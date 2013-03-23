@@ -1,6 +1,6 @@
 # -*- mode: python -*-
 a = Analysis(['xeHentai.py'],
-             pathex=['D:\\Dev\\Python\\Workspace\\ehentai'],
+             pathex=['D:\\Dev\\Python\\Workspace\\xeHentai'],
              hiddenimports=[],
              hookspath=None)
 pyz = PYZ(a.pure)
