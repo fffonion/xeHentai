@@ -315,8 +315,7 @@ class download(threading.Thread):
                         resp,content={'status':'600'},''
                 else:
                     if self.picmode:
-                            LAST_DOWNLOAD_SIZE[int(self.getName().lstrip('收割机'))]\
-                            =int(resp['content-length'])
+                            LAST_DOWNLOAD_SIZE[int(self.getName().lstrip('收割机')-1)]=int(resp['content-length'])
                     if self.picmode and len(content)==11:#没有大图
                         self.prt_q.put([self.getName(),'木有大图，下载正常尺寸.'])
                         url=urlori['pic']
