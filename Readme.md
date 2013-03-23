@@ -1,8 +1,18 @@
-﻿【在线代理】
+﻿#绅士漫画爬虫
+
+##在线代理
+
 ehentai对每个ip单位时间内的下载量有配额(一般为120~200)，因此需要使用在线代理来伪装ip
+***
 本下载器支持glype和knproxy两种类型的在线代理；
-glype是目前使用最广的在线代理，使用时请取消勾选“加密url”、勾选“允许cookies”后随意打开一个网页，然后把网址粘贴进来；knproxy是国人开发的一款在线代理，可以使用knproxy的加密模式，用法与glype相同。
-【命令行模式】支持命令行模式以方便使用路由器或VPS下载（需要安装httplib2库）
+glype是目前使用最广的在线代理，使用时请取消勾选“加密url”、勾选“允许cookies”后随意打开一个网页，然后把网址粘贴进来；
+knproxy是国人开发的一款在线代理，可以使用knproxy的加密模式，用法与glype相同。
+
+
+##命令行模式
+
+支持命令行模式以方便使用路由器或VPS下载（需要安装httplib2库）
+***
 参数： ehentai.py url [-t|-o|-r|-p|-rp|-u|-k|-s|-tm|-f|-l]
 
     url                   下载页的网址
@@ -16,5 +26,9 @@ glype是目前使用最广的在线代理，使用时请取消勾选“加密url
     -f  --force           即使超出配额也下载，默认为否
     -l  --logpath         保存日志的路径，默认为eh.log
      ----------------------------------------------------------------   
-没什么大不了的，就是一个批量下图的东西罢了~
-fffonion    <xijinping@yooooo.us>    Blog:http://yooooo.us/
+	 
+##授权
+
+[GPLv2授权](http://opensource.org/licenses/gpl-2.0.php)
+***
+![@fffonion](http://img.t.sinajs.cn/t5/style/images/register/logo.png)[@fffonion](http://weibo.com/376463435)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;![Blog
