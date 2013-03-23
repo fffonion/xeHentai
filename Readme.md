@@ -6,7 +6,7 @@ windows可执行文件：[这里](https://github.com/fffonion/xeHentai/raw/maste
 python脚本：[这里](https://github.com/fffonion/xeHentai/raw/master/xeHentai.py)
 其他：
 httplib2库：[这里](https://github.com/fffonion/xeHentai/raw/master/httplib2plus.zip)
-ehentai配额统计脚本：python脚本：[这里](https://github.com/fffonion/xeHentai/raw/master/eh-stats.py)
+ehentai配额统计脚本：python脚本：[这里](https://github.com/fffonion/xeHentai/raw/master/xeH-stats)
 
 ##在线代理
 
