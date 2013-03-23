@@ -2,11 +2,11 @@
 
 ##下载
 
-windows可执行文件：[这里](https://github.com/fffonion/eHentai/raw/master/eHentai.exe)
-python脚本：[这里](https://github.com/fffonion/eHentai/raw/master/ehentaiBot.py)
+windows可执行文件：[这里](https://github.com/fffonion/xeHentai/raw/master/xeHentai.exe)
+python脚本：[这里](https://github.com/fffonion/xeHentai/raw/master/xeHentai.py)
 其他：
-httplib2库：[这里](https://github.com/fffonion/eHentai/raw/master/httplib2plus.zip)
-ehentai配额统计脚本：python脚本：[这里](https://github.com/fffonion/eHentai/raw/master/eh-stats.py)
+httplib2库：[这里](https://github.com/fffonion/xeHentai/raw/master/httplib2plus.zip)
+ehentai配额统计脚本：python脚本：[这里](https://github.com/fffonion/xeHentai/raw/master/eh-stats.py)
 
 ##在线代理
 
