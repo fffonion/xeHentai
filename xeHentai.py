@@ -102,6 +102,7 @@ def getcookie():
     else:return False
 
 def getpicpageurl(content,pageurl):
+    #picpage=re.findall('0 no-repeat"><a href="(.*?)"><img alt=\d+',content)
     picpage=re.findall('<a\shref="([^<>"]*)"><img[^<>]*><br[^<>]*>[0-9]+</a>',content)
     picpagenew=[]
     for i in range(len(picpage)):picpagenew.append(REDIRECT(picpage[i]))
@@ -232,7 +233,7 @@ fffonion    <xijinping@yooooo.us>    Blog:http://yooooo.us/
         _print('错误的参数!')
         print e
         arg['url']=''
-    print arg,arg_ori[0]
+    #print arg,arg_ori[0]
     return arg
 class report(threading.Thread):
     def __init__(self, threadname,reportqueue,monitor_thread):
@@ -261,7 +262,8 @@ class report(threading.Thread):
                     for i in range(len(LAST_DOWNLOAD_SIZE)):
                         samecount=0
                         for j in range(len(LAST_DOWNLOAD_SIZE)):#samecount恰好为相同元素个数
-                            if LAST_DOWNLOAD_SIZE[i]==LAST_DOWNLOAD_SIZE[j]:samecount+=1
+                            if LAST_DOWNLOAD_SIZE[i]==LAST_DOWNLOAD_SIZE[j] and LAST_DOWNLOAD_SIZE[i]!=0:
+                                samecount+=1
                         if samecount>=THREAD_COUNT*0.4:
                             prompt('出现状况！')
                             _raw_input('可能流量已经超限，紧急停止，按回车退出',is_silent,'')
@@ -428,7 +430,7 @@ if __name__=='__main__':
             if not opth.exists(folder):os.mkdir(folder)
             pagecount=re.findall('<a href="'+exurl+'\?p=\d*" onclick="return false">(.*?)</a></td'\
                     ,content)
-            if len(pagecount)<=1:pagecount= len(pagecount)
+            if len(pagecount)<=1:pagecount= 1
             else:pagecount=int(pagecount[-2])
             #print gname,pagecount#first none;page 2 ?p=1
             reportqueue=Queue.Queue()

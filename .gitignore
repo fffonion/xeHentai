@@ -2,6 +2,7 @@
 
 # C extensions
 *.so
+.ehentai.cookie
 
 # Packages
 *.egg
