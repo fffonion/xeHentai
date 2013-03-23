@@ -1,5 +1,13 @@
 ﻿#绅士漫画爬虫
 
+##下载
+
+windows可执行文件：[这里](https://github.com/fffonion/eHentai/raw/master/eHentai.exe)
+python脚本：[这里](https://github.com/fffonion/eHentai/raw/master/ehentaiBot.py)
+其他：
+httplib2库：[这里](https://github.com/fffonion/eHentai/raw/master/httplib2plus.zip)
+ehentai配额统计脚本：python脚本：[这里](https://github.com/fffonion/eHentai/raw/master/eh-stats.py)
+
 ##在线代理
 
 ehentai对每个ip单位时间内的下载量有配额(一般为120~200)，因此需要使用在线代理来伪装ip
