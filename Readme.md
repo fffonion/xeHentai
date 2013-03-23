@@ -29,6 +29,6 @@ knproxy是国人开发的一款在线代理，可以使用knproxy的加密模式
 	 
 ##授权
 
-[GPLv2授权](http://opensource.org/licenses/gpl-2.0.php)
+[CC BY-3.0](http://zh.wikipedia.org/wiki/Wikipedia:CC_BY-SA_3.0协议文本)
 ***
-![@fffonion](http://img.t.sinajs.cn/t5/style/images/register/logo.png)[@fffonion](http://weibo.com/376463435)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;![Blog
+![@fffonion](http://img.t.sinajs.cn/t5/style/images/register/logo.png)[@fffonion](http://weibo.com/376463435)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;![Blog](http://zmingcx.com/wp-content/themes/HotNewspro/images/caticon/wordpress.gif)[博客](http://www.yooooo.us)
