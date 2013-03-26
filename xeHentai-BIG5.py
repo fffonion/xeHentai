@@ -367,7 +367,7 @@ if __name__=='__main__':
         if not getcookie():
             if _raw_input('當前沒有登陸，要登陸嗎 y/n? (雙倍流量限制,可訪問exhentai)：')=='y':mkcookie()
     while True:
-        exurl_all=_raw_input('輸入地址(使用,分割下載多個)：',is_silent,argdict['url']).replace('，'.decode('utf-8'),',') or 'http://g.e-hentai.org/g/577409/208d9b29f7/'
+        exurl_all=_raw_input('輸入地址(使用,分割下載多個)：',is_silent,argdict['url']).replace('，'.decode('utf-8'),',')# or 'http://g.e-hentai.org/g/577409/208d9b29f7/'
         if exurl_all:break
         prompt('必須輸入地址~')
     if 'exhentai' in exurl_all and not LOGIN:
