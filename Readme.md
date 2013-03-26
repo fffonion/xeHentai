@@ -2,11 +2,15 @@
 
 ##下载
 
-windows可执行文件：[这里](https://github.com/fffonion/xeHentai/raw/master/xeHentai.exe)
-python脚本：[这里](https://github.com/fffonion/xeHentai/raw/master/xeHentai.py)
+windows可执行文件: [简体](https://github.com/fffonion/xeHentai/raw/master/xeHentai-GBK.exe) [繁体](https://github.com/fffonion/xeHentai/raw/master/xeHentai-BIG5.exe) 
+   
+python脚本: [简体](https://github.com/fffonion/xeHentai/raw/master/xeHentai-GBK.py) [繁体](https://github.com/fffonion/xeHentai/raw/master/xeHentai-BIG5.exe) 
+
 其他：
-httplib2库：[这里](https://github.com/fffonion/xeHentai/raw/master/httplib2plus.zip)
-ehentai配额统计脚本：python脚本：[这里](https://github.com/fffonion/xeHentai/raw/master/xeH-stats)
+
+httplib2库[这里](https://github.com/fffonion/xeHentai/raw/master/httplib2plus.zip)
+ehentai配额统计脚本：python脚本[这里](https://github.com/fffonion/xeHentai/raw/master/xeH-stats.py)
+
 
 ##在线代理
 
