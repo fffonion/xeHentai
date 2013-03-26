@@ -4,7 +4,7 @@
 
 windows可执行文件: [简体](https://github.com/fffonion/xeHentai/raw/master/xeHentai-GBK.exe) [繁体](https://github.com/fffonion/xeHentai/raw/master/xeHentai-BIG5.exe) 
    
-python脚本: [简体](https://github.com/fffonion/xeHentai/raw/master/xeHentai-GBK.py) [繁体](https://github.com/fffonion/xeHentai/raw/master/xeHentai-BIG5.exe) 
+python脚本: [简体](https://github.com/fffonion/xeHentai/raw/master/xeHentai-GBK.py) [繁体](https://github.com/fffonion/xeHentai/raw/master/xeHentai-BIG5.py) 
 
 其他：
 

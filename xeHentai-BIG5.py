@@ -1,11 +1,10 @@
 ﻿#!/usr/bin/python2.7
 # -*- coding:utf-8 -*-
 # A multithread downloader for exhentai.org
-#BIG5 offset version
 # Contributor:
 #      fffonion        <fffonion@gmail.com>
 
-__version__=1.3
+__version__=1.31
 
 import urllib,random,threading,httplib2plus as httplib2,\
 re,os,Queue,time,os.path as opth,sys,socket,traceback,locale
@@ -135,7 +134,7 @@ def getpicurl(content,pageurl):
     elem={'pic':picurl,'full':fullurl\
              ,'name':filename,'gid':index[0],'index':index[1],'fullsize':(fullsize and fullsize[0] or ''),
              'referer':pageurl}
-    file=open(opth.join(getPATH0(),gname+'.progress.txt'),'a')
+    file=open(opth.join(getPATH0(),legalpath(gname)+'.progress.txt'),'a')
     for i in elem:
         file.write(i+'::'+elem[i]+',')
     file.write('\n')
@@ -154,7 +153,7 @@ def query_info():
         used,quota=re.findall('<p>You are currently at <strong>(\d+)</strong> towards a limit of <strong>(\d+)</st',content)[0]
         used,quota=int(used),int(quota)
         _print('當前已使用%d中的%d，%s (可能有延遲)'%(quota,used,\
-          (quota<used and ('流量超限，將在%d分鐘後(%s時)恢複，%s時清零。' % \
+          (quota<used and ('流量超限，將在%d分鐘後(%s時)恢復，%s時清零。' % \
             (used-quota,deltatime(used-quota),deltatime(used))) or '流量充足')))
         if used>quota and not argdict['force_down']=='y':
             prompt('出現狀況！')
@@ -181,6 +180,9 @@ def getPATH0():
         return sys.path[0]
     else:return sys.path[1]
     
+def legalpath(str):
+    return str.replace('|','').replace(':','').replace('?','').replace('\\','').replace('/','').replace('*','')
+
 def init_proxy(url):
     global cooproxy
     resp,content=httplib2.Http().request(url,headers=genheader())
@@ -318,7 +320,7 @@ class download(threading.Thread):
                         resp,content={'status':'600'},''
                 else:
                     if self.picmode:
-                            LAST_DOWNLOAD_SIZE[int(self.getName().lstrip('收割機')-1)]=int(resp['content-length'])
+                            LAST_DOWNLOAD_SIZE[int(self.getName().lstrip('收割機'))-1]=int(resp['content-length'])
                     if self.picmode and len(content)==11:#沒有大圖
                         self.prt_q.put([self.getName(),'木有大圖，下載正常尺寸.'])
                         url=urlori['pic']
@@ -346,150 +348,150 @@ class download(threading.Thread):
         
 def save2file(content,name):
     global folder
-    filename=opth.join(folder,name)
+    filename=opth.join(folder,legalpath(name))
     fileHandle=open(filename,'wb')
     fileHandle.write(content)
     fileHandle.close()
     
   
 if __name__=='__main__':
-    try:
-        reload(sys)
-        sys.setdefaultencoding('utf-8')
-        argdict=parse_arg(sys.argv[1:])
-        is_silent=(argdict['url'])
-        if is_silent:argdict['log']=argdict['log'] or opth.join(getPATH0(),'eh.log')
-        prompt('紳♂士下載器 v'+str(__version__),fill=' ')
-        if argdict['uname'] and argdict['key']:mkcookie(argdict['uname'],argdict['key'])
+    #try:
+    reload(sys)
+    sys.setdefaultencoding('utf-8')
+    argdict=parse_arg(sys.argv[1:])
+    is_silent=(argdict['url'])
+    if is_silent:argdict['log']=argdict['log'] or opth.join(getPATH0(),'eh.log')
+    prompt('紳♂士下載器 v'+str(__version__),fill=' ')
+    if argdict['uname'] and argdict['key']:mkcookie(argdict['uname'],argdict['key'])
+    else:
+        if not getcookie():
+            if _raw_input('當前沒有登陸，要登陸嗎 y/n? (雙倍流量限制,可訪問exhentai)：')=='y':mkcookie()
+    while True:
+        exurl_all=_raw_input('輸入地址(使用,分割下載多個)：',is_silent,argdict['url']).replace('，'.decode('utf-8'),',') or 'http://g.e-hentai.org/g/577409/208d9b29f7/'
+        if exurl_all:break
+        prompt('必須輸入地址~')
+    if 'exhentai' in exurl_all and not LOGIN:
+        if is_silent:
+            if argdict['uname'] and argdict['key']:mkcookie(argdict['uname'],argdict['key'])
+            else:_print('沒有登錄，無法訪問exhentai')
         else:
-            if not getcookie():
-                if _raw_input('當前沒有登陸，要登陸嗎 y/n? (雙倍流量限制,可訪問exhentai)：')=='y':mkcookie()
-        while True:
-            exurl_all=_raw_input('輸入地址(使用,分割下載多個)：',is_silent,argdict['url']).replace('，'.decode('utf-8'),',')# or 'http://g.e-hentai.org/g/577409/208d9b29f7/'
-            if exurl_all:break
-            prompt('必須輸入地址~')
-        if 'exhentai' in exurl_all and not LOGIN:
-            if is_silent:
-                if argdict['uname'] and argdict['key']:mkcookie(argdict['uname'],argdict['key'])
-                else:_print('沒有登錄，無法訪問exhentai')
+            if (_raw_input('需要登錄才能訪問exhentai, 要登陸嗎 y/n?') or 'y')=='y':mkcookie()
+    if ',' not in exurl_all:exurl_all=[exurl_all]
+    else:exurl_all=exurl_all.split(',')
+    THREAD_COUNT=int(_raw_input('設置線程數量(默認5個):',is_silent,argdict['thread']) or '5')
+    LAST_DOWNLOAD_SIZE=[0]*THREAD_COUNT
+    getdowntype=(_raw_input('是否嘗試下載原圖? y/n(默認):',is_silent,argdict['down_ori']) or 'n')=='y'\
+                     and (lambda:'full') or (lambda:'pic')
+    startpos=int(_raw_input('從第幾頁開始下載? (默認從頭):',is_silent,argdict['startpos']) or '1')-1
+    while True:
+        #try:
+        fwdsite =_raw_input('輸入中轉站url, 形如http://a.co/b.php?b=4&u=xxx;\
+        \n需要允許cookies, 如果出錯請取消加密url; 按回車跳過:',is_silent,argdict['redirect']).rstrip('/')
+        if not fwdsite.startswith('http://'):fwdsite='http://'+fwdsite
+        if fwdsite!='http://':
+            forceproxy=(_raw_input('是否對非原圖也應用中轉? y/n(默認):',is_silent,argdict['redirect_norm']) or 'n')=='y'
+            IS_REDIRECT=True
+            _redirect,browse=re.findall('(.+)/(.+)\?',fwdsite)[0]
+            init_proxy(_redirect+'/'+browse)
+            arg=re.findall('([a-zA-Z\._]+)=[^\d]*',fwdsite)[0]
+            bval=re.findall('b=(\d*)',fwdsite)
+            if bval:bval=bval[0]
+            else:bval='4'
+            suff=re.findall('http://.+/(.+)',_redirect) or ['']
+            suff=suff[0]
+            def FIX_REDIRECT(str):
+                #picurl不需重定向，fullpicurl需要重定向
+                url=re.findall(arg+'=(.*?)&',str+'&')[0]
+                if url.find('http')!=-1:#不加密
+                    if url.find('fullimg')!=-1:url=REDIRECT(url)
+                    return url
+                else:#加密,返回/g/browse.php?u=xx，尚未實現
+                    if not str.startswith(_redirect):
+                       str=(suff and _redirect.replace('/'+suff,'') or _redirect)+str
+                    #else:pass
+                    return str
+        else:
+            browse=''
+            _redirect='http://'
+        def REDIRECT(str):
+            if str.startswith(_redirect):return str
             else:
-                if (_raw_input('需要登錄才能訪問exhentai, 要登陸嗎 y/n?') or 'y')=='y':mkcookie()
-        if ',' not in exurl_all:exurl_all=[exurl_all]
-        else:exurl_all=exurl_all.split(',')
-        THREAD_COUNT=int(_raw_input('設置線程數量(默認5個):',is_silent,argdict['thread']) or '5')
-        LAST_DOWNLOAD_SIZE=[0]*THREAD_COUNT
-        getdowntype=(_raw_input('是否嘗試下載原圖? y/n(默認):',is_silent,argdict['down_ori']) or 'n')=='y'\
-                         and (lambda:'full') or (lambda:'pic')
-        startpos=int(_raw_input('從第幾頁開始下載? (默認從頭):',is_silent,argdict['startpos']) or '1')-1
-        while True:
-            #try:
-            fwdsite =_raw_input('輸入中轉站url, 形如http://a.co/b.php?b=4&u=xxx;\
-            \n需要允許cookies, 如果出錯請取消加密url; 按回車跳過:',is_silent,argdict['redirect']).rstrip('/')
-            if not fwdsite.startswith('http://'):fwdsite='http://'+fwdsite
-            if fwdsite!='http://':
-                forceproxy=(_raw_input('是否對非原圖也應用中轉? y/n(默認):',is_silent,argdict['redirect_norm']) or 'n')=='y'
-                IS_REDIRECT=True
-                _redirect,browse=re.findall('(.+)/(.+)\?',fwdsite)[0]
-                init_proxy(_redirect+'/'+browse)
-                arg=re.findall('([a-zA-Z\._]+)=[^\d]*',fwdsite)[0]
-                bval=re.findall('b=(\d*)',fwdsite)
-                if bval:bval=bval[0]
-                else:bval='4'
-                suff=re.findall('http://.+/(.+)',_redirect) or ['']
-                suff=suff[0]
-                def FIX_REDIRECT(str):
-                    #picurl不需重定向，fullpicurl需要重定向
-                    url=re.findall(arg+'=(.*?)&',str+'&')[0]
-                    if url.find('http')!=-1:#不加密
-                        if url.find('fullimg')!=-1:url=REDIRECT(url)
-                        return url
-                    else:#加密,返回/g/browse.php?u=xx，尚未實現
-                        if not str.startswith(_redirect):
-                           str=(suff and _redirect.replace('/'+suff,'') or _redirect)+str
-                        #else:pass
-                        return str
-            else:
-                browse=''
-                _redirect='http://'
-            def REDIRECT(str):
-                if str.startswith(_redirect):return str
-                else:
-                    return _redirect=='http://' \
-                        and str \
-                        or '%s/%s?b=%s&f=norefer&%s=%s'% (_redirect,browse,bval,arg,str)#.replace('//','/').replace(':/','://')
-            query_info()
-            break
-            #except IndexError:
-            #    _print('代理可能有問題，請更換一個~')
-            #    continue
-            #else:break
-        for exurl in exurl_all:
-            http2=httplib2.Http(opth.join(os.environ.get('tmp'),'.ehentai'))
-            resp, content = http2.request(exurl, method='GET', headers=genheader())
-            #h1 id="gn">[DISTANCE] HHH Triple H Archetype Story [german/deutsch]</h1>
-            gname=re.findall('="gn">(.*?)</h1>',content)[0].decode('utf-8')
-            _print('Sibylla system: 準備下載 '+gname)
-            folder=opth.join(getPATH0(),gname).decode('utf-8')
-            if not opth.exists(folder):os.mkdir(folder)
-            pagecount=re.findall('<a href="'+exurl+'\?p=\d*" onclick="return false">(.*?)</a></td'\
-                    ,content)
-            if len(pagecount)<=1:pagecount= 1
-            else:pagecount=int(pagecount[-2])
-            #print gname,pagecount#first none;page 2 ?p=1
-            reportqueue=Queue.Queue()
-            picpagequeue=Queue.Queue()
-            picqueue=Queue.Queue()
-            urlqueue=Queue.Queue()
-            if opth.exists(opth.join(getPATH0(),gname+'.progress.txt')):
-                os.remove(opth.join(getPATH0(),gname+'.progress.txt'))
-            if opth.exists(opth.join(getPATH0(),gname+'.txt')) and getdowntype()=='full':#非完整圖已變成509
-                downthread=[download('收割機%d'% (i+1),picqueue,None,reportqueue,None) for i in range(THREAD_COUNT)]
-                rpt=report('監視官',reportqueue,downthread)
-                file=open(opth.join(getPATH0(),gname+'.txt'),'r')
-                for line in file:
-                    elem={}
-                    sec=line.split(',')
-                    for i in sec:
-                        if ':' in i:
-                            j=i.split('::')
-                            if j[0]=='full' and \
-                            (j[1].startswith('http://g.e-hentai.org/fullimg.php') \
-                             or j[1].startswith('http://exhentai.org/fullimg.php')) and IS_REDIRECT:#重建規則
-                                elem[j[0]]=REDIRECT(j[1])
-                            else:elem[j[0]]=j[1]
-                    picqueue.put(elem)  
-                    pagenum=picqueue.qsize()
-                file.close()
-            else:
-                for i in range(pagecount-startpos):urlqueue.put(exurl+'?p='+str(i+startpos))#第一頁可以用?p=0
-                pagethread=download('執行官',urlqueue,picpagequeue,reportqueue,getpicpageurl)
-                rpt=report('監視官',reportqueue,[pagethread])
-                pagethread.start()
-                rpt.start()
-                pagethread.join()
-                rpt.join()
-                deeperthread=download('執行官+',picpagequeue,picqueue,reportqueue,getpicurl)
-                deeperthread.start()#deeperthread沒有join了
-                downthread=[download('收割機%d'% (i+1),picqueue,None,reportqueue,None,father=deeperthread) for i in range(THREAD_COUNT)]
-                rpt=report('監視官',reportqueue,[deeperthread]+downthread)
-                pagenum=picpagequeue.qsize()+1
-            #while not picqueue.empty():print picqueue.get()
-            prompt('下載開始. 大約下載 %d 張圖片' %(pagenum))
-            if not OVERQUOTA:
-                for i in range(THREAD_COUNT):downthread[i].start()
+                return _redirect=='http://' \
+                    and str \
+                    or '%s/%s?b=%s&f=norefer&%s=%s'% (_redirect,browse,bval,arg,str)#.replace('//','/').replace(':/','://')
+        query_info()
+        break
+        #except IndexError:
+        #    _print('代理可能有問題，請更換一個~')
+        #    continue
+        #else:break
+    for exurl in exurl_all:
+        http2=httplib2.Http(opth.join(os.environ.get('tmp'),'.ehentai'))
+        resp, content = http2.request(exurl, method='GET', headers=genheader())
+        #h1 id="gn">[DISTANCE] HHH Triple H Archetype Story [german/deutsch]</h1>
+        gname=re.findall('="gn">(.*?)</h1>',content)[0].decode('utf-8')
+        _print('Sibylla system: 準備下載 '+gname)
+        folder=opth.join(getPATH0(),legalpath(gname)).decode('utf-8')
+        if not opth.exists(folder):os.mkdir(folder)
+        pagecount=re.findall('<a href="'+exurl+'\?p=\d*" onclick="return false">(.*?)</a></td'\
+                ,content)
+        if len(pagecount)<=1:pagecount= 1
+        else:pagecount=int(pagecount[-2])
+        #print gname,pagecount#first none;page 2 ?p=1
+        reportqueue=Queue.Queue()
+        picpagequeue=Queue.Queue()
+        picqueue=Queue.Queue()
+        urlqueue=Queue.Queue()
+        if opth.exists(opth.join(getPATH0(),legalpath(gname)+'.progress.txt')):
+            os.remove(opth.join(getPATH0(),legalpath(gname)+'.progress.txt'))
+        if opth.exists(opth.join(getPATH0(),legalpath(gname)+'.txt')) and getdowntype()=='full':#非完整圖已變成509
+            downthread=[download('收割機%d'% (i+1),picqueue,None,reportqueue,None) for i in range(THREAD_COUNT)]
+            rpt=report('監視官',reportqueue,downthread)
+            file=open(opth.join(getPATH0(),legalpath(gname)+'.txt'),'r')
+            for line in file:
+                elem={}
+                sec=line.split(',')
+                for i in sec:
+                    if ':' in i:
+                        j=i.split('::')
+                        if j[0]=='full' and \
+                        (j[1].startswith('http://g.e-hentai.org/fullimg.php') \
+                         or j[1].startswith('http://exhentai.org/fullimg.php')) and IS_REDIRECT:#重建規則
+                            elem[j[0]]=REDIRECT(j[1])
+                        else:elem[j[0]]=j[1]
+                picqueue.put(elem)  
+                pagenum=picqueue.qsize()
+            file.close()
+        else:
+            for i in range(pagecount-startpos):urlqueue.put(exurl+'?p='+str(i+startpos))#第一頁可以用?p=0
+            pagethread=download('執行官',urlqueue,picpagequeue,reportqueue,getpicpageurl)
+            rpt=report('監視官',reportqueue,[pagethread])
+            pagethread.start()
             rpt.start()
-            if not OVERQUOTA:
-                for i in range(THREAD_COUNT):downthread[i].join()
+            pagethread.join()
             rpt.join()
-            prompt('下載結束.')
-            if opth.exists((opth.join(getPATH0(),gname+'.txt'))):
-                os.remove((opth.join(getPATH0(),gname+'.txt')))
-            if opth.exists((opth.join(getPATH0(),gname+'.progress.txt'))):
-                os.rename(opth.join(getPATH0(),gname+'.progress.txt'),\
-                           opth.join(getPATH0(),gname+'.txt'))
-            _print(gname+' 下載完成！')
-            query_info()
-    except:
+            deeperthread=download('執行官+',picpagequeue,picqueue,reportqueue,getpicurl)
+            deeperthread.start()#deeperthread沒有join了
+            downthread=[download('收割機%d'% (i+1),picqueue,None,reportqueue,None,father=deeperthread) for i in range(THREAD_COUNT)]
+            rpt=report('監視官',reportqueue,[deeperthread]+downthread)
+            pagenum=picpagequeue.qsize()+1
+        #while not picqueue.empty():print picqueue.get()
+        prompt('下載開始. 大約下載 %d 張圖片' %(pagenum))
+        if not OVERQUOTA:
+            for i in range(THREAD_COUNT):downthread[i].start()
+        rpt.start()
+        if not OVERQUOTA:
+            for i in range(THREAD_COUNT):downthread[i].join()
+        rpt.join()
+        prompt('下載結束.')
+        if opth.exists((opth.join(getPATH0(),legalpath(gname)+'.txt'))):
+            os.remove((opth.join(getPATH0(),legalpath(gname)+'.txt')))
+        if opth.exists((opth.join(getPATH0(),legalpath(gname)+'.progress.txt'))):
+            os.rename(opth.join(getPATH0(),legalpath(gname)+'.progress.txt'),\
+                       opth.join(getPATH0(),legalpath(gname)+'.txt'))
+        _print(gname+' 下載完成！')
+        query_info()
+    '''except:
         if argdict['log']:
             f=open(argdict['log'],'a')
             f.write(time.strftime('%m-%d %X : ',time.localtime(time.time()))+\
@@ -497,6 +499,6 @@ if __name__=='__main__':
             traceback.print_exc(file=f)
             traceback.print_exc()
             f.flush()
-            f.close()
+            f.close()'''
 _raw_input('\n按回車鍵退出……',is_silent,'')
 os._exit(0)
