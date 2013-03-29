@@ -288,7 +288,7 @@ class download(threading.Thread):
         self.picmode='收割機' in self.getName()
     def run(self):
         self.prt_q.put([self.getName(),'已啟動.'])
-        sleepseq=[2,4,7,12,15]
+        sleepseq=[4,7,12,16,20]
         while 1:
             if self.in_q.empty():
                 if self.father:

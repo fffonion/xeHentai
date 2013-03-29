@@ -288,7 +288,7 @@ class download(threading.Thread):
         self.picmode='收割机' in self.getName()
     def run(self):
         self.prt_q.put([self.getName(),'已启动.'])
-        sleepseq=[2,4,7,12,15]
+        sleepseq=[4,7,12,16,20]
         while 1:
             if self.in_q.empty():
                 if self.father:
@@ -367,7 +367,7 @@ if __name__=='__main__':
         if not getcookie():
             if _raw_input('当前没有登陆，要登陆吗 y/n? (双倍流量限制,可访问exhentai)：')=='y':mkcookie()
     while True:
-        exurl_all=_raw_input('输入地址(使用,分割下载多个)：',is_silent,argdict['url']).replace('，'.decode('utf-8'),',')# or 'http://g.e-hentai.org/g/577409/208d9b29f7/'
+        exurl_all=_raw_input('输入地址(使用,分割下载多个)：',is_silent,argdict['url']).replace('，'.decode('utf-8'),',') or 'http://g.e-hentai.org/g/577409/208d9b29f7/'
         if exurl_all:break
         prompt('必须输入地址~')
     if 'exhentai' in exurl_all and not LOGIN:
