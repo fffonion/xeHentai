@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion@gmail.com>
 
-__version__=1.34
+__version__=1.35
 
 import urllib,random,threading,httplib2plus as httplib2,\
 re,os,Queue,time,os.path as opth,sys,socket,traceback,locale
@@ -206,7 +206,7 @@ glype是目前使用最广的在线代理，使用时请取消勾选“加密url
     url                   下载页的网址
     -t  --thread          下载线程数，默认为5
     -o  --down-ori        是否下载原始图片（如果存在）
-    -r  --redirect        在线代理的网址，形如http://a.co/b.php?u=xx&b=3
+    -r  --redirect        在线代理的网址，形如"http://a.co/b.php?u=xx&b=3"(要加引号)
     -ro --redirect-norm   是否应用在线代理到已解析到的非原图，默认不启用
     -u  --username        用户名，覆盖已保存的cookie
     -k  --key             密码
@@ -221,17 +221,18 @@ fffonion    <xijinping@yooooo.us>    Blog:http://yooooo.us/
     try:
         for i in range(len(arg_ori)-1):
             val=arg_ori[i+1].lstrip('"').lstrip("'").rstrip('"').rstrip("'")
-            if arg_ori[i]=='-t' or  arg_ori[i]=='--thread':arg['thread']=arg_ori[i+1]
-            if arg_ori[i]=='-o' or  arg_ori[i]=='--down-ori':arg['down_ori']='y'
-            if arg_ori[i]=='-r' or  arg_ori[i]=='--redirect':arg['redirect']=arg_ori[i+1]
+            if i+2<len(arg_ori):valnext=arg_ori[i+2].lstrip('"').lstrip("'").rstrip('"').rstrip("'")
+            if val=='-t' or  val=='--thread':arg['thread']=valnext
+            if val=='-o' or  val=='--down-ori':arg['down_ori']='y'
+            if val=='-r' or  val=='--redirect':arg['redirect']=valnext
             #if arg_ori[i]=='-p' or  arg_ori[i]=='--redirect-pattern':arg['redirect_pattern']=arg_ori[i+1]
-            if arg_ori[i]=='-ro' or  arg_ori[i]=='--redirect-norm':arg['redirect_norm']='y'
-            if arg_ori[i]=='-u' or  arg_ori[i]=='--username':arg['uname']=arg_ori[i+1]
-            if arg_ori[i]=='-k' or  arg_ori[i]=='--key':arg['key']=arg_ori[i+1]
-            if arg_ori[i]=='-s' or  arg_ori[i]=='--start-pos':arg['startpos']=arg_ori[i+1]
-            if arg_ori[i]=='-tm' or  arg_ori[i]=='--timeout':arg['timeout']=arg_ori[i+1]
-            if arg_ori[i]=='-f' or  arg_ori[i]=='--force':arg['force_down']='y'
-            if arg_ori[i]=='-l' or  arg_ori[i]=='--logpath':arg['log']=arg_ori[i+1]
+            if val=='-ro' or  val=='--redirect-norm':arg['redirect_norm']='y'
+            if val=='-u' or  val=='--username':arg['uname']=valnext
+            if val=='-k' or  val=='--key':arg['key']=valnext
+            if val=='-s' or  val=='--start-pos':arg['startpos']=valnext
+            if val=='-tm' or  val=='--timeout':arg['timeout']=valnext
+            if val=='-f' or  val=='--force':arg['force_down']='y'
+            if val=='-l' or  val=='--logpath':arg['log']=valnext
         if arg_ori[0].startswith('http'):arg['url']=arg_ori[0]
         else:
             raise Exception('Illegal URL.')
@@ -239,7 +240,7 @@ fffonion    <xijinping@yooooo.us>    Blog:http://yooooo.us/
         _print('错误的参数!')
         print e
         arg['url']=''
-    #print arg,arg_ori[0]
+    #print arg,arg_ori[1]
     return arg
 class report(threading.Thread):
     def __init__(self, threadname,reportqueue,monitor_thread):
@@ -270,7 +271,7 @@ class report(threading.Thread):
                         for j in range(len(LAST_DOWNLOAD_SIZE)):#samecount恰好为相同元素个数
                             if LAST_DOWNLOAD_SIZE[i]==LAST_DOWNLOAD_SIZE[j] and LAST_DOWNLOAD_SIZE[i]!=0:
                                 samecount+=1
-                        if samecount>=THREAD_COUNT*0.4:
+                        if samecount>=THREAD_COUNT*0.4 and not argdict['force_down']=='y':
                             prompt('出现状况！')
                             _raw_input('可能流量已经超限，紧急停止，按回车退出',is_silent,'')
                             os._exit(1)
@@ -289,7 +290,7 @@ class download(threading.Thread):
         self.picmode='收割机' in self.getName()
     def run(self):
         self.prt_q.put([self.getName(),'已启动.'])
-        sleepseq=[4,7,12,16,20]
+        sleepseq=[5,8,12,16,20]
         while 1:
             if self.in_q.empty():
                 if self.father:
@@ -369,7 +370,7 @@ if __name__=='__main__':
                 if _raw_input('当前没有登陆，要登陆吗 y/n? (双倍流量限制,可访问exhentai)：')=='y':mkcookie()
         while True:
             exurl_all=_raw_input('输入地址(使用,分割下载多个)：',is_silent,argdict['url']).replace('，'.decode('utf-8'),',')
-            if not (exurl_all.startswith('http://g.e-hentai.org/') or exurl_all.startswith('http://exhentai.org/')):prompt('咦?这是啥')
+            if not (exurl_all.startswith('http://g.e-hentai.org/') or exurl_all.startswith('http://exhentai.org/')) and not is_silent:prompt('咦?这是啥')
             else:
                 if exurl_all:break
                 else:prompt('必须输入地址~')

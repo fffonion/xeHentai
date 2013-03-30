@@ -3,6 +3,7 @@
 # C extensions
 *.so
 .ehentai.cookie
+.tor
 
 # Packages
 *.egg
