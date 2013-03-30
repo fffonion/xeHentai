@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion@gmail.com>
 
-__version__=1.33
+__version__=1.34
 
 import urllib,random,threading,httplib2plus as httplib2,\
 re,os,Queue,time,os.path as opth,sys,socket,traceback,locale
@@ -14,8 +14,9 @@ myhomeurl='http://g.e-hentai.org/home.php'
 cooid,coopw,cooproxy,IP,THREAD_COUNT='','','','',5
 LOGIN,OVERQUOTA,IS_REDIRECT=False,False,False
 LAST_DOWNLOAD_SIZE=[0]*5
+
 def _print(str):
-    print(str.decode('utf-8'))
+    print(str.decode('utf-8').encode(locale.getdefaultlocale()[1],'ignore'))
     if argdict['log']:
         f=open(argdict['log'],'a')
         f.write(time.strftime('%m-%d %X : ',time.localtime(time.time()))+str.decode('utf-8').encode('cp936')+'\n')
