@@ -840,7 +840,7 @@ def proxy_info_from_url(url, method='http'):
         port = dict(https=443, http=80)[method]
 
     if method=='http':proxy_type = 4 # socks.PROXY_TYPE_HTTP_NO_TUNNEL
-    elif methond=='https':proxy_type = 3 # socks.PROXY_TYPE_HTTP, will use CONNECT tunnel
+    elif method=='https':proxy_type = 3 # socks.PROXY_TYPE_HTTP, will use CONNECT tunnel
     return ProxyInfo(
         proxy_type = proxy_type,
         proxy_host = host,

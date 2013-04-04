@@ -4,6 +4,7 @@
 *.so
 .ehentai.cookie
 .tor
+proxies.txt
 
 # Packages
 *.egg
