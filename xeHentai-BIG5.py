@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion@gmail.com>
 
-__version__=1.40
+__version__=1.41
 
 import urllib,random,threading,httplib2plus as httplib2,\
 re,os,Queue,time,os.path as opth,sys,socket,traceback,locale
@@ -467,7 +467,7 @@ if __name__=='__main__':
                 hath=HatH.HatH(hathcontent=content2,check=True)
                 open(hathfilename,'w').write(content2)
                 #open(legalpath(hath.name)+'.hathdl','w').write(content2)
-            hath.path=legalpath(hath.name)
+            hath.path=opth.join(getPATH0(),legalpath(hath.name)).decode('utf-8')
             #h1 id="gn">[DISTANCE] HHH Triple H Archetype Story [german/deutsch]</h1>
             #gname=re.findall('="gn">(.*?)</h1>',content)[0].decode('utf-8')
             _print('Sibylla system: 目標已鎖定 '+hath.name)
