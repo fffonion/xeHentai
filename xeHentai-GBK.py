@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion@gmail.com>
 
-__version__=1.41
+__version__=1.42
 
 import urllib,random,threading,httplib2plus as httplib2,\
 re,os,Queue,time,os.path as opth,sys,socket,traceback,locale
@@ -107,14 +107,14 @@ def getcookie():
         return True
     else:return False
 
-def getpicpageurl(content,pageurl):
+def getpicpageurl(content,pageurl,hath):
     #picpage=re.findall('0 no-repeat"><a href="(.*?)"><img alt=\d+',content)
     picpage=re.findall('<a\shref="([^<>"]*)"><img[^<>]*><br[^<>]*>[0-9]+</a>',content)
     picpagenew=[]
     for i in range(len(picpage)):picpagenew.append(REDIRECT(picpage[i]))
     return picpagenew
 
-def getpicurl(content,pageurl):
+def getpicurl(content,pageurl,hath):
     #print content
     picurl=re.findall('<img id="img" src="(.+)".+style="[a-z]',content)[0]
     filename=re.findall('</a></div><div>(.*?) ::.+::.+</di',content)[0]
@@ -184,7 +184,8 @@ def getPATH0():
     else:return sys.path[1]
     
 def legalpath(str):
-    return str.replace('|','').replace(':','').replace('?','').replace('\\','').replace('/','').replace('*','')
+    return str.replace('|','').replace(':','').replace('?','').replace('\\','').replace('/','').replace('*','')\
+        #.encode(sys.getfilesystemencoding(),'ignore').decode(sys.getfilesystemencoding()).encode('utf-8')
 
 def init_proxy(url):
     global cooproxy
@@ -194,7 +195,7 @@ def init_proxy(url):
 
 def parse_arg(arg_ori):
     arg={'url':'','thread':'5','down_ori':'n','redirect':'','redirect_pattern':'','redirect_norm':'n',\
-         'startpos':'1','timeout':'60','force_down':'n','log':'','uname':'','key':'','rename':'n'}
+         'startpos':'1','timeout':'60','force_down':'n','log':'','uname':'','key':'','rename':'n','nojpname':False}
     if len(arg_ori)==0:return arg
     if arg_ori[0] in ['--help','-h','/?','-?']:
         _print(\
@@ -216,6 +217,7 @@ glype是目前使用最广的在线代理，使用时请取消勾选“加密url
     -f  --force           即使超出配额也下载，默认为否
     -l  --logpath         保存日志的路径，默认为eh.log
     -re --rename          是否重命名成原始文件名
+    -j  --no-jp-name      是否不使用日语命名，默认为否
      ----------------------------------------------------------------   
 没什么大不了的，就是一个批量下图的东西罢了~
 fffonion    <xijinping@yooooo.us>    Blog:http://yooooo.us/
@@ -237,6 +239,7 @@ fffonion    <xijinping@yooooo.us>    Blog:http://yooooo.us/
             if val=='-f' or  val=='--force':arg['force_down']='y'
             if val=='-l' or  val=='--logpath':arg['log']=valnext
             if val=='-re' or  val=='--rename':arg['rename']='y'
+            if val=='-j' or val=='-no-jp-name':arg['nojpname']=True
         if arg_ori[0].startswith('http'):arg['url']=arg_ori[0]
         else:
             raise Exception('Illegal URL.')
@@ -284,7 +287,7 @@ class report(threading.Thread):
             time.sleep(0.2)
             
 class download(threading.Thread):
-    def __init__(self, threadname,url_queue,save_queue,report_queue,handle_func,father=None,exarg=None):
+    def __init__(self, threadname,url_queue,save_queue,report_queue,handle_func,hath,father=None,exarg=None):
         threading.Thread.__init__(self, name=threadname)
         self.in_q=url_queue
         self.handle_func=handle_func
@@ -348,19 +351,18 @@ class download(threading.Thread):
                 time.sleep(sleepseq[retries])
             if int(resp['status'])<400:
                 if self.out_q:
-                    res=self.handle_func(content,url)
+                    res=self.handle_func(content,url,hath)
                     for i in res:
                         self.out_q.put(i)
                 else:
-                    save2file(content,savename)
+                    save2file(content,savename,hath)
             else:raise Exception('Server Error')
             if self.picmode:self.prt_q.put([self.getName(),'#%s %s (%d) 下载完成.'%(index,urlori['name'],len(content))])
             else:self.prt_q.put([self.getName(),url])
         self.prt_q.put([self.getName(),'已退出.'])
         
-def save2file(content,name):
-    global folder
-    filename=opth.join(folder,legalpath(name))
+def save2file(content,name,hath):
+    filename=opth.join(hath.path,legalpath(name))
     fileHandle=open(filename,'wb')
     fileHandle.write(content)
     fileHandle.close()
@@ -449,6 +451,9 @@ if __name__=='__main__':
         for exurl in exurl_all:
             http2=httplib2.Http(opth.join(os.environ.get('tmp'),'.ehentai'))
             resp, content = http2.request(exurl, method='GET', headers=genheader())
+            if re.findall('This gallery is pining for the fjords.',content):
+                prompt('啊……图图被爆菊了, 没法下了呢-。-')
+                continue
             #http://exhentai.org/hathdler.php?gid=575649&t=3fcd227ec7
             if exurl.startswith('http://exhentai.org'):isEX=True
             else:isEX=False
@@ -470,9 +475,13 @@ if __name__=='__main__':
             hath.path=opth.join(getPATH0(),legalpath(hath.name)).decode('utf-8')
             #h1 id="gn">[DISTANCE] HHH Triple H Archetype Story [german/deutsch]</h1>
             #gname=re.findall('="gn">(.*?)</h1>',content)[0].decode('utf-8')
+            gjname=re.findall('="gj">(.*?)</h1>',content)
+            if gjname!=[''] and not argdict['nojpname']:
+                gjname=gjname[0].decode('utf-8')
+                hath.setpath(opth.join(getPATH0(),legalpath(gjname)))
+                hath.name=gjname
             _print('Sibylla system: 目标已锁定 '+hath.name)
-            folder=opth.join(getPATH0(),legalpath(hath.name)).decode('utf-8')
-            if not opth.exists(folder):os.mkdir(folder)
+            if not opth.exists(hath.path):os.mkdir(hath.path)
             pagecount=re.findall('<a href="'+exurl+'\?p=\d*" onclick="return false">(.*?)</a></td'\
                     ,content)
             if len(pagecount)<=1:pagecount= 1
@@ -485,7 +494,7 @@ if __name__=='__main__':
             if opth.exists(opth.join(getPATH0(),legalpath(hath.name)+'.progress.txt')):
                 os.remove(opth.join(getPATH0(),legalpath(hath.name)+'.progress.txt'))
             if opth.exists(opth.join(getPATH0(),legalpath(hath.name)+'.txt')) and getdowntype()=='full':#非完整图已变成509
-                downthread=[download('收割机%d'% (i+1),picqueue,None,reportqueue,None) for i in range(THREAD_COUNT)]
+                downthread=[download('收割机%d'% (i+1),picqueue,None,reportqueue,None,hath) for i in range(THREAD_COUNT)]
                 rpt=report('监视官',reportqueue,downthread)
                 file=open(opth.join(getPATH0(),legalpath(hath.name)+'.txt'),'r')
                 for line in file:
@@ -499,8 +508,15 @@ if __name__=='__main__':
                              or j[1].startswith('http://exhentai.org/fullimg.php')) and IS_REDIRECT:#重建规则
                                 elem[j[0]]=REDIRECT(j[1])
                             else:elem[j[0]]=j[1]
-                    picqueue.put(elem)  
-                    piccount=picqueue.qsize()
+                    picqueue.put(elem)
+                #重筛选
+                piccount=picqueue.qsize()
+                for i in range(piccount):
+                    if picqueue.empty():break
+                    a=picqueue.get()
+                    if (i+startpos*20) in hath.genindex():
+                        picqueue.put(a)
+                piccount=picqueue.qsize()
                 file.close()
             else:
                 if not hasOri:
@@ -509,23 +525,23 @@ if __name__=='__main__':
                 else:
                     _print('Sibylla system: 图片被缩放，进行完整扫描')
                     for i in range(pagecount-startpos):urlqueue.put(exurl+'?p='+str(i+startpos))#第一页可以用?p=0
-                    pagethread=download('执行官',urlqueue,picpagequeue,reportqueue,getpicpageurl)
+                    pagethread=download('执行官',urlqueue,picpagequeue,reportqueue,getpicpageurl,hath)
                     rpt=report('监视官',reportqueue,[pagethread])
                     pagethread.start()
                     rpt.start()
                     pagethread.join()
                     rpt.join()
-            #重筛选
-            piccount=picpagequeue.qsize()
-            for i in range(piccount):
-                if picpagequeue.empty():break
-                a=picpagequeue.get()
-                if (i+startpos*20) in hath.genindex():
-                    picpagequeue.put(a)
-            piccount=picpagequeue.qsize()
-            deeperthread=download('执行官+',picpagequeue,picqueue,reportqueue,getpicurl)
+                #重筛选
+                piccount=picpagequeue.qsize()
+                for i in range(piccount):
+                    if picpagequeue.empty():break
+                    a=picpagequeue.get()
+                    if (i+startpos*20) in hath.genindex():
+                        picpagequeue.put(a)
+                piccount=picpagequeue.qsize()
+            deeperthread=download('执行官+',picpagequeue,picqueue,reportqueue,getpicurl,hath)
             deeperthread.start()#deeperthread没有join了
-            downthread=[download('收割机%d'% (i+1),picqueue,None,reportqueue,None,father=deeperthread) for i in range(THREAD_COUNT)]
+            downthread=[download('收割机%d'% (i+1),picqueue,None,reportqueue,None,hath,father=deeperthread) for i in range(THREAD_COUNT)]
             rpt=report('监视官',reportqueue,[deeperthread]+downthread)
             #while not picqueue.empty():print picqueue.get()
             prompt('下载开始. 大约下载 %d 张图片' %(piccount))

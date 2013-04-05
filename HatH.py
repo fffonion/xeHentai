@@ -27,6 +27,9 @@ class HatH(object):
                 ((isEX and 'exhentai' or 'g.e-hentai'),self.hash_s,self._gid,self.id)
                 
     def __init__(self,dirpath='',filename='',hathcontent='',check=True):
+        '''
+        dirpath must be utf-8 decoded
+        '''
         if filename:
             self.file=open(filename,'r')
             self.content=self.file.read()
@@ -46,10 +49,13 @@ class HatH(object):
             listtmp=listtmp.split('\n')
         except IndexError,ValueError:
             print('File or content illegal.')
-        if dirpath:self.dirpath=dirpath
-        else:self.dirpath=self._name
+        self.setpath(dirpath)
         self.genlist(listtmp,check)
-
+        
+    def setpath(self,path):
+        if path:self.__setattr__('path',path)
+        else:self.__setattr__('path',self._name)
+        
     def genlist(self,raw_list,check=True):
         #生成图片列表
         self._piclist=[self.picelem(raw_list[i],self.gid) for i in range(len(raw_list))]
@@ -75,7 +81,7 @@ class HatH(object):
     def _renameToSeq(self,path,overwrite=False):
         for i in range(self._count):
             oriname=self._piclist[i].name
-            seqname='%03d'%int(self._piclist[i].id)
+            seqname='%03d.%s'%(int(self._piclist[i].id),self._piclist[i].format)
             if opth.exists(opth.join(path,oriname)):
                 if opth.exists(opth.join(path,seqname)):
                     i=1
@@ -91,7 +97,7 @@ class HatH(object):
     def _renameToOri(self,path,overwrite=False):
         for i in range(self._count):
             oriname=self._piclist[i].name
-            seqname='%03d'%int(self._piclist[i].id)
+            seqname='%03d.%s'%(int(self._piclist[i].id),self._piclist[i].format)
             if opth.exists(opth.join(path,seqname)):
                 if opth.exists(opth.join(path,oriname)):
                     i=1
@@ -114,10 +120,16 @@ class HatH(object):
         else:return object.__getattr__(self,key)
         
     def __setattr__(self, name, value):
-        if name == 'path':self.dirpath=value
+        if name=='path':self.dirpath=value
+        if name=='name':self._name=value
         else:object.__setattr__(self,name,value)
     
 if __name__=='__main__':
-    a=HatH(filename='z:\\EHG-575649.hathdl')
-    print a._checkexist(a.dirpath,a.check)
-    print a.list[0].id,a.list[1].id,a.list[2].id
+    def getPATH0():
+        import sys
+        if opth.split(sys.argv[0])[1].find('py')!=-1:#is script
+            return sys.path[0]
+        else:return sys.path[1]
+    a=HatH(filename='z:\\EHG-581481.hathdl')
+    a.setpath(opth.join(getPATH0(),'[ALMISM (水月あるみ)] ビターなコーヒーとシュガーなミルク「夜明けのレモンティー」 (オリジナル) （CE家族社）').decode('utf-8'))
+    a.renameToOri()
