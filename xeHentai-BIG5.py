@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion@gmail.com>
 
-__version__=1.42
+__version__=1.43
 
 import urllib,random,threading,httplib2plus as httplib2,\
 re,os,Queue,time,os.path as opth,sys,socket,traceback,locale
@@ -52,7 +52,8 @@ def genheader(custom='',referer=''):
                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'\
                ,'Connection': 'keep-alive'}#,'X-Forward-For':ip,'Client_IP':ip}
     if cooid and coopw:
-        headers['Cookie']='ipb_member_id='+cooid+';'+'ipb_pass_hash='+coopw+';'
+        headers['Cookie']='ipb_member_id='+cooid+';ipb_pass_hash='+coopw+';'\
+        #+'uconfig=tl_m-uh_y-sa_y-oi_n-qb_n-tf_n-hp_-hk_-rc_0-cats_0-xns_0-xl_-ts_m-tr_1-prn_y-dm_l-rx_0-ry_0'
         if IS_REDIRECT:
             headers['Referer']=referer or _redirect
             headers['Cookie']+='c[e-hentai.org][/][ipb_member_id]='+cooid+\
@@ -185,6 +186,7 @@ def getPATH0():
     
 def legalpath(str):
     return str.replace('|','').replace(':','').replace('?','').replace('\\','').replace('/','').replace('*','')\
+        .decode('utf-8')\
         #.encode(sys.getfilesystemencoding(),'ignore').decode(sys.getfilesystemencoding()).encode('utf-8')
 
 def init_proxy(url):
@@ -426,7 +428,9 @@ if __name__=='__main__':
                 _redirect='http://'
             def FIX_REDIRECT(str):
                 #picurl不需重定向，fullpicurl需要重定向
-                url=re.findall(arg+'=(.*?)&',str+'&')[0]
+                url=re.findall(arg+'=(.*?)&',str+'&')
+                if url:url=url[0]
+                else:return str
                 if url.find('http')!=-1:#不加密
                     if url.find('fullimg')!=-1:url=REDIRECT(url)
                     return url
@@ -451,9 +455,9 @@ if __name__=='__main__':
         for exurl in exurl_all:
             http2=httplib2.Http(opth.join(os.environ.get('tmp'),'.ehentai'))
             resp, content = http2.request(exurl, method='GET', headers=genheader())
-            if re.findall('This gallery is pining for the fjords.',content):
-                prompt('啊……圖圖被爆菊了, 沒法下了呢-。-')
-                continue
+            #if re.findall('This gallery is pining for the fjords.',content):
+            #    prompt('啊……圖圖被爆菊了, 沒法下了呢-。-')
+            #    continue
             #http://exhentai.org/hathdler.php?gid=575649&t=3fcd227ec7
             if exurl.startswith('http://exhentai.org'):isEX=True
             else:isEX=False
@@ -521,7 +525,7 @@ if __name__=='__main__':
             else:
                 if not hasOri:
                     for i in range(hath.count):
-                        if i>startpos*20:picpagequeue.put(hath.list[i].url())
+                        if i>startpos*20:picpagequeue.put(hath.list[i].url(isEX))
                 else:
                     _print('Sibylla system: 圖片被縮放，進行完整掃描')
                     for i in range(pagecount-startpos):urlqueue.put(exurl+'?p='+str(i+startpos))#第一頁可以用?p=0
