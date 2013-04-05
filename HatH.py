@@ -130,6 +130,5 @@ if __name__=='__main__':
         if opth.split(sys.argv[0])[1].find('py')!=-1:#is script
             return sys.path[0]
         else:return sys.path[1]
-    a=HatH(filename='z:\\EHG-581481.hathdl')
-    a.setpath(opth.join(getPATH0(),'[ALMISM (水月あるみ)] ビターなコーヒーとシュガーなミルク「夜明けのレモンティー」 (オリジナル) （CE家族社）').decode('utf-8'))
-    a.renameToOri()
+    a=HatH(filename='z:\\EHG-579997.hathdl')
+    print a.count
