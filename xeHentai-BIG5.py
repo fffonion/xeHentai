@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion@gmail.com>
 
-__version__=1.43
+__version__=1.431
 
 import urllib,random,threading,httplib2plus as httplib2,\
 re,os,Queue,time,os.path as opth,sys,socket,traceback,locale
@@ -20,7 +20,7 @@ def _print(str):
     print(str.decode('utf-8').encode(locale.getdefaultlocale()[1],'ignore'))
     if argdict['log']:
         f=open(argdict['log'],'a')
-        f.write(time.strftime('%m-%d %X : ',time.localtime(time.time()))+str.decode('utf-8').encode('cp936')+'\n')
+        f.write(time.strftime('%m-%d %X : ',time.localtime(time.time()))+str.decode('utf-8').encode('cp936','ignore')+'\n')
         f.close()
     
 def prompt(str,fill='-'):
@@ -312,13 +312,14 @@ class download(threading.Thread):
             slptime=0
             urlori=self.in_q.get()
             if self.picmode:
-                #name=urlori['name']
+                taskname=urlori['name']
                 index='%03d'%int(urlori['index'])
                 savename=index+'.'+urlori['format']#保存用名稱
                 refer=urlori['referer']
                 url=urlori[getdowntype()] or urlori['pic']#無original自動切換成pic
                 format=urlori['format']
             else:
+                taskname=''
                 url=urlori
                 savename=''
                 refer=''
@@ -344,7 +345,7 @@ class download(threading.Thread):
                     elif (len(content)<=678 and not self.picmode) or len(content)==925:
                         time.sleep(sleepseq[slptime])
                         slptime=slptime+(slptime==4 and 0 or 1)
-                        self.prt_q.put([self.getName(),'等待 %d次. %s'%(slptime,urlori['name'])])
+                        self.prt_q.put([self.getName(),'等待 %d次. %s'%(slptime,taskname)])
                     elif len(content)==144 or len(content)==210 or len(content)==1009:
                         self.prt_q.put([self.getName(),'流量超限，請等待一段時間'])
                         self.in_q.put(urlori)
@@ -359,7 +360,7 @@ class download(threading.Thread):
                 else:
                     save2file(content,savename,hath)
             else:raise Exception('Server Error')
-            if self.picmode:self.prt_q.put([self.getName(),'#%s %s (%d) 下載完成.'%(index,urlori['name'],len(content))])
+            if self.picmode:self.prt_q.put([self.getName(),'#%s %s (%d) 下載完成.'%(index,taskname,len(content))])
             else:self.prt_q.put([self.getName(),url])
         self.prt_q.put([self.getName(),'已退出.'])
         
@@ -525,7 +526,7 @@ if __name__=='__main__':
             else:
                 if not hasOri:
                     for i in range(hath.count):
-                        if i>startpos*20:picpagequeue.put(hath.list[i].url(isEX))
+                        if i>=startpos*20:picpagequeue.put(hath.list[i].url(isEX))
                 else:
                     _print('Sibylla system: 圖片被縮放，進行完整掃描')
                     for i in range(pagecount-startpos):urlqueue.put(exurl+'?p='+str(i+startpos))#第一頁可以用?p=0
