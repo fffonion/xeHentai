@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion@gmail.com>
 
-__version__=1.431
+__version__=1.44
 
 import urllib,random,threading,httplib2plus as httplib2,\
 re,os,Queue,time,os.path as opth,sys,socket,traceback,locale
@@ -69,7 +69,7 @@ def mkcookie(uname='',key=''):
     else:silent=False
     try:
         logindata={
-            'ipb_login_username':_raw_input('输入用户名: ',silent,uname),
+            'ipb_login_username':_raw_input('输入用户名: ',silent,uname).decode(locale.getdefaultlocale()[1]).encode('utf-8'),
             'ipb_login_submit':'Login!',
             'ipb_login_password':_raw_input('输入密码:   ',silent,key)}
         resp, content = httplib2.Http().request(loginurl, method='POST', headers=genheader('form'),body=urllib.urlencode(logindata))
