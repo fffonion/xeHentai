@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion@gmail.com>
 
-__version__=1.44
+__version__=1.45
 
 import urllib,random,threading,httplib2plus as httplib2,\
 re,os,Queue,time,os.path as opth,sys,socket,traceback,locale
@@ -181,8 +181,8 @@ def getPATH0():
     返回脚本所在路径
     """
     if opth.split(sys.argv[0])[1].find('py')!=-1:#is script
-        return sys.path[0]
-    else:return sys.path[1]
+        return sys.path[0].decode(sys.getfilesystemencoding())
+    else:return sys.path[1].decode(sys.getfilesystemencoding())
     
 def legalpath(str):
     return str.replace('|','').replace(':','').replace('?','').replace('\\','').replace('/','').replace('*','')\
@@ -465,6 +465,7 @@ if __name__=='__main__':
             if re.findall('Originals only',content):hasOri=False
             else:hasOri=True
             gid,sethash=re.findall('.+/(\d+)/([^\/]+)/*',exurl)[0]
+            print getPATH0(),'EHG-%s.hathdl'%gid
             hathfilename=opth.join(getPATH0(),'EHG-%s.hathdl'%gid)
             if os.path.exists(hathfilename):
                 _print('Sibylla system: 读取H@H索引…… (%s)'%('EHG-%s.hathdl'%gid))

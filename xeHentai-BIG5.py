@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion@gmail.com>
 
-__version__=1.44
+__version__=1.45
 
 import urllib,random,threading,httplib2plus as httplib2,\
 re,os,Queue,time,os.path as opth,sys,socket,traceback,locale
@@ -157,7 +157,7 @@ def query_info():
         used,quota=re.findall('<p>You are currently at <strong>(\d+)</strong> towards a limit of <strong>(\d+)</st',content)[0]
         used,quota=int(used),int(quota)
         _print('當前已使用%d中的%d，%s (可能有延遲)'%(quota,used,\
-          (quota<used and ('流量超限，將在%d分鐘後(%s時)恢復，%s時清零。' % \
+          (quota<used and ('流量超限，將在%d分鍾後(%s時)恢複，%s時清零。' % \
             (used-quota,deltatime(used-quota),deltatime(used))) or '流量充足')))
         if used>quota and not argdict['force_down']=='y':
             prompt('出現狀況！')
@@ -181,8 +181,8 @@ def getPATH0():
     返回腳本所在路徑
     """
     if opth.split(sys.argv[0])[1].find('py')!=-1:#is script
-        return sys.path[0]
-    else:return sys.path[1]
+        return sys.path[0].decode(sys.getfilesystemencoding())
+    else:return sys.path[1].decode(sys.getfilesystemencoding())
     
 def legalpath(str):
     return str.replace('|','').replace(':','').replace('?','').replace('\\','').replace('/','').replace('*','')\
@@ -202,26 +202,26 @@ def parse_arg(arg_ori):
     if arg_ori[0] in ['--help','-h','/?','-?']:
         _print(\
 '''【在線代理】
-ehentai對每個ip單位時間內的下載量有配額(一般為120~200)，因此需要使用在線代理來偽裝ip
+ehentai對每個ip單位時間內的下載量有配額(一般爲120~200)，因此需要使用在線代理來僞裝ip
 本下載器支持glype和knproxy兩種類型的在線代理；
-glype是目前使用最廣的在線代理，使用時請取消勾選“加密url”、勾選“允許cookies”後隨意打開一個網頁，然後把網址粘貼進來；knproxy是國人開發的一款在線代理，可以使用knproxy的加密模式，用法與glype相同。
+glype是目前使用最廣的在線代理，使用時請取消勾選「加密url」、勾選「允許cookies」後隨意打開一個網頁，然後把網址粘貼進來；knproxy是國人開發的一款在線代理，可以使用knproxy的加密模式，用法與glype相同。
 【命令行模式】支持命令行模式以方便使用路由器或VPS下載（需要安裝httplib2庫）
 參數： ehentai.py url [-t|-o|-r|-p|-rp|-u|-k|-s|-tm|-f|-l]
 
     url                   下載頁的網址
-    -t  --thread          下載線程數，默認為5
+    -t  --thread          下載線程數，默認爲5
     -o  --down-ori        是否下載原始圖片（如果存在）
     -r  --redirect        在線代理的網址，形如"http://a.co/b.php?u=xx&b=3"(要加引號)
-    -ro --redirect-norm   是否應用在線代理到已解析到的非原圖，默認不啟用
+    -ro --redirect-norm   是否應用在線代理到已解析到的非原圖，默認不啓用
     -u  --username        用戶名，覆蓋已保存的cookie
     -k  --key             密碼
     -s  --start-pos       從第幾頁開始下載，默認從頭
-    -f  --force           即使超出配額也下載，默認為否
-    -l  --logpath         保存日志的路徑，默認為eh.log
+    -f  --force           即使超出配額也下載，默認爲否
+    -l  --logpath         保存日志的路徑，默認爲eh.log
     -re --rename          是否重命名成原始文件名
-    -j  --no-jp-name      是否不使用日語命名，默認為否
+    -j  --no-jp-name      是否不使用日語命名，默認爲否
      ----------------------------------------------------------------   
-沒什麼大不了的，就是一個批量下圖的東西罷了~
+沒什麽大不了的，就是一個批量下圖的東西罷了~
 fffonion    <xijinping@yooooo.us>    Blog:http://yooooo.us/
                                                   2013-3-23''')
         os._exit(0)
@@ -271,14 +271,14 @@ class report(threading.Thread):
                     flag=True
                     if '收割機' in i.getName():picthread+=1
             if not flag and self.q.empty():break
-            if picthread>0:#不是0早退出了，用於判斷是否pic下載
+            if picthread>0:#不是0早退出了，用于判斷是否pic下載
                 if keep_alive==50:
                     keep_alive=0
                     _print('%s - 監視官 :%2d個收割機存活, 共%2d個.' %(time.strftime('%X',time.localtime()),picthread,THREAD_COUNT))
                     #if last_thread==picthread
                     for i in range(len(LAST_DOWNLOAD_SIZE)):
                         samecount=0
-                        for j in range(len(LAST_DOWNLOAD_SIZE)):#samecount恰好為相同元素個數
+                        for j in range(len(LAST_DOWNLOAD_SIZE)):#samecount恰好爲相同元素個數
                             if LAST_DOWNLOAD_SIZE[i]==LAST_DOWNLOAD_SIZE[j] and LAST_DOWNLOAD_SIZE[i]!=0:
                                 samecount+=1
                         if samecount>=THREAD_COUNT*0.4 and not argdict['force_down']=='y':
@@ -299,7 +299,7 @@ class download(threading.Thread):
         self.father=father
         self.picmode='收割機' in self.getName()
     def run(self):
-        self.prt_q.put([self.getName(),'已啟動.'])
+        self.prt_q.put([self.getName(),'已啓動.'])
         sleepseq=[5,8,12,16,20]
         while 1:
             if self.in_q.empty():
@@ -465,6 +465,7 @@ if __name__=='__main__':
             if re.findall('Originals only',content):hasOri=False
             else:hasOri=True
             gid,sethash=re.findall('.+/(\d+)/([^\/]+)/*',exurl)[0]
+            print getPATH0(),'EHG-%s.hathdl'%gid
             hathfilename=opth.join(getPATH0(),'EHG-%s.hathdl'%gid)
             if os.path.exists(hathfilename):
                 _print('Sibylla system: 讀取H@H索引…… (%s)'%('EHG-%s.hathdl'%gid))
@@ -582,4 +583,4 @@ if __name__=='__main__':
             f.flush()
             f.close()
 _raw_input('\n按回車鍵退出……',is_silent,'')
-os._exit(0)
+os._exit(0) 
