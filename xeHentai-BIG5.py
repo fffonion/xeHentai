@@ -465,7 +465,7 @@ if __name__=='__main__':
             if re.findall('Originals only',content):hasOri=False
             else:hasOri=True
             gid,sethash=re.findall('.+/(\d+)/([^\/]+)/*',exurl)[0]
-            print getPATH0(),'EHG-%s.hathdl'%gid
+            #print getPATH0(),'EHG-%s.hathdl'%gid
             hathfilename=opth.join(getPATH0(),'EHG-%s.hathdl'%gid)
             if os.path.exists(hathfilename):
                 _print('Sibylla system: 讀取H@H索引…… (%s)'%('EHG-%s.hathdl'%gid))
