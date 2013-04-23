@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion@gmail.com>
 
-__version__=1.45
+__version__=1.46
 
 import urllib,random,threading,httplib2plus as httplib2,\
 re,os,Queue,time,os.path as opth,sys,socket,traceback,locale
@@ -387,7 +387,9 @@ if __name__=='__main__':
                 if _raw_input('当前没有登陆，要登陆吗 y/n? (双倍流量限制,可访问exhentai)：')=='y':mkcookie()
         while True:
             exurl_all=_raw_input('输入地址(使用,分割下载多个)：',is_silent,argdict['url']).replace('，'.decode('utf-8'),',')
-            if not (exurl_all.startswith('http://g.e-hentai.org/') or exurl_all.startswith('http://exhentai.org/')) and not is_silent:prompt('咦?这是啥')
+            if not (exurl_all.startswith('http://g.e-hentai.org/') or exurl_all.startswith('http://exhentai.org/')\
+                     or exurl_all.startswith('g.e-hentai.org/') or exurl_all.startswith('exhentai.org/')) \
+                     and not is_silent:prompt('咦?这是啥')
             else:
                 if exurl_all:break
                 else:prompt('必须输入地址~')
@@ -454,6 +456,8 @@ if __name__=='__main__':
             #else:break
         #处理所有url
         for exurl in exurl_all:
+            if not exurl.endswith('/'):exurl+='/'
+            if not exurl.startswith('http://'):exurl='http://'+exurl
             http2=httplib2.Http(opth.join(os.environ.get('tmp'),'.ehentai'))
             resp, content = http2.request(exurl, method='GET', headers=genheader())
             #if re.findall('This gallery is pining for the fjords.',content):
