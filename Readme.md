@@ -1,5 +1,9 @@
 ﻿#绅士漫画爬虫
 
+##注意！！
+
+适！度！使！用！不要设过大的线程数不然IP会被BAN！
+
 ##下载
 
 windows可执行文件: [简体](https://github.com/fffonion/xeHentai/raw/master/xeHentai-GBK.exe) [繁体](https://github.com/fffonion/xeHentai/raw/master/xeHentai-BIG5.exe) 
