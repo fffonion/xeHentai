@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion@gmail.com>
 
-__version__=1.46
+__version__=1.47
 
 import urllib,random,threading,httplib2plus as httplib2,\
 re,os,Queue,time,os.path as opth,sys,socket,traceback,locale
@@ -176,6 +176,10 @@ def query_info():
 def htmldecode(str):
     return str.replace('&amp;', '&')
 
+def getTemp():
+    if sys.platform=='win32':return os.environ.get('tmp')
+    else:return'/tmp'
+
 def getPATH0():
     """
     返回脚本所在路径
@@ -295,7 +299,7 @@ class download(threading.Thread):
         self.handle_func=handle_func
         self.out_q=save_queue
         self.prt_q=report_queue
-        self.http2=httplib2.Http(opth.join(os.environ.get('tmp'),'.ehentai'))
+        self.http2=httplib2.Http(opth.join(getTemp(),'.ehentai'))
         self.father=father
         self.picmode='收割机' in self.getName()
     def run(self):
@@ -458,7 +462,7 @@ if __name__=='__main__':
         for exurl in exurl_all:
             if not exurl.endswith('/'):exurl+='/'
             if not exurl.startswith('http://'):exurl='http://'+exurl
-            http2=httplib2.Http(opth.join(os.environ.get('tmp'),'.ehentai'))
+            http2=httplib2.Http(opth.join(getTemp(),'.ehentai'))
             resp, content = http2.request(exurl, method='GET', headers=genheader())
             #if re.findall('This gallery is pining for the fjords.',content):
             #    prompt('啊……图图被爆菊了, 没法下了呢-。-')
