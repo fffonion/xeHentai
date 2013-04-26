@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion@gmail.com>
 
-__version__=1.46
+__version__=1.47
 
 import urllib,random,threading,httplib2plus as httplib2,\
 re,os,Queue,time,os.path as opth,sys,socket,traceback,locale
@@ -176,6 +176,10 @@ def query_info():
 def htmldecode(str):
     return str.replace('&amp;', '&')
 
+def getTemp():
+    if sys.platform=='win32':return os.environ.get('tmp')
+    else:return'/tmp'
+
 def getPATH0():
     """
     返回腳本所在路徑
@@ -202,9 +206,9 @@ def parse_arg(arg_ori):
     if arg_ori[0] in ['--help','-h','/?','-?']:
         _print(\
 '''【在線代理】
-ehentai對每個ip單位時間內的下載量有配額(一般為120~200)，因此需要使用在線代理來偽裝ip
+ehentai對每個ip單位時間內的下載量有配額(壹般為120~200)，因此需要使用在線代理來偽裝ip
 本下載器支持glype和knproxy兩種類型的在線代理；
-glype是目前使用最廣的在線代理，使用時請取消勾選“加密url”、勾選“允許cookies”後隨意打開一個網頁，然後把網址粘貼進來；knproxy是國人開發的一款在線代理，可以使用knproxy的加密模式，用法與glype相同。
+glype是目前使用最廣的在線代理，使用時請取消勾選“加密url”、勾選“允許cookies”後隨意打開壹個網頁，然後把網址粘貼進來；knproxy是國人開發的壹款在線代理，可以使用knproxy的加密模式，用法與glype相同。
 【命令行模式】支持命令行模式以方便使用路由器或VPS下載（需要安裝httplib2庫）
 參數： ehentai.py url [-t|-o|-r|-p|-rp|-u|-k|-s|-tm|-f|-l]
 
@@ -217,11 +221,11 @@ glype是目前使用最廣的在線代理，使用時請取消勾選“加密url
     -k  --key             密碼
     -s  --start-pos       從第幾頁開始下載，默認從頭
     -f  --force           即使超出配額也下載，默認為否
-    -l  --logpath         保存日志的路徑，默認為eh.log
+    -l  --logpath         保存日誌的路徑，默認為eh.log
     -re --rename          是否重命名成原始文件名
     -j  --no-jp-name      是否不使用日語命名，默認為否
      ----------------------------------------------------------------   
-沒什麼大不了的，就是一個批量下圖的東西罷了~
+沒什麽大不了的，就是壹個批量下圖的東西罷了~
 fffonion    <xijinping@yooooo.us>    Blog:http://yooooo.us/
                                                   2013-3-23''')
         os._exit(0)
@@ -295,7 +299,7 @@ class download(threading.Thread):
         self.handle_func=handle_func
         self.out_q=save_queue
         self.prt_q=report_queue
-        self.http2=httplib2.Http(opth.join(os.environ.get('tmp'),'.ehentai'))
+        self.http2=httplib2.Http(opth.join(getTemp(),'.ehentai'))
         self.father=father
         self.picmode='收割機' in self.getName()
     def run(self):
@@ -347,7 +351,7 @@ class download(threading.Thread):
                         slptime=slptime+(slptime==4 and 0 or 1)
                         self.prt_q.put([self.getName(),'等待 %d次. %s'%(slptime,taskname)])
                     elif len(content)==144 or len(content)==210 or len(content)==1009:
-                        self.prt_q.put([self.getName(),'流量超限，請等待一段時間'])
+                        self.prt_q.put([self.getName(),'流量超限，請等待壹段時間'])
                         self.in_q.put(urlori)
                         return 
                     else:break#正常情況
@@ -451,14 +455,14 @@ if __name__=='__main__':
             query_info()
             break
             #except IndexError:
-            #    _print('代理可能有問題，請更換一個~')
+            #    _print('代理可能有問題，請更換壹個~')
             #    continue
             #else:break
         #處理所有url
         for exurl in exurl_all:
             if not exurl.endswith('/'):exurl+='/'
             if not exurl.startswith('http://'):exurl='http://'+exurl
-            http2=httplib2.Http(opth.join(os.environ.get('tmp'),'.ehentai'))
+            http2=httplib2.Http(opth.join(getTemp(),'.ehentai'))
             resp, content = http2.request(exurl, method='GET', headers=genheader())
             #if re.findall('This gallery is pining for the fjords.',content):
             #    prompt('啊……圖圖被爆菊了, 沒法下了呢-。-')
@@ -534,7 +538,7 @@ if __name__=='__main__':
                         if i>=startpos*20:picpagequeue.put(hath.list[i].url(isEX))
                 else:
                     _print('Sibylla system: 圖片被縮放，進行完整掃描')
-                    for i in range(pagecount-startpos):urlqueue.put(exurl+'?p='+str(i+startpos))#第一頁可以用?p=0
+                    for i in range(pagecount-startpos):urlqueue.put(exurl+'?p='+str(i+startpos))#第壹頁可以用?p=0
                     pagethread=download('執行官',urlqueue,picpagequeue,reportqueue,getpicpageurl,hath)
                     rpt=report('監視官',reportqueue,[pagethread])
                     pagethread.start()
