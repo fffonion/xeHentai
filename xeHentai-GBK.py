@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion@gmail.com>
 
-__version__=1.47
+__version__=1.48
 
 import urllib,random,threading,httplib2plus as httplib2,\
 re,os,Queue,time,os.path as opth,sys,socket,traceback,locale
@@ -149,7 +149,7 @@ def query_info():
     global LOGIN,IP
     if not LOGIN:return
     deltatime=lambda x:time.strftime('%m-%d %X',time.localtime(time.time()+x*60))
-    prompt('查询流量%s信息' % (IP and '' or '及IP'))
+    prompt('查询配额%s信息' % (IP and '' or '及IP'))
     header=genheader()
     try:
         resp,content=httplib2.Http().request(REDIRECT(myhomeurl), method='GET', headers=header)
@@ -157,11 +157,11 @@ def query_info():
         used,quota=re.findall('<p>You are currently at <strong>(\d+)</strong> towards a limit of <strong>(\d+)</st',content)[0]
         used,quota=int(used),int(quota)
         _print('当前已使用%d中的%d，%s (可能有延迟)'%(quota,used,\
-          (quota<used and ('流量超限，将在%d分钟后(%s时)恢复，%s时清零。' % \
-            (used-quota,deltatime(used-quota),deltatime(used))) or '流量充足')))
+          (quota<used and ('配额超限，将在%d分钟后(%s时)恢复，%s时清零。' % \
+            (used-quota,deltatime(used-quota),deltatime(used))) or '配额充足')))
         if used>quota and not argdict['force_down']=='y':
             prompt('出现状况！')
-            _raw_input('流量不足, 中断下载 (可使用-f强制下载), 按回车继续',is_silent,'')
+            _raw_input('配额不足, 中断下载 (可使用-f强制下载), 按回车继续',is_silent,'')
     except Exception as e:
         _print('暂时无法获得数据……')
         print e
@@ -250,9 +250,10 @@ fffonion    <xijinping@yooooo.us>    Blog:http://yooooo.us/
         else:
             raise Exception('Illegal URL.')
     except Exception,e:
-        _print('错误的参数!')
+        print(concode('错误的参数!'))
         print e
         arg['url']=''
+        os._exit(0)
     #print arg,arg_ori[1]
     return arg
 
@@ -285,9 +286,9 @@ class report(threading.Thread):
                         for j in range(len(LAST_DOWNLOAD_SIZE)):#samecount恰好为相同元素个数
                             if LAST_DOWNLOAD_SIZE[i]==LAST_DOWNLOAD_SIZE[j] and LAST_DOWNLOAD_SIZE[i]!=0:
                                 samecount+=1
-                        if samecount>=THREAD_COUNT*0.4 and not argdict['force_down']=='y':
+                        if samecount>=THREAD_COUNT*0.4 and samecount>1 and not argdict['force_down']=='y':
                             prompt('出现状况！')
-                            _raw_input('可能流量已经超限，紧急停止，按回车退出',is_silent,'')
+                            _raw_input('可能配额已经超限，紧急停止，按回车退出',is_silent,'')
                             os._exit(1)
                 keep_alive+=1
             time.sleep(0.2)
@@ -348,10 +349,10 @@ class download(threading.Thread):
                         url=urlori['pic']
                     elif (len(content)<=678 and not self.picmode) or len(content)==925:
                         time.sleep(sleepseq[slptime])
-                        slptime=slptime+(slptime==4 and 0 or 1)
+                        slptime+=int(slptime==4 and '0' or '1')
                         self.prt_q.put([self.getName(),'等待 %d次. %s'%(slptime,taskname)])
                     elif len(content)==144 or len(content)==210 or len(content)==1009:
-                        self.prt_q.put([self.getName(),'流量超限，请等待一段时间'])
+                        self.prt_q.put([self.getName(),'配额超限，请等待一段时间'])
                         self.in_q.put(urlori)
                         return 
                     else:break#正常情况
@@ -380,15 +381,16 @@ if __name__=='__main__':
         reload(sys)
         sys.setdefaultencoding('utf-8')
         #是否命令行模式
+        is_silent=False
         argdict=parse_arg(sys.argv[1:])
-        is_silent=(argdict['url'])
+        is_silent=argdict['url'] or False
         if is_silent:argdict['log']=argdict['log'] or opth.join(getPATH0(),'eh.log')
         prompt('绅♂士下载器 v'+str(__version__),fill=' ')
         #交互界面或从命令行读取参数
         if argdict['uname'] and argdict['key']:mkcookie(argdict['uname'],argdict['key'])
         else:
             if not getcookie():
-                if _raw_input('当前没有登陆，要登陆吗 y/n? (双倍流量限制,可访问exhentai)：')=='y':mkcookie()
+                if _raw_input('当前没有登陆，要登陆吗 y/n? (双倍配额限制,可访问exhentai)：')=='y':mkcookie()
         while True:
             exurl_all=_raw_input('输入地址(使用,分割下载多个)：',is_silent,argdict['url']).replace('，'.decode('utf-8'),',')
             if not (exurl_all.startswith('http://g.e-hentai.org/') or exurl_all.startswith('http://exhentai.org/')\
@@ -577,8 +579,9 @@ if __name__=='__main__':
                 hath.renameToOri()
                 _print('Sibylla system: 重命名完成ww')
             query_info()
-    except KeyboardInterrupt:
-        os._exit(0)
+    except (KeyboardInterrupt, SystemExit):
+        _print('用户中断ww')
+        sys.exit()
     except:
         if not is_silent:
             _print('发生错误: '),
