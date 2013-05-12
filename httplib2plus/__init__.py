@@ -2,6 +2,9 @@ from __future__ import generators
 """
 httplib2plus
 
+Add chunk_read support, fix proxy problems.
+http://github.com/fffonion/httplib2plus
+
 A caching http interface that supports ETags and gzip
 to conserve bandwidth.
 
@@ -1142,7 +1145,7 @@ class Http(object):
     """
     def __init__(self, cache=None, timeout=None,
                  proxy_info=proxy_info_from_environment,
-                 ca_certs=None, disable_ssl_certificate_validation=False,callback_hook=None,chunk_size=0):
+                 ca_certs=None, disable_ssl_certificate_validation=False):
         """If 'cache' is a string then it is used as a directory name for
         a disk cache. Otherwise it must be an object that supports the
         same interface as FileCache.
@@ -1170,8 +1173,8 @@ class Http(object):
         self.ca_certs = ca_certs
         self.disable_ssl_certificate_validation = \
                 disable_ssl_certificate_validation
-        self.chunk_size=chunk_size
-        self.callback_hook=callback_hook
+        #self.chunk_size=chunk_size
+        #self.callback_hook=callback_hook
         # Map domain name to an httplib connection
         self.connections = {}
         # The location of the cache, for now a directory
@@ -1250,7 +1253,7 @@ class Http(object):
         self.credentials.clear()
         self.authorizations = []
 
-    def _conn_request(self, conn, request_uri, method, body, headers):
+    def _conn_request(self, conn, request_uri, method, body, headers, callback_hook, chunk_size):
         i = 0
         seen_bad_status_line = False
         while i < RETRIES:
@@ -1318,11 +1321,11 @@ class Http(object):
                 if method == "HEAD":
                     conn.close()
                 else:
-                    if self.callback_hook:#!= None:
+                    if callback_hook:#!= None:
                         while 1:
-                            chunk= response.read(self.chunk_size)
+                            chunk= response.read(chunk_size)
                             if not chunk:break
-                            self.callback_hook(len(chunk),len(content))
+                            callback_hook(len(chunk),len(content))
                             content +=chunk
                     else:
                         content = response.read()
@@ -1333,7 +1336,7 @@ class Http(object):
         return (response, content)
 
 
-    def _request(self, conn, host, absolute_uri, request_uri, method, body, headers, redirections, cachekey):
+    def _request(self, conn, host, absolute_uri, request_uri, method, body, headers, redirections, cachekey,callback_hook,chunk_size):
         """Do the actual request using the connection object
         and also follow one level of redirects if necessary"""
 
@@ -1342,18 +1345,18 @@ class Http(object):
         if auth:
             auth.request(method, request_uri, headers, body)
 
-        (response, content) = self._conn_request(conn, request_uri, method, body, headers)
+        (response, content) = self._conn_request(conn, request_uri, method, body, headers, callback_hook,chunk_size)
 
         if auth:
             if auth.response(response, body):
                 auth.request(method, request_uri, headers, body)
-                (response, content) = self._conn_request(conn, request_uri, method, body, headers )
+                (response, content) = self._conn_request(conn, request_uri, method, body, headers ,callback_hook, chunk_size)
                 response._stale_digest = 1
 
         if response.status == 401:
             for authorization in self._auth_from_challenge(host, request_uri, headers, response, content):
                 authorization.request(method, request_uri, headers, body)
-                (response, content) = self._conn_request(conn, request_uri, method, body, headers, )
+                (response, content) = self._conn_request(conn, request_uri, method, body, headers, callback_hook,chunk_size)
                 if response.status != 401:
                     self.authorizations.append(authorization)
                     authorization.response(response, body)
@@ -1412,7 +1415,7 @@ class Http(object):
 # including all socket.* and httplib.* exceptions.
 
 
-    def request(self, uri, method="GET", body=None, headers=None, redirections=DEFAULT_MAX_REDIRECTS, connection_type=None):
+    def request(self, uri, method="GET", body=None, headers=None, redirections=DEFAULT_MAX_REDIRECTS, connection_type=None,callback_hook=None,chunk_size=0):
         """ Performs a single HTTP request.
 
         The 'uri' is the URI of the HTTP resource and can begin with either
@@ -1565,7 +1568,7 @@ class Http(object):
                     elif entry_disposition == "TRANSPARENT":
                         pass
 
-                    (response, new_content) = self._request(conn, authority, uri, request_uri, method, body, headers, redirections, cachekey)
+                    (response, new_content) = self._request(conn, authority, uri, request_uri, method, body, headers, redirections, cachekey,callback_hook,chunk_size)
 
                 if response.status == 304 and method == "GET":
                     # Rewrite the cache entry with the new end-to-end headers
@@ -1595,7 +1598,7 @@ class Http(object):
                     response = Response(info)
                     content = ""
                 else:
-                    (response, content) = self._request(conn, authority, uri, request_uri, method, body, headers, redirections, cachekey)
+                    (response, content) = self._request(conn, authority, uri, request_uri, method, body, headers, redirections, cachekey,callback_hook,chunk_size)
         except Exception, e:
             if self.force_exception_to_status_code:
                 if isinstance(e, HttpLib2ErrorWithResponse):
