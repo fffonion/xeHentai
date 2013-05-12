@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion@gmail.com>
 
-__version__=1.48
+__version__=1.49
 
 import urllib,random,threading,httplib2plus as httplib2,\
 re,os,Queue,time,os.path as opth,sys,socket,traceback,locale
@@ -129,12 +129,12 @@ def getpicurl(content,pageurl,hath):
     if IS_REDIRECT:
         #print picurl
         #print fullurl
-        if forceproxy:picurl=REDIRECT(FIX_REDIRECT(htmldecode(picurl)))
-        else:picurl=urllib.unquote(FIX_REDIRECT(htmldecode(picurl)))
-        fullurl=fullurl and FIX_REDIRECT(htmldecode(fullurl[0])) or ''
+        if forceproxy:picurl=REDIRECT(FIX_REDIRECT(urllescape(picurl)))
+        else:picurl=urllib.unquote(FIX_REDIRECT(urlescape(picurl)))
+        fullurl=fullurl and FIX_REDIRECT(urlescape(fullurl[0])) or ''
         #print picurl
         #print fullurl
-    else:fullurl=fullurl and htmldecode(fullurl[0]) or ''
+    else:fullurl=fullurl and urlescape(fullurl[0]) or ''
     elem={'pic':picurl,'full':fullurl\
              ,'name':filename,'gid':index[0],'index':index[1],'fullsize':(fullsize and fullsize[0] or ''),
              'referer':pageurl,'format':format}
@@ -173,8 +173,10 @@ def query_info():
         IP=re.findall('\d+\.\d+\.\d+\.\d+',content)[0]
         _print('当前IP %s' % IP)
         
-def htmldecode(str):
-    return str.replace('&amp;', '&')
+
+def urlescape(str):
+    #partly replace
+    return str.replace('&amp;','&')
 
 def getTemp():
     if sys.platform=='win32':return os.environ.get('tmp')
@@ -467,7 +469,7 @@ if __name__=='__main__':
             http2=httplib2.Http(opth.join(getTemp(),'.ehentai'))
             resp, content = http2.request(exurl, method='GET', headers=genheader())
             #if re.findall('This gallery is pining for the fjords.',content):
-            #    prompt('啊……图图被爆菊了, 没法下了呢-。-')
+            #    prompt('啊……图图被菊爆了, 没法下了呢-。-')
             #    continue
             #http://exhentai.org/hathdler.php?gid=575649&t=3fcd227ec7
             if exurl.startswith('http://exhentai.org'):isEX=True
@@ -547,20 +549,21 @@ if __name__=='__main__':
                     rpt.start()
                     pagethread.join()
                     rpt.join()
-                #重筛选
-                piccount=picpagequeue.qsize()
-                for i in range(piccount):
-                    if picpagequeue.empty():break
-                    a=picpagequeue.get()
-                    if (i+startpos*20) in hath.genindex():
-                        picpagequeue.put(a)
+                    #重筛选
+                    piccount=picpagequeue.qsize()
+                    for i in range(piccount):
+                        if picpagequeue.empty():break
+                        a=picpagequeue.get()
+                        #print i+startpos*20,(i+startpos*20) in hath.genindex()
+                        if (i+startpos*20) in hath.genindex():
+                            picpagequeue.put(a)
                 piccount=picpagequeue.qsize()
             deeperthread=download('执行官+',picpagequeue,picqueue,reportqueue,getpicurl,hath)
             deeperthread.start()#deeperthread没有join了
             downthread=[download('收割机%d'% (i+1),picqueue,None,reportqueue,None,hath,father=deeperthread) for i in range(THREAD_COUNT)]
             rpt=report('监视官',reportqueue,[deeperthread]+downthread)
             #while not picqueue.empty():print picqueue.get()
-            prompt('下载开始. 大约下载 %d 张图片' %(piccount))
+            prompt('下载开始. 下载 %d 张图片' %(piccount))
             if not OVERQUOTA:
                 for i in range(THREAD_COUNT):downthread[i].start()
             rpt.start()
