@@ -37,9 +37,9 @@ class HatH(object):
         else:self.content=hathcontent
         self.check=check
         try:
-            self._name=re.findall('TITLE (.+)',self.content)[0]
+            self._name=self.htmlescape(re.findall('TITLE (.+)',self.content)[0])
             self._gid=int(re.findall('GID (.+)',self.content)[0])
-            self._count=int(re.findall('FILES (.+)',self.content)[0])
+            self._total_count=int(re.findall('FILES (.+)',self.content)[0])
             self._title=re.findall('Title:\s+(.+)',self.content)[0]
             self._upload_time=re.findall('Upload Time:\s+(.+)',self.content)[0]#invisible
             self._upload_by=re.findall('Uploaded By:\s+(.+)',self.content)[0]#invisible
@@ -52,16 +52,30 @@ class HatH(object):
         self.setpath(dirpath)
         self.genlist(listtmp,check)
         
+    def htmlescape(self,str):
+        def replc(match):
+            #print match.group(0),match.group(1),match.group(2)
+            dict={'amp':'&','nbsp':' ','quot':'"','lt':'<','gt':'>','copy':'©','reg':'®'}
+            if match.groups>2:
+                if match.group(1)=='#':
+                    return unichr(int(match.group(2)))
+                else:
+                    return  dict[match.group(2)]
+        htmlre=re.compile("&(#?)(\d{1,5}|\w{1,8}|[a-z]+);")
+        return htmlre.sub(replc,str)
+    
     def setpath(self,path):
         if path:self.__setattr__('path',path)
         else:self.__setattr__('path',self._name)
         
     def genlist(self,raw_list,check=True):
-        #生成图片列表
+        #generate full list
         self._piclist=[self.picelem(raw_list[i],self.gid) for i in range(len(raw_list))]
+        #scan folder for former pics
         self._remainindex=self._checkexist(self.dirpath,check)
         #re-generate
         self._piclist_veryfied=[self._piclist[i] for i in self._remainindex]
+        self._count=len(self._piclist_veryfied)
     
     def genindex(self):
         return self._checkexist(self.dirpath,self.check)
@@ -79,7 +93,7 @@ class HatH(object):
         return self._renameToSeq(self.dirpath,overwrite)
     
     def _renameToSeq(self,path,overwrite=False):
-        for i in range(self._count):
+        for i in range(self._total_count):
             oriname=self._piclist[i].name
             seqname='%03d.%s'%(int(self._piclist[i].id),self._piclist[i].format)
             if opth.exists(opth.join(path,oriname)):
@@ -95,7 +109,7 @@ class HatH(object):
         return self._renameToOri(self.dirpath,overwrite)
     
     def _renameToOri(self,path,overwrite=False):
-        for i in range(self._count):
+        for i in range(self._total_count):
             oriname=self._piclist[i].name
             seqname='%03d.%s'%(int(self._piclist[i].id),self._piclist[i].format)
             if opth.exists(opth.join(path,seqname)):
@@ -112,6 +126,7 @@ class HatH(object):
     
     def __getattr__(self,key):
         if key=='count':return self._count
+        elif key=='total':return self._total_count
         elif key=='gid':return self._gid
         elif key=='name':return self._name
         elif key=='title':return self._title
