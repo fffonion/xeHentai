@@ -40,3 +40,5 @@ nosetests.xml
 #others
 make.bat
 .exe
+ehentai-oschina.py
+test.py
