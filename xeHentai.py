@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion@gmail.com>
 
-__version__=1.50
+__version__=1.51
 
 import urllib,random,threading,re,os,Queue,time,os.path as opth,sys,socket,traceback,locale
 import gzip,hmac
@@ -15,11 +15,6 @@ cooid,coopw,cooproxy,IP,THREAD_COUNT='','','','',5
 LOGIN,OVERQUOTA,IS_REDIRECT=False,False,False
 LAST_DOWNLOAD_SIZE=[0]*5
 
-def convStr(str):
-    if locale.getdefaultlocale()[0]=='zh_CN':conv=chans.toTW#conv=lambda x:x
-    elif locale.getdefaultlocale()[0]=='zh_TW':conv=chans.toTW
-    elif locale.getdefaultlocale()[0]=='zh_HK':conv=chans.toHK
-    return conv(str).decode('utf-8').encode(locale.getdefaultlocale()[1],'ignore')
 
 def _print(str):
     print(convStr(str))
@@ -38,12 +33,14 @@ def _raw_input(str,is_silent=False,default=''):
         print(convStr(str)),
         return raw_input()
 
-def concode(str,errors='ignore'):
+def convStr(str,errors='ignore'):
     """
-    字符串合法化函数
+    字符串合法化+转换函数
     """
-    codec=locale.getdefaultlocale()[1]
-    return str.encode(codec,errors)
+    if locale.getdefaultlocale()[0]=='zh_CN':conv=chans.toTW#conv=lambda x:x
+    elif locale.getdefaultlocale()[0]=='zh_TW':conv=chans.toTW
+    elif locale.getdefaultlocale()[0]=='zh_HK':conv=chans.toHK
+    return conv(str).decode('utf-8').encode(locale.getdefaultlocale()[1],errors)
     #if sys.platform=='win32':return str.encode(codec,errors)
     #else:return str.encode(codec,errors)
     
@@ -257,7 +254,7 @@ fffonion    <xijinping@yooooo.us>    Blog:http://yooooo.us/
         else:
             raise Exception('Illegal URL.')
     except Exception,e:
-        print(concode('错误的参数!'))
+        print(convStr('错误的参数!'))
         print e
         arg['url']=''
         os._exit(0)
@@ -476,9 +473,11 @@ if __name__=='__main__':
             if not exurl.startswith('http://'):exurl='http://'+exurl
             http2=httplib2.Http(opth.join(getTemp(),'.ehentai'))
             resp, content = http2.request(exurl, method='GET', headers=genheader())
-            #if re.findall('This gallery is pining for the fjords.',content):
-            #    prompt('啊……图图被菊爆了, 没法下了呢-。-')
-            #    continue
+            if re.findall('This gallery is pining for the fjords.',content):
+                prompt('啊……图图被菊爆了, 没法下了呢-。-')
+                if _raw_input('试试换成exhentai？(y/n)',is_silent,'n') or 'y' =='y':
+                    exurl_all+=[exurl.replace('g.e-hentai','exhentai')]
+                continue
             #http://exhentai.org/hathdler.php?gid=575649&t=3fcd227ec7
             if exurl.startswith('http://exhentai.org'):isEX=True
             else:isEX=False
@@ -594,9 +593,9 @@ if __name__=='__main__':
         _print('用户中断ww')
         sys.exit()
     except:
-        #if not is_silent:
-           # _print('发生错误: '),
-        traceback.print_exc()
+        if not is_silent:
+            _print('发生错误: '),
+            traceback.print_exc()
         if argdict['log']:
             f=open(argdict['log'],'a')
             f.write(time.strftime('%m-%d %X : ',time.localtime(time.time()))+\
