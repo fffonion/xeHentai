@@ -7,7 +7,7 @@
 __version__=1.51
 
 import urllib,random,threading,re,os,Queue,time,os.path as opth,sys,socket,traceback,locale
-import gzip,hmac
+#import gzip,hmac
 loginurl='http://e-hentai.org/bounce_login.php?b=d&bt=1-1'
 baseurl='http://e-hentai.org'
 myhomeurl='http://g.e-hentai.org/home.php'
