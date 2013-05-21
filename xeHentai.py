@@ -174,8 +174,7 @@ def query_info():
             _print('重试……')
         IP=re.findall('\d+\.\d+\.\d+\.\d+',content)[0]
         _print('当前IP %s' % IP)
-        
-
+         
 def urlescape(str):
     #partly replace
     return str.replace('&amp;','&')

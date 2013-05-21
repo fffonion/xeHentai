@@ -1,4 +1,4 @@
-﻿#绅士漫画爬虫
+﻿#绅♂士♂站♂小♂爬♂虫
 
 ##注意！！
 
@@ -13,7 +13,9 @@ python脚本: [这里这里](https://github.com/fffonion/xeHentai/raw/master/xeH
 其他：
 
 依赖库(EXE不需要)[这里](https://github.com/fffonion/xeHentai/raw/master/dependency.zip)
+
 httplib2库[这里](https://github.com/fffonion/xeHentai/raw/master/httplib2plus.zip)
+
 ehentai配额统计脚本：python脚本[这里](https://github.com/fffonion/xeHentai/raw/master/xeH-stats.py)
 
 
