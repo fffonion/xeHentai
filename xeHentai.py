@@ -37,7 +37,7 @@ def convStr(str,errors='ignore'):
     """
     字符串合法化+转换函数
     """
-    if locale.getdefaultlocale()[0]=='zh_CN':conv=chans.toTW#conv=lambda x:x
+    if locale.getdefaultlocale()[0]=='zh_CN':conv=lambda x:x
     elif locale.getdefaultlocale()[0]=='zh_TW':conv=chans.toTW
     elif locale.getdefaultlocale()[0]=='zh_HK':conv=chans.toHK
     return conv(str).decode('utf-8').encode(locale.getdefaultlocale()[1],errors)
