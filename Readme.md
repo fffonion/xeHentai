@@ -10,9 +10,10 @@ windows可执行文件: [这里这里](https://github.com/fffonion/xeHentai/raw/
    
 python脚本: [这里这里](https://github.com/fffonion/xeHentai/raw/master/xeHentai.py)
 
-其他：
 
-依赖库(EXE不需要)[这里](https://github.com/fffonion/xeHentai/raw/master/dependency.zip)
+其他：(EXE不需要)
+
+依赖库[这里](https://github.com/fffonion/xeHentai/raw/master/dependency.zip)
 
 httplib2库[这里](https://github.com/fffonion/xeHentai/raw/master/httplib2plus.zip)
 
@@ -37,7 +38,7 @@ knproxy是国人开发的一款在线代理，可以使用knproxy的加密模式
 
 支持命令行模式以方便使用路由器或VPS下载（需要安装httplib2库）
 ***
-参数： ehentai.py url [-t|-o|-r|-p|-rp|-u|-k|-s|-tm|-f|-l]
+参数： xehentai.py url [-t|-o|-r|-p|-rp|-u|-k|-s|-tm|-f|-l]
 
     url                   下载页的网址
     -t  --thread          下载线程数，默认为5
