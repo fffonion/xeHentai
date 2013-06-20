@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion@gmail.com>
 
-__version__ = 1.54
+__version__ = 1.541
 
 import urllib, random, threading, re, os, Queue, time, os.path as opth, sys, socket, traceback, locale
 # import gzip,hmac

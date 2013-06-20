@@ -66,8 +66,8 @@ class HatH(object):
         return htmlre.sub(replc,str)
     
     def setpath(self,path):
-        if path:self.dirpath=path
-        else:self.dirpath=self._name
+        if path:self.__setattr__('path',path)
+        else:self.__setattr__('path',self._name)
         self.genlist(self._listtmp,self.check)
         
     def genlist(self,raw_list,check=True):
