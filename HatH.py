@@ -45,12 +45,12 @@ class HatH(object):
             self._upload_by=re.findall('Uploaded By:\s+(.+)',self.content)[0]#invisible
             self._downloaded=re.findall('Downloaded:\s+(.+)',self.content)[0]#invisible
             self._tags=re.findall('Tags:\s+(.+)',self.content)[0].split(', ')
-            listtmp=re.findall('FILELIST\n(.+)\n+\nINFORMATION',self.content,re.DOTALL)[0]
-            listtmp=listtmp.split('\n')
+            self._listtmp=re.findall('FILELIST\n(.+)\n+\nINFORMATION',self.content,re.DOTALL)[0]
+            self._listtmp=self._listtmp.split('\n')
         except IndexError,ValueError:
             print('File or content illegal.')
         self.setpath(dirpath)
-        self.genlist(listtmp,check)
+        self.genlist(self._listtmp,check)
         
     def htmlescape(self,str):
         def replc(match):
@@ -66,8 +66,9 @@ class HatH(object):
         return htmlre.sub(replc,str)
     
     def setpath(self,path):
-        if path:self.__setattr__('path',path)
-        else:self.__setattr__('path',self._name)
+        if path:self.dirpath=path
+        else:self.dirpath=self._name
+        self.genlist(self._listtmp,self.check)
         
     def genlist(self,raw_list,check=True):
         #generate full list
@@ -139,7 +140,7 @@ class HatH(object):
         if name=='path':self.dirpath=value
         if name=='name':self._name=value
         else:object.__setattr__(self,name,value)
-    
+
 if __name__=='__main__':
     def getPATH0():
         import sys
