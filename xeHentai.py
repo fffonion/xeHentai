@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion@gmail.com>
 
-__version__ = 1.53
+__version__ = 1.54
 
 import urllib, random, threading, re, os, Queue, time, os.path as opth, sys, socket, traceback, locale
 # import gzip,hmac
@@ -359,7 +359,7 @@ class download(threading.Thread):
                             errinfo='509 Quota exceeded'
                         time.sleep(sleepseq[slptime])
                         slptime += int(slptime == 4 and '0' or '1')
-                        LAST_DOWNLOAD_SIZE[int(self.getName().lstrip('收割机')) - 1]=0#置为空值
+                        LAST_DOWNLOAD_SIZE[int(self.getName().lstrip('收割机').lstrip('执行官+')) - 1]=0#置为空值
                         self.prt_q.put([self.getName(), '等待 %d次(%s). %s' % (slptime, errinfo, taskname)])
                     elif len(content) == 144 or len(content) == 210 or len(content) == 1009:
                         self.prt_q.put([self.getName(), '配额超限，请等待一段时间'])
