@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion@gmail.com>
 
-__version__ = 1.541
+__version__ = 1.542
 
 import urllib, random, threading, re, os, Queue, time, os.path as opth, sys, socket, traceback, locale
 # import gzip,hmac
@@ -37,9 +37,9 @@ def convStr(str, errors = 'ignore'):
     """
     字符串合法化+转换函数
     """
-    if locale.getdefaultlocale()[0] == 'zh_CN':conv = lambda x:x
-    elif locale.getdefaultlocale()[0] == 'zh_TW':conv = chans.toTW
+    if locale.getdefaultlocale()[0] == 'zh_TW':conv = chans.toTW
     elif locale.getdefaultlocale()[0] == 'zh_HK':conv = chans.toHK
+    else :conv = lambda x:x
     return conv(str).decode('utf-8').encode(locale.getdefaultlocale()[1], errors)
     # if sys.platform=='win32':return str.encode(codec,errors)
     # else:return str.encode(codec,errors)
