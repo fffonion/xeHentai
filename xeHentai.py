@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion@gmail.com>
 
-__version__ = 1.542
+__version__ = 1.543
 
 import urllib, random, threading, re, os, Queue, time, os.path as opth, sys, socket, traceback, locale
 # import gzip,hmac
@@ -53,14 +53,15 @@ def genheader(custom = '', referer = ''):
     headers = {'User-Agent':ua, 'Accept-Language':'zh-CN,zh;q=0.8', 'Accept-Charset':'utf-8;q=0.7,*;q=0.7', \
                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'\
                , 'Connection': 'keep-alive'}  # ,'X-Forward-For':ip,'Client_IP':ip}
+    headers['Cookie']='nw=1;'
     if cooid and coopw:
-        headers['Cookie'] = 'ipb_member_id=' + cooid + ';ipb_pass_hash=' + coopw + ';'\
+        headers['Cookie'] += 'ipb_member_id=' + cooid + ';ipb_pass_hash=' + coopw + ';'\
         # +'uconfig=tl_m-uh_y-sa_y-oi_n-qb_n-tf_n-hp_-hk_-rc_0-cats_0-xns_0-xl_-ts_m-tr_1-prn_y-dm_l-rx_0-ry_0'
         if IS_REDIRECT:
             headers['Referer'] = referer or _redirect
             headers['Cookie'] += 'c[e-hentai.org][/][ipb_member_id]=' + cooid + \
-            ';' + 'c[e-hentai.org][/][ipb_pass_hash]=' + coopw + ';c[exhentai.org][/][ipb_member_id]=' + cooid + \
-            ';' + 'c[exhentai.org][/][ipb_pass_hash]=' + coopw + ';s=' + cooproxy + ';'
+            ';c[e-hentai.org][/][ipb_pass_hash]=' + coopw + ';c[exhentai.org][/][ipb_member_id]=' + cooid + \
+            ';c[exhentai.org][/][ipb_pass_hash]=' + coopw + ';s=' + cooproxy + ';c[exhentai.org][/][nw]=1'
     # if coofetcher:headers['Cookie']+=coofetcher
     if 'form' in custom:
         headers['Content-Type'] = 'application/x-www-form-urlencoded'
