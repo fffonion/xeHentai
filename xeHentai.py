@@ -2,9 +2,9 @@
 # -*- coding:utf-8 -*-
 # A multithread downloader for exhentai.org
 # Contributor:
-#      fffonion        <fffonion@gmail.com>
+#      fffonion        <fffonion#gmail.com>
 
-__version__ = 1.543
+__version__ = 1.544
 
 import urllib, random, threading, re, os, Queue, time, os.path as opth, sys, socket, traceback, locale
 # import gzip,hmac
@@ -18,10 +18,13 @@ LAST_DOWNLOAD_SIZE = [0] * 5
 
 def _print(str):
     print(convStr(str))
-    if argdict['log']:
-        f = open(argdict['log'], 'a')
-        f.write(time.strftime('%m-%d %X : ', time.localtime(time.time())) + str.decode('utf-8').encode('cp936', 'ignore') + '\n')
-        f.close()
+    try:
+        if argdict['log']:
+            f = open(argdict['log'], 'a')
+            f.write(time.strftime('%m-%d %X : ', time.localtime(time.time())) + str.decode('utf-8').encode('cp936', 'ignore') + '\n')
+            f.close()
+    except NameError:
+         pass
 
 def prompt(str, fill = '-'):
     leng = (54 - len(str.decode('utf-8'))) / 2  # unicode不等长
@@ -207,14 +210,14 @@ def parse_arg(arg_ori):
     arg = {'url':'', 'thread':'5', 'down_ori':'n', 'redirect':'', 'redirect_pattern':'', 'redirect_norm':'n', \
          'startpos':'1', 'timeout':'60', 'force_down':'n', 'log':'', 'uname':'', 'key':'', 'rename':'n', 'nojpname':False}
     if len(arg_ori) == 0:return arg
-    if arg_ori[0] in ['--help', '-h', '/?', '-?']:
+    if arg_ori[0] in ['--help', '-h', '/?', '-?','help']:
         _print(\
 '''【在线代理】
 ehentai对每个ip单位时间内的下载量有配额(一般为120~200)，因此需要使用在线代理来伪装ip
 本下载器支持glype和knproxy两种类型的在线代理；
-glype是目前使用最广的在线代理，使用时请取消勾选“加密url”、勾选“允许cookies”后随意打开一个网页，然后把网址粘贴进来；knproxy是国人开发的一款在线代理，可以使用knproxy的加密模式，用法与glype相同。
+glype是目前使用最广的在线代理，使用时请取消勾选“加密url”、勾选“允许cookies”后随意打开一个网页，然后把网址粘贴进来；knproxy是KnH开发的一款在线代理，可以使用knproxy的加密模式，用法与glype相同。
 【命令行模式】支持命令行模式以方便使用路由器或VPS下载（需要安装httplib2库）
-参数： ehentai.py url [-t|-o|-r|-p|-rp|-u|-k|-s|-tm|-f|-l]
+参数： xeHentai.py url [-t|-o|-r|-p|-rp|-u|-k|-s|-tm|-f|-l]
 
     url                   下载页的网址
     -t  --thread          下载线程数，默认为5
@@ -229,14 +232,15 @@ glype是目前使用最广的在线代理，使用时请取消勾选“加密url
     -re --rename          是否重命名成原始文件名
     -j  --no-jp-name      是否不使用日语命名，默认为否
      ----------------------------------------------------------------   
-没什么大不了的，就是一个批量下图的东西罢了~
-fffonion    <xijinping@yooooo.us>    Blog:http://yooooo.us/
-                                                  2013-3-23''')
+代码很丑重构中www
+fffonion    <fffonion#gmail.com>    Blog:http://yooooo.us/
+                                                  2013-7-22''')
         os._exit(0)
     try:
         for i in range(len(arg_ori) - 1):
             val = arg_ori[i + 1].lstrip('"').lstrip("'").rstrip('"').rstrip("'")
             if i + 2 < len(arg_ori):valnext = arg_ori[i + 2].lstrip('"').lstrip("'").rstrip('"').rstrip("'")
+            if '=' in val:val,valnext=val.split('=')
             if val == '-t' or  val == '--thread':arg['thread'] = valnext
             if val == '-o' or  val == '--down-ori':arg['down_ori'] = 'y'
             if val == '-r' or  val == '--redirect':arg['redirect'] = valnext
@@ -310,7 +314,7 @@ class download(threading.Thread):
     def run(self):
         self.prt_q.put([self.getName(), '已启动.'])
         sleepseq = [5, 8, 12, 16, 20]
-        while 1:
+        while True:
             if self.in_q.empty():
                 if self.father:
                     if self.father.isAlive():
@@ -335,7 +339,7 @@ class download(threading.Thread):
                 #while self.out_q.qsize()>10:# 等一会下图片的线程
                 #    time.sleep(5)
             retries = 0
-            while 1:
+            while True:
                 header = genheader(referer = refer)
                 # self.prt_q.put([self.getName(),url])
                 try:
@@ -484,6 +488,7 @@ if __name__ == '__main__':
                 prompt('啊……图图被菊爆了, 没法下了呢-。-')
                 if _raw_input('试试换成exhentai？(y/n)', is_silent, 'n') or 'y' == 'y':
                     exurl_all += [exurl.replace('g.e-hentai', 'exhentai')]
+                #添加一个exhentai新任务并直接跳过当前
                 continue
             # http://exhentai.org/hathdler.php?gid=575649&t=3fcd227ec7
             if exurl.startswith('http://exhentai.org'):isEX = True
