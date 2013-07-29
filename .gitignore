@@ -39,7 +39,7 @@ nosetests.xml
 
 #others
 make.bat
-*.exe
+xeHentai.exe
 ehentai-oschina.py
 test.py
 desktop.ini
