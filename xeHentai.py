@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion#gmail.com>
 
-__version__ = 1.544
+__version__ = 1.545
 
 import urllib, random, threading, re, os, Queue, time, os.path as opth, sys, socket, traceback, locale
 # import gzip,hmac
@@ -126,7 +126,7 @@ def getpicurl(content, pageurl, hath):
     picurl = urlescape(re.findall('<img id="img" src="(.+)".+style="[a-z]', content)[0])
     filename = re.findall('</a></div><div>(.*?) ::.+::.+</di', content)[0]
     if 'image.php' in filename:filename = re.findall('n=(.+)', picurl)[0]
-    format = re.findall('.*?\.([a-zA-Z]+)', filename)[0]
+    format = re.findall('.+\.([a-zA-Z]+)', filename)[0]
     # http://exhentai.org/fullimg.php?gid=577354&page=2&key=af594b7cf3
     index = re.findall('.+/(\d+)-(\d*)', pageurl)[0]
     fullurl = re.findall('class="mr".+<a href="(.+)"\s*>Download original', content)
@@ -364,7 +364,8 @@ class download(threading.Thread):
                             errinfo='509 Quota exceeded'
                         time.sleep(sleepseq[slptime])
                         slptime += int(slptime == 4 and '0' or '1')
-                        LAST_DOWNLOAD_SIZE[int(self.getName().lstrip('收割机').lstrip('执行官+')) - 1]=0#置为空值
+                        if '收割机' in self.getName():
+                        	LAST_DOWNLOAD_SIZE[int(self.getName()[-1]) - 1]=0#置为空值
                         self.prt_q.put([self.getName(), '等待 %d次(%s). %s' % (slptime, errinfo, taskname)])
                     elif len(content) == 144 or len(content) == 210 or len(content) == 1009:
                         self.prt_q.put([self.getName(), '配额超限，请等待一段时间'])
