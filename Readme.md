@@ -25,8 +25,8 @@ ehentai配额统计脚本：python脚本[这里](https://github.com/fffonion/xeH
 ehentai对每个ip单位时间内的下载量有配额(一般为120~200)，因此需要使用在线代理来伪装ip
 ***
 本下载器支持glype和knproxy两种类型的在线代理；
-glype是目前使用最广的在线代理，使用时请取消勾选“加密url”、勾选“允许cookies”后随意打开一个网页，然后把网址粘贴进来；
-knproxy是国人开发的一款在线代理，可以使用knproxy的加密模式，用法与glype相同。
+glype是目前使用最广的php在线代理，使用时请取消勾选“加密url”、勾选“允许cookies”后随意打开一个网页，然后把网址粘贴进来；
+knproxy是[KnH](http://kanoha.org/knproxy/)开发的一个基于php的在线代理，可以使用knproxy的加密模式，用法与glype相同。
 
 ##配额
 
@@ -38,7 +38,7 @@ knproxy是国人开发的一款在线代理，可以使用knproxy的加密模式
 
 支持命令行模式以方便使用路由器或VPS下载（需要安装httplib2库）
 ***
-参数： xehentai.py url [-t|-o|-r|-p|-rp|-u|-k|-s|-tm|-f|-l]
+参数： xeHentai.py url [-t|-o|-r|-p|-rp|-u|-k|-s|-tm|-f|-l]
 
     url                   下载页的网址
     -t  --thread          下载线程数，默认为5
@@ -53,7 +53,13 @@ knproxy是国人开发的一款在线代理，可以使用knproxy的加密模式
 	-re --rename          是否重命名成原始文件名
      ----------------------------------------------------------------   
 	 
-##授权
+设置线程数4，下载原图，从第三页开始，下载完成后重命名成原始文件名：
+
+	xeHentai.py http://exhentai.org/g/613908/1f1864b790/ -t 4 -o -s 3 -re
+	
+	xeHentai.py http://exhentai.org/g/613908/1f1864b790/ --thread=4 --down-ori --start-pos=3 --rename
+
+##License
 
 [CC BY-3.0](http://zh.wikipedia.org/wiki/Wikipedia:CC_BY-SA_3.0协议文本)
 ***
