@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion#gmail.com>
 
-__version__ = 1.545
+__version__ = 1.546
 
 import urllib, random, threading, re, os, Queue, time, os.path as opth, sys, socket, traceback, locale
 # import gzip,hmac
@@ -193,7 +193,9 @@ def getPATH0():
     """
     if opth.split(sys.argv[0])[1].find('py') != -1:  # is script
         return sys.path[0].decode(sys.getfilesystemencoding())
-    else:return sys.path[1].decode(sys.getfilesystemencoding())
+    else:
+        return sys.path[1].decode(sys.getfilesystemencoding())#pyinstaller build
+        #return os.path.split(sys.path[0])[0].decode(sys.getfilesystemencoding())#py2exe build
 
 def legalpath(str):
         return str.replace('|', '').replace(':', '').replace('?', '').replace('\\', '').replace('/', '').replace('*', '')\
@@ -565,6 +567,8 @@ if __name__ == '__main__':
                     for i in range(pagecount - startpos):urlqueue.put(exurl + '?p=' + str(i + startpos))  # 第一页可以用?p=0
                     pagethread = download('执行官', urlqueue, picpagequeue, reportqueue, getpicpageurl, hath)
                     rpt = report('监视官', reportqueue, [pagethread])
+                    pagethread.setDaemon(True)
+                    rpt.setDaemon(True)
                     pagethread.start()
                     rpt.start()
                     pagethread.join()
@@ -579,13 +583,17 @@ if __name__ == '__main__':
                             picpagequeue.put(a)
                 piccount = picpagequeue.qsize()
             deeperthread = download('执行官+', picpagequeue, picqueue, reportqueue, getpicurl, hath)
+            deeperthread.setDaemon(True)
             deeperthread.start()  # deeperthread没有join了
             downthread = [download('收割机%d' % (i + 1), picqueue, None, reportqueue, None, hath, father = deeperthread) for i in range(THREAD_COUNT)]
             rpt = report('监视官', reportqueue, [deeperthread] + downthread)
             # while not picqueue.empty():print picqueue.get()
             prompt('下载开始. 下载 %d 张图片' % (piccount))
             if not OVERQUOTA:
-                for i in range(THREAD_COUNT):downthread[i].start()
+                for i in range(THREAD_COUNT):
+                    downthread[i].setDaemon(True)
+                    downthread[i].start()
+            rpt.setDaemon(True)
             rpt.start()
             if not OVERQUOTA:
                 for i in range(THREAD_COUNT):downthread[i].join()
@@ -606,9 +614,9 @@ if __name__ == '__main__':
         _print('用户中断ww')
         sys.exit()
     except:
-        if not is_silent:
-            _print('发生错误: '),
-            traceback.print_exc()
+        #if not is_silent:
+        _print('发生错误: '),
+        traceback.print_exc()
         if argdict['log']:
             f = open(argdict['log'], 'a')
             f.write(time.strftime('%m-%d %X : ', time.localtime(time.time())) + \
