@@ -15,7 +15,7 @@ python脚本: [这里这里](https://github.com/fffonion/xeHentai/raw/master/xeH
 
 依赖库[这里](https://github.com/fffonion/xeHentai/raw/master/dependency.zip)
 
-httplib2库[这里](https://github.com/fffonion/xeHentai/raw/master/httplib2plus.zip)
+httplib2库[这里](https://github.chttps://github.com/fffonion/httplib2-plus/archive/master.zip)
 
 ehentai配额统计脚本：python脚本[这里](https://github.com/fffonion/xeHentai/raw/master/xeH-stats.py)
 

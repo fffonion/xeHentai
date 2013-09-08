@@ -6,7 +6,21 @@
 
 __version__ = 1.547
 
-import urllib, random, threading, re, os, Queue, time, os.path as opth, sys, socket, traceback, locale
+import urllib
+import random
+import threading
+import re
+import os, os.path as opth
+import Queue
+import time
+import sys
+import socket
+import traceback
+import locale
+sys.path.insert(2, opth.abspath(opth.join(getPATH0(), 'dependency.zip')))
+import httplib2plus as httplib2
+import convHans
+import HatH
 # import gzip,hmac
 loginurl = 'http://e-hentai.org/bounce_login.php?b=d&bt=1-1'
 baseurl = 'http://e-hentai.org'
@@ -398,8 +412,6 @@ if __name__ == '__main__':
     try:
         reload(sys)
         sys.setdefaultencoding('utf-8')
-        sys.path.insert(2, opth.abspath(opth.join(getPATH0(), 'dependency.zip')))
-        import httplib2plus as httplib2, convHans, HatH
         chans = convHans.convHans()
         # 是否命令行模式
         is_silent = False

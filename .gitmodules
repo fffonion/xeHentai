@@ -1,0 +1,3 @@
+[submodule "httplib2plus"]
+	path = httplib2plus
+	url = git@github.com:fffonion/httplib2-plus.git
