@@ -134,7 +134,7 @@ class HatH(object):
         elif key=='title':return self._title
         elif key=='tags':return self._tags
         elif key=='list':return self._piclist_veryfied
-        else:return object.__getattr__(self,key)
+        else:return getattr(self,key)
         
     def __setattr__(self, name, value):
         if name=='path':self.dirpath=value

@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion#gmail.com>
 
-__version__ = 1.546
+__version__ = 1.547
 
 import urllib, random, threading, re, os, Queue, time, os.path as opth, sys, socket, traceback, locale
 # import gzip,hmac
@@ -78,7 +78,7 @@ def mkcookie(uname = '', key = ''):
             'ipb_login_username':_raw_input('输入用户名: ', silent, uname).decode(locale.getdefaultlocale()[1]).encode('utf-8'),
             'ipb_login_submit':'Login!',
             'ipb_login_password':_raw_input('输入密码:   ', silent, key)}
-        resp, content = httplib2.Http().request(loginurl, method = 'POST', headers = genheader('form'), body = urllib.urlencode(logindata))
+        resp, content = httplib2.Http(timeout=20).request(loginurl, method = 'POST', headers = genheader('form'), body = urllib.urlencode(logindata))
         coo = resp['set-cookie']
         global cooid, coopw
         cooid = re.findall('ipb_member_id=(.*?);', coo)[0]
@@ -158,7 +158,7 @@ def query_info():
     prompt('查询配额%s信息' % (IP and '' or '及IP'))
     header = genheader()
     try:
-        resp, content = httplib2.Http().request(REDIRECT(myhomeurl), method = 'GET', headers = header)
+        resp, content = httplib2.Http(timeout=20).request(REDIRECT(myhomeurl), method = 'GET', headers = header)
         if int(resp['status']) >= 500:raise Exception('Server Error.')
         used, quota = re.findall('<p>You are currently at <strong>(\d+)</strong> towards a limit of <strong>(\d+)</st', content)[0]
         used, quota = int(used), int(quota)
@@ -173,7 +173,7 @@ def query_info():
         print e
     if not IP:
         while 1:
-            resp, content = httplib2.Http().request(REDIRECT('http://www.whereismyip.com/'), headers = genheader())
+            resp, content = httplib2.Http(timeout=20).request(REDIRECT('http://www.whereismyip.com/'), headers = genheader())
             if int(resp['status']) < 400:break
             _print('重试……')
         IP = re.findall('\d+\.\d+\.\d+\.\d+', content)[0]
@@ -204,7 +204,7 @@ def legalpath(str):
 
 def init_proxy(url):
     global cooproxy
-    resp, content = httplib2.Http().request(url, headers = genheader())
+    resp, content = httplib2.Http(timeout=20).request(url, headers = genheader())
     cooproxy = re.findall('s=(.*?);', resp['set-cookie'])[0]
     # print cooproxy
 
@@ -242,7 +242,7 @@ fffonion    <fffonion#gmail.com>    Blog:http://yooooo.us/
         for i in range(len(arg_ori) - 1):
             val = arg_ori[i + 1].lstrip('"').lstrip("'").rstrip('"').rstrip("'")
             if i + 2 < len(arg_ori):valnext = arg_ori[i + 2].lstrip('"').lstrip("'").rstrip('"').rstrip("'")
-            if '=' in val:val,valnext=val.split('=')
+            if '=' in val and not val.startswith("http"):val,valnext=val.split('=')#形如r=xxx的参数形式，排除=在代理url中的情况
             if val == '-t' or  val == '--thread':arg['thread'] = valnext
             if val == '-o' or  val == '--down-ori':arg['down_ori'] = 'y'
             if val == '-r' or  val == '--redirect':arg['redirect'] = valnext
@@ -264,7 +264,7 @@ fffonion    <fffonion#gmail.com>    Blog:http://yooooo.us/
         print e
         arg['url'] = ''
         os._exit(0)
-    # print arg,arg_ori[1]
+    #print arg,arg_ori[1]
     return arg
 
 class report(threading.Thread):
@@ -310,7 +310,7 @@ class download(threading.Thread):
         self.handle_func = handle_func
         self.out_q = save_queue
         self.prt_q = report_queue
-        self.http2 = httplib2.Http(opth.join(getTemp(), '.ehentai'))
+        self.http2 = httplib2.Http(opth.join(getTemp(), '.ehentai'),timeout=20)
         self.father = father
         self.picmode = '收割机' in self.getName()
     def run(self):
@@ -485,7 +485,7 @@ if __name__ == '__main__':
         for exurl in exurl_all:
             if not exurl.endswith('/'):exurl += '/'
             if not exurl.startswith('http://'):exurl = 'http://' + exurl
-            http2 = httplib2.Http(opth.join(getTemp(), '.ehentai'))
+            http2 = httplib2.Http(opth.join(getTemp(), '.ehentai'),timeout=20)
             resp, content = http2.request(exurl, method = 'GET', headers = genheader())
             if re.findall('This gallery is pining for the fjords.', content):
                 prompt('啊……图图被菊爆了, 没法下了呢-。-')
