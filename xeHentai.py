@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion#gmail.com>
 
-__version__ = 1.547
+__version__ = 1.548
 
 import urllib
 import random
@@ -373,10 +373,10 @@ class download(threading.Thread):
                     if self.picmode and len(content) == 11:  # 没有大图
                         self.prt_q.put([self.getName(), '木有大图，下载正常尺寸.'])
                         url = urlori['pic']
-                    elif (len(content) <= 678 and not self.picmode) or len(content) == 925:
+                    elif (len(content) <= 678 and not self.picmode) or len(content) in [925,28658]:
                         if len(content) == 925:
                             errinfo='403 Access Denied'
-                        else:
+                        else:#28658 is also 509s.gif
                             errinfo='509 Quota exceeded'
                         time.sleep(sleepseq[slptime])
                         slptime += int(slptime == 4 and '0' or '1')
