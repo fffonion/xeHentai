@@ -17,7 +17,7 @@ import sys
 import socket
 import traceback
 import locale
-sys.path.insert(2, opth.abspath(opth.join(getPATH0(), 'dependency.zip')))
+sys.path.insert(2, opth.join(opth.abspath('.'), 'dependency.zip'))
 import httplib2plus as httplib2
 import convHans
 import HatH
@@ -29,6 +29,15 @@ cooid, coopw, cooproxy, IP, THREAD_COUNT = '', '', '', '', 5
 LOGIN, OVERQUOTA, IS_REDIRECT = False, False, False
 LAST_DOWNLOAD_SIZE = [0] * 5
 
+def getPATH0():
+    """
+    返回脚本所在路径
+    """
+    if opth.split(sys.argv[0])[1].find('py') != -1:  # is script
+        return sys.path[0].decode(sys.getfilesystemencoding())
+    else:
+        return sys.path[1].decode(sys.getfilesystemencoding())#pyinstaller build
+        #return os.path.split(sys.path[0])[0].decode(sys.getfilesystemencoding())#py2exe build
 
 def _print(str):
     print(convStr(str))
@@ -201,15 +210,6 @@ def getTemp():
     if sys.platform == 'win32':return os.environ.get('tmp')
     else:return'/tmp'
 
-def getPATH0():
-    """
-    返回脚本所在路径
-    """
-    if opth.split(sys.argv[0])[1].find('py') != -1:  # is script
-        return sys.path[0].decode(sys.getfilesystemencoding())
-    else:
-        return sys.path[1].decode(sys.getfilesystemencoding())#pyinstaller build
-        #return os.path.split(sys.path[0])[0].decode(sys.getfilesystemencoding())#py2exe build
 
 def legalpath(str):
         return str.replace('|', '').replace(':', '').replace('?', '').replace('\\', '').replace('/', '').replace('*', '')\
