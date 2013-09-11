@@ -10,6 +10,7 @@ windows可执行文件: [这里这里](https://github.com/fffonion/xeHentai/raw/
    
 python脚本: [这里这里](https://github.com/fffonion/xeHentai/raw/master/xeHentai.py)
 
+批处理生成器: [这里这里](http://www.mapaler.com/tools/xeHentai_code.html) 感谢[枫谷剑仙](http://weibo.com/mapaler)
 
 其他：(EXE不需要)
 
