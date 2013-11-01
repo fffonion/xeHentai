@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion@gmail.com>
 
-__version__=1.0
+__version__=1.1
 import re,os,os.path as opth
 #http://exhentai.org/g/575649/3fcd227ec7/
 class HatH(object):
@@ -66,8 +66,10 @@ class HatH(object):
         return htmlre.sub(replc,str)
     
     def setpath(self,path):
-        if path:self.__setattr__('path',path)
-        else:self.__setattr__('path',self._name)
+        if path:
+            setattr(self,'dirpath',path)
+        else:
+            setattr(self,'dirpath',self._name.decode('utf-8'))
         self.genlist(self._listtmp,self.check)
         
     def genlist(self,raw_list,check=True):
@@ -127,19 +129,23 @@ class HatH(object):
         return self._count
     
     def __getattr__(self,key):
-        if key=='count':return self._count
-        elif key=='total':return self._total_count
-        elif key=='gid':return self._gid
-        elif key=='name':return self._name
-        elif key=='title':return self._title
-        elif key=='tags':return self._tags
-        elif key=='list':return self._piclist_veryfied
-        else:return getattr(self,key)
+        if key=='count':
+            return self._count
+        elif key=='total':
+            return self._total_count
+        elif key=='gid':
+            return self._gid
+        elif key=='name':
+            return self._name
+        elif key=='title':
+            return self._title
+        elif key=='tags':
+            return self._tags
+        elif key=='list':
+            return self._piclist_veryfied
+        else:
+            return getattr(self,key)
         
-    def __setattr__(self, name, value):
-        if name=='path':self.dirpath=value
-        if name=='name':self._name=value
-        else:object.__setattr__(self,name,value)
 
 if __name__=='__main__':
     def getPATH0():
