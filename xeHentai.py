@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion#gmail.com>
 
-__version__ = 1.548
+__version__ = 1.549
 
 import urllib
 import random
