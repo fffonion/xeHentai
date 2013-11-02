@@ -18,7 +18,7 @@ import socket
 import traceback
 import locale
 sys.path.insert(2, opth.join(opth.abspath('.'), 'dependency.zip'))
-import httplib2plus as httplib2
+import httplib2
 import convHans
 import HatH
 # import gzip,hmac
@@ -402,7 +402,7 @@ class download(threading.Thread):
         self.prt_q.put([self.getName(), '已退出.'])
 
 def save2file(content, name, hath):
-    filename = opth.join(hath.path, legalpath(name))
+    filename = opth.join(hath.dirpath, legalpath(name))
     fileHandle = open(filename, 'wb')
     fileHandle.write(content)
     fileHandle.close()
@@ -524,7 +524,7 @@ if __name__ == '__main__':
                 hath = HatH.HatH(hathcontent = content2, check = True)
                 open(hathfilename, 'w').write(content2)
                 # open(legalpath(hath.name)+'.hathdl','w').write(content2)
-            hath.path = opth.join(getPATH0(), legalpath(hath.name)).decode('utf-8')
+            hath.setpath(opth.join(getPATH0(), legalpath(hath.name)).decode('utf-8'))
             # h1 id="gn">[DISTANCE] HHH Triple H Archetype Story [german/deutsch]</h1>
             # gname=re.findall('="gn">(.*?)</h1>',content)[0].decode('utf-8')
             gjname = re.findall('="gj">(.*?)</h1>', content)
@@ -533,7 +533,7 @@ if __name__ == '__main__':
                 hath.setpath(opth.join(getPATH0(), legalpath(gjname)))
                 hath.name = gjname
             _print('Sibylla system: 目标已锁定 ' + hath.name)
-            if not opth.exists(hath.path):os.mkdir(hath.path)
+            if not opth.exists(hath.dirpath):os.mkdir(hath.dirpath)
             pagecount = re.findall('<a href="' + exurl + '\?p=\d*" onclick="return false">(.*?)</a></td'\
                     , content)
             if len(pagecount) <= 1:pagecount = 1

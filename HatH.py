@@ -15,7 +15,7 @@ class HatH(object):
             self.id,self.length,self.width,self.height=\
                 int(self.id),int(self.length),int(self.width),int(self.height)
             self.hash_s=self.hash[:10]
-            self._gid=gid
+            self.gid=gid
         def __str__(self):
             return '%s %s %s %s %s %s %s'%\
                 (self.id,self.hash,self.length,self.width,self.height,self.format,self.name)
@@ -24,7 +24,7 @@ class HatH(object):
             #http://exhentai.org/s/ba1c7d5cda/575649-1
             #if file resized, this url not works
             return 'http://%s.org/s/%s/%d-%d'%\
-                ((isEX and 'exhentai' or 'g.e-hentai'),self.hash_s,self._gid,self.id)
+                ((isEX and 'exhentai' or 'g.e-hentai'),self.hash_s,self.gid,self.id)
                 
     def __init__(self,dirpath='',filename='',hathcontent='',check=True):
         '''
@@ -37,14 +37,14 @@ class HatH(object):
         else:self.content=hathcontent
         self.check=check
         try:
-            self._name=self.htmlescape(re.findall('TITLE (.+)',self.content)[0])
-            self._gid=int(re.findall('GID (.+)',self.content)[0])
-            self._total_count=int(re.findall('FILES (.+)',self.content)[0])
-            self._title=re.findall('Title:\s+(.+)',self.content)[0]
+            self.name=self.htmlescape(re.findall('TITLE (.+)',self.content)[0])
+            self.gid=int(re.findall('GID (.+)',self.content)[0])
+            self.total=int(re.findall('FILES (.+)',self.content)[0])
+            self.title=re.findall('Title:\s+(.+)',self.content)[0]
             self._upload_time=re.findall('Upload Time:\s+(.+)',self.content)[0]#invisible
             self._upload_by=re.findall('Uploaded By:\s+(.+)',self.content)[0]#invisible
             self._downloaded=re.findall('Downloaded:\s+(.+)',self.content)[0]#invisible
-            self._tags=re.findall('Tags:\s+(.+)',self.content)[0].split(', ')
+            self.tags=re.findall('Tags:\s+(.+)',self.content)[0].split(', ')
             self._listtmp=re.findall('FILELIST\n(.+)\n+\nINFORMATION',self.content,re.DOTALL)[0]
             self._listtmp=self._listtmp.split('\n')
         except IndexError,ValueError:
@@ -69,7 +69,7 @@ class HatH(object):
         if path:
             setattr(self,'dirpath',path)
         else:
-            setattr(self,'dirpath',self._name.decode('utf-8'))
+            setattr(self,'dirpath',self.name.decode('utf-8'))
         self.genlist(self._listtmp,self.check)
         
     def genlist(self,raw_list,check=True):
@@ -78,8 +78,8 @@ class HatH(object):
         #scan folder for former pics
         self._remainindex=self._checkexist(self.dirpath,check)
         #re-generate
-        self._piclist_veryfied=[self._piclist[i] for i in self._remainindex]
-        self._count=len(self._piclist_veryfied)
+        self.list=[self._piclist[i] for i in self._remainindex]
+        self.count=len(self.list)
     
     def genindex(self):
         return self._checkexist(self.dirpath,self.check)
@@ -97,7 +97,7 @@ class HatH(object):
         return self._renameToSeq(self.dirpath,overwrite)
     
     def _renameToSeq(self,path,overwrite=False):
-        for i in range(self._total_count):
+        for i in range(self.total):
             oriname=self._piclist[i].name
             seqname='%03d.%s'%(int(self._piclist[i].id),self._piclist[i].format)
             if opth.exists(opth.join(path,oriname)):
@@ -113,7 +113,7 @@ class HatH(object):
         return self._renameToOri(self.dirpath,overwrite)
     
     def _renameToOri(self,path,overwrite=False):
-        for i in range(self._total_count):
+        for i in range(self.total):
             oriname=self._piclist[i].name
             seqname='%03d.%s'%(int(self._piclist[i].id),self._piclist[i].format)
             if opth.exists(opth.join(path,seqname)):
@@ -126,26 +126,8 @@ class HatH(object):
                     os.rename(opth.join(path,seqname), opth.join(path,oriname))
                    
     def __len__(self):
-        return self._count
+        return self.count
     
-    def __getattr__(self,key):
-        if key=='count':
-            return self._count
-        elif key=='total':
-            return self._total_count
-        elif key=='gid':
-            return self._gid
-        elif key=='name':
-            return self._name
-        elif key=='title':
-            return self._title
-        elif key=='tags':
-            return self._tags
-        elif key=='list':
-            return self._piclist_veryfied
-        else:
-            return getattr(self,key)
-        
 
 if __name__=='__main__':
     def getPATH0():
