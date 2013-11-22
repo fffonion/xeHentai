@@ -6,7 +6,7 @@
 
 ##下载
 
-windows可执行文件: [这里这里](https://github.com/fffonion/xeHentai/raw/master/release/xeHentai.exe)
+windows可执行文件: [这里](https://github.com/fffonion/xeHentai/releases) [或这里](http://pan.baidu.com/share/link?shareid=337996&uk=154041138)
    
 python脚本: [这里这里](https://github.com/fffonion/xeHentai/raw/master/xeHentai.py)
 
@@ -51,14 +51,14 @@ knproxy是[KnH](http://kanoha.org/knproxy/)开发的一个基于php的在线代�
     -s  --start-pos       从第几页开始下载，默认从头
     -f  --force           即使超出配额也下载，默认为否
     -l  --logpath         保存日志的路径，默认为eh.log
-	-re --rename          是否重命名成原始文件名
+    -re --rename          是否重命名成原始文件名
      ----------------------------------------------------------------   
-	 
+     
 设置线程数4，下载原图，从第三页开始，下载完成后重命名成原始文件名：
 
-	xeHentai.py http://exhentai.org/g/613908/1f1864b790/ -t 4 -o -s 3 -re
-	
-	xeHentai.py http://exhentai.org/g/613908/1f1864b790/ --thread=4 --down-ori --start-pos=3 --rename
+    xeHentai.py http://exhentai.org/g/613908/1f1864b790/ -t 4 -o -s 3 -re
+    
+    xeHentai.py http://exhentai.org/g/613908/1f1864b790/ --thread=4 --down-ori --start-pos=3 --rename
 
 ##License
 
