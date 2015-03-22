@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion#gmail.com>
 
-__version__ = 1.549
+__version__ = 1.5499
 
 import urllib
 import random
@@ -138,8 +138,9 @@ def getcookie():
     else:return False
 
 def getpicpageurl(content, pageurl, hath):
-    # picpage=re.findall('0 no-repeat"><a href="(.*?)"><img alt=\d+',content)
-    picpage = re.findall('<a\shref="([^<>"]*)"><img[^<>]*><br[^<>]*>[0-9]+</a>', content)
+    #picpage=re.findall('0 no-repeat"><a href="(.*?)"><img alt=\d+',content)
+    #picpage = re.findall('<a\shref="([^<>"]*)"><img[^<>]*><br[^<>]*>[0-9]+</a>', content)
+    picpage=re.findall('0 no-repeat"><a href="(.*?)"><img',content)
     picpagenew = []
     for i in range(len(picpage)):picpagenew.append(REDIRECT(picpage[i]))
     return picpagenew
