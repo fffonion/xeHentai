@@ -139,7 +139,7 @@ def getcookie():
 
 def getpicpageurl(content, pageurl, hath):
     # picpage=re.findall('0 no-repeat"><a href="(.*?)"><img alt=\d+',content)
-    picpage = re.findall('<a\shref="([^<>"]*)"><img[^<>]*><br[^<>]*>[0-9]+</a>', content)
+    picpage = re.findall('<a\shref="([^<>"]*)"><img\sa[^<>]*></a>', content)
     picpagenew = []
     for i in range(len(picpage)):picpagenew.append(REDIRECT(picpage[i]))
     return picpagenew
