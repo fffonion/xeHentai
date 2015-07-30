@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion#gmail.com>
 
-__version__ = 1.549
+__version__ = 1.5499
 
 import urllib
 import random
@@ -22,7 +22,7 @@ import httplib2
 import convHans
 import HatH
 # import gzip,hmac
-loginurl = 'http://e-hentai.org/bounce_login.php?b=d&bt=1-1'
+loginurl = 'http://forums.e-hentai.org/index.php?act=Login&CODE=01'
 baseurl = 'http://e-hentai.org'
 myhomeurl = 'http://g.e-hentai.org/home.php'
 cooid, coopw, cooproxy, IP, THREAD_COUNT = '', '', '', '', 5
@@ -98,9 +98,12 @@ def mkcookie(uname = '', key = ''):
     else:silent = False
     try:
         logindata = {
-            'ipb_login_username':_raw_input('输入用户名: ', silent, uname).decode(locale.getdefaultlocale()[1]).encode('utf-8'),
-            'ipb_login_submit':'Login!',
-            'ipb_login_password':_raw_input('输入密码:   ', silent, key)}
+            'UserName':_raw_input('输入用户名: ', silent, uname).decode(locale.getdefaultlocale()[1]).encode('utf-8'),
+            'returntype':'8',
+            'CookieDate':'1',
+            'b':'d',
+            'bt':'pone',
+            'PassWord':_raw_input('输入密码:   ', silent, key)}
         resp, content = httplib2.Http(timeout=20).request(loginurl, method = 'POST', headers = genheader('form'), body = urllib.urlencode(logindata))
         coo = resp['set-cookie']
         global cooid, coopw
@@ -138,8 +141,9 @@ def getcookie():
     else:return False
 
 def getpicpageurl(content, pageurl, hath):
-    # picpage=re.findall('0 no-repeat"><a href="(.*?)"><img alt=\d+',content)
-    picpage = re.findall('<a\shref="([^<>"]*)"><img[^<>]*><br[^<>]*>[0-9]+</a>', content)
+    #picpage=re.findall('0 no-repeat"><a href="(.*?)"><img alt=\d+',content)
+    #picpage = re.findall('<a\shref="([^<>"]*)"><img[^<>]*><br[^<>]*>[0-9]+</a>', content)
+    picpage=re.findall('0 no-repeat"><a href="(.*?)"><img',content)
     picpagenew = []
     for i in range(len(picpage)):picpagenew.append(REDIRECT(picpage[i]))
     return picpagenew
@@ -180,7 +184,7 @@ def query_info():
     deltatime = lambda x:time.strftime('%m-%d %X', time.localtime(time.time() + x * 60))
     prompt('查询配额%s信息' % (IP and '' or '及IP'))
     header = genheader()
-    try:
+    '''try:
         resp, content = httplib2.Http(timeout=20).request(REDIRECT(myhomeurl), method = 'GET', headers = header)
         if int(resp['status']) >= 500:raise Exception('Server Error.')
         used, quota = re.findall('<p>You are currently at <strong>(\d+)</strong> towards a limit of <strong>(\d+)</st', content)[0]
@@ -193,7 +197,7 @@ def query_info():
             _raw_input('配额不足, 中断下载 (可使用-f强制下载), 按回车继续', is_silent, '')
     except Exception as e:
         _print('暂时无法获得数据……')
-        print e
+        print e'''
     if not IP:
         while 1:
             resp, content = httplib2.Http(timeout=20).request(REDIRECT('http://www.whereismyip.com/'), headers = genheader())
@@ -423,7 +427,7 @@ if __name__ == '__main__':
         if argdict['uname'] and argdict['key']:mkcookie(argdict['uname'], argdict['key'])
         else:
             if not getcookie():
-                if _raw_input('当前没有登陆，要登陆吗 y/n? (双倍配额限制,可访问exhentai)：') == 'y':mkcookie()
+                if _raw_input('当前没有登陆，要登陆吗 y/n? (可访问exhentai)：') == 'y':mkcookie()
         while True:
             exurl_all = _raw_input('输入地址(使用,分割下载多个)：', is_silent, argdict['url']).replace('，'.decode('utf-8'), ',')
             if not (exurl_all.startswith('http://g.e-hentai.org/') or exurl_all.startswith('http://exhentai.org/')\
