@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion#gmail.com>
 
-__version__ = 1.5499
+__version__ = 1.549992
 
 import urllib
 import random
@@ -17,7 +17,7 @@ import sys
 import socket
 import traceback
 import locale
-sys.path.insert(2, opth.join(opth.abspath('.'), 'dependency.zip'))
+sys.path.append(opth.join(opth.abspath('.'), 'dependency.zip'))
 import httplib2
 import convHans
 import HatH
@@ -33,7 +33,7 @@ def getPATH0():
     """
     返回脚本所在路径
     """
-    if opth.split(sys.argv[0])[1].find('py') != -1:  # is script
+    if opth.split(sys.argv[0])[1].find('.py') != -1 or (opth.isdir(sys.path[0]) and '_MEI' not in sys.path[0]):  # is script or is splitted pyinstaller build
         return sys.path[0].decode(sys.getfilesystemencoding())
     else:
         return sys.path[1].decode(sys.getfilesystemencoding())#pyinstaller build
@@ -150,7 +150,7 @@ def getpicpageurl(content, pageurl, hath):
 
 def getpicurl(content, pageurl, hath):
     # print content
-    picurl = urlescape(re.findall('<img id="img" src="(.+)".+style="[a-z]', content)[0])
+    picurl = urlescape(re.findall('src="([^"]+keystamp[^"]+)"', content)[0])
     filename = re.findall('</a></div><div>(.*?) ::.+::.+</di', content)[0]
     if 'image.php' in filename:filename = re.findall('n=(.+)', picurl)[0]
     format = re.findall('.+\.([a-zA-Z]+)', filename)[0]
@@ -198,10 +198,16 @@ def query_info():
     except Exception as e:
         _print('暂时无法获得数据……')
         print e'''
+    sites = ('http://xeh.yooooo.us/ip', 'http://ip.cn')
     if not IP:
-        while 1:
-            resp, content = httplib2.Http(timeout=20).request(REDIRECT('http://www.whereismyip.com/'), headers = genheader())
-            if int(resp['status']) < 400:break
+        for s in sites:
+            try:
+                resp, content = httplib2.Http(timeout=20).request(REDIRECT(s), headers = genheader())
+            except Exception as ex:
+                _print(str(ex))
+            else:
+                if int(resp['status']) < 400:
+                    break
             _print('重试……')
         IP = re.findall('\d+\.\d+\.\d+\.\d+', content)[0]
         _print('当前IP %s' % IP)
