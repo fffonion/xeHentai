@@ -6,7 +6,7 @@
 
 ##下载
 
-windows可执行文件: [这里](https://github.com/fffonion/xeHentai/releases) [或这里](http://pan.baidu.com/s/1i3mluDZ)
+windows可执行文件: [这里](https://github.com/fffonion/xeHentai/releases) [或这里](http://pan.baidu.com/s/1dFNkypr)
    
 python脚本: [这里这里](https://github.com/fffonion/xeHentai/raw/master/xeHentai.py)
 
