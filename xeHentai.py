@@ -17,7 +17,7 @@ import sys
 import socket
 import traceback
 import locale
-sys.path.append(opth.join(opth.abspath('.'), 'dependency.zip'))
+sys.path.insert(2, opth.join(opth.abspath('.'), 'dependency.zip'))
 import httplib2
 import convHans
 import HatH
@@ -36,7 +36,7 @@ def getPATH0():
     if opth.split(sys.argv[0])[1].find('.py') != -1 or (opth.isdir(sys.path[0]) and '_MEI' not in sys.path[0]):  # is script or is splitted pyinstaller build
         return sys.path[0].decode(sys.getfilesystemencoding())
     else:
-        return sys.path[1].decode(sys.getfilesystemencoding())#pyinstaller build
+        return os.path.split(sys.path[1].decode(sys.getfilesystemencoding()))[0]#pyinstaller build
         #return os.path.split(sys.path[0])[0].decode(sys.getfilesystemencoding())#py2exe build
 
 def _print(str):
@@ -143,7 +143,8 @@ def getcookie():
 def getpicpageurl(content, pageurl, hath):
     #picpage=re.findall('0 no-repeat"><a href="(.*?)"><img alt=\d+',content)
     #picpage = re.findall('<a\shref="([^<>"]*)"><img[^<>]*><br[^<>]*>[0-9]+</a>', content)
-    picpage=re.findall('0 no-repeat"><a href="(.*?)"><img',content)
+    #picpage=re.findall('0 no-repeat"><a href="(.*?)"><img',content)
+    picpage=re.findall('<a href="(http://(?:g.e-hentai|exhentai).org/./[a-f0-9]{10}/\d+\-\d+)"><img',content)
     picpagenew = []
     for i in range(len(picpage)):picpagenew.append(REDIRECT(picpage[i]))
     return picpagenew
