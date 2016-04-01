@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion#gmail.com>
 
-__version__ = 1.549992
+__version__ = 1.549993
 
 import urllib
 import random
@@ -151,7 +151,10 @@ def getpicpageurl(content, pageurl, hath):
 
 def getpicurl(content, pageurl, hath):
     # print content
-    picurl = urlescape(re.findall('src="([^"]+keystamp[^"]+)"', content)[0])
+    try:
+        picurl = urlescape(re.findall('src="([^"]+keystamp[^"]+)"', content)[0])
+    except IndexError:
+        picurl = urlescape(re.findall('<img id="img" src="(.+)".+style="[a-z]', content)[0])
     filename = re.findall('</a></div><div>(.*?) ::.+::.+</di', content)[0]
     if 'image.php' in filename:filename = re.findall('n=(.+)', picurl)[0]
     format = re.findall('.+\.([a-zA-Z]+)', filename)[0]
