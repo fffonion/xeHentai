@@ -88,8 +88,9 @@ class HatH(object):
         tobedown_index=[]
         for i in range(len(self._piclist)):
             #if not opth.exists(opth.join(path,self._piclist[i].name)) or not check:
-            if not opth.exists(opth.join(path,'%03d.%s'%\
-                            (self._piclist[i].id,self._piclist[i].format))) or not check:
+            if (not opth.exists(opth.join(path,'%03d.%s' % (self._piclist[i].id,self._piclist[i].format))) and \
+                not opth.exists(opth.join(path,'%03d.jpg' % (self._piclist[i].id)))) \
+                    or not check:
                 tobedown_index+=[i]
         return tobedown_index
     
