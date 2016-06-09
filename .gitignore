@@ -45,3 +45,4 @@ test.py
 desktop.ini
 dependency
 release
+*.spec
