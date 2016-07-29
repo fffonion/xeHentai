@@ -4,7 +4,7 @@
 # Contributor:
 #      fffonion        <fffonion#gmail.com>
 
-__version__ = 1.549994
+__version__ = 1.5499951
 
 import urllib
 import random
@@ -144,7 +144,7 @@ def getpicpageurl(content, pageurl, hath):
     #picpage=re.findall('0 no-repeat"><a href="(.*?)"><img alt=\d+',content)
     #picpage = re.findall('<a\shref="([^<>"]*)"><img[^<>]*><br[^<>]*>[0-9]+</a>', content)
     #picpage=re.findall('0 no-repeat"><a href="(.*?)"><img',content)
-    picpage=re.findall('<a href="(http://(?:g.e-hentai|exhentai).org/./[a-f0-9]{10}/\d+\-\d+)"><img',content)
+    picpage=re.findall('<a href="(https*://(?:g.e-hentai|exhentai).org/./[a-f0-9]{10}/\d+\-\d+)"><img',content)
     picpagenew = []
     for i in range(len(picpage)):picpagenew.append(REDIRECT(picpage[i]))
     return picpagenew
@@ -338,7 +338,7 @@ class download(threading.Thread):
         self.handle_func = handle_func
         self.out_q = save_queue
         self.prt_q = report_queue
-        self.http2 = httplib2.Http(opth.join(getTemp(), '.ehentai'),timeout=20)
+        self.http2 = httplib2.Http(opth.join(getTemp(), '.ehentai'),timeout=20,disable_ssl_certificate_validation=True)
         self.father = father
         self.picmode = '收割机' in self.getName()
     def run(self):
@@ -440,9 +440,8 @@ if __name__ == '__main__':
                 if _raw_input('当前没有登陆，要登陆吗 y/n? (可访问exhentai)：') == 'y':mkcookie()
         while True:
             exurl_all = _raw_input('输入地址(使用,分割下载多个)：', is_silent, argdict['url']).replace('，'.decode('utf-8'), ',')
-            if not (exurl_all.startswith('http://g.e-hentai.org/') or exurl_all.startswith('http://exhentai.org/')\
-                     or exurl_all.startswith('g.e-hentai.org/') or exurl_all.startswith('exhentai.org/')) \
-                     and not is_silent:prompt('咦?这是啥')
+            if not re.findall("^(https*://)*(g.e\-hentai|exhentai)\.org", exurl_all) and not is_silent:
+                 prompt('咦?这是啥')
             else:
                 if exurl_all:break
                 else:prompt('必须输入地址~')
@@ -510,8 +509,8 @@ if __name__ == '__main__':
         # 处理所有url
         for exurl in exurl_all:
             if not exurl.endswith('/'):exurl += '/'
-            if not exurl.startswith('http://'):exurl = 'http://' + exurl
-            http2 = httplib2.Http(opth.join(getTemp(), '.ehentai'),timeout=20)
+            if not exurl.startswith('http'):exurl = ('https://' if 'exhentai' in exurl else "http://") + exurl
+            http2 = httplib2.Http(opth.join(getTemp(), '.ehentai'),timeout=20,disable_ssl_certificate_validation=True)
             resp, content = http2.request(exurl, method = 'GET', headers = genheader())
             if re.findall('This gallery is pining for the fjords.', content):
                 prompt('啊……图图被菊爆了, 没法下了呢-。-')
@@ -520,7 +519,7 @@ if __name__ == '__main__':
                 #添加一个exhentai新任务并直接跳过当前
                 continue
             # http://exhentai.org/hathdler.php?gid=575649&t=3fcd227ec7
-            if exurl.startswith('http://exhentai.org'):isEX = True
+            if 'exhentai' in exurl:isEX = True
             else:isEX = False
             if re.findall('Originals only', content):hasOri = False
             else:hasOri = True
@@ -532,8 +531,8 @@ if __name__ == '__main__':
                 hath = HatH.HatH(filename = hathfilename, check = True)
             else:
                 _print('Sibylla system: 下载H@H索引……')
-                resp2, content2 = http2.request('http://%s.org/hathdler.php?gid=%s&t=%s' % \
-                    (isEX and 'exhentai' or 'g.e-hentai', gid, sethash), \
+                resp2, content2 = http2.request('%s.org/hathdler.php?gid=%s&t=%s' % \
+                    (isEX and 'https://exhentai' or 'http://g.e-hentai', gid, sethash), \
                     method = 'GET', headers = genheader())
                 hath = HatH.HatH(hathcontent = content2, check = True)
                 open(hathfilename, 'w').write(content2)
@@ -570,8 +569,7 @@ if __name__ == '__main__':
                         if ':' in i:
                             j = i.split('::')
                             if j[0] == 'full' and \
-                            (j[1].startswith('http://g.e-hentai.org/fullimg.php') \
-                             or j[1].startswith('http://exhentai.org/fullimg.php')) and IS_REDIRECT:  # 重建规则
+                            ('.org/fullimg.php' in j[1]) and IS_REDIRECT:  # 重建规则
                                 elem[j[0]] = REDIRECT(j[1])
                             else:elem[j[0]] = j[1]
                     picqueue.put(elem)
