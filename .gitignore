@@ -1,0 +1,12 @@
+*.py[cod]
+
+.atomignore
+*.pyc
+*.json
+*.sh
+*.log
+release
+desktop.ini
+verinfo.txt
+config.py
+make.bat

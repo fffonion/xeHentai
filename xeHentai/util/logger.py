@@ -1,0 +1,147 @@
+#!/usr/bin/env python
+# coding:utf-8
+# Contributor:
+#      fffonion        <fffonion@gmail.com>
+
+import os
+import sys
+import datetime
+import locale
+import logging
+#import logging.handlers
+from ..const import *
+
+convhans = lambda x:x
+try:
+    from . import ZhConversion
+except ImportError:
+    pass
+else:
+    chans = ZhConversion.convHans()
+    if LOCALE == 'zh_TW':
+        convhans = chans.toTW
+    elif LOCALE == 'zh_HK':
+        convhans = chans.toHK
+
+class tz_GMT8(datetime.tzinfo):
+    def utcoffset(self, dt):
+        return datetime.timedelta(hours = 8)
+    def dst(self, dt):
+        return datetime.timedelta(0)
+
+def safestr(s):
+    if not isinstance(s, unicode):
+        s = s.decode("utf-8")
+    return convhans(s).encode(locale.getdefaultlocale()[1] or 'utf-8', 'replace')
+
+class Logger(object):
+    # paste from goagent
+    CRITICAL = 5
+    FATAL = CRITICAL
+    ERROR = 4
+    WARNING = 3
+    WARN = WARNING
+    INFO = 2
+    DEBUG = 1
+    VERBOSE = 0
+    def __init__(self, *args, **kwargs):
+        # self.level = self.__class__.INFO
+        self.logf = None
+        self.__write = __write = lambda x: sys.stdout.write(safestr(x))
+        self.isatty = getattr(sys.stdout, 'isatty', lambda: False)()
+        self.__set_error_color = lambda: None
+        self.__set_warning_color = lambda: None
+        self.__set_debug_color = lambda: None
+        self.__set_verbose_color = lambda: None
+        self.__reset_color = lambda: None
+        if self.isatty:
+            if os.name == 'nt':
+                import ctypes
+                SetConsoleTextAttribute = ctypes.windll.kernel32.SetConsoleTextAttribute
+                GetStdHandle = ctypes.windll.kernel32.GetStdHandle
+                self.__set_error_color = lambda: SetConsoleTextAttribute(GetStdHandle(-11), 0x0C)
+                self.__set_warning_color = lambda: SetConsoleTextAttribute(GetStdHandle(-11), 0x06)
+                self.__set_debug_color = lambda: SetConsoleTextAttribute(GetStdHandle(-11), 0x02)
+                self.__set_verbose_color = lambda: SetConsoleTextAttribute(GetStdHandle(-11), 0x08)
+                self.__set_bright_color = lambda: SetConsoleTextAttribute(GetStdHandle(-11), 0x0F)
+                self.__reset_color = lambda: SetConsoleTextAttribute(GetStdHandle(-11), 0x07)
+            elif os.name == 'posix':
+                self.__set_error_color = lambda: __write('\033[31m')
+                self.__set_warning_color = lambda: __write('\033[33m')
+                self.__set_debug_color = lambda: __write('\033[32m')
+                self.__set_verbose_color = lambda: __write('\033[36m')
+                self.__set_bright_color = lambda: __write('\033[32m')
+                self.__reset_color = lambda: __write('\033[0m')
+
+
+    @classmethod
+    def getLogger(cls, *args, **kwargs):
+        return cls(*args, **kwargs)
+
+    def cleanup(self):
+        if self.logf:
+            _ = self.logf
+            self.logf = None
+            _.close()
+
+    def set_logfile(self, fpath):
+        if self.logf:
+            self.logf.close()
+        self.logf = open(fpath, "a")
+
+    def set_level(self, level):
+        f = ('verbose', 'debug', 'info')
+        lv = min(max(level, 0), 2)
+        for p in range(lv):
+            setattr(self, f[p], self.dummy)
+
+    def log(self, level, fmt, *args, **kwargs):
+        # fmt=du8(fmt)
+        try:
+            self.__write('%-4s - [%s] %s\n' % (level, datetime.datetime.now(tz_GMT8()).strftime('%X'), fmt % args))
+        except (ValueError, TypeError):
+            fmt = fmt.replace('%','%%')
+            self.__write('%-4s - [%s] %s\n' % (level, datetime.datetime.now(tz_GMT8()).strftime('%X'), fmt % args))
+        sys.stdout.flush()
+        if self.logf:
+            self.logf.write(('[%s] %s\n' % (datetime.datetime.now(tz_GMT8()).strftime('%b %d %X'), fmt % args)).encode("utf-8"))
+
+    def dummy(self, *args, **kwargs):
+        pass
+
+    def debug(self, fmt, *args, **kwargs):
+        self.__set_debug_color()
+        self.log('DEBG', fmt, *args, **kwargs)
+        self.__reset_color()
+
+    def info(self, fmt, *args, **kwargs):
+        puretext = self.log('INFO', fmt, *args)
+        # if self.logfile:
+        #    self.logfile.write(puretext)
+
+    def verbose(self, fmt, *args, **kwargs):
+        self.__set_verbose_color()
+        self.log('VERB', fmt, *args, **kwargs)
+        self.__reset_color()
+
+    def warning(self, fmt, *args, **kwargs):
+        self.__set_warning_color()
+        self.log('WARN', fmt, *args, **kwargs)
+        self.__reset_color()
+
+    def warn(self, fmt, *args, **kwargs):
+        self.warning(fmt, *args, **kwargs)
+
+    def error(self, fmt, *args, **kwargs):
+        self.__set_error_color()
+        self.log('ERROR', fmt, *args, **kwargs)
+        self.__reset_color()
+
+    def exception(self, fmt, *args, **kwargs):
+        self.error(fmt, *args, **kwargs)
+        traceback.print_exc(file = sys.stderr)
+
+    def critical(self, fmt, *args, **kwargs):
+        self.__set_error_color()
+        self.log('CRITICAL', fmt, *args, **kwargs)
+        self.__reset_color()
