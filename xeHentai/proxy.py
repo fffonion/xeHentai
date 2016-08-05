@@ -7,6 +7,7 @@ import re
 import random
 from requests.exceptions import ConnectTimeout, ConnectionError, InvalidSchema
 from requests.packages.urllib3.exceptions import ProxySchemeUnknown
+from . import util
 
 class PoolException(Exception):
     pass
@@ -54,16 +55,20 @@ class Pool(object):
                     self.disabled.add(addr)
                 # print(self.proxies[addr])
                 if ex:
+                    import traceback
+                    traceback.print_exc()
                     raise ex
                 return r
             return __
         return _
 
     def add_proxy(self, addr):
-        if re.match("socks[45]a*://([^:]+:[^@]+@)*(\d{1,3}\.){3}\d{1,3}\:\d{1,5}", addr):
+        if re.match("socks[45]a*://([^:^/]+)(\:\d{1,5})*/*$", addr):
             p = socks_proxy(addr, self.trace_proxy)
-        elif re.match("https*://([^:]+:[^@]+@)*(\d{1,3}\.){3}\d{1,3}(\:\d{1,5})*", addr):
+        elif re.match("https*://([^:^/]+)(\:\d{1,5})*/*$", addr):
             p = http_proxy(addr, self.trace_proxy)
+        elif re.match("https*://([^:^/]+)(\:\d{1,5})*/.+\.php\?.*b=.+", addr):
+            p = glype_proxy(addr, self.trace_proxy)
         else:
             raise ValueError(" %s is not an acceptable proxy address" % addr)
         self.proxies[addr] = [p, 0, 0]
@@ -94,9 +99,57 @@ def http_proxy(addr, trace_proxy):
         return f
     return handle
 
+def glype_proxy(addr, trace_proxy):
+    def handle(session):
+        import urllib
+        argname = re.findall('[&\?]([a-zA-Z\._]+)=[^\d]*', addr)[0]
+        bval = re.findall('[&\?]b=(\d*)', addr)
+        bval = bval[0] if bval else '4'
+        baseurl = re.findall('(https*://[^/]+/.*?\.php)', addr)[0]
+        def mkurl(url):
+            return "%s?%s=%s&b=%s&f=norefer" % (
+                baseurl, argname, urllib.quote_plus(url),
+                bval)
+        @trace_proxy(addr)
+        def f(*args, **kwargs):
+            # change url
+            url = args[1]
+            args = (args[0], mkurl(url),)
+            if 'headers' not in kwargs:
+                kwargs['headers'] = {}
+            kwargs['headers'] = dict(kwargs['headers'])
+            # anti hotlinking
+            kwargs['headers'].update({'Referer':baseurl})
+            _kw_lower = {k.lower():v for k,v in kwargs['headers'].iteritems()}
+            if 'cookie' in _kw_lower:
+                site = re.findall('https*://([^/]+)/*', url)[0]
+                _coo_new = {}
+                _coo_old = util.parse_cookie(_kw_lower['cookie'])
+                for k in _coo_old:
+                    _coo_new["c[%s][/][%s]" % (site, k)] = _coo_old[k]
+                kwargs['headers'].update({'Cookie':_coo_new})
+            while True:
+                rt = session.request(*args, **kwargs)
+                if '<input type="hidden" name="action" value="sslagree">' not in rt.text:
+                    break
+                rt = session.request("GET", "%s/include/process.php?action=sslagree" % baseurl)
+                print("retry", rt.headers)
+            if rt.headers.get('set-cookie'):
+                coo = util.parse_cookie(rt.headers.get('set-cookie').replace(",", ";"))
+                for k in coo.keys():
+                    _ = re.findall('c\[[^]]+\]\[[^]]+\]\[([^]]+)\]', k)
+                    if _:
+                        coo[_[0]] = coo[k]
+                rt.headers['set-cookie'] = util.make_cookie(coo)
+            rt.url = url
+            # change cookie domain
+            return rt
+
+        return f
+    return handle
 
 if __name__ == '__main__':
     import requests
     p = Pool()
-    p.add_proxy("socks5://127.0.0.1:16963")
-    print(p.proxied_request(requests.Session())("GET", "http://ipip.tk", timeout = 2).text)
+    p.add_proxy("sock5://127.0.0.1:16961")
+    print(p.proxied_request(requests.Session())("GET", "http://ipip.tk", headers = {}, timeout = 2).headers)
