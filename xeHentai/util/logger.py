@@ -91,7 +91,7 @@ class Logger(object):
 
     def set_level(self, level):
         f = ('verbose', 'debug', 'info')
-        lv = min(max(level, 0), 2)
+        lv = min(max(level, 0), 3)
         for p in range(lv):
             setattr(self, f[p], self.dummy)
 

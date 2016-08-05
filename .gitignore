@@ -1,6 +1,5 @@
 *.py[cod]
 
-.atomignore
 *.pyc
 *.json
 *.sh
@@ -8,5 +7,6 @@
 release
 desktop.ini
 verinfo.txt
-config.py
+.atomignore
 make.bat
+config.py

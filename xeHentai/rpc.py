@@ -10,9 +10,11 @@ from threading import Thread
 from SocketServer import ThreadingMixIn
 from BaseHTTPServer import HTTPServer, BaseHTTPRequestHandler
 from .const import *
+from .const import __version__
 from .i18n import i18n
 
 cmdre = re.compile("([a-z])([A-Z])")
+pathre = re.compile("/jsonrpc")
 
 class RPCServer(Thread):
     def __init__(self, xeH, bind_addr, secret = None, logger = None, exit_check = None):
@@ -47,7 +49,7 @@ def jsonrpc_resp(request, ret = None, error_code = None, error_msg = None):
 
 def path_filter(func):
     def f(self):
-        if self.path != "/jsonrpc":
+        if not pathre.match(self.path):
             self.send_response(404)
             self.end_headers()
             self.wfile.write('\n')
@@ -60,7 +62,17 @@ class Handler(BaseHTTPRequestHandler):
     def __init__(self, xeH, *args):
         self.xeH = xeH
         self.args = args
+        self.server_version = "xeHentai/%s" % __version__
         BaseHTTPRequestHandler.__init__(self, *args)
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+        self.send_header("Access-Control-Max-Age", "1728000")
+        self.end_headers()
+        self.wfile.write('\n')
 
     @path_filter
     def do_GET(self):
@@ -74,29 +86,35 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         d = self.rfile.read(int(self.headers.getheader('Content-Length')))
         rt = None
+        code = 200
         while True:
             try:
                 j = json.loads(d)
                 assert('method' in j and j['method'] != None and 'id' in j)
             except ValueError:
-                rt = jsonrpc_resp({"id":None}, error_code = ERR_RPC_PARSE_ERROR)
+                code = 400
+                rte = jsonrpc_resp({"id":None}, error_code = ERR_RPC_PARSE_ERROR)
                 break
             except AssertionError:
+                code = 400
                 rt = jsonrpc_resp({"id":None}, error_code = ERR_RPC_INVALID_REQUEST)
                 break
             cmd = re.findall("xeH\.(.+)", j['method'])
             if not cmd:
+                code = 404
                 rt = jsonrpc_resp({"id":j['id']}, error_code = ERR_RPC_METHOD_NOT_FOUND)
                 break
             # let's make fooBar to foo_bar
             cmd_r = cmdre.sub(lambda m: "%s_%s" % (m.group(1), m.group(2).lower()), cmd[0])
             if not hasattr(self.xeH, cmd_r) or cmd_r.startswith("_"):
+                code = 404
                 rt = jsonrpc_resp({"id":j['id']}, error_code = ERR_RPC_METHOD_NOT_FOUND)
                 break
             try:
                 params = ([], {}) if 'params' not in j else j['params']
                 cmd_rt = getattr(self.xeH, cmd_r)(*params[0], **params[1])
             except ValueError as ex:
+                code = 500
                 rt = jsonrpc_resp({"id":j['id']}, error_code = ERR_RPC_EXEC_ERROR,
                 error_msg = str(ex))
                 break
@@ -105,6 +123,8 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 rt = jsonrpc_resp({"id":j['id']}, ret = cmd_rt[1])
             break
+        self.send_response(code)
+        self.end_headers()
         self.wfile.write(rt)
         self.wfile.write('\n')
         return

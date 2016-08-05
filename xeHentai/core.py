@@ -53,8 +53,8 @@ class xeHentai(object):
 
     def update_config(self, cfg_dict):
         self.cfg.update({k:v for k, v in cfg_dict.iteritems() if k in cfg_dict})
-        self.logger.verbose("cfg %s" % self.cfg)
         self.logger.set_level(logger.Logger.WARNING - self.cfg['log_verbose'])
+        self.logger.verbose("cfg %s" % self.cfg)
         if cfg_dict['proxy']:
             if not self.proxy: # else we keep it None
                 self.proxy = proxy.Pool()

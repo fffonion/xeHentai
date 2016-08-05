@@ -174,7 +174,7 @@ class Monitor(Thread):
             intv += 1
             self._check_vote()
             for k in self.thread_last_seen.keys():
-                if time.time() - self.thread_last_seen[k] > 15:
+                if time.time() - self.thread_last_seen[k] > 30:
                     if k in self.thread_ref and self.thread_ref[k].is_alive():
                         self.logger.warning(i18n.THREAD_MAY_BECOME_ZOMBIE % k)
                         self.thread_zombie.add(k)

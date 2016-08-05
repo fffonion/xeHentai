@@ -29,9 +29,9 @@ def start():
         if os.name == "posix":
             pid = os.fork()
             if pid == 0:
-                sys.stdin.close()
-                sys.stdout = open("/dev/null", "w")
-                sys.stderr = open("/dev/null", "w")
+                #sys.stdin.close()
+                #sys.stdout = open("/dev/null", "w")
+                #sys.stderr = open("/dev/null", "w")
                 return main(xeH, opt)
         elif os.name == "nt":
             import multiprocessing
@@ -63,7 +63,7 @@ def main(xeH, opt):
     try:
         if opt.urls:
             for u in opt.urls:
-                xeH.add_task(u)
+                xeH.add_task(u.strip())
             # finished this task and exit xeHentai
             Thread(target = lambda:(time.sleep(0.618), setattr(xeH, "_exit", XEH_STATE_SOFT_EXIT))).start()
         Thread(target = xeH._task_loop, name = "main" ).start()
@@ -71,12 +71,13 @@ def main(xeH, opt):
             time.sleep(1)
     except KeyboardInterrupt:
         log.info(i18n.XEH_CLEANUP)
+        xeH._term_threads()
     except Exception as ex:
         log.error(i18n.XEH_CRITICAL_ERROR % traceback.format_exc())
+        xeH._term_threads()
     else:
         sys.exit(0) # this is mandatory for single task auto exit
     try:
-        xeH._term_threads()
         # we should call cleanup ourself because we break out of task_loop
         xeH._cleanup()
     except KeyboardInterrupt:
@@ -148,4 +149,5 @@ def interactive(xeH):
     download_ori = _readline(i18n.PS_DOWNLOAD_ORI) == "y"
     proxy = _readline(i18n.PS_PROXY).strip()
     proxy = [proxy] if proxy else None
-    return {'urls': url, 'proxy': proxy, 'download_ori': download_ori}
+    _dir = _readline(i18n.PS_DOWNLOAD_DIR % os.path.abspath(xeH.cfg['dir'])) or xeH.cfg['dir']
+    return {'urls': url, 'proxy': proxy, 'download_ori': download_ori, 'dir': _dir}

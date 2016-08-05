@@ -89,7 +89,6 @@ class Task(object):
         return self.reload_map[imgurl][0]
 
     def scan_downloaded(self, scaled = True):
-        print(self.config)
         fpath = os.path.join(self.config['dir'], util.legalpath(self.meta['title']))
         if not os.path.exists(fpath):
             return
