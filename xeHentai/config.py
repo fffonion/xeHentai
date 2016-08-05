@@ -11,7 +11,6 @@ proxy = None
 log_path = "eh.log"
 log_verbose = 2
 daemon = False
-fast_scan = False
 rpc_interface = 'localhost'
 rpc_port = None
 rpc_secret = None

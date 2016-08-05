@@ -116,7 +116,8 @@ class Monitor(Thread):
     def vote(self, tname, code):
         # thread_id, result_code
         self.votelock.acquire()
-        self.logger.verbose("t-%s vote:%s" % (tname, code))
+        if code != 0:
+            self.logger.verbose("t-%s vote:%s" % (tname, code))
         if code not in self.vote_result:
             self.vote_result[code] = 1
         else:
@@ -146,19 +147,19 @@ class Monitor(Thread):
                 self.thread_ref[tname] = wrk_thread
         return _
 
-    def _rescan_pages(self):
-        # not using
-        # throw away existing page urls
-        while True:
-            try:
-                self.task.page_q.get(False)
-            except Empty:
-                break
-        # put page into task.list_q
-        [self.task.list_q.put("%s/?p=%d" % (self.task.url, x)
-            for x in range(1, 1 + int(math.ceil(self.task.meta['total']/20.0))))
-        ]
-        print(self.task.list_q.qsize())
+    # def _rescan_pages(self):
+    #     # not using
+    #     # throw away existing page urls
+    #     while True:
+    #         try:
+    #             self.task.page_q.get(False)
+    #         except Empty:
+    #             break
+    #     # put page into task.list_q
+    #     [self.task.list_q.put("%s/?p=%d" % (self.task.url, x)
+    #         for x in range(1, 1 + int(math.ceil(self.task.meta['total']/20.0))))
+    #     ]
+    #     print(self.task.list_q.qsize())
 
     def _check_vote(self):
         if False and ERR_IMAGE_RESAMPLED in self.vote_result and ERR_IMAGE_RESAMPLED not in self.vote_cleared:
@@ -166,7 +167,7 @@ class Monitor(Thread):
             self._rescan_pages()
             self.task.meta['has_ori'] = True
             self.vote_cleared.add(ERR_IMAGE_RESAMPLED)
-    
+
     def set_title(self, s):
          if os.name == "nt":
             os.system("TITLE %s" % s.encode(CODEPAGE, 'replace'))
@@ -186,14 +187,14 @@ class Monitor(Thread):
                     else:
                         self.logger.warning(i18n.THREAD_SWEEP_OUT % k)
                     del self.thread_last_seen[k]
-            if intv == 10:
-                _ = "%s %dR/%dZ/%d, %s %d/%d" % (
+            if intv == 5:
+                _ = "%s %dR/%dZ/%d, %s %dR/%dD" % (
                     i18n.THREAD,
                     len(self.thread_last_seen), len(self.thread_zombie),
                     len(self.thread_last_seen) + len(self.thread_zombie),
                     i18n.QUEUE,
                     self.task.img_q.qsize(),
-                    self.task.meta['total'])
+                    self.task.meta['finished'])
                 self.logger.info(_)
                 self.set_title(_)
                 intv = 0

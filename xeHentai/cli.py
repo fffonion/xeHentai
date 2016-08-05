@@ -104,8 +104,8 @@ def parse_opt():
     parser.add_argument('-t', '--thread', type = int, metavar = 'N',
                         default = config.download_thread_cnt, dest = 'download_thread_cnt',
                         help = i18n.XEH_OPT_t)
-    parser.add_argument('-f', '--fast-scan', action = 'store_true', default = config.fast_scan,
-                        help = i18n.XEH_OPT_f)
+    # parser.add_argument('-f', '--fast-scan', action = 'store_true', default = config.fast_scan,
+    #                     help = i18n.XEH_OPT_f)
     parser.add_argument('-d', '--dir', default = os.path.abspath(config.dir),
                         help = i18n.XEH_OPT_d)
     parser.add_argument('--daemon', action = 'store_true', default = config.daemon,

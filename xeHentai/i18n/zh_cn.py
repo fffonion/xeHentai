@@ -14,6 +14,7 @@ err_msg = {
     ERR_DELETE_RUNNING_TASK: "无法删除运行中的任务",
     ERR_TASK_CANNOT_PAUSE: "这个任务无法被暂停",
     ERR_TASK_CANNOT_RESUME: "这个任务无法被恢复",
+#    ERR_HATHDL_NOTFOUND: "hathdl文件未找到"
     ERR_RPC_PARSE_ERROR: "Parse error.",
     ERR_RPC_INVALID_REQUEST: "Invalid request.",
     ERR_RPC_METHOD_NOT_FOUND: "Method not found.",
@@ -30,7 +31,7 @@ XEH_OPT_URLS = "下载页的网址"
 XEH_OPT_u = "用户名"
 XEH_OPT_k = "密码"
 XEH_OPT_c = "Cookie字符串，如果指定了用户名和密码，此项会被忽略"
-XEH_OPT_o = "是否下载原始图片（如果存在） (当前: %(default)s)"
+XEH_OPT_o = "是否下载原始图片（如果存在），需要登录 (当前: %(default)s)"
 XEH_OPT_t = "下载线程数 (当前: %(default)d)"
 XEH_OPT_f = "快速扫描，从hathdl猜测页面链接，但有时会抽风 (当前: %(default)s)"
 XEH_OPT_l = "保存日志的路径 (当前: %(default)s)"
@@ -75,6 +76,7 @@ XEH_RPC_STARTED = "rpc 服务器监听在 %s:%d"
 XEH_PLATFORM_NO_DAEMON = "后台模式不支持您的系统: %s"
 XEH_CLEANUP = "擦干净..."
 XEH_CRITICAL_ERROR = "xeHentai 抽风啦:\n%s"
+XEH_DOWNLOAD_ORI_NEED_LOGIN = "下载原图需要登录"
 
 SESSION_LOAD_EXCEPTION = "读取存档时遇到错误: %s"
 SESSION_WRITE_EXCEPTION = "写入存档时遇到错误: %s"
