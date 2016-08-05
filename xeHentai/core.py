@@ -238,7 +238,8 @@ class xeHentai(object):
                     _.start()
                     self._all_threads[TASK_STATE_SCAN_IMG].append(_)
                 task.state = TASK_STATE_DOWNLOAD - 1
-
+            elif task.state == TASK_STATE_SCAN_ARCHIVE:
+                task.state = TASK_STATE_DOWNLOAD - 1
             elif task.state == TASK_STATE_DOWNLOAD:
                 # spawn thread to download all urls
                 for i in range(task.config['download_thread_cnt']):

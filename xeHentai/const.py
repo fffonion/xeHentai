@@ -15,7 +15,7 @@ LOCALE = locale.getdefaultlocale()[0]
 CODEPAGE = locale.getdefaultlocale()[1]
 ANDROID = 'ANDROID_ARGUMENT' in os.environ
 
-__version__ = 2.0
+__version__ = 2.001
 DEVELOPMENT = True
 
 SCRIPT_NAME = "xeHentai"
@@ -40,6 +40,7 @@ TASK_STATE_GET_META = 2
 # TASK_STATE_GET_HATHDL = 3
 TASK_STATE_SCAN_PAGE = 3
 TASK_STATE_SCAN_IMG = 4
+TASK_STATE_SCAN_ARCHIVE = 5
 TASK_STATE_DOWNLOAD = 10
 TASK_STATE_FINISHED = 20
 TASK_STATE_FAILED = -1
