@@ -204,7 +204,7 @@ class xeHentai(object):
                 else:
                     # scan by our own, should not be here currently
                     # start backup thread
-                    for x in range(1, 1 + int(math.ceil(task.meta['total']/20.0))):
+                    for x in range(0, 1 + int(math.ceil(task.meta['total']/20.0))):
                         r = req.request("GET",
                             "%s/?p=%d" % (task.url, x),
                             filters.flt_pageurl,
@@ -255,20 +255,26 @@ class xeHentai(object):
 
     def _task_loop(self):
         task_guid = None
+        cnt = 0
         while not self._exit:
             # get a new task
-            self.save_session()
+            if cnt == 10:
+                self.save_session()
+                cnt = 0
             try:
                 _ = self.tasks.get(False)
                 self.last_task_guid = task_guid
                 task_guid = _
             except Empty:
                 time.sleep(1)
+                cnt += 1
                 continue
             else:
                 task = self._all_tasks[task_guid]
                 if TASK_STATE_PAUSED < task.state < TASK_STATE_FINISHED:
                     self.logger.info(i18n.TASK_START % task_guid)
+                    self.save_session()
+                    cnt = 0
                     self._do_task(task_guid)
         self.logger.info(i18n.XEH_LOOP_FINISHED)
         self._cleanup()
@@ -362,14 +368,13 @@ class xeHentai(object):
             lambda x:(self.logger.warning(x),
                 self.logger.info(i18n.XEH_LOGIN_FAILED)),
             logindata)
+        return ERR_NO_ERROR, self.has_login
 
     def set_cookie(self, cookie):
         self.cookies.update(util.parse_cookie(cookie))
         self.headers.update({'Cookie':util.make_cookie(self.cookies)})
         self.has_login = True
-
-
-
+        return ERR_NO_ERROR, None
 
 
 if __name__ == '__main__':

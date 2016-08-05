@@ -31,17 +31,21 @@ class Task(object):
         self.meta = {}
         self.has_ori = False
         self.reload_map = {} # {url:reload_url}
-        self._flist_done = set() # store id
         self.img_q = None
         self.page_q = None
         self.list_q = None
+        self._flist_done = set() # store id, don't save, will generate when scan
 
     def cleanup(self):
-        if 'filelist' in self.meta:
-            del self.meta['filelist']
-        self.reload_map = {}
-        self.flist_map = {}
-        self.flist_done = None
+        if self.state in (TASK_STATE_FINISHED, TASK_STATE_FAILED):
+            self.img_q = None
+            self.page_q = None
+            self.list_q = None
+            self.reload_map = {}
+            if 'filelist' in self.meta:
+                del self.meta['filelist']
+            if 'resampled' in self.meta:
+                del self.meta['resampled']
 
     def set_fail(self, code):
         self.state = TASK_STATE_FAILED
@@ -98,8 +102,8 @@ class Task(object):
         # can only check un-renamed files
         for h in self.meta['filelist']:
             fid = self.meta['filelist'][h][0]
-            fname = "%03d.jpg" % int(fid) # id
-            if os.path.exists(os.path.join(fpath, fname)) or donefile:
+            fname = os.path.join(fpath, "%03d.jpg" % int(fid)) # id
+            if (os.path.exists(fname) and os.stat(fname).st_size > 0) or donefile:
                 self._flist_done.add(int(fid))
         self.meta['finished'] = len(self._flist_done)
 

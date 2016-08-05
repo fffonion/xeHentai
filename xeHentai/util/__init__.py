@@ -13,7 +13,16 @@ from ..const import *
 
 
 def parse_cookie(coostr):
-    pass
+    ret = {}
+    for coo in coostr.split(";"):
+        coo = coo.strip()
+        if coo.lower() in ('secure', 'httponly'):
+            continue
+        k, v = coo.split("=")
+        if k.lower() in ('path', 'expires', 'domain', 'max-age', 'comment'):
+            continue
+        ret[k] = v
+    return ret
 
 def make_cookie(coodict):
     return ";".join(map("=".join, coodict.iteritems()))

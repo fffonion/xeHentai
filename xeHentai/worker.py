@@ -166,10 +166,15 @@ class Monitor(Thread):
             self._rescan_pages()
             self.task.meta['has_ori'] = True
             self.vote_cleared.add(ERR_IMAGE_RESAMPLED)
+    
+    def set_title(self, s):
+         if os.name == "nt":
+            os.system("TITLE %s" % s.encode(CODEPAGE, 'replace'))
 
 
     def run(self):
         intv = 0
+        self.set_title(i18n.TASK_START % self.task.guid)
         while len(self.thread_last_seen) > 0:
             intv += 1
             self._check_vote()
@@ -182,20 +187,23 @@ class Monitor(Thread):
                         self.logger.warning(i18n.THREAD_SWEEP_OUT % k)
                     del self.thread_last_seen[k]
             if intv == 10:
-                self.logger.info("%s %dR/%dZ/%d, %s %d/%d" % (
+                _ = "%s %dR/%dZ/%d, %s %d/%d" % (
                     i18n.THREAD,
                     len(self.thread_last_seen), len(self.thread_zombie),
                     len(self.thread_last_seen) + len(self.thread_zombie),
                     i18n.QUEUE,
-                    self.task.meta['total'] - self.task.meta['finished'],
-                    self.task.meta['total']))
+                    self.task.img_q.qsize(),
+                    self.task.meta['total'])
+                self.logger.info(_)
+                self.set_title(_)
                 intv = 0
             time.sleep(1)
         if self.task.meta['finished'] == self.task.meta['total']:
             self.task.state = TASK_STATE_FINISHED
             self.task.rename_ori()
-            self.task.cleanup()
             self.logger.info(i18n.TASK_FINISHED % self.task.guid)
+            self.set_title(i18n.TASK_FINISHED % self.task.guid)
+        self.task.cleanup()
 
 
 if __name__ == '__main__':

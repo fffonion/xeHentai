@@ -51,6 +51,7 @@ def path_filter(func):
     def f(self):
         if not pathre.match(self.path):
             self.send_response(404)
+            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write('\n')
             return
@@ -62,8 +63,10 @@ class Handler(BaseHTTPRequestHandler):
     def __init__(self, xeH, *args):
         self.xeH = xeH
         self.args = args
-        self.server_version = "xeHentai/%s" % __version__
         BaseHTTPRequestHandler.__init__(self, *args)
+    
+    def version_string(self):
+        return "xeHentai/%s" % __version__
 
     def do_OPTIONS(self):
         self.send_response(200)
@@ -76,16 +79,20 @@ class Handler(BaseHTTPRequestHandler):
 
     @path_filter
     def do_GET(self):
+        rt = jsonrpc_resp({"id":None}, error_code = ERR_RPC_INVALID_REQUEST)
         self.send_response(400)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Type", "application/json-rpc")
+        self.send_header("Content-Length", len(rt))
         self.end_headers()
-        self.wfile.write(jsonrpc_resp({"id":None}, error_code = ERR_RPC_INVALID_REQUEST))
+        self.wfile.write(rt)
         self.wfile.write('\n')
         return
 
     @path_filter
     def do_POST(self):
         d = self.rfile.read(int(self.headers.getheader('Content-Length')))
-        rt = None
+        rt = ""
         code = 200
         while True:
             try:
@@ -124,6 +131,9 @@ class Handler(BaseHTTPRequestHandler):
                 rt = jsonrpc_resp({"id":j['id']}, ret = cmd_rt[1])
             break
         self.send_response(code)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Type", "application/json-rpc")
+        self.send_header("Content-Length", len(rt))
         self.end_headers()
         self.wfile.write(rt)
         self.wfile.write('\n')
