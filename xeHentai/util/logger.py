@@ -11,18 +11,6 @@ import logging
 #import logging.handlers
 from ..const import *
 
-convhans = lambda x:x
-try:
-    from . import ZhConversion
-except ImportError:
-    pass
-else:
-    chans = ZhConversion.convHans()
-    if LOCALE == 'zh_TW':
-        convhans = chans.toTW
-    elif LOCALE == 'zh_HK':
-        convhans = chans.toHK
-
 class tz_GMT8(datetime.tzinfo):
     def utcoffset(self, dt):
         return datetime.timedelta(hours = 8)
@@ -32,7 +20,7 @@ class tz_GMT8(datetime.tzinfo):
 def safestr(s):
     if not isinstance(s, unicode):
         s = s.decode("utf-8")
-    return convhans(s).encode(locale.getdefaultlocale()[1] or 'utf-8', 'replace')
+    return s.encode(locale.getdefaultlocale()[1] or 'utf-8', 'replace')
 
 class Logger(object):
     # paste from goagent
