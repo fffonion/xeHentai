@@ -24,7 +24,6 @@ sys.path.pop(1)
 def start():
     opt = parse_opt()
     xeH = xeHentai()
-    xeH.update_config(vars(opt))
     if opt.daemon:
         if os.name == "posix":
             pid = os.fork()
@@ -42,6 +41,7 @@ def start():
         main(xeH, opt)
 
 def main(xeH, opt):
+    xeH.update_config(vars(opt))
     log = xeH.logger
     log.info(i18n.XEH_STARTED % xeH.verstr)
     if opt.cookie:

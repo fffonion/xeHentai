@@ -64,7 +64,7 @@ class Handler(BaseHTTPRequestHandler):
         self.xeH = xeH
         self.args = args
         BaseHTTPRequestHandler.__init__(self, *args)
-    
+
     def version_string(self):
         return "xeHentai/%s" % __version__
 
