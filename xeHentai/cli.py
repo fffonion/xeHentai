@@ -29,15 +29,12 @@ def start():
         if os.name == "posix":
             pid = os.fork()
             if pid == 0:
-                #sys.stdin.close()
-                #sys.stdout = open("/dev/null", "w")
-                #sys.stderr = open("/dev/null", "w")
+                sys.stdin.close()
+                sys.stdout = open("/dev/null", "w")
+                sys.stderr = open("/dev/null", "w")
                 return main(xeH, opt)
         elif os.name == "nt":
-            import multiprocessing
-            p = multiprocessing.Process(target = main, args = (xeH, opt, ))
-            p.start()
-            pid = p.pid
+            return xeH.logger.error(i18n.XEH_PLATFORM_NO_DAEMON % os.name)
         else:
             return xeH.logger.error(i18n.XEH_PLATFORM_NO_DAEMON % os.name)
         xeH.logger.info(i18n.XEH_DAEMON_START % pid)
