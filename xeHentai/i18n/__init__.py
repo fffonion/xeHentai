@@ -8,7 +8,10 @@ from ..const import *
 from . import en_us as lng_fallback
 
 try:
-    lng = importlib.import_module("%s.i18n.%s" % (SCRIPT_NAME, LOCALE.lower()))
+    _locale = LOCALE.lower()
+    if _locale in ('zh_tw', 'zh_hk', 'zh_mo', 'zh_sg'):
+        _locale = 'zh_hant'
+    lng = importlib.import_module("%s.i18n.%s" % (SCRIPT_NAME, _locale))
 except (ImportError, ValueError):
     lng = lng_fallback
 

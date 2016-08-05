@@ -56,7 +56,7 @@ def main(xeH, opt):
             r = interactive(xeH)
             opt.__dict__.update(r)
             xeH.update_config(r)
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, SystemExit):
             log.info(i18n.XEH_CLEANUP)
             xeH._cleanup()
             return
@@ -130,10 +130,7 @@ def parse_opt():
     return args
 
 def interactive(xeH):
-    def _readline(s):
-        if not isinstance(s, unicode):
-            s = s.decode("utf-8")
-        return raw_input(logger.convhans(s).encode(locale.getdefaultlocale()[1] or 'utf-8', 'replace'))
+    _readline = lambda x:raw_input(logger.safestr(x))
 
     if not xeH.has_login and _readline(i18n.PS_LOGIN) == "y":
         uname = pwd = ""
