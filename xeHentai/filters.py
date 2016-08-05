@@ -41,8 +41,11 @@ def flt_metadata(r, suc, fail):
     meta['sample_hash'] = sample_hash
     meta['resampled'] = {}
     meta['gjname'] = re.findall('="gj">(.*?)</h1>', r.text)[0]
-    meta['gnname']=re.findall('="gn">(.*?)</h1>', r.text)[0]
-    meta['title'] = meta['gjname']
+    meta['gnname']= re.findall('="gn">(.*?)</h1>', r.text)[0]
+    meta['title'] = meta['gjname'] if meta['gjname'] else meta['gnname']
+    meta['total'] = int(re.findall('Length:</td><td class="gdt2">(\d+)\s+page', r.text)[0])
+    meta['finished'] = 0
+    meta['tags'] = {}
     # _ = re.findall(
     #    'https*://(g\.e\-|ex)hentai\.org/[^/]+/(\d+)/[^/]+/\?p=\d*" onclick="return false"(.*?)</a>',
     #    r.text)
@@ -50,31 +53,34 @@ def flt_metadata(r, suc, fail):
     suc(meta)
 
 
-def flt_hathdl(r, suc, fail):
-    # input hathdl response
-    # add gallery meta if suc; return errorcode if fail
-    try:
-        meta = {
-            'name': util.htmlescape(re.findall('TITLE (.+)', r.text)[0]),
-            #'gid': int(re.findall('GID (.+)', r.text)[0]),
-            'total': int(re.findall('FILES (.+)', r.text)[0]),
-            'finished': 0,
-            'title': re.findall('Title:\s+(.+)', r.text)[0],
-            #'upload_time': re.findall('Upload Time:\s+(.+)', r.text)[0], # invisible
-            #'upload_by': re.findall('Uploaded By:\s+(.+)', r.text)[0], # invisible
-            #'downloaded': re.findall('Downloaded:\s+(.+)', r.text)[0], # invisible
-            'tags': re.findall('Tags:\s+(.+)', r.text)[0].split(', '),
-        }
-        listtmp = re.findall('FILELIST\n(.+)\n+\nINFORMATION', r.text, re.DOTALL)[0].split('\n')
-        meta['filelist'] = {}
-        for l in listtmp:
-            # hash(full): id, hash_10, length, width, height, format, name
-            _ = re.findall('(\d+) ([a-z0-9]+)-(\d+)-(\d+)-(\d+)-([a-z]+) (.+)', l)[0]
-            meta['filelist'][_[1][:10]] = list(_)
-    except (IndexError, ValueError) as ex:
-        fail(ERR_MALFORMED_HATHDL)
-        return ERR_MALFORMED_HATHDL
-    suc(meta)
+# def flt_hathdl(r, suc, fail):
+#     # input hathdl response
+#     # add gallery meta if suc; return errorcode if fail
+#     if r.status_code == 404:
+#         fail(ERR_HATHDL_NOTFOUND)
+#         return ERR_HATHDL_NOTFOUND
+#     try:
+#         meta = {
+#             'name': util.htmlescape(re.findall('TITLE (.+)', r.text)[0]),
+#             #'gid': int(re.findall('GID (.+)', r.text)[0]),
+#             'total': int(re.findall('FILES (.+)', r.text)[0]),
+#             'finished': 0,
+#             'title': re.findall('Title:\s+(.+)', r.text)[0],
+#             #'upload_time': re.findall('Upload Time:\s+(.+)', r.text)[0], # invisible
+#             #'upload_by': re.findall('Uploaded By:\s+(.+)', r.text)[0], # invisible
+#             #'downloaded': re.findall('Downloaded:\s+(.+)', r.text)[0], # invisible
+#             'tags': re.findall('Tags:\s+(.+)', r.text)[0].split(', '),
+#         }
+#         listtmp = re.findall('FILELIST\n(.+)\n+\nINFORMATION', r.text, re.DOTALL)[0].split('\n')
+#         meta['filelist'] = {}
+#         for l in listtmp:
+#             # hash(full): id, hash_10, length, width, height, format, name
+#             _ = re.findall('(\d+) ([a-z0-9]+)-(\d+)-(\d+)-(\d+)-([a-z]+) (.+)', l)[0]
+#             meta['filelist'][_[1][:10]] = list(_)
+#     except (IndexError, ValueError) as ex:
+#         fail(ERR_MALFORMED_HATHDL)
+#         return ERR_MALFORMED_HATHDL
+#     suc(meta)
 
 def flt_pageurl(r, suc, fail):
     # input gallery response

@@ -83,8 +83,10 @@ class xeHentai(object):
     def add_task(self, url, cfg_dict = {}):
         url = url.strip()
         cfg = {k:v for k, v in self.cfg.iteritems() if k in (
-            "dir", "download_ori", "download_thread_cnt", "scan_thread_cnt", "fast_scan")}
+            "dir", "download_ori", "download_thread_cnt", "scan_thread_cnt")}
         cfg.update(cfg_dict)
+        if cfg['download_ori'] and not self.has_login:
+            self.logger.warning(i18n.XEH_DOWNLOAD_ORI_NEED_LOGIN)
         t = Task(url, cfg)
         if t.guid in self._all_tasks:
             if self._all_tasks[t.guid].state in (TASK_STATE_FINISHED, TASK_STATE_FAILED):
@@ -114,17 +116,21 @@ class xeHentai(object):
     def pause_task(self, guid):
         if guid not in self._all_tasks:
             return ERR_TASK_NOT_FOUND, None
-        if self._all_tasks[guid].state in (TASK_STATE_PAUSED, TASK_STATE_FINISHED, TASK_STATE_FAILED):
+        t = self._all_tasks[guid]
+        if t.state in (TASK_STATE_PAUSED, TASK_STATE_FINISHED, TASK_STATE_FAILED):
             return ERR_TASK_CANNOT_PAUSE, None
-        self._all_tasks[guid].state = TASK_STATE_PAUSED
+        if t._monitor:
+            t._monitor._exit = lambda x: True
+        t.state = TASK_STATE_PAUSED
         return ERR_NO_ERROR, ""
 
     def resume_task(self, guid):
         if guid not in self._all_tasks:
             return ERR_TASK_NOT_FOUND, None
-        if TASK_STATE_FAILED< self._all_tasks[guid].state < TASK_STATE_FINISHED:
+        t = self._all_tasks[guid]
+        if TASK_STATE_FAILED< t.state < TASK_STATE_FINISHED:
             return ERR_TASK_CANNOT_RESUME, None
-        self._all_tasks[guid].state = max(self._all_tasks[guid].state, TASK_STATE_WAITING)
+        t.state = max(t.state, TASK_STATE_WAITING)
         return ERR_NO_ERROR, ""
 
     def list_tasks(self, level = "download"):
@@ -167,6 +173,7 @@ class xeHentai(object):
                 if task.state >= TASK_STATE_SCAN_IMG:
                     _ += ['scan-%d' % (i + 1) for i in range(task.config['scan_thread_cnt'])]
                 mon.set_vote_ns(_)
+                self._monitor = mon
                 mon.start()
                 # put in the lowest state
                 self._all_threads[TASK_STATE_SCAN_IMG].append(mon)
@@ -184,46 +191,50 @@ class xeHentai(object):
                     self.logger.info(i18n.TASK_MIGRATE_EXH % task_guid)
                     self.tasks.put(task_guid)
                     break
-            elif task.state == TASK_STATE_GET_HATHDL: # download hathdl
-                r = req.request("GET",
-                    "%s/hathdler.php?gid=%s&t=%s" % (task.base_url(), task.gid, task.sethash),
-                    filters.flt_hathdl,
-                    lambda x:(task.meta.update(x),
-                        task.guess_ori(),
-                        task.scan_downloaded()),
-                            #task.meta['has_ori'] and task.config['download_ori'])),
-                    lambda x:task.set_fail(x),)
+            # elif task.state == TASK_STATE_GET_HATHDL: # download hathdl
+            #     r = req.request("GET",
+            #         "%s/hathdler.php?gid=%s&t=%s" % (task.base_url(), task.gid, task.sethash),
+            #         filters.flt_hathdl,
+            #         lambda x:(task.meta.update(x),
+            #             task.guess_ori(),
+            #             task.scan_downloaded()),
+            #                 #task.meta['has_ori'] and task.config['download_ori'])),
+            #         lambda x:task.set_fail(x),)
+            #     self.logger.info(i18n.TASK_WILL_DOWNLOAD_CNT % (
+            #         task_guid, task.meta['total'] - len(task._flist_done),
+            #         task.meta['total']))
+            elif task.state == TASK_STATE_SCAN_PAGE:
+                # if task.config['fast_scan'] and not task.has_ori:
+                #     self.logger.info(i18n.TASK_FAST_SCAN % task.guid)
+                #     for p in task.meta['filelist']:
+                #         task.queue_wrapper(task.page_q.put, pichash = p)
+                # else:
+                # scan by our own, should not be here currently
+                # start backup thread
+                for x in range(0, int(math.ceil(task.meta['total'] / 40.0))):
+                    r = req.request("GET",
+                        "%s/?p=%d" % (task.url, x),
+                        filters.flt_pageurl,
+                        lambda x: task.queue_wrapper(task.page_q.put, url = x),
+                        lambda x: task.set_fail(x))
+                    if task.failcode:
+                        break
+                task.scan_downloaded()
                 self.logger.info(i18n.TASK_WILL_DOWNLOAD_CNT % (
                     task_guid, task.meta['total'] - len(task._flist_done),
                     task.meta['total']))
-            elif task.state == TASK_STATE_SCAN_PAGE:
-                if task.config['fast_scan'] and not task.has_ori:
-                    self.logger.info(i18n.TASK_FAST_SCAN % task.guid)
-                    for p in task.meta['filelist']:
-                        task.queue_wrapper(task.page_q.put, pichash = p)
-                else:
-                    # scan by our own, should not be here currently
-                    # start backup thread
-                    for x in range(0, 1 + int(math.ceil(task.meta['total']/20.0))):
-                        r = req.request("GET",
-                            "%s/?p=%d" % (task.url, x),
-                            filters.flt_pageurl,
-                            lambda x: task.queue_wrapper(task.page_q.put, url = x),
-                            lambda x: task.set_fail(x))
-                        if task.failcode:
-                            break
             elif task.state == TASK_STATE_SCAN_IMG:
                 # spawn thread to scan images
                 for i in range(task.config['scan_thread_cnt']):
                     tid = 'scan-%d' % (i + 1)
                     _ = self._get_httpworker(tid, task.page_q,
-                        filters.flt_imgurl_wrapper(task.config['download_ori']),
+                        filters.flt_imgurl_wrapper(task.config['download_ori'] and self.has_login),
                         lambda x, tid = tid: (task.img_q.put(x[0]),
                             task.set_reload_url(x[0], x[1], x[2]),
                             mon.vote(tid, 0)),
                         lambda x, tid = tid: (mon.vote(tid, x)),
                         mon.wrk_keepalive)
-                    _._exit = lambda t: t._finish_queue()
+                    # _._exit = lambda t: t._finish_queue()
                     _.start()
                     self._all_threads[TASK_STATE_SCAN_IMG].append(_)
                 task.state = TASK_STATE_DOWNLOAD - 1

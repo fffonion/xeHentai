@@ -8,6 +8,7 @@ import re
 import copy
 import json
 import uuid
+from threading import RLock
 from Queue import Queue, Empty
 from . import util
 from .const import *
@@ -35,6 +36,9 @@ class Task(object):
         self.page_q = None
         self.list_q = None
         self._flist_done = set() # store id, don't save, will generate when scan
+        self._monitor = None
+        self._cnt_lock = RLock()
+        self._f_lock = RLock()
 
     def cleanup(self):
         if self.state in (TASK_STATE_FINISHED, TASK_STATE_FAILED):
@@ -42,10 +46,10 @@ class Task(object):
             self.page_q = None
             self.list_q = None
             self.reload_map = {}
-            if 'filelist' in self.meta:
-                del self.meta['filelist']
-            if 'resampled' in self.meta:
-                del self.meta['resampled']
+            # if 'filelist' in self.meta:
+            #     del self.meta['filelist']
+            # if 'resampled' in self.meta:
+            #     del self.meta['resampled']
 
     def set_fail(self, code):
         self.state = TASK_STATE_FAILED
@@ -62,27 +66,27 @@ class Task(object):
         self.failcode = 0
         return True
 
-    def guess_ori(self):
-        # guess if this gallery has resampled files depending on some sample hashes
-        # return True if it's ori
-        if 'sample_hash' not in self.meta:
-            return
-        all_keys = map(lambda x:x[:10], self.meta['filelist'].keys())
-        for h in self.meta['sample_hash']:
-            if h not in all_keys:
-                self.has_ori = True
-                break
-        del self.meta['sample_hash']
+    # def guess_ori(self):
+    #     # guess if this gallery has resampled files depending on some sample hashes
+    #     # return True if it's ori
+    #     if 'sample_hash' not in self.meta:
+    #         return
+    #     all_keys = map(lambda x:x[:10], self.meta['filelist'].keys())
+    #     for h in self.meta['sample_hash']:
+    #         if h not in all_keys:
+    #             self.has_ori = True
+    #             break
+    #     del self.meta['sample_hash']
 
     def base_url(self):
         return re.findall("(https*://(?:g\.e\-|ex)hentai\.org)", self.url)[0]
 
-    def get_picpage_url(self, pichash):
-        # if file resized, this url not works
-        # http://%s.org/s/hash_s/gid-picid'
-        return "%s/s/%s/%s-%s" % (
-            self.base_url(), pichash[:10], self.gid, self.meta['filelist'][pichash][0]
-        )
+    # def get_picpage_url(self, pichash):
+    #     # if file resized, this url not works
+    #     # http://%s.org/s/hash_s/gid-picid'
+    #     return "%s/s/%s/%s-%s" % (
+    #         self.base_url(), pichash[:10], self.gid, self.meta['filelist'][pichash][0]
+    #     )
 
     def set_reload_url(self, imgurl, reload_url, fname):
         self.reload_map[imgurl] = (reload_url, fname)
@@ -100,8 +104,7 @@ class Task(object):
         if os.path.exists(os.path.join(fpath, ".xehdone")):
             donefile = True
         # can only check un-renamed files
-        for h in self.meta['filelist']:
-            fid = self.meta['filelist'][h][0]
+        for fid in range(self.meta['total']):
             fname = os.path.join(fpath, "%03d.jpg" % int(fid)) # id
             if (os.path.exists(fname) and os.stat(fname).st_size > 0) or donefile:
                 self._flist_done.add(int(fid))
@@ -110,30 +113,36 @@ class Task(object):
     def queue_wrapper(self, callback, pichash = None, url = None):
         # if url is not finished, call callback to put into queue
         # type 1: normal file; type 2: resampled url
-        if pichash:
-            fid = int(self.meta['filelist'][pichash][0])
-            if fid not in self._flist_done:
-                callback(self.get_picpage_url(pichash))
-        elif url:
-            fhash, fid = gallery_re.findall(url)[0]
-            if fhash not in self.meta['filelist']:
-                self.meta['resampled'][fhash] = int(fid)
-                self.has_ori = True
+        # if pichash:
+        #     fid = int(self.meta['filelist'][pichash][0])
+        #     if fid not in self._flist_done:
+        #         callback(self.get_picpage_url(pichash))
+        # elif url:
+        fhash, fid = gallery_re.findall(url)[0]
+        # if fhash not in self.meta['filelist']:
+        #     self.meta['resampled'][fhash] = int(fid)
+        #     self.has_ori = True]
+        if int(fid) not in self._flist_done:
             callback(url)
 
     def save_file(self, imgurl, binary):
         # TODO: Rlock for finished += 1
-        self.meta['finished'] += 1
 
         fpath = os.path.join(self.config['dir'], util.legalpath(self.meta['title']))
+        self._f_lock.acquire()
         if not os.path.exists(fpath):
             os.mkdir(fpath)
+        self._f_lock.release()
         pageurl, fname = self.reload_map[imgurl]
         _, fid = gallery_re.findall(pageurl)[0]
 
-        fpath = os.path.join(fpath, "%03d.jpg" % int(fid))
-
-        with open(fpath, "wb") as f:
+        fn = os.path.join(fpath, "%03d.jpg" % int(fid))
+        if os.path.exists(fn) and os.stat(fn).st_size > 0:
+            return
+        self._cnt_lock.acquire()
+        self.meta['finished'] += 1
+        self._cnt_lock.release()
+        with open(fn, "wb") as f:
             f.write(binary)
 
     def rename_ori(self):

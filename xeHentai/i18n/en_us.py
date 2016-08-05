@@ -14,6 +14,7 @@ err_msg = {
     ERR_DELETE_RUNNING_TASK: "can't delete a running task",
     ERR_TASK_CANNOT_PAUSE: "this task can't be paused",
     ERR_TASK_CANNOT_RESUME: "this task can't be resumed",
+#    ERR_HATHDL_NOTFOUND: "hathdl not found",
     ERR_RPC_PARSE_ERROR: "Parse error.",
     ERR_RPC_INVALID_REQUEST: "Invalid request.",
     ERR_RPC_METHOD_NOT_FOUND: "Method not found.",
@@ -31,7 +32,7 @@ XEH_OPT_URLS = "gallery url(s) to download"
 XEH_OPT_u = "username"
 XEH_OPT_k = "password"
 XEH_OPT_c = "cookie string, will be overriden if given -u and -k"
-XEH_OPT_o = "download original images (current: %(default)s)"
+XEH_OPT_o = "download original images, needs to login (current: %(default)s)"
 XEH_OPT_t = "download threads count (current: %(default)d)"
 XEH_OPT_f = "fast scan, guess page url from .hathdl file, not working everytime (current: %(default)s)"
 XEH_OPT_l = "define log path (current: %(default)s)"
@@ -75,6 +76,7 @@ XEH_RPC_STARTED = "rpc server listening on %s:%d"
 XEH_PLATFORM_NO_DAEMON = "daemon mode is not supported on platform: %s"
 XEH_CLEANUP = "cleaning up..."
 XEH_CRITICAL_ERROR = "xeHentai throws critical error:\n%s"
+XEH_DOWNLOAD_ORI_NEED_LOGIN = "haven't login, so I won't download original images"
 
 SESSION_LOAD_EXCEPTION = "exception occurs when loading saved session: %s"
 SESSION_WRITE_EXCEPTION = "exception occurs when writing saved session: %s"
