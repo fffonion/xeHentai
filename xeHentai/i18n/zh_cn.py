@@ -3,17 +3,17 @@
 from ..const import *
 
 err_msg = {
-    ERR_URL_NOT_RECOGNIZED: "url not recognized",
-    ERR_CANT_DOWNLOAD_EXH: "can't download exhentai.org without login",
-    ERR_ONLY_VISIBLE_EXH: "this gallery is only visible in exhentai.org",
-    ERR_MALFORMED_HATHDL: "malformed .hathdl, can't parse",
-    ERR_GALLERY_REMOVED: "this gallery has been removed, may be visible in exhentai",
-    ERR_NO_PAGEURL_FOUND: "no page url found, change of site structure?",
-    ERR_TASK_NOT_FOUND: "no such task guid",
-    ERR_TASK_LEVEL_UNDEF: "task filter level unknown",
-    ERR_DELETE_RUNNING_TASK: "can't delete a running task",
-    ERR_TASK_CANNOT_PAUSE: "this task can't be paused",
-    ERR_TASK_CANNOT_RESUME: "this task can't be resumed",
+    ERR_URL_NOT_RECOGNIZED: "网址不够绅士",
+    ERR_CANT_DOWNLOAD_EXH: "需要登录后才能下载里站",
+    ERR_ONLY_VISIBLE_EXH: "这个本子只有里站能看到",
+    ERR_MALFORMED_HATHDL: "hathdl文件有猫饼，解析失败",
+    ERR_GALLERY_REMOVED: "这个本子被移除了，大概里站能看到",
+    ERR_NO_PAGEURL_FOUND: "没有找到页面链接，网站改版了嘛？",
+    ERR_TASK_NOT_FOUND: "没有该GUID对应的任务",
+    ERR_TASK_LEVEL_UNDEF: "任务过滤等级不存在",
+    ERR_DELETE_RUNNING_TASK: "无法删除运行中的任务",
+    ERR_TASK_CANNOT_PAUSE: "这个任务无法被暂停",
+    ERR_TASK_CANNOT_RESUME: "这个任务无法被恢复",
     ERR_RPC_PARSE_ERROR: "Parse error.",
     ERR_RPC_INVALID_REQUEST: "Invalid request.",
     ERR_RPC_METHOD_NOT_FOUND: "Method not found.",
@@ -22,7 +22,7 @@ err_msg = {
     ERR_SAVE_SESSION_FAILED: "",
 }
 
-ERR_NOMSG = "undefined error message with code %d"
+ERR_NOMSG = "未指定的错误，错误号 %d"
 
 XEH_OPT_DESC = "绅♂士下载器"
 XEH_OPT_EPILOG = "如果参数未指定，则使用config.py中的默认值"

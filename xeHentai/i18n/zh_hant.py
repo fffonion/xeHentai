@@ -3,17 +3,17 @@
 from ..const import *
 
 err_msg = {
-    ERR_URL_NOT_RECOGNIZED: "url not recognized",
-    ERR_CANT_DOWNLOAD_EXH: "can't download exhentai.org without login",
-    ERR_ONLY_VISIBLE_EXH: "this gallery is only visible in exhentai.org",
-    ERR_MALFORMED_HATHDL: "malformed .hathdl, can't parse",
-    ERR_GALLERY_REMOVED: "this gallery has been removed, may be visible in exhentai",
-    ERR_NO_PAGEURL_FOUND: "no page url found, change of site structure?",
-    ERR_TASK_NOT_FOUND: "no such task guid",
-    ERR_TASK_LEVEL_UNDEF: "task filter level unknown",
-    ERR_DELETE_RUNNING_TASK: "can't delete a running task",
-    ERR_TASK_CANNOT_PAUSE: "this task can't be paused",
-    ERR_TASK_CANNOT_RESUME: "this task can't be resumed",
+    ERR_URL_NOT_RECOGNIZED: "網址不夠紳士",
+    ERR_CANT_DOWNLOAD_EXH: "需要登錄後才能下載里站",
+    ERR_ONLY_VISIBLE_EXH: "這個本子只有里站能看到",
+    ERR_MALFORMED_HATHDL: "hathdl文件有貓餅，解析失敗",
+    ERR_GALLERY_REMOVED: "這個本子被移除了，大概里站能看到",
+    ERR_NO_PAGEURL_FOUND: "沒有找到頁面鏈接，網站改版了嘛？",
+    ERR_TASK_NOT_FOUND: "沒有該GUID對應的任務",
+    ERR_TASK_LEVEL_UNDEF: "任務過濾等級不存在",
+    ERR_DELETE_RUNNING_TASK: "無法刪除運行中的任務",
+    ERR_TASK_CANNOT_PAUSE: "這個任務無法被暫停",
+    ERR_TASK_CANNOT_RESUME: "這個任務無法被恢復",
     ERR_RPC_PARSE_ERROR: "Parse error.",
     ERR_RPC_INVALID_REQUEST: "Invalid request.",
     ERR_RPC_METHOD_NOT_FOUND: "Method not found.",
@@ -22,7 +22,7 @@ err_msg = {
     ERR_SAVE_SESSION_FAILED: "",
 }
 
-ERR_NOMSG = "undefined error message with code %d"
+ERR_NOMSG = "未指定的錯誤，錯誤號 %d"
 
 XEH_OPT_DESC = "紳♂士下載器"
 XEH_OPT_EPILOG = "如果參數未指定，則使用config.py中的默認值"
@@ -34,7 +34,7 @@ XEH_OPT_o = "是否下載原始圖片（如果存在） (當前: %(default)s)"
 XEH_OPT_t = "下載線程數 (當前: %(default)d)"
 XEH_OPT_f = "快速掃描，從hathdl猜測頁面鏈接，但有時會抽風 (當前: %(default)s)"
 XEH_OPT_l = "保存日誌的路徑 (當前: %(default)s)"
-XEH_OPT_p = "設置代理, 當前支持的類型: socks5/4a, http(s) (當前: %(default)s)"
+XEH_OPT_p = "設置代理, 可以指定多次, 當前支持的類型: socks5/4a, http(s) (當前: %(default)s)"
 XEH_OPT_d = "設置下載目錄 (當前: %(default)s)"
 XEH_OPT_v = "設置日誌裝逼等級 (當前: %(default)s)"
 XEH_OPT_i = "交互模式，如果開啟後台模式，此項會被忽略 (當前: %(default)s)"
