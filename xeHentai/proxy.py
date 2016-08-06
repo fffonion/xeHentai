@@ -70,7 +70,7 @@ class Pool(object):
         elif re.match("https*://([^:^/]+)(\:\d{1,5})*/.+\.php\?.*b=.+", addr):
             p = glype_proxy(addr, self.trace_proxy)
         else:
-            raise ValueError(" %s is not an acceptable proxy address" % addr)
+            raise ValueError("%s is not an acceptable proxy address" % addr)
         self.proxies[addr] = [p, 0, 0]
 
 def socks_proxy(addr, trace_proxy):
@@ -100,15 +100,17 @@ def http_proxy(addr, trace_proxy):
     return handle
 
 def glype_proxy(addr, trace_proxy):
-    def handle(session):
+    g_session = {"s":""}
+    def handle(session, g_session = g_session):
         import urllib
         argname = re.findall('[&\?]([a-zA-Z\._]+)=[^\d]*', addr)[0]
         bval = re.findall('[&\?]b=(\d*)', addr)
         bval = bval[0] if bval else '4'
-        baseurl = re.findall('(https*://[^/]+/.*?\.php)', addr)[0]
+        server, inst_loc, script = re.findall('(https*://[^/]+)/(.*?)/([^/]+\.php)', addr)[0]
+        urlre = re.compile('/%s/%s\?u=([^&"\']+)&[^"\']+' % (inst_loc, script))
         def mkurl(url):
-            return "%s?%s=%s&b=%s&f=norefer" % (
-                baseurl, argname, urllib.quote_plus(url),
+            return "%s/%s/%s?%s=%s&b=%s&f=norefer" % (
+                server, inst_loc, script, argname, urllib.quote_plus(url),
                 bval)
         @trace_proxy(addr)
         def f(*args, **kwargs):
@@ -119,21 +121,31 @@ def glype_proxy(addr, trace_proxy):
                 kwargs['headers'] = {}
             kwargs['headers'] = dict(kwargs['headers'])
             # anti hotlinking
-            kwargs['headers'].update({'Referer':baseurl})
-            _kw_lower = {k.lower():v for k,v in kwargs['headers'].iteritems()}
-            if 'cookie' in _kw_lower:
+            kwargs['headers'].update({'Referer':"%s/%s/%s" % (server, inst_loc, script)})
+            _coo_new = dict(g_session) if g_session['s'] else {}
+            if 'Cookie' in kwargs['headers']:
                 site = re.findall('https*://([^/]+)/*', url)[0]
-                _coo_new = {}
-                _coo_old = util.parse_cookie(_kw_lower['cookie'])
+                _coo_old = util.parse_cookie(kwargs['headers']['Cookie'])
                 for k in _coo_old:
                     _coo_new["c[%s][/][%s]" % (site, k)] = _coo_old[k]
-                kwargs['headers'].update({'Cookie':_coo_new})
+                kwargs['headers']['Cookie'] = util.make_cookie(_coo_new)
+            tried = 0
             while True:
+                if tried == 2:
+                    raise PoolException("can't bypass glype https warning")
                 rt = session.request(*args, **kwargs)
                 if '<input type="hidden" name="action" value="sslagree">' not in rt.text:
                     break
-                rt = session.request("GET", "%s/include/process.php?action=sslagree" % baseurl)
-                print("retry", rt.headers)
+                rt = session.request("GET", "%s/%s/includes/process.php?action=sslagree" % (server, inst_loc),
+                    allow_redirects = False, **kwargs)
+                if rt.headers.get('set-cookie'):
+                    _coo_new.update(util.parse_cookie(rt.headers.get('set-cookie').replace(",", ";")))
+                    kwargs['headers']['Cookie'] = util.make_cookie(_coo_new)
+                    if 's' in _coo_new:
+                        g_session["s"] = _coo_new['s']
+                        print(g_session)
+                tried += 1
+            
             if rt.headers.get('set-cookie'):
                 coo = util.parse_cookie(rt.headers.get('set-cookie').replace(",", ";"))
                 for k in coo.keys():
@@ -141,8 +153,13 @@ def glype_proxy(addr, trace_proxy):
                     if _:
                         coo[_[0]] = coo[k]
                 rt.headers['set-cookie'] = util.make_cookie(coo)
+            # change url back
             rt.url = url
-            # change cookie domain
+            _ = re.match('<div id="error">(.*?)</div>', rt.content)
+            if _:
+                raise PoolException("glype returns: %s" % _[0])
+            # change transformed url back
+            rt._content = urlre.sub(lambda x:urllib.unquote(x.group(1)), rt._content)
             return rt
 
         return f

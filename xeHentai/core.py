@@ -219,10 +219,11 @@ class xeHentai(object):
                         lambda x: task.set_fail(x))
                     if task.failcode:
                         break
-                task.scan_downloaded()
-                self.logger.info(i18n.TASK_WILL_DOWNLOAD_CNT % (
-                    task_guid, task.meta['total'] - len(task._flist_done),
-                    task.meta['total']))
+                if not task.failcode:
+                    task.scan_downloaded()
+                    self.logger.info(i18n.TASK_WILL_DOWNLOAD_CNT % (
+                        task_guid, task.meta['total'] - len(task._flist_done),
+                        task.meta['total']))
             elif task.state == TASK_STATE_SCAN_IMG:
                 # spawn thread to scan images
                 for i in range(task.config['scan_thread_cnt']):

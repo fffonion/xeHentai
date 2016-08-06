@@ -14,6 +14,7 @@ err_msg = {
     ERR_DELETE_RUNNING_TASK: "無法刪除運行中的任務",
     ERR_TASK_CANNOT_PAUSE: "這個任務無法被暫停",
     ERR_TASK_CANNOT_RESUME: "這個任務無法被恢復",
+#    ERR_HATHDL_NOTFOUND: "hathdl文件未找到"
     ERR_RPC_PARSE_ERROR: "Parse error.",
     ERR_RPC_INVALID_REQUEST: "Invalid request.",
     ERR_RPC_METHOD_NOT_FOUND: "Method not found.",
@@ -30,11 +31,11 @@ XEH_OPT_URLS = "下載頁的網址"
 XEH_OPT_u = "用戶名"
 XEH_OPT_k = "密碼"
 XEH_OPT_c = "Cookie字符串，如果指定了用戶名和密碼，此項會被忽略"
-XEH_OPT_o = "是否下載原始圖片（如果存在） (當前: %(default)s)"
+XEH_OPT_o = "是否下載原始圖片（如果存在），需要登錄 (當前: %(default)s)"
 XEH_OPT_t = "下載線程數 (當前: %(default)d)"
-XEH_OPT_f = "快速掃描，從hathdl猜測頁面鏈接，但有時會抽風 (當前: %(default)s)"
+# XEH_OPT_f = "快速掃描，從hathdl猜測頁面鏈接，但有時會抽風 (當前: %(default)s)"
 XEH_OPT_l = "保存日誌的路徑 (當前: %(default)s)"
-XEH_OPT_p = "設置代理, 可以指定多次, 當前支持的類型: socks5/4a, http(s) (當前: %(default)s)"
+XEH_OPT_p = "設置代理, 可以指定多次, 當前支持的類型: socks5/4a, http(s), glype (當前: %(default)s)"
 XEH_OPT_d = "設置下載目錄 (當前: %(default)s)"
 XEH_OPT_v = "設置日誌裝逼等級 (當前: %(default)s)"
 XEH_OPT_i = "交互模式，如果開啟後台模式，此項會被忽略 (當前: %(default)s)"
@@ -75,6 +76,8 @@ XEH_RPC_STARTED = "rpc 伺服器監聽在 %s:%d"
 XEH_PLATFORM_NO_DAEMON = "後台模式不支持您的系統: %s"
 XEH_CLEANUP = "擦乾淨..."
 XEH_CRITICAL_ERROR = "xeHentai 抽風啦:\n%s"
+XEH_DOWNLOAD_ORI_NEED_LOGIN = "下載原圖需要登錄"
+XEH_FILE_DOWNLOADED = "圖片已下載 #%03d %s"
 
 SESSION_LOAD_EXCEPTION = "讀取存檔時遇到錯誤: %s"
 SESSION_WRITE_EXCEPTION = "寫入存檔時遇到錯誤: %s"
