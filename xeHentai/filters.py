@@ -89,7 +89,7 @@ def flt_pageurl(r, suc, fail):
     # TODO: catch re exceptions
     picpage = re.findall('<a href="(https*://(?:g.e-hentai|exhentai).org/./[a-f0-9]{10}/\d+\-\d+)"><img', r.text)
     if not picpage:
-        fail()
+        fail(ERR_NO_PAGEURL_FOUND)
     for p in picpage:
         suc(p)
 

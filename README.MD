@@ -58,13 +58,12 @@ xeH
   -i, --interactive     交互模式，如果开启后台模式，此项会被忽略 (默认: 否)
   -o, --download-ori    是否下载原始图片（如果存在） (默认: 否)
   -t N, --thread N      下载线程数 (默认: 5)
-  -f, --fast-scan       从hathdl猜测页面链接，可以提高抓取速度，但有时会抽风 (默认: 否)
   -d DIR, --dir DIR     设置下载目录 (默认: 当前目录)
   --daemon              后台模式 (默认: 否)
   -l /path/to/eh.log, --logpath /path/to/eh.log
                         保存日志的路径 (默认: eh.log)
   -p PROXY, --proxy PROXY
-                        设置代理, 可以指定多次, 当前支持的类型: socks5/4a, http(s) (默认: 无)
+                        设置代理, 可以指定多次, 当前支持的类型: socks5/4a, http(s), glype (默认: 无)
   -v, --verbose         设置日志装逼等级 (默认: 2)
   --rpc-port PORT       设置JSON-RPC监听IP (默认: 无)
   --rpc-interface ADDR  设置JSON-RPC监听端口 (默认: localhost)
@@ -96,6 +95,16 @@ Firefox用户需要安装[Greasemonkey](https://addons.mozilla.org/en-US/firefox
 如果命令行没有指定url，xeHentai将会在完成存档中的队列（如果存在）后继续等待。（待修改）
 
 如果指定了后台模式（`-d`或设置`daemon`为`True`），xeHentai将会在保持后台运行。
+
+### 代理
+
+目前支持三种模式的代理：
+
+ - socks代理，如`socks5://127.0.0.1:1080`。
+ - http(s)代理，如`http://127.0.0.1:8080`。
+ - glype代理，如`http://example.com/browse.php?u=a&b=4`。请根据实际情况修改`b`的名称。glype是目前使用最广的php在线代理，使用时请取消勾选“加密url(Encrypt URL)”、勾选“允许cookies (Allow Cookies)”后随意打开一个网页，然后把网址粘贴进来
+
+可以指定多个代理，格式如`['socks5://127.0.0.1:1080', 'http://127.0.0.1:8080']`。
 
 ## 其他说明
 
