@@ -27,7 +27,7 @@ xeH
  - **dir** 下载目录，默认为当前目录
  - **download_ori** 是否下载原图，默认为否
  - **download_thread_cnt** 下载线程数，默认为5
- - **scan_thread_cnt** 扫描线程数，默认为5
+ - **scan_thread_cnt** 扫描线程数，默认为1
  - **proxy** 代理列表，形如`["socks://127.0.0.1:1080", "http://127.0.0.1:8080"]`
  - **log_path** 日志路径，默认为`eh.log`
  - **log_verbose** 日志等级，可选1-3，值越大输出越详细，默认为2

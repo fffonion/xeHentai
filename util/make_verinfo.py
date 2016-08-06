@@ -6,12 +6,7 @@ sys.path.insert(0, os.path.join(sys.path[0], ".."))
 from xeHentai import const
 
 version = const.__version__
-v = []
-t = version
-for i in range(4):
-    v.append(str(int(t)))
-    t = (t - int(t)) * 10
-
+v = list(str(int(version*1000)))
 tmpl='''# UTF-8
 #
 # For more details about fixed file info 'ffi' see:
