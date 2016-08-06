@@ -8,6 +8,7 @@ import sys
 import datetime
 import locale
 import logging
+from threading import RLock
 #import logging.handlers
 from ..const import *
 
@@ -44,15 +45,16 @@ class Logger(object):
         self.__reset_color = lambda: None
         if self.isatty:
             if os.name == 'nt':
+                self._nt_color_lock = RLock()
                 import ctypes
                 SetConsoleTextAttribute = ctypes.windll.kernel32.SetConsoleTextAttribute
                 GetStdHandle = ctypes.windll.kernel32.GetStdHandle
-                self.__set_error_color = lambda: SetConsoleTextAttribute(GetStdHandle(-11), 0x0C)
-                self.__set_warning_color = lambda: SetConsoleTextAttribute(GetStdHandle(-11), 0x06)
-                self.__set_debug_color = lambda: SetConsoleTextAttribute(GetStdHandle(-11), 0x02)
-                self.__set_verbose_color = lambda: SetConsoleTextAttribute(GetStdHandle(-11), 0x08)
-                self.__set_bright_color = lambda: SetConsoleTextAttribute(GetStdHandle(-11), 0x0F)
-                self.__reset_color = lambda: SetConsoleTextAttribute(GetStdHandle(-11), 0x07)
+                self.__set_error_color = lambda: (self._nt_color_lock.acquire(), SetConsoleTextAttribute(GetStdHandle(-11), 0x0C))
+                self.__set_warning_color = lambda: (self._nt_color_lock.acquire(), SetConsoleTextAttribute(GetStdHandle(-11), 0x06))
+                self.__set_debug_color = lambda: (self._nt_color_lock.acquire(), SetConsoleTextAttribute(GetStdHandle(-11), 0x02))
+                self.__set_verbose_color = lambda: (self._nt_color_lock.acquire(), SetConsoleTextAttribute(GetStdHandle(-11), 0x08))
+                self.__set_bright_color = lambda: (self._nt_color_lock.acquire(), SetConsoleTextAttribute(GetStdHandle(-11), 0x0F))
+                self.__reset_color = lambda: (SetConsoleTextAttribute(GetStdHandle(-11), 0x07), self._nt_color_lock.release())
             elif os.name == 'posix':
                 self.__set_error_color = lambda: __write('\033[31m')
                 self.__set_warning_color = lambda: __write('\033[33m')
