@@ -247,6 +247,7 @@ class xeHentai(object):
                     _ = self._get_httpworker(tid, task.img_q,
                         filters.download_file_wrapper(task.config['dir']),
                         lambda x, tid = tid: (task.save_file(x[1], x[0]),
+                            self.logger.debug(i18n.XEH_FILE_DOWNLOADED % (task.get_fname(x[1]))),
                             mon.vote(tid, 0)),
                         lambda x, tid = tid: (
                             task.page_q.put(task.get_reload_url(x[1])),# if x[0] != ERR_QUOTA_EXCEEDED else None,

@@ -77,6 +77,7 @@ XEH_PLATFORM_NO_DAEMON = "后台模式不支持您的系统: %s"
 XEH_CLEANUP = "擦干净..."
 XEH_CRITICAL_ERROR = "xeHentai 抽风啦:\n%s"
 XEH_DOWNLOAD_ORI_NEED_LOGIN = "下载原图需要登录"
+XEH_FILE_DOWNLOADED = "图片已下载 #%03d %s"
 
 SESSION_LOAD_EXCEPTION = "读取存档时遇到错误: %s"
 SESSION_WRITE_EXCEPTION = "写入存档时遇到错误: %s"
