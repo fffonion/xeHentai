@@ -138,12 +138,17 @@ class Task(object):
 
         fn = os.path.join(fpath, "%03d.jpg" % int(fid))
         if os.path.exists(fn) and os.stat(fn).st_size > 0:
-            return
+            return fn
         self._cnt_lock.acquire()
         self.meta['finished'] += 1
         self._cnt_lock.release()
         with open(fn, "wb") as f:
             f.write(binary)
+    
+    def get_fname(self, imgurl):
+        pageurl, fname = self.reload_map[imgurl]
+        _, fid = gallery_re.findall(pageurl)[0]
+        return int(fid), fname
 
     def rename_ori(self):
         fpath = os.path.join(self.config['dir'], util.legalpath(self.meta['title']))

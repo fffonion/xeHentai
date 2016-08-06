@@ -77,6 +77,7 @@ XEH_PLATFORM_NO_DAEMON = "daemon mode is not supported on platform: %s"
 XEH_CLEANUP = "cleaning up..."
 XEH_CRITICAL_ERROR = "xeHentai throws critical error:\n%s"
 XEH_DOWNLOAD_ORI_NEED_LOGIN = "haven't login, so I won't download original images"
+XEH_FILE_DOWNLOADED = "file downloaded #%03d %s"
 
 SESSION_LOAD_EXCEPTION = "exception occurs when loading saved session: %s"
 SESSION_WRITE_EXCEPTION = "exception occurs when writing saved session: %s"
