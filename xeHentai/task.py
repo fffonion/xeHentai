@@ -104,7 +104,7 @@ class Task(object):
         if os.path.exists(os.path.join(fpath, ".xehdone")):
             donefile = True
         # can only check un-renamed files
-        for fid in range(self.meta['total']):
+        for fid in range(1, self.meta['total'] + 1):
             fname = os.path.join(fpath, "%03d.jpg" % int(fid)) # id
             if (os.path.exists(fname) and os.stat(fname).st_size > 0) or donefile:
                 self._flist_done.add(int(fid))
@@ -144,27 +144,27 @@ class Task(object):
         self._cnt_lock.release()
         with open(fn, "wb") as f:
             f.write(binary)
-    
+
     def get_fname(self, imgurl):
         pageurl, fname = self.reload_map[imgurl]
         _, fid = gallery_re.findall(pageurl)[0]
         return int(fid), fname
 
     def rename_ori(self):
-        fpath = os.path.join(self.config['dir'], util.legalpath(self.meta['title']))
-        cnt = 0
-        for h in self.reload_map:
-            pageurl, fname = self.reload_map[h]
-            _, fid = gallery_re.findall(pageurl)[0]
-            fname_ori = os.path.join(fpath, "%03d.jpg" % int(fid)) # id
-            fname_to = os.path.join(fpath, util.legalpath(fname))
-            if os.path.exists(fname_ori):
-                os.rename(fname_ori, fname_to)
-                cnt += 1
-        if cnt == self.meta['total']:
-            with open(os.path.join(fpath, ".xehdone"), "w"):
-                pass
-
+        if self.config['rename_ori']:
+            fpath = os.path.join(self.config['dir'], util.legalpath(self.meta['title']))
+            cnt = 0
+            for h in self.reload_map:
+                pageurl, fname = self.reload_map[h]
+                _, fid = gallery_re.findall(pageurl)[0]
+                fname_ori = os.path.join(fpath, "%03d.jpg" % int(fid)) # id
+                fname_to = os.path.join(fpath, util.legalpath(fname))
+                if os.path.exists(fname_ori):
+                    os.rename(fname_ori, fname_to)
+                    cnt += 1
+            if cnt == self.meta['total']:
+                with open(os.path.join(fpath, ".xehdone"), "w"):
+                    pass
 
     def from_dict(self, j):
         for k in self.__dict__:

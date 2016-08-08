@@ -4,6 +4,7 @@
 *.json
 *.sh
 *.log
+.ehentai.cookie
 release
 desktop.ini
 verinfo.txt

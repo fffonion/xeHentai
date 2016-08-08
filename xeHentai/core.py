@@ -22,11 +22,12 @@ from .const import *
 from .const import __version__
 from .worker import *
 
+from . import config as default_config
 sys.path.insert(1, FILEPATH)
 try:
     import config
 except ImportError:
-    from . import config
+    config = default_config
 sys.path.pop(1)
 
 class xeHentai(object):
@@ -38,7 +39,8 @@ class xeHentai(object):
         self.last_task_guid = None
         self._all_tasks = {} # for saving states
         self._all_threads = [[] for i in range(20)]
-        self.cfg = {k:v for k,v in config.__dict__.iteritems() if not k.startswith("_")}
+        self.cfg = {k:v for k,v in default_config.__dict__.iteritems() if not k.startswith("_")}
+        self.cfg.update({k:v for k,v in config.__dict__.iteritems() if not k.startswith("_")})
         self.proxy = None
         self.cookies = {}
         self.headers = {
@@ -83,7 +85,7 @@ class xeHentai(object):
     def add_task(self, url, cfg_dict = {}):
         url = url.strip()
         cfg = {k:v for k, v in self.cfg.iteritems() if k in (
-            "dir", "download_ori", "download_thread_cnt", "scan_thread_cnt")}
+            "dir", "download_ori", "download_thread_cnt", "scan_thread_cnt", "rename_ori")}
         cfg.update(cfg_dict)
         if cfg['download_ori'] and not self.has_login:
             self.logger.warning(i18n.XEH_DOWNLOAD_ORI_NEED_LOGIN)
@@ -211,6 +213,7 @@ class xeHentai(object):
                 # else:
                 # scan by our own, should not be here currently
                 # start backup thread
+                task.scan_downloaded()
                 for x in range(0, int(math.ceil(task.meta['total'] / 40.0))):
                     r = req.request("GET",
                         "%s/?p=%d" % (task.url, x),
@@ -220,7 +223,6 @@ class xeHentai(object):
                     if task.failcode:
                         break
                 if not task.failcode:
-                    task.scan_downloaded()
                     self.logger.info(i18n.TASK_WILL_DOWNLOAD_CNT % (
                         task_guid, task.meta['total'] - len(task._flist_done),
                         task.meta['total']))
@@ -323,7 +325,8 @@ class xeHentai(object):
         with open("h.json", "w") as f:
             try:
                 f.write(json.dumps({
-                    'tasks':{k: v.to_dict() for k,v in self._all_tasks.iteritems()},
+                    'tasks':{} if not self.cfg['save_tasks'] else
+                        {k: v.to_dict() for k,v in self._all_tasks.iteritems()},
                     'cookies':self.cookies}))
             except Exception as ex:
                 self.logger.warning(i18n.SESSION_LOAD_EXCEPTION % ex)
@@ -331,31 +334,44 @@ class xeHentai(object):
         return ERR_NO_ERROR, None
 
     def load_session(self):
-        if not os.path.exists("h.json"):
-            return
-        with open("h.json") as f:
-            try:
-                j = json.loads(f.read())
-            except Exception as ex:
-                self.logger.warning(i18n.SESSION_SAVE_EXCEPTION % ex)
-                return ERR_SAVE_SESSION_FAILED, str(ex)
-            else:
-                for _ in j['tasks'].values():
-                    _t = Task("", {}).from_dict(_)
-                    if 'filelist' in _t.meta:
-                        _t.scan_downloaded()
-                            #_t.meta['has_ori'] and task.config['download_ori'])
-                    # since we don't block on scan_img state, an unempty page_q
-                    # indicates we should start from scan_img state,
-                    if _t.state == TASK_STATE_DOWNLOAD and _t.page_q:
-                        _t.state = TASK_STATE_SCAN_IMG
-                    self._all_tasks[_['guid']] = _t
-                    self.tasks.put(_['guid'])
-                self.logger.info(i18n.XEH_LOAD_TASKS_CNT % len(self._all_tasks))
-                self.cookies = j['cookies']
-                if self.cookies:
+        if os.path.exists("h.json"):
+            with open("h.json") as f:
+                try:
+                    j = json.loads(f.read())
+                except Exception as ex:
+                    self.logger.warning(i18n.SESSION_SAVE_EXCEPTION % ex)
+                    return ERR_SAVE_SESSION_FAILED, str(ex)
+                else:
+                    for _ in j['tasks'].values():
+                        _t = Task("", {}).from_dict(_)
+                        if 'filelist' in _t.meta:
+                            _t.scan_downloaded()
+                                #_t.meta['has_ori'] and task.config['download_ori'])
+                        # since we don't block on scan_img state, an unempty page_q
+                        # indicates we should start from scan_img state,
+                        if _t.state == TASK_STATE_DOWNLOAD and _t.page_q:
+                            _t.state = TASK_STATE_SCAN_IMG
+                        self._all_tasks[_['guid']] = _t
+                        self.tasks.put(_['guid'])
+                    if self._all_tasks:
+                        self.logger.info(i18n.XEH_LOAD_TASKS_CNT % len(self._all_tasks))
+                    self.cookies = j['cookies']
+                    if self.cookies:
+                        self.headers.update({'Cookie':util.make_cookie(self.cookies)})
+                        self.has_login = True
+        _1xcookie = os.path.join(FILEPATH, ".ehentai.cookie")# 1.x cookie filelist
+        if not self.has_login and os.path.exists(_1xcookie):
+            with open(_1xcookie) as f:
+                try:
+                    cid, cpw = f.read().strip().split(",")
+                    self.cookies.update({'ipb_member_id':cid, 'ipb_pass_hash':cpw})
                     self.headers.update({'Cookie':util.make_cookie(self.cookies)})
                     self.has_login = True
+                    self.logger.info(i18n.XEH_LOAD_OLD_COOKIE)
+                except:
+                    pass
+
+
         return ERR_NO_ERROR, None
 
     def login_exhentai(self, name, pwd):
