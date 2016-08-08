@@ -115,7 +115,6 @@ def flt_imgurl_wrapper(ori):
         try:
             picurl = util.htmlescape(re.findall('src="([^"]+keystamp[^"]+)"', r.text)[0])
         except IndexError:
-            open("/tmp/1.htm", "w").write(r.text.encode('utf-8'))
             picurl = util.htmlescape(re.findall('src="(.+)"\s+style="[a-z]', r.text)[0])
         filename = re.findall('</a></div><div>(.*?) ::.+::.+</di', r.text)[0]
         if 'image.php' in filename:
