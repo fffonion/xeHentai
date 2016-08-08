@@ -22,6 +22,8 @@ xeH
 
 使用源码运行的用户请先将`xeHentai/config.py`复制到当前目录。
 
+配置的优先级为 交互模式 > 命令行参数 > 用户config.py > 内置config.py。
+
 参数说明：
 
  - **dir** 下载目录，默认为当前目录
@@ -31,11 +33,13 @@ xeH
  - **proxy** 代理列表，形如`["socks://127.0.0.1:1080", "http://127.0.0.1:8080"]`
  - **log_path** 日志路径，默认为`eh.log`
  - **log_verbose** 日志等级，可选1-3，值越大输出越详细，默认为2
+ - **rename_ori** 将图片重命名为原始名称，如果关闭则使用序号，默认为否
  - **daemon** 后台模式，默认为否
  - **fast_scan** 快速扫描，从hathdl猜测页面链接，可以提高抓取速度，但有时会抽风，默认为否
  - **rpc_interface** RPC绑定的IP，默认为`localhost`
  - **rpc_port** RPC绑定的端口，默认为`None`
  - **rpc_secret** RPC密钥，默认为`None`
+ - **save_tasks** 是否保存任务到`h.json`，默认为是
 
 
 ### 命令行模式
@@ -48,25 +52,28 @@ xeH
 绅♂士下载器
 
 可选参数:
-  url                   下载页的网址
-  -h, --help            show this help message and exit
+  -h, --help            显示帮助
   -u USERNAME, --username USERNAME
                         用户名
   -k KEY, --key KEY     密码
   -c COOKIE, --cookie COOKIE
                         Cookie字符串，如果指定了用户名和密码，此项会被忽略
-  -i, --interactive     交互模式，如果开启后台模式，此项会被忽略 (默认: 否)
-  -o, --download-ori    是否下载原始图片（如果存在） (默认: 否)
+  -i, --interactive     交互模式，如果开启后台模式，此项会被忽略 (默认: False)
+  -o, --download-ori    是否下载原始图片（如果存在），需要登录 (默认: False)
   -t N, --thread N      下载线程数 (默认: 5)
   -d DIR, --dir DIR     设置下载目录 (默认: 当前目录)
-  --daemon              后台模式 (默认: 否)
+  --daemon              后台模式 (默认: False)
   -l /path/to/eh.log, --logpath /path/to/eh.log
-                        保存日志的路径 (默认: eh.log)
+                        保存日志的路径 (默认: /eh.log)
   -p PROXY, --proxy PROXY
                         设置代理, 可以指定多次, 当前支持的类型: socks5/4a, http(s), glype (默认: 无)
   -v, --verbose         设置日志装逼等级 (默认: 2)
-  --rpc-port PORT       设置JSON-RPC监听IP (默认: 无)
+  --rpc-port PORT       设置JSON-RPC监听IP (默认: None)
   --rpc-interface ADDR  设置JSON-RPC监听端口 (默认: localhost)
+  -r BOOL, --rename-ori BOOL
+                        将图片重命名为原始名称，如果关闭则使用序号 (默认: False)
+
+如果参数未指定，则使用config.py中的默认值
 
 ```
 
