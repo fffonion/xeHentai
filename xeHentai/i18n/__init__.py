@@ -18,15 +18,17 @@ except (ImportError, ValueError):
 
 class _(object):
     def c(cls, code):
-        return (code not in lng.err_msg and \
+        _ = code not in lng.err_msg and \
             (code not in lng_fallback.err_msg and \
                 (cls.ERR_NOMSG % code) or \
                     lng_fallback.err_msg[code] ) or \
-            lng.err_msg[code]).decode('utf-8')
+            lng.err_msg[code]
+        return _ if PY3K else _.decode('utf-8')
 
     def __getattr__(cls, idx):
-        return (not hasattr(lng, idx) and \
+        _ = not hasattr(lng, idx) and \
             getattr(lng_fallback, idx) or \
-            getattr(lng, idx)).decode('utf-8')
+            getattr(lng, idx)
+        return _ if PY3K else _.decode('utf-8')
 
 i18n = _()

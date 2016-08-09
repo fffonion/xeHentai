@@ -8,10 +8,13 @@ import time
 import random
 import requests
 import traceback
-from Queue import Queue, Empty
 from threading import Thread, RLock
 from .const import *
 from .i18n import i18n
+if PY3K:
+    from queue import Queue, Empty
+else:
+    from Queue import Queue, Empty
 
 # pinfo = {'http':'socks5://127.0.0.1:16963', 'https':'socks5://127.0.0.1:16963'}
 

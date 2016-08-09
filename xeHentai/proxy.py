@@ -8,6 +8,7 @@ import random
 from requests.exceptions import ConnectTimeout, ConnectionError, InvalidSchema
 from requests.packages.urllib3.exceptions import ProxySchemeUnknown
 from . import util
+from .const import *
 
 class PoolException(Exception):
     pass
@@ -39,7 +40,8 @@ class Pool(object):
                 ex = None
                 try:
                     r = func(*args, **kwargs)
-                except Exception as ex:
+                except Exception as _ex:
+                    ex = _ex
                     for e in [ConnectTimeout, ConnectionError] + exceptions:
                         if isinstance(ex, e):
                             self.proxies[addr][2] += weight
@@ -110,8 +112,8 @@ def glype_proxy(addr, trace_proxy):
         urlre = re.compile('/%s/%s\?u=([^&"\']+)&[^"\']+' % (inst_loc, script))
         def mkurl(url):
             return "%s/%s/%s?%s=%s&b=%s&f=norefer" % (
-                server, inst_loc, script, argname, urllib.quote_plus(url),
-                bval)
+                server, inst_loc, script, argname,
+                (urllib.parse if PY3K else urllib).quote_plus(url), bval)
         @trace_proxy(addr)
         def f(*args, **kwargs):
             # change url
@@ -145,21 +147,25 @@ def glype_proxy(addr, trace_proxy):
                         g_session["s"] = _coo_new['s']
                         print(g_session)
                 tried += 1
-            
+
             if rt.headers.get('set-cookie'):
                 coo = util.parse_cookie(rt.headers.get('set-cookie').replace(",", ";"))
-                for k in coo.keys():
+                for k in list(coo.keys()):
                     _ = re.findall('c\[[^]]+\]\[[^]]+\]\[([^]]+)\]', k)
                     if _:
                         coo[_[0]] = coo[k]
                 rt.headers['set-cookie'] = util.make_cookie(coo)
             # change url back
             rt.url = url
+            if PY3K:
+                rt._content = rt._content.decode('utf-8')
             _ = re.match('<div id="error">(.*?)</div>', rt.content)
             if _:
                 raise PoolException("glype returns: %s" % _[0])
             # change transformed url back
-            rt._content = urlre.sub(lambda x:urllib.unquote(x.group(1)), rt._content)
+            rt._content = urlre.sub(lambda x:(urllib.parse if PY3K else urllib).unquote(x.group(1)), rt._content)
+            if PY3K:
+                rt._content = rt._content.encode('utf-8')
             return rt
 
         return f

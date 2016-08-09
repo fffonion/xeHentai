@@ -10,7 +10,6 @@ import sys
 import math
 import json
 import time
-from Queue import Queue, Empty
 from .task import Task
 from . import util
 from . import proxy
@@ -21,6 +20,10 @@ from .util import logger
 from .const import *
 from .const import __version__
 from .worker import *
+if PY3K:
+    from queue import Queue, Empty
+else:
+    from Queue import Queue, Empty
 
 from . import config as default_config
 sys.path.insert(1, FILEPATH)
@@ -39,8 +42,8 @@ class xeHentai(object):
         self.last_task_guid = None
         self._all_tasks = {} # for saving states
         self._all_threads = [[] for i in range(20)]
-        self.cfg = {k:v for k,v in default_config.__dict__.iteritems() if not k.startswith("_")}
-        self.cfg.update({k:v for k,v in config.__dict__.iteritems() if not k.startswith("_")})
+        self.cfg = {k:v for k,v in default_config.__dict__.items() if not k.startswith("_")}
+        self.cfg.update({k:v for k,v in config.__dict__.items() if not k.startswith("_")})
         self.proxy = None
         self.cookies = {}
         self.headers = {
@@ -54,7 +57,7 @@ class xeHentai(object):
         self.rpc = None
 
     def update_config(self, cfg_dict):
-        self.cfg.update({k:v for k, v in cfg_dict.iteritems() if k in cfg_dict})
+        self.cfg.update({k:v for k, v in cfg_dict.items() if k in cfg_dict})
         self.logger.set_level(logger.Logger.WARNING - self.cfg['log_verbose'])
         self.logger.verbose("cfg %s" % self.cfg)
         if cfg_dict['proxy']:
@@ -84,7 +87,7 @@ class xeHentai(object):
 
     def add_task(self, url, cfg_dict = {}):
         url = url.strip()
-        cfg = {k:v for k, v in self.cfg.iteritems() if k in (
+        cfg = {k:v for k, v in self.cfg.items() if k in (
             "dir", "download_ori", "download_thread_cnt", "scan_thread_cnt", "rename_ori")}
         cfg.update(cfg_dict)
         if cfg['download_ori'] and not self.has_login:
@@ -140,7 +143,7 @@ class xeHentai(object):
         if level not in globals():
             return ERR_TASK_LEVEL_UNDEF, None
         lv = globals()[level]
-        rt = {k:v.to_dict() for k, v in self._all_tasks.iteritems() if v.state == lv}
+        rt = {k:v.to_dict() for k, v in self._all_tasks.items() if v.state == lv}
         return ERR_NO_ERROR, rt
 
     def _do_task(self, task_guid):
@@ -326,7 +329,7 @@ class xeHentai(object):
             try:
                 f.write(json.dumps({
                     'tasks':{} if not self.cfg['save_tasks'] else
-                        {k: v.to_dict() for k,v in self._all_tasks.iteritems()},
+                        {k: v.to_dict() for k,v in self._all_tasks.items()},
                     'cookies':self.cookies}))
             except Exception as ex:
                 self.logger.warning(i18n.SESSION_LOAD_EXCEPTION % ex)
@@ -339,7 +342,7 @@ class xeHentai(object):
                 try:
                     j = json.loads(f.read())
                 except Exception as ex:
-                    self.logger.warning(i18n.SESSION_SAVE_EXCEPTION % ex)
+                    self.logger.warning(i18n.SESSION_WRITE_EXCEPTION % ex)
                     return ERR_SAVE_SESSION_FAILED, str(ex)
                 else:
                     for _ in j['tasks'].values():

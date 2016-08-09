@@ -91,8 +91,8 @@ def main(xeH, opt):
     -j  --no-jp-name      是否不使用日语命名，默认为否'''
 
 def parse_opt():
-    _def = {k:v for k,v in default_config.__dict__.iteritems() if not k.startswith("_")}
-    _def.update({k:v for k,v in config.__dict__.iteritems() if not k.startswith("_")})
+    _def = {k:v for k,v in default_config.__dict__.items() if not k.startswith("_")}
+    _def.update({k:v for k,v in config.__dict__.items() if not k.startswith("_")})
     parser = argparse.ArgumentParser(description = i18n.XEH_OPT_DESC, epilog = i18n.XEH_OPT_EPILOG)
     # the followings are handled in cli
     parser.add_argument('-u', '--username', help = i18n.XEH_OPT_u)
@@ -134,7 +134,7 @@ def parse_opt():
     return args
 
 def interactive(xeH):
-    _readline = lambda x:raw_input(logger.safestr(x))
+    _readline = lambda x:input(logger.safestr(x)) if PY3K else raw_input(logger.safestr(x))
 
     if not xeH.has_login and _readline(i18n.PS_LOGIN) == "y":
         uname = pwd = ""
@@ -150,7 +150,7 @@ def interactive(xeH):
     download_ori = _readline(i18n.PS_DOWNLOAD_ORI) == "y"
     proxy = _readline(i18n.PS_PROXY).strip()
     proxy = [proxy] if proxy else xeH.cfg['proxy']
-    _dir = _readline(i18n.PS_DOWNLOAD_DIR % os.path.abspath(xeH.cfg['dir'])) or xeH.cfg['dir']
+    _dir = _readline(i18n.PS_DOWNLOAD_DIR % os.path.abspath(xeH.cfg['dir']).decode(sys.getfilesystemencoding())) or xeH.cfg['dir']
     rename_ori = _readline(i18n.PS_RENAME_ORI) == "y"
     return {'urls': url, 'proxy': proxy, 'download_ori': download_ori, 'dir': _dir, 'rename_ori':rename_ori,
             'save_tasks': False}

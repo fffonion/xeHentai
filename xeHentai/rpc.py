@@ -6,12 +6,17 @@
 import re
 import time
 import json
+import traceback
 from threading import Thread
-from SocketServer import ThreadingMixIn
-from BaseHTTPServer import HTTPServer, BaseHTTPRequestHandler
 from .const import *
 from .const import __version__
 from .i18n import i18n
+if PY3K:
+    from socketserver import ThreadingMixIn
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+else:
+    from SocketServer import ThreadingMixIn
+    from BaseHTTPServer import HTTPServer, BaseHTTPRequestHandler
 
 cmdre = re.compile("([a-z])([A-Z])")
 pathre = re.compile("/jsonrpc")
@@ -53,7 +58,7 @@ def path_filter(func):
             self.send_response(404)
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
-            self.wfile.write('\n')
+            self.wfile.write(b'\n')
             return
         func(self)
     return f
@@ -75,7 +80,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
         self.send_header("Access-Control-Max-Age", "1728000")
         self.end_headers()
-        self.wfile.write('\n')
+        self.wfile.write(b'\n')
 
     @path_filter
     def do_GET(self):
@@ -86,16 +91,20 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", len(rt))
         self.end_headers()
         self.wfile.write(rt)
-        self.wfile.write('\n')
+        self.wfile.write(b'\n')
         return
 
     @path_filter
     def do_POST(self):
-        d = self.rfile.read(int(self.headers.getheader('Content-Length')))
+        _get_header = lambda h: self.headers.get_all(h)[0] if PY3K else \
+            self.headers.getheader(h)
+        d = self.rfile.read(int(_get_header('Content-Length')))
         rt = ""
         code = 200
         while True:
             try:
+                if PY3K:
+                    d = d.decode('utf-8')
                 j = json.loads(d)
                 assert('method' in j and j['method'] != None and 'id' in j)
             except ValueError:
@@ -120,7 +129,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 params = ([], {}) if 'params' not in j else j['params']
                 cmd_rt = getattr(self.xeH, cmd_r)(*params[0], **params[1])
-            except ValueError as ex:
+            except KeyboardInterrupt as ex:
+                self.xeH.logger.verbose("RPC exec error:\n%s" % traceback.format_exc())
                 code = 500
                 rt = jsonrpc_resp({"id":j['id']}, error_code = ERR_RPC_EXEC_ERROR,
                 error_msg = str(ex))
@@ -135,8 +145,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json-rpc")
         self.send_header("Content-Length", len(rt))
         self.end_headers()
+        if PY3K:
+            rt = rt.encode('utf-8')
         self.wfile.write(rt)
-        self.wfile.write('\n')
+        self.wfile.write(b'\n')
         return
 
 
