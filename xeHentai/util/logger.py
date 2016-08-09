@@ -19,9 +19,10 @@ class tz_GMT8(datetime.tzinfo):
         return datetime.timedelta(0)
 
 def safestr(s):
-    if not isinstance(s, unicode):
+    if (PY3K and isinstance(s, bytes)) or (not PY3K and not isinstance(s, unicode)):
         s = s.decode("utf-8")
-    return s.encode(locale.getdefaultlocale()[1] or 'utf-8', 'replace')
+    _ = s.encode(locale.getdefaultlocale()[1] or 'utf-8', 'replace')
+    return _.decode('utf-8') if PY3K else _
 
 class Logger(object):
     # paste from goagent
@@ -94,7 +95,8 @@ class Logger(object):
             self.__write('%-4s - [%s] %s\n' % (level, datetime.datetime.now(tz_GMT8()).strftime('%X'), fmt % args))
         sys.stdout.flush()
         if self.logf:
-            self.logf.write(('[%s] %s\n' % (datetime.datetime.now(tz_GMT8()).strftime('%b %d %X'), fmt % args)).encode("utf-8"))
+            _ = ('[%s] %s\n' % (datetime.datetime.now(tz_GMT8()).strftime('%b %d %X'), fmt % args))
+            self.logf.write(_ if PY3K else _.encode("utf-8"))
 
     def dummy(self, *args, **kwargs):
         pass

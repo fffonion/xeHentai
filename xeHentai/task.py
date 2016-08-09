@@ -9,9 +9,12 @@ import copy
 import json
 import uuid
 from threading import RLock
-from Queue import Queue, Empty
 from . import util
 from .const import *
+if PY3K:
+    from queue import Queue, Empty
+else:
+    from Queue import Queue, Empty
 
 index_re = re.compile('.+/(\d+)/([^\/]+)/*')
 gallery_re = re.compile('/([a-f0-9]{10})/[^\-]+\-(\d+)')
@@ -182,7 +185,7 @@ class Task(object):
 
 
     def to_dict(self):
-        d = dict({k:v for k, v in self.__dict__.iteritems()
+        d = dict({k:v for k, v in self.__dict__.items()
             if not k.endswith('_q') and not k.startswith("_")})
         for k in ['img_q', 'page_q', 'list_q']:
             if getattr(self, k):

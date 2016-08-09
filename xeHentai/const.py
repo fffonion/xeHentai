@@ -10,12 +10,12 @@ import locale
 
 PY3K = sys.version_info[0] == 3
 IRONPYTHON = sys.platform == 'cli'
-EXEBUNDLE = os.path.split(sys.argv[0])[1].find('py') == -1
+EXEBUNDLE = getattr(sys, 'frozen', False)
 LOCALE = locale.getdefaultlocale()[0]
 CODEPAGE = locale.getdefaultlocale()[1]
 ANDROID = 'ANDROID_ARGUMENT' in os.environ
 
-__version__ = 2.003
+__version__ = 2.004
 DEVELOPMENT = True
 
 SCRIPT_NAME = "xeHentai"
