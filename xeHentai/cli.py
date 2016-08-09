@@ -150,7 +150,7 @@ def interactive(xeH):
     download_ori = _readline(i18n.PS_DOWNLOAD_ORI) == "y"
     proxy = _readline(i18n.PS_PROXY).strip()
     proxy = [proxy] if proxy else xeH.cfg['proxy']
-    _dir = _readline(i18n.PS_DOWNLOAD_DIR % os.path.abspath(xeH.cfg['dir']).decode('utf-8')) or xeH.cfg['dir']
+    _dir = _readline(i18n.PS_DOWNLOAD_DIR % os.path.abspath(xeH.cfg['dir']).decode(sys.getfilesystemencoding())) or xeH.cfg['dir']
     rename_ori = _readline(i18n.PS_RENAME_ORI) == "y"
     return {'urls': url, 'proxy': proxy, 'download_ori': download_ori, 'dir': _dir, 'rename_ori':rename_ori,
             'save_tasks': False}
