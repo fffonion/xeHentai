@@ -12,6 +12,7 @@ from threading import Thread
 from .i18n import i18n
 from .core import xeHentai
 from .const import *
+from .const import __version__
 from .util import logger
 
 from . import config as default_config
@@ -93,7 +94,7 @@ def main(xeH, opt):
 def parse_opt():
     _def = {k:v for k,v in default_config.__dict__.items() if not k.startswith("_")}
     _def.update({k:v for k,v in config.__dict__.items() if not k.startswith("_")})
-    parser = argparse.ArgumentParser(description = i18n.XEH_OPT_DESC, epilog = i18n.XEH_OPT_EPILOG)
+    parser = argparse.ArgumentParser(description = i18n.XEH_OPT_DESC, epilog = i18n.XEH_OPT_EPILOG, add_help = False)
     # the followings are handled in cli
     parser.add_argument('-u', '--username', help = i18n.XEH_OPT_u)
     parser.add_argument('-k', '--key', help = i18n.XEH_OPT_k)
@@ -121,14 +122,17 @@ def parse_opt():
                         help = i18n.XEH_OPT_p)
     parser.add_argument('-v', '--verbose', action = 'count', default = _def['log_verbose'],
                         help = i18n.XEH_OPT_v)
-    parser.add_argument('--rpc-port', type = int, metavar = "PORT", default = _def['rpc_port'],
-                        help = i18n.XEH_OPT_rpc_port)
     parser.add_argument('--rpc-interface', metavar = "ADDR", default = _def['rpc_interface'],
                         help = i18n.XEH_OPT_rpc_interface)
-    # parser.add_argument('--rpc-secret', metavar = "...", default = _def['rpc_secret'],
-    #                    help = i18n.XEH_OPT_rpc_secret)
+    parser.add_argument('--rpc-port', type = int, metavar = "PORT", default = _def['rpc_port'],
+                        help = i18n.XEH_OPT_rpc_port)
+    parser.add_argument('--rpc-secret', metavar = "...", default = _def['rpc_secret'],
+                        help = i18n.XEH_OPT_rpc_secret)
     parser.add_argument('-r', '--rename-ori', type = bool, metavar = "BOOL", default = _def['rename_ori'],
                         help = i18n.XEH_OPT_r)
+    parser.add_argument('-h','--help', action = 'help', help = i18n.XEH_OPT_h)
+    parser.add_argument('--version', action = 'version', version = '%s v%.3f' % (SCRIPT_NAME, __version__),
+                        help = i18n.XEH_OPT_version)
 
     args = parser.parse_args()
     return args

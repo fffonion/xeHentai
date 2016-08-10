@@ -137,6 +137,8 @@ class Monitor(Thread):
             self._exit("mon")
         # self.logger.verbose("mon#%s %s ask, %s, %s" % (self.task.guid, tname, _,
         #    self.thread_last_seen))
+        if tname in self.thread_zombie:
+            self.thread_zombie.remove(tname)
         if _ or not wrk_thread.is_alive():
             self.dctlock.acquire()
             if tname in self.thread_last_seen:
@@ -191,10 +193,9 @@ class Monitor(Thread):
                         self.logger.warning(i18n.THREAD_SWEEP_OUT % k)
                     del self.thread_last_seen[k]
             if intv == 5:
-                _ = "%s %dR/%dZ/%d, %s %dR/%dD" % (
+                _ = "%s %dR/%dZ, %s %dR/%dD" % (
                     i18n.THREAD,
                     len(self.thread_last_seen), len(self.thread_zombie),
-                    len(self.thread_last_seen) + len(self.thread_zombie),
                     i18n.QUEUE,
                     self.task.img_q.qsize(),
                     self.task.meta['finished'])

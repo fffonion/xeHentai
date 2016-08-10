@@ -19,6 +19,7 @@ err_msg = {
     ERR_RPC_INVALID_REQUEST: "Invalid request.",
     ERR_RPC_METHOD_NOT_FOUND: "Method not found.",
     ERR_RPC_INVALID_PARAMS: "Invalid method parameter(s).",
+    ERR_RPC_UNAUTHORIZED: "Unauthorized",
     ERR_RPC_EXEC_ERROR: "",
     ERR_SAVE_SESSION_FAILED: "",
 }
@@ -42,9 +43,11 @@ XEH_OPT_v = "show more detailed log (current: %(default)s)"
 XEH_OPT_i = "interactive mode, will be ignored in daemon mode (current: %(default)s)"
 XEH_OPT_r = "rename gallery image to original name, use sequence name if turned off  (current: %(default)s)"
 XEH_OPT_daemon = "daemon mode, can't use with -i (current: %(default)s)"
-XEH_OPT_rpc_interface = "bind jsonrpc server to this port (current: %(default)s)"
-XEH_OPT_rpc_port = "bind jsonrpc server to this address (current: %(default)s)"
+XEH_OPT_rpc_interface = "bind jsonrpc server to this address (current: %(default)s)"
+XEH_OPT_rpc_port = "bind jsonrpc server to this port (current: %(default)s)"
 XEH_OPT_rpc_secret = "jsonrpc secret string (current: %(default)s)"
+XEH_OPT_h = "show this help message and exit"
+XEH_OPT_version = "show program's version number and exit"
 XEH_OPT_IGNORING_I = "ignoring -i option in daemon mode"
 
 PS_LOGIN = "login to exhentai (y/n)? > "
@@ -76,7 +79,9 @@ XEH_LOGIN_FAILED = "can't login exhentai"
 XEH_LOAD_TASKS_CNT = "load %d tasks from saved session"
 XEH_LOAD_OLD_COOKIE = "load cookie from legacy cookie file"
 XEH_DAEMON_START = "daemon start at PID %d"
-XEH_RPC_STARTED = "rpc server listening on %s:%d"
+XEH_RPC_STARTED = "RPC server listening on %s:%d"
+XEH_RPC_TOO_OPEN = "RPC server is listening on public interface (%s) but no rpc_secret defined, which is not safe"
+XEH_RPC_CANNOT_BIND = "RPC server can't listen on requested address"
 XEH_PLATFORM_NO_DAEMON = "daemon mode is not supported on platform: %s"
 XEH_CLEANUP = "cleaning up..."
 XEH_CRITICAL_ERROR = "xeHentai throws critical error:\n%s"

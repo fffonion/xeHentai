@@ -70,8 +70,11 @@ xeH
   -v, --verbose         设置日志装逼等级 (默认: 2)
   --rpc-port PORT       设置JSON-RPC监听IP (默认: None)
   --rpc-interface ADDR  设置JSON-RPC监听端口 (默认: localhost)
+  --rpc-secret ...      设置JSON-RPC密钥 (默认: None)
   -r BOOL, --rename-ori BOOL
-                        将图片重命名为原始名称，如果关闭则使用序号 (默认: False)
+                        将图片重命名为原始名称，如果关闭则使用序号 (默认: True)
+  -h, --help            显示本帮助信息
+  --version             显示版本信息
 
 如果参数未指定，则使用config.py中的默认值
 
@@ -88,7 +91,13 @@ $ curl localhost:8010/jsonrpc -d '{"jsonrpc": "2.0", "id": 1, "method":"xeH.addT
 {"jsonrpc": "2.0", "id": 1, "result": "36df423e"}
 ```
 
-其中`method`为调用的方法，必须以**xeH.**开头。在`core.py`的xeHentai类中，所有不以下划线`_`开头的方法均可以通过RPC调用，但需将方法名的下划线命名法改为驼峰命名法。如`add_task`需改为`addTask`。
+如果`rpc_secret`设置为**hentai**，则需在params中带上这个值：
+```
+$ curl localhost:8010/jsonrpc -d '{"jsonrpc": "2.0", "id": 1, "method":"xeH.addTask", "params":["token:hentai",[args],{kwargs}]}'
+{"jsonrpc": "2.0", "id": 1, "result": "36df423e"}
+```
+
+其中`method`为调用的方法，必须以**xeH.** 开头。在`core.py`的xeHentai类中，所有不以下划线`_`开头的方法均可以通过RPC调用，但需将方法名的下划线命名法改为驼峰命名法。如`add_task`需改为`addTask`。
 
 参数列表请参阅xeHentai类。
 
