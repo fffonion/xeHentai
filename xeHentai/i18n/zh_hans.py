@@ -14,11 +14,13 @@ err_msg = {
     ERR_DELETE_RUNNING_TASK: "无法删除运行中的任务",
     ERR_TASK_CANNOT_PAUSE: "这个任务无法被暂停",
     ERR_TASK_CANNOT_RESUME: "这个任务无法被恢复",
+    ERR_CANNOT_CREATE_DIR: "无法创建文件夹 %s",
 #    ERR_HATHDL_NOTFOUND: "hathdl文件未找到"
     ERR_RPC_PARSE_ERROR: "Parse error.",
     ERR_RPC_INVALID_REQUEST: "Invalid request.",
     ERR_RPC_METHOD_NOT_FOUND: "Method not found.",
     ERR_RPC_INVALID_PARAMS: "Invalid method parameter(s).",
+    ERR_RPC_UNAUTHORIZED: "Unauthorized",
     ERR_RPC_EXEC_ERROR: "",
     ERR_SAVE_SESSION_FAILED: "",
 }
@@ -41,9 +43,11 @@ XEH_OPT_v = "设置日志装逼等级 (当前: %(default)s)"
 XEH_OPT_i = "交互模式，如果开启后台模式，此项会被忽略 (当前: %(default)s)"
 XEH_OPT_r = "将图片重命名为原始名称，如果关闭则使用序号 (当前: %(default)s)"
 XEH_OPT_daemon = "后台模式 (当前: %(default)s)"
-XEH_OPT_rpc_port = "设置JSON-RPC监听IP (当前: %(default)s)"
-XEH_OPT_rpc_interface = "设置JSON-RPC监听端口 (当前: %(default)s)"
+XEH_OPT_rpc_interface = "设置JSON-RPC监听IP (当前: %(default)s)"
+XEH_OPT_rpc_port = "设置JSON-RPC监听端口 (当前: %(default)s)"
 XEH_OPT_rpc_secret = "设置JSON-RPC密钥 (当前: %(default)s)"
+XEH_OPT_h = "显示本帮助信息"
+XEH_OPT_version = "显示版本信息"
 XEH_OPT_IGNORING_I = "后台模式已忽略 -i 参数"
 
 
@@ -76,7 +80,9 @@ XEH_LOGIN_FAILED = "无法登录绅士"
 XEH_LOAD_TASKS_CNT = "从存档中读取了%d个任务"
 XEH_LOAD_OLD_COOKIE = "从1.x版cookie文件从读取了登录信息"
 XEH_DAEMON_START = "后台进程已启动，PID为%d"
-XEH_RPC_STARTED = "rpc 服务器监听在 %s:%d"
+XEH_RPC_STARTED = "RPC服务器监听在 %s:%d"
+XEH_RPC_TOO_OPEN = "RPC服务器监听在公网IP (%s)，为了安全起见应该设置rpc_secret"
+XEH_RPC_CANNOT_BIND = "RPC服务器无法启动：%s"
 XEH_PLATFORM_NO_DAEMON = "后台模式不支持您的系统: %s"
 XEH_CLEANUP = "擦干净..."
 XEH_CRITICAL_ERROR = "xeHentai 抽风啦:\n%s"

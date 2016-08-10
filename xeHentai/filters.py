@@ -37,9 +37,9 @@ def flt_metadata(r, suc, fail):
         fail(ERR_ONLY_VISIBLE_EXH)
         return ERR_ONLY_VISIBLE_EXH
     meta = {}
-    #print(r.text)
-    sample_hash = re.findall('<a href="https*://(?:g.e-hentai|exhentai).org/./([a-f0-9]{10})/\d+\-\d+"><img', r.text)
-    meta['sample_hash'] = sample_hash
+    # print(r.text)
+    # sample_hash = re.findall('<a href="https*://(?:g.e-hentai|exhentai).org/./([a-f0-9]{10})/\d+\-\d+"><img', r.text)
+    # meta['sample_hash'] = sample_hash
     meta['resampled'] = {}
     meta['gjname'] = re.findall('="gj">(.*?)</h1>', r.text)[0]
     meta['gnname']= re.findall('="gn">(.*?)</h1>', r.text)[0]
