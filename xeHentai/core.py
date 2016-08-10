@@ -69,12 +69,19 @@ class xeHentai(object):
                 except Exception as ex:
                     self.logger.warning(str(ex))
             self.logger.debug(i18n.PROXY_CANDIDATE_CNT % len(self.proxy.proxies))
+        if cfg_dict['dir'] and not os.path.exists(cfg_dict['dir']):
+            try:
+                os.makedirs(cfg_dict['dir'])
+            except OSError as ex:  # Python >2.5
+                self.logger.error(i18n.ERR_CANNOT_CREATE_DIR % cfg_dict['dir'])
         if not self.rpc and self.cfg['rpc_port'] and self.cfg['rpc_interface']:
             self.rpc = RPCServer(self, (self.cfg['rpc_interface'], int(self.cfg['rpc_port'])),
                 secret = None if 'rpc_secret' not in self.cfg else self.cfg['rpc_secret'],
                 logger = self.logger)
+            if not re.findall('(localhost|127\.0\.0\.|::1)', self.cfg['rpc_interface']) and \
+                not self.cfg['rpc_secret']:
+                self.logger.warning(i18n.XEH_RPC_TOO_OPEN % self.cfg['rpc_interface'])
             self.rpc.start()
-            self.logger.info(i18n.XEH_RPC_STARTED % (self.cfg['rpc_interface'], int(self.cfg['rpc_port'])))
         self.logger.set_logfile(self.cfg['log_path'])
 
     def _get_httpreq(self):

@@ -43,7 +43,7 @@ def htmlescape(s):
             if match.group(1)=='#':
                 return unichr(int(match.group(2)))
             else:
-                return  dict.get(match.group(2), '?')
+                return dict.get(match.group(2), '?')
     htmlre=re.compile("&(#?)(\d{1,5}|\w{1,8}|[a-z]+);")
     return htmlre.sub(replc, s)
 
