@@ -19,6 +19,7 @@ err_msg = {
     ERR_RPC_INVALID_REQUEST: "Invalid request.",
     ERR_RPC_METHOD_NOT_FOUND: "Method not found.",
     ERR_RPC_INVALID_PARAMS: "Invalid method parameter(s).",
+    ERR_RPC_UNAUTHORIZED: "Unauthorized",
     ERR_RPC_EXEC_ERROR: "",
     ERR_SAVE_SESSION_FAILED: "",
 }

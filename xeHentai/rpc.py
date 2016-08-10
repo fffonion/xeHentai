@@ -33,9 +33,14 @@ class RPCServer(Thread):
         self._exit = exit_check if exit_check else lambda x:False
 
     def run(self):
-        self.server = ThreadedHTTPServer(self.bind_addr, lambda *x: Handler(self.xeH, *x))
-        while not self._exit("rpc"):
-            self.server.handle_request()
+        try:
+            self.server = ThreadedHTTPServer(self.bind_addr, lambda *x: Handler(self.xeH, self.secret, *x))
+        except Exception as ex:
+            self.logger.error(i18n.XEH_RPC_CANNOT_BIND % str(ex))
+        else:
+            self.logger.info(i18n.XEH_RPC_STARTED % (self.bind_addr[0], self.bind_addr[1]))
+            while not self._exit("rpc"):
+                self.server.handle_request()
 
 
 def jsonrpc_resp(request, ret = None, error_code = None, error_msg = None):
@@ -65,8 +70,9 @@ def path_filter(func):
 
 class Handler(BaseHTTPRequestHandler):
 
-    def __init__(self, xeH, *args):
+    def __init__(self, xeH, secret, *args):
         self.xeH = xeH
+        self.secret = secret
         self.args = args
         BaseHTTPRequestHandler.__init__(self, *args)
 
@@ -126,8 +132,17 @@ class Handler(BaseHTTPRequestHandler):
                 code = 404
                 rt = jsonrpc_resp({"id":j['id']}, error_code = ERR_RPC_METHOD_NOT_FOUND)
                 break
+            params = ([], {}) if 'params' not in j else j['params']
+            if self.secret:
+                if not PY3K:
+                    params[0] = params[0].encode('utf-8')
+                if isinstance(params[0], str) and re.findall("token:%s" % self.secret, params[0]):
+                    params.pop(0)
+                else:
+                    code = 400
+                    rt = jsonrpc_resp({"id":j['id']}, error_code = ERR_RPC_UNAUTHORIZED)
+                    break
             try:
-                params = ([], {}) if 'params' not in j else j['params']
                 cmd_rt = getattr(self.xeH, cmd_r)(*params[0], **params[1])
             except KeyboardInterrupt as ex:
                 self.xeH.logger.verbose("RPC exec error:\n%s" % traceback.format_exc())

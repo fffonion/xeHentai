@@ -73,8 +73,10 @@ class xeHentai(object):
             self.rpc = RPCServer(self, (self.cfg['rpc_interface'], int(self.cfg['rpc_port'])),
                 secret = None if 'rpc_secret' not in self.cfg else self.cfg['rpc_secret'],
                 logger = self.logger)
+            if not re.findall('(localhost|127\.0\.0\.|::1)', self.cfg['rpc_interface']) and \
+                not self.cfg['rpc_secret']:
+                self.logger.warning(i18n.XEH_RPC_TOO_OPEN % self.cfg['rpc_interface'])
             self.rpc.start()
-            self.logger.info(i18n.XEH_RPC_STARTED % (self.cfg['rpc_interface'], int(self.cfg['rpc_port'])))
         self.logger.set_logfile(self.cfg['log_path'])
 
     def _get_httpreq(self):

@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.005
+- 增加`rpc_secret`
+- `i18n/zh_cn`更名为`i18n/zh_hans`
+
+## 2.004
+- 支持Python3
+
 ## 2.003
 - 读取 .ehentai.cookie
 - 交互模式不保存任务
