@@ -3,12 +3,14 @@
 # Contributor:
 #      fffonion        <fffonion@gmail.com>
 
+import re
 import math
 import time
 import random
 import requests
 import traceback
 from threading import Thread, RLock
+from . import util
 from .const import *
 from .i18n import i18n
 if PY3K:
@@ -17,6 +19,12 @@ else:
     from Queue import Queue, Empty
 
 # pinfo = {'http':'socks5://127.0.0.1:16963', 'https':'socks5://127.0.0.1:16963'}
+
+class _FakeResponse(object):
+    def __init__(self, url):
+        self.status_code = 600
+        self.content = None
+        self.url = self._real_url = url
 
 class HttpReq(object):
     def __init__(self, headers = {}, proxy = None, retry = 10, timeout = 20, logger = None, tname = "main"):
@@ -29,10 +37,13 @@ class HttpReq(object):
         self.tname = tname
 
     def request(self, method, url, _filter, suc, fail, data = None):
-        for _ in range(self.retry):
+        retry = 0
+        while True:
+            if retry >= self.retry:
+                break
             try:
                 if self.proxy:
-                    f = self.proxy.proxied_request(self.session)
+                    f, __not_good = self.proxy.proxied_request(self.session)
                 else:
                     f = self.session.request
                 r = f(method, url,
@@ -43,7 +54,14 @@ class HttpReq(object):
                 self.logger.warning("%s-%s %s %s: %s" % (i18n.THREAD, self.tname, method, url, ex))
                 time.sleep(random.random() + 0.618)
             else:
-                self.logger.debug("%s-%s %s %s %d %d" % (i18n.THREAD, self.tname, method, url, r.status_code, len(r.content)))
+                self.logger.verbose("%s-%s %s %s %d %d" % (i18n.THREAD, self.tname, method, url, r.status_code, len(r.content)))
+                # intercept some error to see if we can change IP
+                if self.proxy and len(r.content) < 1024 and re.match("Your IP address has been temporarily banned", r.text):
+                    _t = util.parse_human_time(r.text)
+                    self.logger.warn(i18n.PROXY_DISABLE_BANNED % _t)
+                    # fail this proxy immediately and set expire time
+                    __not_good(expire = _t)
+                    continue
                 r.encoding = "utf-8"
                 # r._text_bytes = r.text.encode("utf-8")
                 if r.history:
@@ -51,7 +69,8 @@ class HttpReq(object):
                 else:
                     r._real_url = r.url
                 return _filter(r, suc, fail)
-        _filter(None, suc, fail)
+            retry += 1
+        return _filter(_FakeResponse(url), suc, fail)
 
 
 
@@ -86,10 +105,34 @@ class HttpWorker(Thread, HttpReq):
                 self.request("GET", url, self.flt, self.f_suc, self.f_fail)
             except Exception as ex:
                 self.logger.warning(i18n.THREAD_UNCAUGHT_EXCEPTION % (self.tname, traceback.format_exc()))
-                self.flt(None, self.f_suc, self.f_fail)
+                self.flt(_FakeResponse(url), self.f_suc, self.f_fail)
         # notify monitor the last time
         self.logger.verbose("t-%s exit" % self.name)
         self._keepalive(self)
+
+class ArchiveWorker(Thread):
+    def __init__(self, logger, task, exit_check = None):
+        Thread.__init__(self, name = "archiver%s" % task.guid)
+        Thread.setDaemon(self, True)
+        self.logger = logger
+        self.task = task
+        self._exit = lambda x: False
+
+    def run(self):
+        while self.task.state < TASK_STATE_FINISHED:
+            if self._exit(self) or self.task.state in (TASK_STATE_PAUSED, TASK_STATE_FAILED):
+                return
+            time.sleep(1)
+        self.logger.info(i18n.TASK_START_MAKE_ARCHIVE % self.task.guid)
+        self.task.state = TASK_STATE_MAKE_ARCHIVE
+        try:
+            pth = self.task.make_archive()
+        except Exception as ex:
+            self.task.state = TASK_STATE_FAILED
+            self.logger.error(i18n.TASK_ERROR % (self.task.guid, i18n.c(ERR_CANNOT_MAKE_ARCHIVE) % str(ex)))
+        else:
+            self.task.state = TASK_STATE_FINISHED
+            self.logger.info(i18n.TASK_MAKE_ARCHIVE_FINISHED % (self.task.guid, pth))
 
 
 class Monitor(Thread):
@@ -172,6 +215,10 @@ class Monitor(Thread):
             self._rescan_pages()
             self.task.meta['has_ori'] = True
             self.vote_cleared.add(ERR_IMAGE_RESAMPLED)
+        elif ERR_QUOTA_EXCEEDED in self.vote_result and \
+            self.vote_result[ERR_QUOTA_EXCEEDED] >= len(self.thread_last_seen):
+            self.logger.error(i18n.TASK_STOP_QUOTA_EXCEEDED % self.task.guid)
+            self.task.state = TASK_STATE_FAILED
 
     def set_title(self, s):
          if os.name == "nt":
@@ -192,7 +239,7 @@ class Monitor(Thread):
                     else:
                         self.logger.warning(i18n.THREAD_SWEEP_OUT % k)
                     del self.thread_last_seen[k]
-            if intv == 5:
+            if intv == 10:
                 _ = "%s %dR/%dZ, %s %dR/%dD" % (
                     i18n.THREAD,
                     len(self.thread_last_seen), len(self.thread_zombie),
@@ -202,14 +249,13 @@ class Monitor(Thread):
                 self.logger.info(_)
                 self.set_title(_)
                 intv = 0
-            time.sleep(1)
+            time.sleep(0.5)
         if self.task.meta['finished'] == self.task.meta['total']:
-            self.task.state = TASK_STATE_FINISHED
             self.task.rename_ori()
-            self.logger.info(i18n.TASK_FINISHED % self.task.guid)
             self.set_title(i18n.TASK_FINISHED % self.task.guid)
+            self.logger.info(i18n.TASK_FINISHED % self.task.guid)
+            self.task.state = TASK_STATE_FINISHED
         self.task.cleanup()
-
 
 if __name__ == '__main__':
     print(HttpReq().request("GET", "https://ipip.tk", lambda x:x, None, None))

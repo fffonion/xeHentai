@@ -9,11 +9,14 @@ err_msg = {
     ERR_MALFORMED_HATHDL: "hathdl文件有貓餅，解析失敗",
     ERR_GALLERY_REMOVED: "這個本子被移除了，大概里站能看到",
     ERR_NO_PAGEURL_FOUND: "沒有找到頁面鏈接，網站改版了嘛？",
+    ERR_CONNECTION_ERROR: "連接有問題？",
+    ERR_IP_BANNED: "IP被ban了, 恢復時間: %s",
     ERR_TASK_NOT_FOUND: "沒有該GUID對應的任務",
     ERR_TASK_LEVEL_UNDEF: "任務過濾等級不存在",
     ERR_DELETE_RUNNING_TASK: "無法刪除運行中的任務",
     ERR_TASK_CANNOT_PAUSE: "這個任務無法被暫停",
     ERR_TASK_CANNOT_RESUME: "這個任務無法被恢復",
+    ERR_CANNOT_CREATE_DIR: "無法創建文件夾 %s",
 #    ERR_HATHDL_NOTFOUND: "hathdl文件未找到"
     ERR_RPC_PARSE_ERROR: "Parse error.",
     ERR_RPC_INVALID_REQUEST: "Invalid request.",
@@ -42,9 +45,12 @@ XEH_OPT_v = "設置日誌裝逼等級 (當前: %(default)s)"
 XEH_OPT_i = "交互模式，如果開啟後台模式，此項會被忽略 (當前: %(default)s)"
 XEH_OPT_r = "將圖片重命名為原始名稱，如果關閉則使用序號 (當前: %(default)s)"
 XEH_OPT_daemon = "後台模式 (當前: %(default)s)"
-XEH_OPT_rpc_port = "設置JSON-RPC監聽IP (當前: %(default)s)"
-XEH_OPT_rpc_interface = "設置JSON-RPC監聽埠 (當前: %(default)s)"
+XEH_OPT_rpc_interface = "設置JSON-RPC監聽IP (當前: %(default)s)"
+XEH_OPT_rpc_port = "設置JSON-RPC監聽埠 (當前: %(default)s)"
 XEH_OPT_rpc_secret = "設置JSON-RPC密鑰 (當前: %(default)s)"
+XEH_OPT_a = "下載完成後生成zip壓縮包並刪除下載目錄 (當前: %(default)s)"
+XEH_OPT_h = "顯示本幫助信息"
+XEH_OPT_version = "顯示版本信息"
 XEH_OPT_IGNORING_I = "後台模式已忽略 -i 參數"
 
 
@@ -55,6 +61,7 @@ PS_URL = "輸入地址（使用,分割下載多個）> "
 PS_PROXY = "輸入代理地址 (可選) > "
 PS_DOWNLOAD_ORI = "是否下載原圖（默認否） (y/n)? > "
 PS_RENAME_ORI  = "是否自動重命名（默認否） (y/n)? > "
+PS_MAKE_ARCHIVE = "是否製作zip壓縮包（默認否） (y/n)? > "
 PS_DOWNLOAD_DIR = "下載目錄 (當前: %s)\n回車確認或輸入新路徑 > "
 
 PROXY_CANDIDATE_CNT = "代理池中有%d個代理"
@@ -65,9 +72,12 @@ TASK_MIGRATE_EXH = "任務 #%s 使用里站地址重新下載"
 TASK_TITLE = "任務 #%s 標題 %s"
 TASK_WILL_DOWNLOAD_CNT = "任務 #%s 將下載%d個文件，共%d個 "
 TASK_START = "任務 #%s 開始"
-TASK_FINISHED = "任務 #%s 完成"
+TASK_FINISHED = "任務 #%s 下載完成"
 TASK_START_PAGE_RESCAN = "任務 #%s 圖片被縮放，進行完整掃描"
-TASK_FAST_SCAN = "任務 #%s 使用快速掃描"
+# TASK_FAST_SCAN = "任務 #%s 使用快速掃描"
+TASK_START_MAKE_ARCHIVE = "任務 #%s 開始打包"
+TASK_MAKE_ARCHIVE_FINISHED = "任務 #%s 打包完成，保存在: %s"
+TASK_STOP_QUOTA_EXCEEDED = "任務 #%s 配額超限"
 
 XEH_STARTED = "xeHentai %s 已啟動"
 XEH_LOOP_FINISHED = "程序循環已完成"
@@ -77,12 +87,15 @@ XEH_LOGIN_FAILED = "無法登錄紳士"
 XEH_LOAD_TASKS_CNT = "從存檔中讀取了%d個任務"
 XEH_LOAD_OLD_COOKIE = "從1.x版cookie文件從讀取了登錄信息"
 XEH_DAEMON_START = "後台進程已啟動，PID為%d"
-XEH_RPC_STARTED = "rpc 伺服器監聽在 %s:%d"
 XEH_PLATFORM_NO_DAEMON = "後台模式不支持您的系統: %s"
 XEH_CLEANUP = "擦乾淨..."
 XEH_CRITICAL_ERROR = "xeHentai 抽風啦:\n%s"
 XEH_DOWNLOAD_ORI_NEED_LOGIN = "下載原圖需要登錄"
 XEH_FILE_DOWNLOADED = "圖片已下載 #%03d %s"
+
+RPC_STARTED = "RPC伺服器監聽在 %s:%d"
+RPC_TOO_OPEN = "RPC伺服器監聽在公網IP (%s)，為了安全起見應該設置rpc_secret"
+RPC_CANNOT_BIND = "RPC伺服器無法啟動：%s"
 
 SESSION_LOAD_EXCEPTION = "讀取存檔時遇到錯誤: %s"
 SESSION_WRITE_EXCEPTION = "寫入存檔時遇到錯誤: %s"
@@ -93,3 +106,5 @@ THREAD_MAY_BECOME_ZOMBIE = "紳士-%s 可能變成了喪屍"
 THREAD_SWEEP_OUT = "紳士-%s 掛了, 不再理它"
 
 QUEUE = "隊列"
+
+PROXY_DISABLE_BANNED = "禁用了一個被ban的代理，將在約%s秒後恢復"

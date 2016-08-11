@@ -36,9 +36,9 @@ class RPCServer(Thread):
         try:
             self.server = ThreadedHTTPServer(self.bind_addr, lambda *x: Handler(self.xeH, self.secret, *x))
         except Exception as ex:
-            self.logger.error(i18n.XEH_RPC_CANNOT_BIND % str(ex))
+            self.logger.error(i18n.RPC_CANNOT_BIND % str(ex))
         else:
-            self.logger.info(i18n.XEH_RPC_STARTED % (self.bind_addr[0], self.bind_addr[1]))
+            self.logger.info(i18n.RPC_STARTED % (self.bind_addr[0], self.bind_addr[1]))
             while not self._exit("rpc"):
                 self.server.handle_request()
 

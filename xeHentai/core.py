@@ -80,7 +80,7 @@ class xeHentai(object):
                 logger = self.logger)
             if not re.findall('(localhost|127\.0\.0\.|::1)', self.cfg['rpc_interface']) and \
                 not self.cfg['rpc_secret']:
-                self.logger.warning(i18n.XEH_RPC_TOO_OPEN % self.cfg['rpc_interface'])
+                self.logger.warning(i18n.RPC_TOO_OPEN % self.cfg['rpc_interface'])
             self.rpc.start()
         self.logger.set_logfile(self.cfg['log_path'])
 
@@ -95,7 +95,7 @@ class xeHentai(object):
     def add_task(self, url, cfg_dict = {}):
         url = url.strip()
         cfg = {k:v for k, v in self.cfg.items() if k in (
-            "dir", "download_ori", "download_thread_cnt", "scan_thread_cnt", "rename_ori")}
+            "dir", "download_ori", "download_thread_cnt", "scan_thread_cnt", "rename_ori", "make_archive")}
         cfg.update(cfg_dict)
         if cfg['download_ori'] and not self.has_login:
             self.logger.warning(i18n.XEH_DOWNLOAD_ORI_NEED_LOGIN)
@@ -192,17 +192,25 @@ class xeHentai(object):
                 monitor_started = True
 
             if task.state == TASK_STATE_GET_META: # grab meta data
-                r = req.request("GET", task.url,
-                    filters.flt_metadata,
-                    lambda x:(task.meta.update(x),
-                        self.logger.info(i18n.TASK_TITLE % (
-                            task_guid, task.meta['gjname'] or task.meta['gnname']))),
-                    lambda x:task.set_fail(x))
-                if r in (ERR_ONLY_VISIBLE_EXH, ERR_GALLERY_REMOVED) and self.has_login and \
+                try:
+                    r = req.request("GET", task.url,
+                        filters.flt_metadata,
+                        lambda x:task.meta.update(x),
+                        lambda x:task.set_fail(x))
+                except Exception as ex:
+                    self.logger.error(i18n.TASK_ERROR % (task.guid, str(ex)))
+                    task.state = TASK_STATE_FAILED
+                    break
+                if task.failcode in (ERR_ONLY_VISIBLE_EXH, ERR_GALLERY_REMOVED) and self.has_login and \
                         task.migrate_exhentai():
                     self.logger.info(i18n.TASK_MIGRATE_EXH % task_guid)
                     self.tasks.put(task_guid)
                     break
+                elif task.failcode == ERR_IP_BANNED:
+                    self.logger.error(i18n.c(ERR_IP_BANNED) % r)
+                    task.state = TASK_STATE_FAILED
+                    break
+
             # elif task.state == TASK_STATE_GET_HATHDL: # download hathdl
             #     r = req.request("GET",
             #         "%s/hathdler.php?gid=%s&t=%s" % (task.base_url(), task.gid, task.sethash),
@@ -224,6 +232,8 @@ class xeHentai(object):
                 # scan by our own, should not be here currently
                 # start backup thread
                 task.scan_downloaded()
+                if task.state == TASK_STATE_FINISHED:
+                    continue
                 for x in range(0, int(math.ceil(task.meta['total'] / 40.0))):
                     r = req.request("GET",
                         "%s/?p=%d" % (task.url, x),
@@ -232,11 +242,13 @@ class xeHentai(object):
                         lambda x: task.set_fail(x))
                     if task.failcode:
                         break
-                if not task.failcode:
-                    self.logger.info(i18n.TASK_WILL_DOWNLOAD_CNT % (
-                        task_guid, task.meta['total'] - len(task._flist_done),
-                        task.meta['total']))
             elif task.state == TASK_STATE_SCAN_IMG:
+                # print here so that see it after we can join former threads
+                self.logger.info(i18n.TASK_TITLE % (
+                    task_guid, task.meta['gjname'] or task.meta['gnname']))
+                self.logger.info(i18n.TASK_WILL_DOWNLOAD_CNT % (
+                    task_guid, task.meta['total'] - len(task._flist_done),
+                    task.meta['total']))
                 # spawn thread to scan images
                 for i in range(task.config['scan_thread_cnt']):
                     tid = 'scan-%d' % (i + 1)
@@ -248,8 +260,8 @@ class xeHentai(object):
                         lambda x, tid = tid: (mon.vote(tid, x)),
                         mon.wrk_keepalive)
                     # _._exit = lambda t: t._finish_queue()
-                    _.start()
                     self._all_threads[TASK_STATE_SCAN_IMG].append(_)
+                    _.start()
                 task.state = TASK_STATE_DOWNLOAD - 1
             elif task.state == TASK_STATE_SCAN_ARCHIVE:
                 task.state = TASK_STATE_DOWNLOAD - 1
@@ -264,11 +276,19 @@ class xeHentai(object):
                             mon.vote(tid, 0)),
                         lambda x, tid = tid: (
                             task.page_q.put(task.get_reload_url(x[1])),# if x[0] != ERR_QUOTA_EXCEEDED else None,
+                            self.logger.debug("put a failed file %s into queue" % tid),
                             mon.vote(tid, x[0])),
                         mon.wrk_keepalive)
-                    _.start()
                     self._all_threads[TASK_STATE_DOWNLOAD].append(_)
-
+                    _.start()
+                # spawn archiver if we need
+                if task.config['make_archive']:
+                    if self._all_threads[TASK_STATE_MAKE_ARCHIVE]:
+                        self._all_threads[TASK_STATE_MAKE_ARCHIVE][0].join()
+                        self._all_threads[TASK_STATE_MAKE_ARCHIVE] = []
+                    _a = ArchiveWorker(self.logger, task)
+                    self._all_threads[TASK_STATE_MAKE_ARCHIVE].append(_a)
+                    _a.start()
                 # break current task loop
                 break
 
@@ -315,15 +335,18 @@ class xeHentai(object):
         self._exit = self._exit if self._exit > 0 else XEH_STATE_SOFT_EXIT
         self.save_session()
         self._join_all()
-        # save it again in case we miss something
-        self.save_session()
         self.logger.cleanup()
         # let's send a request to rpc server to unblock it
         if self.rpc:
             self.rpc._exit = lambda x:True
             import requests
-            requests.get("http://%s:%s/" % (self.cfg['rpc_interface'], self.cfg['rpc_port']))
+            try:
+                requests.get("http://%s:%s/" % (self.cfg['rpc_interface'], self.cfg['rpc_port']))
+            except:
+                pass
             self.rpc.join()
+        # save it again in case we miss something
+        self.save_session()
         self._exit = XEH_STATE_CLEAN
 
     def _join_all(self):
@@ -369,7 +392,7 @@ class xeHentai(object):
                     if self.cookies:
                         self.headers.update({'Cookie':util.make_cookie(self.cookies)})
                         self.has_login = True
-        _1xcookie = os.path.join(FILEPATH, ".ehentai.cookie")# 1.x cookie filelist
+        _1xcookie = os.path.join(FILEPATH, ".ehentai.cookie")# 1.x cookie file
         if not self.has_login and os.path.exists(_1xcookie):
             with open(_1xcookie) as f:
                 try:
@@ -380,7 +403,6 @@ class xeHentai(object):
                     self.logger.info(i18n.XEH_LOAD_OLD_COOKIE)
                 except:
                     pass
-
 
         return ERR_NO_ERROR, None
 
@@ -405,7 +427,7 @@ class xeHentai(object):
                 self.headers.update({'Cookie':util.make_cookie(self.cookies)}),
                 self.save_session(),
                 self.logger.info(i18n.XEH_LOGIN_OK)),
-            lambda x:(self.logger.warning(x),
+            lambda x:(self.logger.warning(str(x)),
                 self.logger.info(i18n.XEH_LOGIN_FAILED)),
             logindata)
         return ERR_NO_ERROR, self.has_login
