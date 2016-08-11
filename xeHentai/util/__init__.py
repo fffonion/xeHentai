@@ -18,7 +18,9 @@ def parse_cookie(coostr):
         coo = coo.strip()
         if coo.lower() in ('secure', 'httponly'):
             continue
-        k, v = coo.split("=")
+        _ = coo.split("=")
+        k = _[0]
+        v = "=".join(_[1:])
         if k.lower() in ('path', 'expires', 'domain', 'max-age', 'comment'):
             continue
         ret[k] = v
