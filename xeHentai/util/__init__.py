@@ -34,6 +34,21 @@ def make_ua():
         rrange(21, 27, 10), rrange(0, 9999, 10), rrange(535, 538, 10)
     )
 
+def parse_human_time(s):
+    rt = 0
+    day = re.findall('(\d+)\sdays*', s)
+    if day:
+        rt += 86400 * int(day[0])
+    hour = re.findall('(\d+)\shours*', s)
+    if hour:
+        rt += 3600 * int(hour[0])
+    minute = re.findall('(\d+)\sminutes*', s)
+    if minute:
+        rt += 60 * int(minute[0])
+    else:
+        rt += 60
+    return rt
+
 def htmlescape(s):
     def replc(match):
         #print match.group(0),match.group(1),match.group(2)

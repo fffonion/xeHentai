@@ -8,6 +8,7 @@ import os
 import time
 import argparse
 import traceback
+import threading
 from threading import Thread
 from .i18n import i18n
 from .core import xeHentai
@@ -130,6 +131,8 @@ def parse_opt():
                         help = i18n.XEH_OPT_rpc_secret)
     parser.add_argument('-r', '--rename-ori', type = bool, metavar = "BOOL", default = _def['rename_ori'],
                         help = i18n.XEH_OPT_r)
+    parser.add_argument('-a', '--archive', type = bool, metavar = "BOOL", default = _def['make_archive'],
+                        help = i18n.XEH_OPT_a)
     parser.add_argument('-h','--help', action = 'help', help = i18n.XEH_OPT_h)
     parser.add_argument('--version', action = 'version', version = '%s v%.3f' % (SCRIPT_NAME, __version__),
                         help = i18n.XEH_OPT_version)
@@ -154,7 +157,11 @@ def interactive(xeH):
     download_ori = _readline(i18n.PS_DOWNLOAD_ORI) == "y"
     proxy = _readline(i18n.PS_PROXY).strip()
     proxy = [proxy] if proxy else xeH.cfg['proxy']
-    _dir = _readline(i18n.PS_DOWNLOAD_DIR % os.path.abspath(xeH.cfg['dir']).decode(sys.getfilesystemencoding())) or xeH.cfg['dir']
+    __def_dir = os.path.abspath(xeH.cfg['dir'])
+    if not PY3K:
+        __def_dir = __def_dir.decode(sys.getfilesystemencoding())
+    _dir = _readline(i18n.PS_DOWNLOAD_DIR % __def_dir) or xeH.cfg['dir']
     rename_ori = _readline(i18n.PS_RENAME_ORI) == "y"
+    make_archive = _readline(i18n.PS_MAKE_ARCHIVE) == "y"
     return {'urls': url, 'proxy': proxy, 'download_ori': download_ori, 'dir': _dir, 'rename_ori':rename_ori,
-            'save_tasks': False}
+            'make_archive': make_archive, 'save_tasks': False}

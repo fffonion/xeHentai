@@ -8,9 +8,12 @@ import re
 import copy
 import json
 import uuid
+import shutil
+import zipfile
 from threading import RLock
 from . import util
 from .const import *
+from .const import __version__
 if PY3K:
     from queue import Queue, Empty
 else:
@@ -101,17 +104,17 @@ class Task(object):
 
     def scan_downloaded(self, scaled = True):
         fpath = os.path.join(self.config['dir'], util.legalpath(self.meta['title']))
-        if not os.path.exists(fpath):
-            return
         donefile = False
-        if os.path.exists(os.path.join(fpath, ".xehdone")):
+        if os.path.exists(os.path.join(fpath, ".xehdone")) or os.path.exists("%s.zip" % fpath):
             donefile = True
         # can only check un-renamed files
         for fid in range(1, self.meta['total'] + 1):
             fname = os.path.join(fpath, "%03d.jpg" % int(fid)) # id
-            if (os.path.exists(fname) and os.stat(fname).st_size > 0) or donefile:
+            if donefile or (os.path.exists(fname) and os.stat(fname).st_size > 0):
                 self._flist_done.add(int(fid))
         self.meta['finished'] = len(self._flist_done)
+        if self.meta['finished'] == self.meta['total']:
+            self.state == TASK_STATE_FINISHED
 
     def queue_wrapper(self, callback, pichash = None, url = None):
         # if url is not finished, call callback to put into queue
@@ -168,6 +171,17 @@ class Task(object):
             if cnt == self.meta['total']:
                 with open(os.path.join(fpath, ".xehdone"), "w"):
                     pass
+
+    def make_archive(self):
+        dpath = os.path.join(self.config['dir'], util.legalpath(self.meta['title']))
+        with zipfile.ZipFile('%s.zip' % dpath, 'w')  as zipFile:
+            zipFile.comment = ("xeHentai Archiver v%s\nTitle:%s\nOriginal URL:%s" % (
+                __version__, self.meta['title'], self.url)).encode('utf-8')
+            for f in sorted(os.listdir(dpath)):
+                fullpath = os.path.join(dpath, f)
+                zipFile.write(fullpath, f, zipfile.ZIP_STORED)
+        shutil.rmtree(dpath)
+        return '%s.zip' % dpath
 
     def from_dict(self, j):
         for k in self.__dict__:

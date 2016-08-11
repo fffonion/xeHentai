@@ -4,11 +4,14 @@
 #      fffonion        <fffonion@gmail.com>
 
 import re
+import time
 import random
 from requests.exceptions import ConnectTimeout, ConnectionError, InvalidSchema
 from requests.packages.urllib3.exceptions import ProxySchemeUnknown
 from . import util
 from .const import *
+
+MAX_FAIL = 5
 
 class PoolException(Exception):
     pass
@@ -18,21 +21,35 @@ class Pool(object):
         self.proxies = {}
         self.errors = {}
         if not disable_policy:
-            self.disable_policy = lambda x, y: y >= 5
+            self.disable_policy = lambda x, y: y >= MAX_FAIL
         else:
             self.disable_policy = disable_policy
-        self.disabled = set()
+        self.disabled = {} # key: expire
 
     def proxied_request(self, session):
+        for d in self.disabled:
+            if 0 < self.disabled[d] < time.time():
+                try:
+                    del self.disabled[d]
+                except:
+                    pass
         l = [i for i in self.proxies.keys() if i not in self.disabled]
         if not l:
             raise PoolException("try to use proxy but no proxies avaliable")
         # _ = self.proxies[random.choice(l)]
         _ = self.proxies[l[0]]
-        return _[0](session)
+        return _[0](session), self.not_good(l[0])
 
     def has_available_proxies(self):
         return len([i for i in self.proxies.keys() if i not in self.disabled]) == 0
+
+    def not_good(self, addr):
+        def n(weight = MAX_FAIL, expire = 0):
+            self.proxies[addr][2] += weight
+            if self.disable_policy(*self.proxies[addr][1:]):
+                # add to disabled set
+                self.disabled[addr] = expire + time.time()
+        return n
 
     def trace_proxy(self, addr, weight = 1, check_func = None, exceptions = []):
         def _(func):
@@ -53,8 +70,8 @@ class Pool(object):
                         # suc count + 1
                         self.proxies[addr][1] += weight
                 if self.disable_policy(*self.proxies[addr][1:]):
-                    # add to disabled set
-                    self.disabled.add(addr)
+                    # add to disabled set and never expire
+                    self.disabled[addr] = 0
                 # print(self.proxies[addr])
                 if ex:
                     import traceback

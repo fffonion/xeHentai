@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.006
+- 增加`make_archive`, 下载完成后生成zip压缩包并删除下载目录
+- 完善reload机制
+- 检测IP是否被ban并自动更换代理IP
+
 ## 2.005
 - 增加`rpc_secret`
 - `i18n/zh_cn`更名为`i18n/zh_hans`

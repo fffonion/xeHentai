@@ -40,7 +40,7 @@ xeH
  - **rpc_port** RPC绑定的端口，默认为`None`
  - **rpc_secret** RPC密钥，默认为`None`
  - **save_tasks** 是否保存任务到`h.json`，默认为是
-
+ - **make_archive** 是否下载完成后生成zip压缩包，并删除下载目录，默认为否
 
 ### 命令行模式
 ```
@@ -73,6 +73,8 @@ xeH
   --rpc-secret ...      设置JSON-RPC密钥 (默认: None)
   -r BOOL, --rename-ori BOOL
                         将图片重命名为原始名称，如果关闭则使用序号 (默认: True)
+  -a BOOL, --archive BOOL
+                        下载完成后生成zip压缩包并删除下载目录 (默认: False)
   -h, --help            显示本帮助信息
   --version             显示版本信息
 
@@ -103,6 +105,8 @@ $ curl localhost:8010/jsonrpc -d '{"jsonrpc": "2.0", "id": 1, "method":"xeH.addT
 
 如果浏览器安装了用户脚本插件，可以[下载xeHentaiHelper.user.js](http://dl.yooooo.us/userscripts/xeHentaiHelper.user.js)，将会在页面上添加`Add to xeHentai`链接，以支持将当前页面添加到xeHentai中。Chrome用户需要安装[Tampermonkey](https://chrome.google.com/webstore/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo)，
 Firefox用户需要安装[Greasemonkey](https://addons.mozilla.org/en-US/firefox/addon/greasemonkey/)，Opera和傲游用户需要安装暴力猴。
+
+**由于里站启用了https，而rpc走的是http，所以chrome用户需要点击地址栏右侧盾牌，选择“加载不安全的脚本”**
 
 ### 运行模式
 

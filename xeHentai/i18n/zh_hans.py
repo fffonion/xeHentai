@@ -9,6 +9,8 @@ err_msg = {
     ERR_MALFORMED_HATHDL: "hathdl文件有猫饼，解析失败",
     ERR_GALLERY_REMOVED: "这个本子被移除了，大概里站能看到",
     ERR_NO_PAGEURL_FOUND: "没有找到页面链接，网站改版了嘛？",
+    ERR_CONNECTION_ERROR: "连接有问题？",
+    ERR_IP_BANNED: "IP被ban了, 恢复时间: %s",
     ERR_TASK_NOT_FOUND: "没有该GUID对应的任务",
     ERR_TASK_LEVEL_UNDEF: "任务过滤等级不存在",
     ERR_DELETE_RUNNING_TASK: "无法删除运行中的任务",
@@ -46,6 +48,7 @@ XEH_OPT_daemon = "后台模式 (当前: %(default)s)"
 XEH_OPT_rpc_interface = "设置JSON-RPC监听IP (当前: %(default)s)"
 XEH_OPT_rpc_port = "设置JSON-RPC监听端口 (当前: %(default)s)"
 XEH_OPT_rpc_secret = "设置JSON-RPC密钥 (当前: %(default)s)"
+XEH_OPT_a = "下载完成后生成zip压缩包并删除下载目录 (当前: %(default)s)"
 XEH_OPT_h = "显示本帮助信息"
 XEH_OPT_version = "显示版本信息"
 XEH_OPT_IGNORING_I = "后台模式已忽略 -i 参数"
@@ -58,6 +61,7 @@ PS_URL = "输入地址（使用,分割下载多个）> "
 PS_PROXY = "输入代理地址 (可选) > "
 PS_DOWNLOAD_ORI = "是否下载原图（默认否） (y/n)? > "
 PS_RENAME_ORI  = "是否自动重命名（默认否） (y/n)? > "
+PS_MAKE_ARCHIVE = "是否制作zip压缩包（默认否） (y/n)? > "
 PS_DOWNLOAD_DIR = "下载目录 (当前: %s)\n回车确认或输入新路径 > "
 
 PROXY_CANDIDATE_CNT = "代理池中有%d个代理"
@@ -68,9 +72,12 @@ TASK_MIGRATE_EXH = "任务 #%s 使用里站地址重新下载"
 TASK_TITLE = "任务 #%s 标题 %s"
 TASK_WILL_DOWNLOAD_CNT = "任务 #%s 将下载%d个文件，共%d个 "
 TASK_START = "任务 #%s 开始"
-TASK_FINISHED = "任务 #%s 完成"
+TASK_FINISHED = "任务 #%s 下载完成"
 TASK_START_PAGE_RESCAN = "任务 #%s 图片被缩放，进行完整扫描"
-TASK_FAST_SCAN = "任务 #%s 使用快速扫描"
+# TASK_FAST_SCAN = "任务 #%s 使用快速扫描"
+TASK_START_MAKE_ARCHIVE = "任务 #%s 开始打包"
+TASK_MAKE_ARCHIVE_FINISHED = "任务 #%s 打包完成，保存在: %s"
+TASK_STOP_QUOTA_EXCEEDED = "任务 #%s 配额超限"
 
 XEH_STARTED = "xeHentai %s 已启动"
 XEH_LOOP_FINISHED = "程序循环已完成"
@@ -80,14 +87,15 @@ XEH_LOGIN_FAILED = "无法登录绅士"
 XEH_LOAD_TASKS_CNT = "从存档中读取了%d个任务"
 XEH_LOAD_OLD_COOKIE = "从1.x版cookie文件从读取了登录信息"
 XEH_DAEMON_START = "后台进程已启动，PID为%d"
-XEH_RPC_STARTED = "RPC服务器监听在 %s:%d"
-XEH_RPC_TOO_OPEN = "RPC服务器监听在公网IP (%s)，为了安全起见应该设置rpc_secret"
-XEH_RPC_CANNOT_BIND = "RPC服务器无法启动：%s"
 XEH_PLATFORM_NO_DAEMON = "后台模式不支持您的系统: %s"
 XEH_CLEANUP = "擦干净..."
 XEH_CRITICAL_ERROR = "xeHentai 抽风啦:\n%s"
 XEH_DOWNLOAD_ORI_NEED_LOGIN = "下载原图需要登录"
 XEH_FILE_DOWNLOADED = "图片已下载 #%03d %s"
+
+RPC_STARTED = "RPC服务器监听在 %s:%d"
+RPC_TOO_OPEN = "RPC服务器监听在公网IP (%s)，为了安全起见应该设置rpc_secret"
+RPC_CANNOT_BIND = "RPC服务器无法启动：%s"
 
 SESSION_LOAD_EXCEPTION = "读取存档时遇到错误: %s"
 SESSION_WRITE_EXCEPTION = "写入存档时遇到错误: %s"
@@ -98,3 +106,5 @@ THREAD_MAY_BECOME_ZOMBIE = "绅士-%s 可能变成了丧尸"
 THREAD_SWEEP_OUT = "绅士-%s 挂了, 不再理它"
 
 QUEUE = "队列"
+
+PROXY_DISABLE_BANNED = "禁用了一个被ban的代理，将在约%s秒后恢复"
