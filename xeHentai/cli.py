@@ -8,7 +8,6 @@ import os
 import time
 import argparse
 import traceback
-import threading
 from threading import Thread
 from .i18n import i18n
 from .core import xeHentai

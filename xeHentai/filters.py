@@ -41,18 +41,15 @@ def flt_metadata(r, suc, fail):
     # print(r.text)
     # sample_hash = re.findall('<a href="https*://(?:g.e-hentai|exhentai).org/./([a-f0-9]{10})/\d+\-\d+"><img', r.text)
     # meta['sample_hash'] = sample_hash
-    meta['resampled'] = {}
-    try:
-        meta['gjname'] = util.htmlescape(re.findall('="gj">(.*?)</h1>', r.text)[0])
-        meta['gnname']= util.htmlescape(re.findall('="gn">(.*?)</h1>', r.text)[0])
-        meta['title'] = meta['gjname'] if meta['gjname'] else meta['gnname']
-        meta['total'] = int(re.findall('Length:</td><td class="gdt2">(\d+)\s+page', r.text)[0])
-        meta['finished'] = 0
-        meta['tags'] = {}
-    except IndexError:
-        pass
-    else:
-        suc(meta)
+    # meta['resampled'] = {}
+    meta['gjname'] = util.htmlescape(re.findall('="gj">(.*?)</h1>', r.text)[0])
+    meta['gnname']= util.htmlescape(re.findall('="gn">(.*?)</h1>', r.text)[0])
+    meta['title'] = meta['gjname'] if meta['gjname'] else meta['gnname']
+    meta['total'] = int(re.findall('Length:</td><td class="gdt2">(\d+)\s+page', r.text)[0])
+    meta['finished'] = 0
+    meta['tags'] = {}
+
+    suc(meta)
     # _ = re.findall(
     #    'https*://(g\.e\-|ex)hentai\.org/[^/]+/(\d+)/[^/]+/\?p=\d*" onclick="return false"(.*?)</a>',
     #    r.text)
@@ -91,7 +88,6 @@ def flt_metadata(r, suc, fail):
 def flt_pageurl(r, suc, fail):
     # input gallery response
     # add per image urls if suc; finish task if fail
-    # TODO: catch re exceptions
     picpage = re.findall('<a href="(https*://(?:g.e-hentai|exhentai).org/./[a-f0-9]{10}/\d+\-\d+)"><img', r.text)
     if not picpage:
         fail(ERR_NO_PAGEURL_FOUND)
@@ -100,13 +96,13 @@ def flt_pageurl(r, suc, fail):
 
 def flt_quota_check(func):
     def _(r, suc, fail):
-        if r.status_code == 509 or len(r.content) in [925, 28658, 144, 210, 1009] or '509.gif' in r.url:
+        if r.status_code == 600:# tcp layer error
+            fail((ERR_CONNECTION_ERROR, r._real_url))
+        elif r.status_code == 509 or len(r.content) in [925, 28658, 144, 210, 1009] or '509.gif' in r.url:
             fail((ERR_QUOTA_EXCEEDED, None))
             # will not call the decorated filter
         elif r.status_code == 403:
             fail((ERR_KEY_EXPIRED, r._real_url))
-        elif r.status_code == 600:# tcp layer error
-            fail((ERR_CONNECTION_ERROR, r._real_url))
         else:
             func(r, suc, fail)
     return _

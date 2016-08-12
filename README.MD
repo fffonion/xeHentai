@@ -35,11 +35,10 @@ xeH
  - **log_verbose** 日志等级，可选1-3，值越大输出越详细，默认为2
  - **rename_ori** 将图片重命名为原始名称，如果关闭则使用序号，默认为否
  - **daemon** 后台模式，默认为否
- - **fast_scan** 快速扫描，从hathdl猜测页面链接，可以提高抓取速度，但有时会抽风，默认为否
  - **rpc_interface** RPC绑定的IP，默认为`localhost`
  - **rpc_port** RPC绑定的端口，默认为`None`
  - **rpc_secret** RPC密钥，默认为`None`
- - **save_tasks** 是否保存任务到`h.json`，默认为是
+ - **save_tasks** 是否保存任务到`h.json`，默认为否
  - **make_archive** 是否下载完成后生成zip压缩包，并删除下载目录，默认为否
 
 ### 命令行模式
