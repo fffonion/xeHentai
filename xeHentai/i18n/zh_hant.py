@@ -17,6 +17,7 @@ err_msg = {
     ERR_TASK_CANNOT_PAUSE: "這個任務無法被暫停",
     ERR_TASK_CANNOT_RESUME: "這個任務無法被恢復",
     ERR_CANNOT_CREATE_DIR: "無法創建文件夾 %s",
+    ERR_CANNOT_MAKE_ARCHIVE: "無法製作壓縮包 %s",
 #    ERR_HATHDL_NOTFOUND: "hathdl文件未找到"
     ERR_RPC_PARSE_ERROR: "Parse error.",
     ERR_RPC_INVALID_REQUEST: "Invalid request.",
@@ -30,7 +31,8 @@ err_msg = {
 ERR_NOMSG = "未指定的錯誤，錯誤號 %d"
 
 XEH_OPT_DESC = "紳♂士下載器"
-XEH_OPT_EPILOG = "如果參數未指定，則使用config.py中的默認值"
+XEH_OPT_EPILOG = "如果參數未指定，則使用config.py中的默認值; " \
+        "討論和反饋問題：https://yooooo.us/2013/xehentai"
 XEH_OPT_URLS = "下載頁的網址"
 XEH_OPT_u = "用戶名"
 XEH_OPT_k = "密碼"
@@ -76,7 +78,7 @@ TASK_FINISHED = "任務 #%s 下載完成"
 TASK_START_PAGE_RESCAN = "任務 #%s 圖片被縮放，進行完整掃描"
 # TASK_FAST_SCAN = "任務 #%s 使用快速掃描"
 TASK_START_MAKE_ARCHIVE = "任務 #%s 開始打包"
-TASK_MAKE_ARCHIVE_FINISHED = "任務 #%s 打包完成，保存在: %s"
+TASK_MAKE_ARCHIVE_FINISHED = "任務 #%s 打包完成，保存在: %s, 用時%.1f秒"
 TASK_STOP_QUOTA_EXCEEDED = "任務 #%s 配額超限"
 
 XEH_STARTED = "xeHentai %s 已啟動"
