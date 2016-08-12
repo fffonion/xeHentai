@@ -74,8 +74,8 @@ class Pool(object):
                     self.disabled[addr] = 0
                 # print(self.proxies[addr])
                 if ex:
-                    import traceback
-                    traceback.print_exc()
+                    # import traceback
+                    # traceback.print_exc()
                     raise ex
                 return r
             return __

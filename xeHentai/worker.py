@@ -13,6 +13,7 @@ from threading import Thread, RLock
 from . import util
 from .const import *
 from .i18n import i18n
+from .proxy import PoolException
 if PY3K:
     from queue import Queue, Empty
 else:
@@ -103,14 +104,18 @@ class HttpWorker(Thread, HttpReq):
             self.run_once = True
             try:
                 self.request("GET", url, self.flt, self.f_suc, self.f_fail)
+            except PoolException as ex:
+                self.logger.warning("%s-%s %s" % (i18n.THREAD, self.tname, str(ex)))
+                break
             except Exception as ex:
                 self.logger.warning(i18n.THREAD_UNCAUGHT_EXCEPTION % (self.tname, traceback.format_exc()))
                 self.flt(_FakeResponse(url), self.f_suc, self.f_fail)
         # notify monitor the last time
         self.logger.verbose("t-%s exit" % self.name)
-        self._keepalive(self)
+        self._keepalive(self, _exit = True)
 
 class ArchiveWorker(Thread):
+    # this worker is not managed by monitor
     def __init__(self, logger, task, exit_check = None):
         Thread.__init__(self, name = "archiver%s" % task.guid)
         Thread.setDaemon(self, True)
@@ -125,6 +130,7 @@ class ArchiveWorker(Thread):
             time.sleep(1)
         self.logger.info(i18n.TASK_START_MAKE_ARCHIVE % self.task.guid)
         self.task.state = TASK_STATE_MAKE_ARCHIVE
+        t = time.time()
         try:
             pth = self.task.make_archive()
         except Exception as ex:
@@ -132,7 +138,7 @@ class ArchiveWorker(Thread):
             self.logger.error(i18n.TASK_ERROR % (self.task.guid, i18n.c(ERR_CANNOT_MAKE_ARCHIVE) % str(ex)))
         else:
             self.task.state = TASK_STATE_FINISHED
-            self.logger.info(i18n.TASK_MAKE_ARCHIVE_FINISHED % (self.task.guid, pth))
+            self.logger.info(i18n.TASK_MAKE_ARCHIVE_FINISHED % (self.task.guid, pth, time.time() - t))
 
 
 class Monitor(Thread):
@@ -154,6 +160,11 @@ class Monitor(Thread):
         self.task = task
         self._exit = exit_check if exit_check else lambda x: False
         self._cleaning_up = False
+        if os.name == "nt":
+            self.set_title = lambda s:os.system("TITLE %s" % s.encode(CODEPAGE, 'replace'))
+        elif os.name == 'posix':
+            import sys
+            self.set_title = lambda s:sys.stdout.write("\033]2;%s\007" % s.encode(CODEPAGE, 'replace'))
 
     def set_vote_ns(self, tnames):
         t = time.time()
@@ -170,18 +181,18 @@ class Monitor(Thread):
             self.vote_result[code] += 1
         self.votelock.release()
 
-    def wrk_keepalive(self, wrk_thread):
-        # determines if there's quota error/unrecovable network error
+    def wrk_keepalive(self, wrk_thread, _exit = False):
         tname = wrk_thread.name
-        # all image downloaded
-        # task is finished or failed
-        _ = self.task.meta['finished'] == self.task.meta['total'] or \
-            self.task.state in (TASK_STATE_FINISHED, TASK_STATE_FAILED) or \
-            self._exit("mon")
-        # self.logger.verbose("mon#%s %s ask, %s, %s" % (self.task.guid, tname, _,
-        #    self.thread_last_seen))
         if tname in self.thread_zombie:
             self.thread_zombie.remove(tname)
+        # all image downloaded
+        # task is finished or failed
+        # monitor is exiting or  worker notify its exit
+        _ = self.task.meta['finished'] == self.task.meta['total'] or \
+            self.task.state in (TASK_STATE_FINISHED, TASK_STATE_FAILED) or \
+            self._exit("mon") or _exit
+        # self.logger.verbose("mon#%s %s ask, %s, %s" % (self.task.guid, tname, _,
+        #    self.thread_last_seen))
         if _ or not wrk_thread.is_alive():
             self.dctlock.acquire()
             if tname in self.thread_last_seen:
@@ -219,11 +230,6 @@ class Monitor(Thread):
             self.vote_result[ERR_QUOTA_EXCEEDED] >= len(self.thread_last_seen):
             self.logger.error(i18n.TASK_STOP_QUOTA_EXCEEDED % self.task.guid)
             self.task.state = TASK_STATE_FAILED
-
-    def set_title(self, s):
-         if os.name == "nt":
-            os.system("TITLE %s" % s.encode(CODEPAGE, 'replace'))
-
 
     def run(self):
         intv = 0

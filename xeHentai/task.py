@@ -38,6 +38,7 @@ class Task(object):
         self.meta = {}
         self.has_ori = False
         self.reload_map = {} # {url:reload_url}
+        self.filehash_map = {} # map same hash to different ids, {url:((id, fname), )}
         self.img_q = None
         self.page_q = None
         self.list_q = None
@@ -95,7 +96,34 @@ class Task(object):
     #     )
 
     def set_reload_url(self, imgurl, reload_url, fname):
-        self.reload_map[imgurl] = (reload_url, fname)
+        # if same file occurs severl times in a gallery
+        if imgurl in self.reload_map:
+            fpath = self.get_fpath()
+            old_f = os.path.join(fpath, '%03d.jpg' % self.get_fname(imgurl)[0])
+            this_fid = int(gallery_re.findall(reload_url)[0][1])
+            this_f = os.path.join(fpath, '%03d.jpg' % this_fid)
+            self._f_lock.acquire()
+            if os.path.exists(old_f):
+                # we can just copy old file if already downloaded
+                try:
+                    with open(old_f, 'rb') as _of:
+                        with open(this_f, 'wb') as _nf:
+                            _nf.write(_of.read())
+                except Exception as ex:
+                    self._f_lock.release()
+                    raise ex
+                else:
+                    self._f_lock.release()
+                    self._cnt_lock.acquire()
+                    self.meta['finished'] += 1
+                    self._cnt_lock.release()
+            else:
+                if imgurl not in self.filehash_map:
+                    self.filehash_map[imgurl] = []
+                self.filehash_map[imgurl].append((this_fid, fname))
+                self._f_lock.release()
+        else:
+            self.reload_map[imgurl] = (reload_url, fname)
 
     def get_reload_url(self, imgurl):
         if not imgurl:
@@ -103,7 +131,7 @@ class Task(object):
         return self.reload_map[imgurl][0]
 
     def scan_downloaded(self, scaled = True):
-        fpath = os.path.join(self.config['dir'], util.legalpath(self.meta['title']))
+        fpath = self.get_fpath()
         donefile = False
         if os.path.exists(os.path.join(fpath, ".xehdone")) or os.path.exists("%s.zip" % fpath):
             donefile = True
@@ -134,7 +162,7 @@ class Task(object):
     def save_file(self, imgurl, binary):
         # TODO: Rlock for finished += 1
 
-        fpath = os.path.join(self.config['dir'], util.legalpath(self.meta['title']))
+        fpath = self.get_fpath()
         self._f_lock.acquire()
         if not os.path.exists(fpath):
             os.mkdir(fpath)
@@ -156,13 +184,15 @@ class Task(object):
         _, fid = gallery_re.findall(pageurl)[0]
         return int(fid), fname
 
+    def get_fpath(self):
+        return os.path.join(self.config['dir'], util.legalpath(self.meta['title']))
+
     def rename_ori(self):
         if self.config['rename_ori']:
-            fpath = os.path.join(self.config['dir'], util.legalpath(self.meta['title']))
+            fpath = self.get_fpath()
             cnt = 0
             for h in self.reload_map:
-                pageurl, fname = self.reload_map[h]
-                _, fid = gallery_re.findall(pageurl)[0]
+                fid, fname = self.get_fname(h)
                 fname_ori = os.path.join(fpath, "%03d.jpg" % int(fid)) # id
                 fname_to = os.path.join(fpath, util.legalpath(fname))
                 if os.path.exists(fname_ori):
@@ -174,14 +204,17 @@ class Task(object):
 
     def make_archive(self):
         dpath = os.path.join(self.config['dir'], util.legalpath(self.meta['title']))
-        with zipfile.ZipFile('%s.zip' % dpath, 'w')  as zipFile:
+        arc = "%s.zip" % dpath
+        if os.path.exists(arc):
+            return arc
+        with zipfile.ZipFile(arc, 'w')  as zipFile:
             zipFile.comment = ("xeHentai Archiver v%s\nTitle:%s\nOriginal URL:%s" % (
                 __version__, self.meta['title'], self.url)).encode('utf-8')
             for f in sorted(os.listdir(dpath)):
                 fullpath = os.path.join(dpath, f)
                 zipFile.write(fullpath, f, zipfile.ZIP_STORED)
         shutil.rmtree(dpath)
-        return '%s.zip' % dpath
+        return arc
 
     def from_dict(self, j):
         for k in self.__dict__:

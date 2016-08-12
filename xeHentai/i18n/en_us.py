@@ -32,7 +32,8 @@ ERR_NOMSG = "undefined error message with code %d"
 
 XEH_OPT_DESC = "xeHentai Downloader NG"
 XEH_OPT_EPILOG = "Values shown as current is read from config.py " \
-                "and can be overriden by command line options."
+                "and can be overriden by command line options. " \
+                "Discuss and bug reporting at https://yooooo.us/2013/xehentai"
 XEH_OPT_URLS = "gallery url(s) to download"
 XEH_OPT_u = "username"
 XEH_OPT_k = "password"
@@ -76,8 +77,8 @@ TASK_START = "task #%s start"
 TASK_FINISHED = "task #%s download finishd"
 TASK_START_PAGE_RESCAN = "task #%s resample detected, start full scan"
 # TASK_FAST_SCAN = "task #%s uses fast scan"
-TASK_START_MAKE_ARCHIVE = "task %s start making archive"
-TASK_MAKE_ARCHIVE_FINISHED = "task #%s archive saved at: %s"
+TASK_START_MAKE_ARCHIVE = "task #%s start making archive"
+TASK_MAKE_ARCHIVE_FINISHED = "task #%s archive saved at: %s, use %.1fs"
 TASK_STOP_QUOTA_EXCEEDED = "task #%s quota exceeded"
 
 XEH_STARTED = "xeHentai %s started."

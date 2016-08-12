@@ -15,5 +15,5 @@ daemon = False
 rpc_interface = 'localhost'
 rpc_port = None
 rpc_secret = None
-save_tasks = True
+save_tasks = False
 make_archive = False

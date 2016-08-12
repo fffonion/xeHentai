@@ -276,7 +276,7 @@ class xeHentai(object):
                             mon.vote(tid, 0)),
                         lambda x, tid = tid: (
                             task.page_q.put(task.get_reload_url(x[1])),# if x[0] != ERR_QUOTA_EXCEEDED else None,
-                            self.logger.debug("put a failed file %s into queue" % tid),
+                            self.logger.debug("%s put a failed file into queue" % tid),
                             mon.vote(tid, x[0])),
                         mon.wrk_keepalive)
                     self._all_threads[TASK_STATE_DOWNLOAD].append(_)
