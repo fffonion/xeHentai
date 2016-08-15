@@ -45,7 +45,7 @@ class xeHentai(object):
         self.cfg = {k:v for k,v in default_config.__dict__.items() if not k.startswith("_")}
         self.cfg.update({k:v for k,v in config.__dict__.items() if not k.startswith("_")})
         self.proxy = None
-        self.cookies = {}
+        self.cookies = {"nw": "1"}
         self.headers = {
             'User-Agent': util.make_ua(),
             'Accept-Charset': 'utf-8;q=0.7,*;q=0.7',
@@ -388,7 +388,7 @@ class xeHentai(object):
                         self.tasks.put(_['guid'])
                     if self._all_tasks:
                         self.logger.info(i18n.XEH_LOAD_TASKS_CNT % len(self._all_tasks))
-                    self.cookies = j['cookies']
+                    self.cookies.update(j['cookies'])
                     if self.cookies:
                         self.headers.update({'Cookie':util.make_cookie(self.cookies)})
                         self.has_login = True
@@ -435,7 +435,8 @@ class xeHentai(object):
     def set_cookie(self, cookie):
         self.cookies.update(util.parse_cookie(cookie))
         self.headers.update({'Cookie':util.make_cookie(self.cookies)})
-        self.has_login = True
+        if 'ipb_member_id' in self.cookies and 'ipb_pass_hash' in self.cookies:
+            self.has_login = True
         return ERR_NO_ERROR, None
 
 
