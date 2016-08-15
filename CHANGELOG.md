@@ -1,5 +1,8 @@
 # Changelog
 
+## 2.009
+- 交互模式默认值改为配置中设置的值
+
 ## 2.008
 - 跳过Content Warning
 

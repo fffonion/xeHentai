@@ -140,9 +140,13 @@ def parse_opt():
     return args
 
 def interactive(xeH):
-    _readline = lambda x:input(logger.safestr(x)) if PY3K else raw_input(logger.safestr(x))
+    def _readline(x, default = ""):
+        if default:
+            x = x % default
+        _ = input(logger.safestr(x)) if PY3K else raw_input(logger.safestr(x))
+        return _ or default
 
-    if not xeH.has_login and _readline(i18n.PS_LOGIN) == "y":
+    if not xeH.has_login and _readline(i18n.PS_LOGIN) == 'y':
         uname = pwd = ""
         while not uname:
             uname = _readline(i18n.PS_USERNAME)
@@ -153,14 +157,14 @@ def interactive(xeH):
     while not url:
         url = _readline(i18n.PS_URL)
     url = url.split(",")
-    download_ori = _readline(i18n.PS_DOWNLOAD_ORI) == "y"
+    download_ori = _readline(i18n.PS_DOWNLOAD_ORI, 'y' if xeH.cfg['download_ori'] else 'n') == 'y'
     proxy = _readline(i18n.PS_PROXY).strip()
     proxy = [proxy] if proxy else xeH.cfg['proxy']
     __def_dir = os.path.abspath(xeH.cfg['dir'])
     if not PY3K:
         __def_dir = __def_dir.decode(sys.getfilesystemencoding())
     _dir = _readline(i18n.PS_DOWNLOAD_DIR % __def_dir) or xeH.cfg['dir']
-    rename_ori = _readline(i18n.PS_RENAME_ORI) == "y"
-    make_archive = _readline(i18n.PS_MAKE_ARCHIVE) == "y"
+    rename_ori = _readline(i18n.PS_RENAME_ORI, 'y' if xeH.cfg['rename_ori'] else 'n') == 'y'
+    make_archive = _readline(i18n.PS_MAKE_ARCHIVE, 'y' if xeH.cfg['make_archive'] else 'n') == 'y'
     return {'urls': url, 'proxy': proxy, 'download_ori': download_ori, 'dir': _dir, 'rename_ori':rename_ori,
             'make_archive': make_archive, 'save_tasks': False}
