@@ -1,5 +1,8 @@
 # Changelog
 
+## 2.008
+- 跳过Content Warning
+
 ## 2.007
 - 修复本子中有重复图时无法自动退出的bug
 - 其他稳定性修复
