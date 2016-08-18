@@ -145,6 +145,8 @@ def download_file_wrapper(dirpath):
     def download_file(r, suc, fail, dirpath = dirpath):
         # input image/archive response
         # return (binary, url) if suc; return (errocode, url) if fail
+        if r.status_code == 404:
+            fail((ERR_HATH_NOT_FOUND, r._real_url))
         suc((r.content, r._real_url))
 
     return download_file
