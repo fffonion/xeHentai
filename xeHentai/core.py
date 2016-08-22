@@ -107,7 +107,7 @@ class xeHentai(object):
                 self._all_tasks[t.guid].cleanup()
             return 0, t.guid
         self._all_tasks[t.guid] = t
-        if not re.match("^https*://(g\.e\-|ex)hentai\.org/[^/]+/\d+/[^/]+/*$", url):
+        if not re.match("^https*://(g\.e\-|ex)hentai\.org/[^/]+/\d+/[^/]+/*#*$", url):
             t.set_fail(ERR_URL_NOT_RECOGNIZED)
         elif not self.has_login and re.match("^https*://exhentai\.org", url):
             t.set_fail(ERR_CANT_DOWNLOAD_EXH)
@@ -234,7 +234,8 @@ class xeHentai(object):
                 task.scan_downloaded()
                 if task.state == TASK_STATE_FINISHED:
                     continue
-                for x in range(0, int(math.ceil(task.meta['total'] / 40.0))):
+                for x in range(0,
+                    int(math.ceil(1.0 * task.meta['total'] / int(task.meta['thumbnail_cnt'])))):
                     r = req.request("GET",
                         "%s/?p=%d" % (task.url, x),
                         filters.flt_pageurl,
@@ -271,7 +272,7 @@ class xeHentai(object):
                     tid = 'down-%d' % (i + 1)
                     _ = self._get_httpworker(tid, task.img_q,
                         filters.download_file_wrapper(task.config['dir']),
-                        lambda x, tid = tid: (task.save_file(x[1], x[0]),
+                        lambda x, tid = tid: (task.save_file(x[1], x[2], x[0]),
                             self.logger.debug(i18n.XEH_FILE_DOWNLOADED % (task.get_fname(x[1]))),
                             mon.vote(tid, 0)),
                         lambda x, tid = tid: (

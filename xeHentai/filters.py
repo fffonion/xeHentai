@@ -49,6 +49,10 @@ def flt_metadata(r, suc, fail):
     meta['finished'] = 0
     meta['tags'] = {}
 
+    # TODO: parse cookie to calc thumbnail_cnt (tr_2, ts_m)
+    _ = re.findall("Showing (\d+) \- (\d+) of (\d+) images", r.text)[0]
+    meta['thumbnail_cnt'] = int(_[1]) - int(_[0]) + 1
+
     suc(meta)
     # _ = re.findall(
     #    'https*://(g\.e\-|ex)hentai\.org/[^/]+/(\d+)/[^/]+/\?p=\d*" onclick="return false"(.*?)</a>',
@@ -134,6 +138,7 @@ def flt_imgurl_wrapper(ori):
         js_nl = re.findall("return nl\('([\d\-]+)'\)", r.text)[0]
         reload_url = "%s%snl=%s" % (r._real_url, "&" if "?" in r._real_url else "?", js_nl)
         if ori:
+            # we will parse the 302 url to get original filename
             suc((fullurl, reload_url, filename))
         else:
             suc((picurl, reload_url, filename))
@@ -146,8 +151,8 @@ def download_file_wrapper(dirpath):
         # input image/archive response
         # return (binary, url) if suc; return (errocode, url) if fail
         if r.status_code == 404:
-            fail((ERR_HATH_NOT_FOUND, r._real_url))
-        suc((r.content, r._real_url))
+            fail((ERR_HATH_NOT_FOUND, r._real_url, r.url))
+        suc((r.content, r._real_url, r.url))
 
     return download_file
 

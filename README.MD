@@ -129,9 +129,7 @@ Firefox用户需要安装[Greasemonkey](https://addons.mozilla.org/en-US/firefox
 
 ### 配额
 
-直接从服务器及镜像途径下载的图片计入配额，从H@H下载的不计算；下载新发布的、冷门的漫画更有可能消耗配额，下载热门漫画基本不消耗配额
-
-![quota](http://ww3.sinaimg.cn/large/436919cbjw1e314v6gxtzj.jpg)
+直接从服务器及镜像途径下载的图片计入配额，从H@H下载的不计算；下载新发布的、冷门的漫画以及原图更有可能消耗配额，下载热门漫画基本不消耗配额
 
 ## License
 

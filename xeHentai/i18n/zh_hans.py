@@ -80,6 +80,7 @@ TASK_START_PAGE_RESCAN = "任务 #%s 图片被缩放，进行完整扫描"
 TASK_START_MAKE_ARCHIVE = "任务 #%s 开始打包"
 TASK_MAKE_ARCHIVE_FINISHED = "任务 #%s 打包完成，保存在: %s, 用时%.1f秒"
 TASK_STOP_QUOTA_EXCEEDED = "任务 #%s 配额超限"
+TASK_STUCK = "任务 #%s 卡住了, 可能是脚本有bug, 或者网络连接太慢了"
 
 XEH_STARTED = "xeHentai %s 已启动"
 XEH_LOOP_FINISHED = "程序循环已完成"
