@@ -15,7 +15,7 @@ LOCALE = locale.getdefaultlocale()[0]
 CODEPAGE = locale.getdefaultlocale()[1]
 ANDROID = 'ANDROID_ARGUMENT' in os.environ
 
-__version__ = 2.01
+__version__ = 2.011
 DEVELOPMENT = False
 
 SCRIPT_NAME = "xeHentai"
@@ -28,6 +28,8 @@ else:
     # The application is not frozen
     # Change this bit to match where you store your data files:
     FILEPATH = sys.path[0]
+
+DUMMY_FILENAME = "-dummy-"
 
 XEH_STATE_RUNNING = 0
 XEH_STATE_SOFT_EXIT = 1 # wait until current task finish and exit

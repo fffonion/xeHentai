@@ -232,8 +232,12 @@ class Monitor(Thread):
             self.task.state = TASK_STATE_FAILED
 
     def run(self):
+        CHECK_INTERVAL = 10
+        STUCK_INTERVAL = 90
         intv = 0
         self.set_title(i18n.TASK_START % self.task.guid)
+        last_change = time.time()
+        last_finished = -1
         while len(self.thread_last_seen) > 0:
             intv += 1
             self._check_vote()
@@ -245,7 +249,7 @@ class Monitor(Thread):
                     else:
                         self.logger.warning(i18n.THREAD_SWEEP_OUT % k)
                     del self.thread_last_seen[k]
-            if intv == 10:
+            if intv == CHECK_INTERVAL:
                 _ = "%s %dR/%dZ, %s %dR/%dD" % (
                     i18n.THREAD,
                     len(self.thread_last_seen), len(self.thread_zombie),
@@ -255,9 +259,17 @@ class Monitor(Thread):
                 self.logger.info(_)
                 self.set_title(_)
                 intv = 0
+                # if not downloading any new images in 1.5 min, exit
+                if last_finished != self.task.meta['finished']:
+                    last_change = time.time()
+                    last_finished = self.task.meta['finished']
+                else:
+                    if time.time() - last_change > STUCK_INTERVAL:
+                        self.logger.warning(i18n.TASK_STUCK % self.task.guid)
+                        break
             time.sleep(0.5)
         if self.task.meta['finished'] == self.task.meta['total']:
-            self.task.rename_ori()
+            self.task.rename_fname()
             self.set_title(i18n.TASK_FINISHED % self.task.guid)
             self.logger.info(i18n.TASK_FINISHED % self.task.guid)
             self.task.state = TASK_STATE_FINISHED

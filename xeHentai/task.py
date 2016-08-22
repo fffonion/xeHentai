@@ -99,7 +99,8 @@ class Task(object):
         # if same file occurs severl times in a gallery
         if imgurl in self.reload_map:
             fpath = self.get_fpath()
-            old_f = os.path.join(fpath, '%03d.jpg' % self.get_fname(imgurl)[0])
+            old_fid = self.get_fname(imgurl)[0]
+            old_f = os.path.join(fpath, '%03d.jpg' % old_fid)
             this_fid = int(gallery_re.findall(reload_url)[0][1])
             this_f = os.path.join(fpath, '%03d.jpg' % this_fid)
             self._f_lock.acquire()
@@ -118,12 +119,13 @@ class Task(object):
                     self.meta['finished'] += 1
                     self._cnt_lock.release()
             else:
+                # if not downloaded, we will copy them in save_file
                 if imgurl not in self.filehash_map:
                     self.filehash_map[imgurl] = []
-                self.filehash_map[imgurl].append((this_fid, fname))
+                self.filehash_map[imgurl].append((this_fid, old_fid))
                 self._f_lock.release()
         else:
-            self.reload_map[imgurl] = (reload_url, fname)
+            self.reload_map[imgurl] = [reload_url, fname]
 
     def get_reload_url(self, imgurl):
         if not imgurl:
@@ -159,15 +161,18 @@ class Task(object):
         if int(fid) not in self._flist_done:
             callback(url)
 
-    def save_file(self, imgurl, binary):
+    def save_file(self, imgurl, redirect_url, binary):
         # TODO: Rlock for finished += 1
-
         fpath = self.get_fpath()
         self._f_lock.acquire()
         if not os.path.exists(fpath):
             os.mkdir(fpath)
         self._f_lock.release()
         pageurl, fname = self.reload_map[imgurl]
+        _ = re.findall("/([^/\?]+)(?:\?|$)", redirect_url)
+        if _: # change it if it's a full image
+            fname = _[0]
+            self.reload_map[imgurl][1] = fname
         _, fid = gallery_re.findall(pageurl)[0]
 
         fn = os.path.join(fpath, "%03d.jpg" % int(fid))
@@ -176,8 +181,17 @@ class Task(object):
         self._cnt_lock.acquire()
         self.meta['finished'] += 1
         self._cnt_lock.release()
+        self._f_lock.acquire()
         with open(fn, "wb") as f:
             f.write(binary)
+        if imgurl in self.filehash_map:
+            for fid, _ in self.filehash_map[imgurl]:
+                fn_rep = os.path.join(fpath, "%03d.jpg" % int(fid))
+                with open(fn_rep, "wb") as f:
+                    f.write(binary)
+                self.meta['finished'] += 1
+            del self.filehash_map[imgurl]
+        self._f_lock.release()
 
     def get_fname(self, imgurl):
         pageurl, fname = self.reload_map[imgurl]
@@ -187,20 +201,31 @@ class Task(object):
     def get_fpath(self):
         return os.path.join(self.config['dir'], util.legalpath(self.meta['title']))
 
-    def rename_ori(self):
-        if self.config['rename_ori']:
-            fpath = self.get_fpath()
-            cnt = 0
-            for h in self.reload_map:
-                fid, fname = self.get_fname(h)
-                fname_ori = os.path.join(fpath, "%03d.jpg" % int(fid)) # id
+    def rename_fname(self):
+        fpath = self.get_fpath()
+        cnt = 0
+        for h in self.reload_map:
+            fid, fname = self.get_fname(h)
+            # if we don't need to rename to original name and file type matches
+            if not self.config['rename_ori'] and os.path.splitext(fname)[1].lower() == '.jpg':
+                continue
+            fname_ori = os.path.join(fpath, "%03d.jpg" % int(fid)) # id
+            if self.config['rename_ori']:
                 fname_to = os.path.join(fpath, util.legalpath(fname))
-                if os.path.exists(fname_ori):
-                    os.rename(fname_ori, fname_to)
-                    cnt += 1
-            if cnt == self.meta['total']:
-                with open(os.path.join(fpath, ".xehdone"), "w"):
-                    pass
+            else:
+                # Q: Why we don't just use id.ext when saving files instead of using
+                #   id.jpg?
+                # A: If former task doesn't download all files, a new task with same gallery
+                #   will have zero knowledge about file type before scanning all per page,
+                #   thus can't determine if this id is downloaded, because file type is not
+                #   necessarily .jpg
+                fname_to = os.path.join(fpath, "%03d%s" % (int(fid), os.path.splitext(fname)[1]))
+            if os.path.exists(fname_ori):
+                os.rename(fname_ori, fname_to)
+                cnt += 1
+        if cnt == self.meta['total']:
+            with open(os.path.join(fpath, ".xehdone"), "w"):
+                pass
 
     def make_archive(self):
         dpath = os.path.join(self.config['dir'], util.legalpath(self.meta['title']))
