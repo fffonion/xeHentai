@@ -228,7 +228,7 @@ class Task(object):
                 pass
 
     def make_archive(self):
-        dpath = os.path.join(self.config['dir'], util.legalpath(self.meta['title']))
+        dpath = self.get_fpath()
         arc = "%s.zip" % dpath
         if os.path.exists(arc):
             return arc
