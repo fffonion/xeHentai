@@ -94,6 +94,9 @@ def main(xeH, opt):
 def parse_opt():
     _def = {k:v for k,v in default_config.__dict__.items() if not k.startswith("_")}
     _def.update({k:v for k,v in config.__dict__.items() if not k.startswith("_")})
+    if not PY3K:
+        for k in ('dir', 'log_path'):
+            _def[k] = _def[k].decode('utf-8')
     parser = argparse.ArgumentParser(description = i18n.XEH_OPT_DESC, epilog = i18n.XEH_OPT_EPILOG, add_help = False)
     # the followings are handled in cli
     parser.add_argument('-u', '--username', help = i18n.XEH_OPT_u)
@@ -144,7 +147,8 @@ def interactive(xeH):
         if default:
             x = x % default
         _ = input(logger.safestr(x)) if PY3K else raw_input(logger.safestr(x))
-        return _ or default
+        _ = _ or default
+        return _.decode(locale.getdefaultlocale()[1] or 'utf-8')
 
     if not xeH.has_login and _readline(i18n.PS_LOGIN) == 'y':
         uname = pwd = ""
@@ -161,8 +165,8 @@ def interactive(xeH):
     proxy = _readline(i18n.PS_PROXY).strip()
     proxy = [proxy] if proxy else xeH.cfg['proxy']
     __def_dir = os.path.abspath(xeH.cfg['dir'])
-    if not PY3K:
-        __def_dir = __def_dir.decode(sys.getfilesystemencoding())
+    # if not PY3K:
+    #    __def_dir = __def_dir.decode(sys.getfilesystemencoding())
     _dir = _readline(i18n.PS_DOWNLOAD_DIR % __def_dir) or xeH.cfg['dir']
     rename_ori = _readline(i18n.PS_RENAME_ORI, 'y' if xeH.cfg['rename_ori'] else 'n') == 'y'
     make_archive = _readline(i18n.PS_MAKE_ARCHIVE, 'y' if xeH.cfg['make_archive'] else 'n') == 'y'

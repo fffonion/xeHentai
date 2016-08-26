@@ -64,5 +64,5 @@ def htmlescape(s):
     htmlre=re.compile("&(#?)(\d{1,5}|\w{1,8}|[a-z]+);")
     return htmlre.sub(replc, s)
 
-def legalpath(str):
-    return str.replace('|', '').replace(':', '').replace('?', '').replace('\\', '').replace('/', '').replace('*', '')\
+def legalpath(s):
+    return re.sub("[|:?\\/*'\"]", lambda x:"", s)
