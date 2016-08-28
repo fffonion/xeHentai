@@ -94,7 +94,7 @@ XEH_PLATFORM_NO_DAEMON = "daemon mode is not supported on platform: %s"
 XEH_CLEANUP = "cleaning up..."
 XEH_CRITICAL_ERROR = "xeHentai throws critical error:\n%s"
 XEH_DOWNLOAD_ORI_NEED_LOGIN = "haven't login, so I won't download original images"
-XEH_FILE_DOWNLOADED = "file downloaded #%03d %s"
+XEH_FILE_DOWNLOADED = "file downloaded #%d %s"
 
 RPC_STARTED = "RPC server listening on %s:%d"
 RPC_TOO_OPEN = "RPC server is listening on public interface (%s) but no rpc_secret defined, which is not safe"
