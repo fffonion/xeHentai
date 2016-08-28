@@ -94,7 +94,7 @@ XEH_PLATFORM_NO_DAEMON = "後台模式不支持您的系統: %s"
 XEH_CLEANUP = "擦乾淨..."
 XEH_CRITICAL_ERROR = "xeHentai 抽風啦:\n%s"
 XEH_DOWNLOAD_ORI_NEED_LOGIN = "下載原圖需要登錄"
-XEH_FILE_DOWNLOADED = "圖片已下載 #%03d %s"
+XEH_FILE_DOWNLOADED = "圖片已下載 #%d %s"
 
 RPC_STARTED = "RPC伺服器監聽在 %s:%d"
 RPC_TOO_OPEN = "RPC伺服器監聽在公網IP (%s)，為了安全起見應該設置rpc_secret"

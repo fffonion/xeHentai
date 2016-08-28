@@ -100,9 +100,9 @@ class Task(object):
         if imgurl in self.reload_map:
             fpath = self.get_fpath()
             old_fid = self.get_fname(imgurl)[0]
-            old_f = os.path.join(fpath, '%03d.jpg' % old_fid)
+            old_f = os.path.join(fpath, self.get_fidpad(old_fid))
             this_fid = int(gallery_re.findall(reload_url)[0][1])
-            this_f = os.path.join(fpath, '%03d.jpg' % this_fid)
+            this_f = os.path.join(fpath, self.get_fidpad(this_fid))
             self._f_lock.acquire()
             if os.path.exists(old_f):
                 # we can just copy old file if already downloaded
@@ -139,7 +139,7 @@ class Task(object):
             donefile = True
         # can only check un-renamed files
         for fid in range(1, self.meta['total'] + 1):
-            fname = os.path.join(fpath, "%03d.jpg" % int(fid)) # id
+            fname = os.path.join(fpath, self.get_fidpad(fid)) # id
             if donefile or (os.path.exists(fname) and os.stat(fname).st_size > 0):
                 self._flist_done.add(int(fid))
         self.meta['finished'] = len(self._flist_done)
@@ -175,7 +175,7 @@ class Task(object):
             self.reload_map[imgurl][1] = fname
         _, fid = gallery_re.findall(pageurl)[0]
 
-        fn = os.path.join(fpath, "%03d.jpg" % int(fid))
+        fn = os.path.join(fpath, self.get_fidpad(int(fid)))
         if os.path.exists(fn) and os.stat(fn).st_size > 0:
             return fn
         self._cnt_lock.acquire()
@@ -186,7 +186,7 @@ class Task(object):
             f.write(binary)
         if imgurl in self.filehash_map:
             for fid, _ in self.filehash_map[imgurl]:
-                fn_rep = os.path.join(fpath, "%03d.jpg" % int(fid))
+                fn_rep = os.path.join(fpath, self.get_fidpad(fid))
                 with open(fn_rep, "wb") as f:
                     f.write(binary)
                 self.meta['finished'] += 1
@@ -201,6 +201,11 @@ class Task(object):
     def get_fpath(self):
         return os.path.join(self.config['dir'], util.legalpath(self.meta['title']))
 
+    def get_fidpad(self, fid, ext = 'jpg'):
+        fid = int(fid)
+        _ = "%%0%dd.%%s" % (len(str(self.meta['total'])))
+        return _ % (fid, ext)
+
     def rename_fname(self):
         fpath = self.get_fpath()
         cnt = 0
@@ -209,7 +214,7 @@ class Task(object):
             # if we don't need to rename to original name and file type matches
             if not self.config['rename_ori'] and os.path.splitext(fname)[1].lower() == '.jpg':
                 continue
-            fname_ori = os.path.join(fpath, "%03d.jpg" % int(fid)) # id
+            fname_ori = os.path.join(fpath, self.get_fidpad(fid)) # id
             if self.config['rename_ori']:
                 fname_to = os.path.join(fpath, util.legalpath(fname))
             else:
@@ -219,8 +224,17 @@ class Task(object):
                 #   will have zero knowledge about file type before scanning all per page,
                 #   thus can't determine if this id is downloaded, because file type is not
                 #   necessarily .jpg
-                fname_to = os.path.join(fpath, "%03d%s" % (int(fid), os.path.splitext(fname)[1]))
+                fname_to = os.path.join(fpath, self.get_fidpad(fid, os.path.splitext(fname)[1]))
             if os.path.exists(fname_ori):
+                while os.path.exists(fname_to):
+                    _base, _ext = os.path.splitext(fname_to)
+                    _ = re.findall("\((\d+)\)$", _base)
+                    if _ :# if ...(1) exists, use ...(2)
+                        _base = re.sub("\((\d+)\)$", _base, lambda x:"(%d)" % (int(x.group(1)) + 1))
+                    else:
+                        _base = "%s(1)" % _base
+                    fname_to = "".join((_base, _ext))
+
                 os.rename(fname_ori, fname_to)
                 cnt += 1
         if cnt == self.meta['total']:

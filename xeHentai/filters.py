@@ -50,7 +50,7 @@ def flt_metadata(r, suc, fail):
     meta['tags'] = {}
 
     # TODO: parse cookie to calc thumbnail_cnt (tr_2, ts_m)
-    _ = re.findall("Showing (\d+) \- (\d+) of (\d+) images", r.text)[0]
+    _ = re.findall("Showing (\d+) \- (\d+) of ([\d,]+) images", r.text)[0]
     meta['thumbnail_cnt'] = int(_[1]) - int(_[0]) + 1
 
     suc(meta)
