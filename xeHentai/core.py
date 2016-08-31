@@ -392,7 +392,7 @@ class xeHentai(object):
                     self.cookies.update(j['cookies'])
                     if self.cookies:
                         self.headers.update({'Cookie':util.make_cookie(self.cookies)})
-                        self.has_login = True
+                        self.has_login = 'ipb_member_id' in self.cookie and 'ipb_pass_hash' in self.cookie
         _1xcookie = os.path.join(FILEPATH, ".ehentai.cookie")# 1.x cookie file
         if not self.has_login and os.path.exists(_1xcookie):
             with open(_1xcookie) as f:
