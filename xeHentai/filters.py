@@ -19,7 +19,11 @@ def login_exhentai(r, suc, fail):
         cooid = re.findall('ipb_member_id=(.*?);', coo)[0]
         coopw = re.findall('ipb_pass_hash=(.*?);', coo)[0]
     except (IndexError, ) as ex:
-        fail(ex)
+        errmsg = re.findall('<span class="postcolor">([^<]+)</span>', r.text)
+        if errmsg:
+            fail(errmsg[0])
+        else:
+            fail("ex: %s" % ex)
         return FAIL
     else:
         suc({'ipb_member_id':cooid, 'ipb_pass_hash':coopw})
