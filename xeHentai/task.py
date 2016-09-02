@@ -225,18 +225,18 @@ class Task(object):
                 #   thus can't determine if this id is downloaded, because file type is not
                 #   necessarily .jpg
                 fname_to = os.path.join(fpath, self.get_fidpad(fid, os.path.splitext(fname)[1]))
-            if os.path.exists(fname_ori):
-                while os.path.exists(fname_to):
-                    _base, _ext = os.path.splitext(fname_to)
-                    _ = re.findall("\((\d+)\)$", _base)
-                    if _ :# if ...(1) exists, use ...(2)
-                        _base = re.sub("\((\d+)\)$", _base, lambda x:"(%d)" % (int(x.group(1)) + 1))
-                    else:
-                        _base = "%s(1)" % _base
-                    fname_to = "".join((_base, _ext))
-
+            if fname_ori != fname_to:
+                if os.path.exists(fname_ori):
+                    while os.path.exists(fname_to):
+                        _base, _ext = os.path.splitext(fname_to)
+                        _ = re.findall("\((\d+)\)$", _base)
+                        if _ :# if ...(1) exists, use ...(2)
+                            _base = re.sub("\((\d+)\)$", _base, lambda x:"(%d)" % (int(x.group(1)) + 1))
+                        else:
+                            _base = "%s(1)" % _base
+                        fname_to = "".join((_base, _ext))
                 os.rename(fname_ori, fname_to)
-                cnt += 1
+            cnt += 1
         if cnt == self.meta['total']:
             with open(os.path.join(fpath, ".xehdone"), "w"):
                 pass

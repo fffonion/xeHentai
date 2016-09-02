@@ -109,9 +109,9 @@ Firefox用户需要安装[Greasemonkey](https://addons.mozilla.org/en-US/firefox
 
 ### 运行模式
 
-如果通过命令行或交互模式指定了下载url，xeHentai会会在下载完成后退出。
+如果通过命令行或交互模式指定了下载url，xeHentai会在下载完成`h.json`中存储的任务（如果存在）及指定的url后退出。
 
-如果命令行没有指定url，xeHentai将会在完成存档中的队列（如果存在）后继续等待。（待修改）
+如果命令行没有指定url，xeHentai将会在完成存档`h.json`中的队列（如果存在）后继续等待。
 
 如果指定了后台模式（`-d`或设置`daemon`为`True`），xeHentai将会在保持后台运行。
 

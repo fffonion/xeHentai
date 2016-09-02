@@ -66,10 +66,12 @@ def main(xeH, opt):
         if opt.urls:
             for u in opt.urls:
                 xeH.add_task(u.strip())
-            # finished this task and exit xeHentai
-            Thread(target = lambda:(time.sleep(0.618), setattr(xeH, "_exit", XEH_STATE_SOFT_EXIT))).start()
+            # Thread(target = lambda:(time.sleep(0.618), setattr(xeH, "_exit", XEH_STATE_SOFT_EXIT))).start()
         Thread(target = xeH._task_loop, name = "main" ).start()
         while xeH._exit < XEH_STATE_CLEAN:
+            # if specify urls, finished this task and exit xeHentai
+            if opt.urls and not [k for k, v in xeH._all_tasks.items() if TASK_STATE_WAITING <= v.state < TASK_STATE_FINISHED]:
+                xeH._exit = XEH_STATE_SOFT_EXIT
             time.sleep(1)
     except KeyboardInterrupt:
         log.info(i18n.XEH_CLEANUP)
@@ -134,7 +136,7 @@ def parse_opt():
     parser.add_argument('-r', '--rename-ori', type = bool, metavar = "BOOL", default = _def['rename_ori'],
                         help = i18n.XEH_OPT_r)
     parser.add_argument('-a', '--archive', type = bool, metavar = "BOOL", default = _def['make_archive'],
-                        help = i18n.XEH_OPT_a)
+                        dest = 'make_archive', help = i18n.XEH_OPT_a)
     parser.add_argument('-h','--help', action = 'help', help = i18n.XEH_OPT_h)
     parser.add_argument('--version', action = 'version', version = '%s v%.3f' % (SCRIPT_NAME, __version__),
                         help = i18n.XEH_OPT_version)
