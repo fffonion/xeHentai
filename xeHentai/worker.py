@@ -269,7 +269,11 @@ class Monitor(Thread):
                         break
             time.sleep(0.5)
         if self.task.meta['finished'] == self.task.meta['total']:
-            self.task.rename_fname()
+            _err = self.task.rename_fname()
+            if _err:
+                self.logger.warning(i18n.XEH_RENAME_HAS_ERRORS % (
+                    "\n".join(map(lambda x:"%s => %s : %s" % x, _err))
+                ))
             self.set_title(i18n.TASK_FINISHED % self.task.guid)
             self.logger.info(i18n.TASK_FINISHED % self.task.guid)
             self.task.state = TASK_STATE_FINISHED

@@ -209,6 +209,7 @@ class Task(object):
     def rename_fname(self):
         fpath = self.get_fpath()
         cnt = 0
+        error_list = []
         for h in self.reload_map:
             fid, fname = self.get_fname(h)
             # if we don't need to rename to original name and file type matches
@@ -224,7 +225,7 @@ class Task(object):
                 #   will have zero knowledge about file type before scanning all per page,
                 #   thus can't determine if this id is downloaded, because file type is not
                 #   necessarily .jpg
-                fname_to = os.path.join(fpath, self.get_fidpad(fid, os.path.splitext(fname)[1]))
+                fname_to = os.path.join(fpath, self.get_fidpad(fid, os.path.splitext(fname)[1][1:]))
             if fname_ori != fname_to:
                 if os.path.exists(fname_ori):
                     while os.path.exists(fname_to):
@@ -235,11 +236,15 @@ class Task(object):
                         else:
                             _base = "%s(1)" % _base
                         fname_to = "".join((_base, _ext))
-                os.rename(fname_ori, fname_to)
+                try:
+                    os.rename(fname_ori, fname_to)
+                except Exception as ex:
+                    error_list.append(os.path.split(fname_ori)[1], os.path.split(fname_to)[1], str(ex))
             cnt += 1
         if cnt == self.meta['total']:
             with open(os.path.join(fpath, ".xehdone"), "w"):
                 pass
+        return error_list
 
     def make_archive(self):
         dpath = self.get_fpath()
