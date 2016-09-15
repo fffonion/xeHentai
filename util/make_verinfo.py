@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.join(sys.path[0], ".."))
 from xeHentai import const
 
 version = const.__version__
-v = list(str(int(version*1000)))
+v = list(str(int(round(version * 1000))))
 print(version, v)
 tmpl='''# UTF-8
 #
