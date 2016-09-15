@@ -11,6 +11,10 @@ import random
 
 from ..const import *
 
+if os.name == 'nt':
+    filename_filter = re.compile("[|:?\\/*'\"<>]")
+else:# assume posix
+    filename_filter = re.compile("[\/:]")
 
 def parse_cookie(coostr):
     ret = {}
@@ -65,4 +69,4 @@ def htmlescape(s):
     return htmlre.sub(replc, s)
 
 def legalpath(s):
-    return re.sub("[|:?\\/*'\"]", lambda x:"", s)
+    return filename_filter.sub(lambda x:"", s)
