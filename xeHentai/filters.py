@@ -96,7 +96,9 @@ def flt_metadata(r, suc, fail):
 def flt_pageurl(r, suc, fail):
     # input gallery response
     # add per image urls if suc; finish task if fail
-    picpage = re.findall('<a href="(https*://(?:g.e-hentai|exhentai).org/./[a-f0-9]{10}/\d+\-\d+)"><img', r.text)
+    picpage = re.findall(
+        '<a href="(https*://(?:g.e-hentai|exhentai).org/./[a-f0-9]{10}/\d+\-\d+)"><img[^>]+blank.gif',
+        r.text)
     if not picpage:
         fail(ERR_NO_PAGEURL_FOUND)
     for p in picpage:
