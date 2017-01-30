@@ -8,6 +8,7 @@ download_ori = False
 download_thread_cnt = 5
 scan_thread_cnt = 1
 proxy = None
+proxy_image = True
 log_path = "eh.log"
 log_verbose = 2
 rename_ori = False

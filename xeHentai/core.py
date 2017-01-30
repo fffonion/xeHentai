@@ -10,6 +10,7 @@ import sys
 import math
 import json
 import time
+import traceback
 from .task import Task
 from . import util
 from . import proxy
@@ -67,7 +68,7 @@ class xeHentai(object):
                 try:
                     self.proxy.add_proxy(p)
                 except Exception as ex:
-                    self.logger.warning(str(ex))
+                    self.logger.warning(traceback.format_exc())
             self.logger.debug(i18n.PROXY_CANDIDATE_CNT % len(self.proxy.proxies))
         if cfg_dict['dir'] and not os.path.exists(cfg_dict['dir']):
             try:
@@ -85,11 +86,11 @@ class xeHentai(object):
         self.logger.set_logfile(self.cfg['log_path'])
 
     def _get_httpreq(self):
-        return HttpReq(self.headers, logger = self.logger, proxy = self.proxy)
+        return HttpReq(self.headers, logger = self.logger, proxy = self.proxy, proxy_image = self.cfg['proxy_image'])
 
     def _get_httpworker(self, tid, task_q, flt, suc, fail, keep_alive):
         return HttpWorker(tid, task_q, flt, suc, fail,
-            headers = self.headers, proxy = self.proxy,
+            headers = self.headers, proxy = self.proxy, proxy_image = self.cfg['proxy_image'],
             logger = self.logger, keep_alive = keep_alive)
 
     def add_task(self, url, cfg_dict = {}):
@@ -198,7 +199,7 @@ class xeHentai(object):
                         lambda x:task.meta.update(x),
                         lambda x:task.set_fail(x))
                 except Exception as ex:
-                    self.logger.error(i18n.TASK_ERROR % (task.guid, str(ex)))
+                    self.logger.error(i18n.TASK_ERROR % (task.guid, traceback.format_exc()))
                     task.state = TASK_STATE_FAILED
                     break
                 if task.failcode in (ERR_ONLY_VISIBLE_EXH, ERR_GALLERY_REMOVED) and self.has_login and \
@@ -363,7 +364,7 @@ class xeHentai(object):
                         {k: v.to_dict() for k,v in self._all_tasks.items()},
                     'cookies':self.cookies}))
             except Exception as ex:
-                self.logger.warning(i18n.SESSION_LOAD_EXCEPTION % ex)
+                self.logger.warning(i18n.SESSION_LOAD_EXCEPTION % traceback.format_exc())
                 return ERR_SAVE_SESSION_FAILED, str(ex)
         return ERR_NO_ERROR, None
 
@@ -373,7 +374,7 @@ class xeHentai(object):
                 try:
                     j = json.loads(f.read())
                 except Exception as ex:
-                    self.logger.warning(i18n.SESSION_WRITE_EXCEPTION % ex)
+                    self.logger.warning(i18n.SESSION_WRITE_EXCEPTION % traceback.format_exc())
                     return ERR_SAVE_SESSION_FAILED, str(ex)
                 else:
                     for _ in j['tasks'].values():

@@ -125,6 +125,8 @@ def parse_opt():
                         default = os.path.abspath(_def['log_path']), help = i18n.XEH_OPT_l)
     parser.add_argument('-p', '--proxy', action = 'append', default = _def['proxy'],
                         help = i18n.XEH_OPT_p)
+    parser.add_argument('--proxy-image', action = 'store_true', default = _def['proxy_image'],
+                        help = i18n.XEH_OPT_proxy_image)
     parser.add_argument('-v', '--verbose', action = 'count', default = _def['log_verbose'],
                         help = i18n.XEH_OPT_v)
     parser.add_argument('--rpc-interface', metavar = "ADDR", default = _def['rpc_interface'],

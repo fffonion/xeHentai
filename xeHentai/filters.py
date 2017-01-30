@@ -42,7 +42,6 @@ def flt_metadata(r, suc, fail):
         fail(ERR_IP_BANNED)
         return re.findall("The ban expires in (.+)", r.text)[0]
     meta = {}
-    # print(r.text)
     # sample_hash = re.findall('<a href="https*://(?:g.e-hentai|exhentai).org/./([a-f0-9]{10})/\d+\-\d+"><img', r.text)
     # meta['sample_hash'] = sample_hash
     # meta['resampled'] = {}
@@ -97,7 +96,7 @@ def flt_pageurl(r, suc, fail):
     # input gallery response
     # add per image urls if suc; finish task if fail
     picpage = re.findall(
-        '<a href="(https*://(?:g.e-hentai|exhentai).org/./[a-f0-9]{10}/\d+\-\d+)"><img[^>]+blank.gif',
+        '<a href="(https*://(?:[g\.]*e-hentai|exhentai).org/./[a-f0-9]{10}/\d+\-\d+)"><img[^>]+blank.gif',
         r.text)
     if not picpage:
         fail(ERR_NO_PAGEURL_FOUND)
