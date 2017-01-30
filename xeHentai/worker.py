@@ -28,11 +28,12 @@ class _FakeResponse(object):
         self.url = self._real_url = url
 
 class HttpReq(object):
-    def __init__(self, headers = {}, proxy = None, retry = 10, timeout = 20, logger = None, tname = "main"):
+    def __init__(self, headers = {}, proxy = None, proxy_image = False, retry = 10, timeout = 20, logger = None, tname = "main"):
         self.session = requests.Session()
         self.headers = headers
         self.retry = retry
         self.proxy = proxy
+        self.proxy_image = proxy_image
         self.timeout = timeout
         self.logger = logger
         self.tname = tname
@@ -43,7 +44,7 @@ class HttpReq(object):
             if retry >= self.retry:
                 break
             try:
-                if self.proxy:
+                if self.proxy and (self.proxy_image or re.match('^https*://(?:[g\.]*e-hentai|exhentai).org', url)):
                     f, __not_good = self.proxy.proxied_request(self.session)
                 else:
                     f = self.session.request
@@ -76,8 +77,9 @@ class HttpReq(object):
 
 
 class HttpWorker(Thread, HttpReq):
-    def __init__(self, tname, task_queue, flt, suc, fail, headers = {}, proxy = None, retry = 3, timeout = 10, logger = None, keep_alive = None):
-        HttpReq.__init__(self, headers, proxy, retry, timeout, logger, tname = tname)
+    def __init__(self, tname, task_queue, flt, suc, fail, headers = {}, proxy = None, proxy_image = False,
+            retry = 3, timeout = 10, logger = None, keep_alive = None):
+        HttpReq.__init__(self, headers, proxy, proxy_image, retry, timeout, logger, tname = tname)
         Thread.__init__(self, name = tname)
         Thread.setDaemon(self, True)
         self.task_queue = task_queue
@@ -135,7 +137,7 @@ class ArchiveWorker(Thread):
             pth = self.task.make_archive()
         except Exception as ex:
             self.task.state = TASK_STATE_FAILED
-            self.logger.error(i18n.TASK_ERROR % (self.task.guid, i18n.c(ERR_CANNOT_MAKE_ARCHIVE) % str(ex)))
+            self.logger.error(i18n.TASK_ERROR % (self.task.guid, i18n.c(ERR_CANNOT_MAKE_ARCHIVE) % traceback.format_exc()))
         else:
             self.task.state = TASK_STATE_FINISHED
             self.logger.info(i18n.TASK_MAKE_ARCHIVE_FINISHED % (self.task.guid, pth, time.time() - t))

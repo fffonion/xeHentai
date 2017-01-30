@@ -125,10 +125,10 @@ def glype_proxy(addr, trace_proxy):
         argname = re.findall('[&\?]([a-zA-Z\._]+)=[^\d]*', addr)[0]
         bval = re.findall('[&\?]b=(\d*)', addr)
         bval = bval[0] if bval else '4'
-        server, inst_loc, script = re.findall('(https*://[^/]+)/(.*?)/([^/]+\.php)', addr)[0]
-        urlre = re.compile('/%s/%s\?u=([^&"\']+)&[^"\']+' % (inst_loc, script))
+        server, inst_loc, script = re.findall('(https*://[^/]+)/(.*?)([^/]+\.php)', addr)[0]
+        urlre = re.compile('/%s%s\?u=([^&"\']+)&[^"\']+' % (inst_loc, script))
         def mkurl(url):
-            return "%s/%s/%s?%s=%s&b=%s&f=norefer" % (
+            return "%s/%s%s?%s=%s&b=%s&f=norefer" % (
                 server, inst_loc, script, argname,
                 (urllib.parse if PY3K else urllib).quote_plus(url), bval)
         @trace_proxy(addr)
@@ -140,7 +140,7 @@ def glype_proxy(addr, trace_proxy):
                 kwargs['headers'] = {}
             kwargs['headers'] = dict(kwargs['headers'])
             # anti hotlinking
-            kwargs['headers'].update({'Referer':"%s/%s/%s" % (server, inst_loc, script)})
+            kwargs['headers'].update({'Referer':"%s/%s%s" % (server, inst_loc, script)})
             _coo_new = dict(g_session) if g_session['s'] else {}
             if 'Cookie' in kwargs['headers']:
                 site = re.findall('https*://([^/]+)/*', url)[0]
@@ -155,14 +155,14 @@ def glype_proxy(addr, trace_proxy):
                 rt = session.request(*args, **kwargs)
                 if '<input type="hidden" name="action" value="sslagree">' not in rt.text:
                     break
-                rt = session.request("GET", "%s/%s/includes/process.php?action=sslagree" % (server, inst_loc),
+                rt = session.request("GET", "%s/%sincludes/process.php?action=sslagree" % (server, inst_loc),
                     allow_redirects = False, **kwargs)
                 if rt.headers.get('set-cookie'):
                     _coo_new.update(util.parse_cookie(rt.headers.get('set-cookie').replace(",", ";")))
                     kwargs['headers']['Cookie'] = util.make_cookie(_coo_new)
                     if 's' in _coo_new:
                         g_session["s"] = _coo_new['s']
-                        print(g_session)
+                        # print(g_session)
                 tried += 1
 
             if rt.headers.get('set-cookie'):

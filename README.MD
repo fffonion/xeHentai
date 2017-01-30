@@ -31,6 +31,7 @@ xeH
  - **download_thread_cnt** 下载线程数，默认为5
  - **scan_thread_cnt** 扫描线程数，默认为1
  - **proxy** 代理列表，形如`["socks://127.0.0.1:1080", "http://127.0.0.1:8080"]`
+ - **proxy_image** 是否使用代理下载图片，如果设为否则只将代理用于扫描网页，默认为是
  - **log_path** 日志路径，默认为`eh.log`
  - **log_verbose** 日志等级，可选1-3，值越大输出越详细，默认为2
  - **rename_ori** 将图片重命名为原始名称，如果关闭则使用序号，默认为否
@@ -43,9 +44,10 @@ xeH
 
 ### 命令行模式
 ```
-用法: xeH [-h] [-u USERNAME] [-k KEY] [-c COOKIE] [-i] [-o] [-t N] [-f]
-           [-d DIR] [--daemon] [-l /path/to/eh.log] [-p PROXY] [-v]
-           [--rpc-port PORT] [--rpc-interface ADDR]
+用法: xeH [-u USERNAME] [-k KEY] [-c COOKIE] [-i] [-o] [-t N] [-d DIR]
+           [--daemon] [-l /path/to/eh.log] [-p PROXY] [--proxy-image] [-v]
+           [--rpc-interface ADDR] [--rpc-port PORT] [--rpc-secret ...]
+           [-r BOOL] [-a BOOL] [-h] [--version]
            [url [url ...]]
 
 绅♂士下载器
@@ -66,6 +68,7 @@ xeH
                         保存日志的路径 (默认: /eh.log)
   -p PROXY, --proxy PROXY
                         设置代理, 可以指定多次, 当前支持的类型: socks5/4a, http(s), glype (默认: 无)
+  --proxy-image         同时使用代理来下载图片，，如果设为否则只将代理用于扫描网页 (默认: True)
   -v, --verbose         设置日志装逼等级 (默认: 2)
   --rpc-port PORT       设置JSON-RPC监听IP (默认: None)
   --rpc-interface ADDR  设置JSON-RPC监听端口 (默认: localhost)
@@ -124,6 +127,10 @@ Firefox用户需要安装[Greasemonkey](https://addons.mozilla.org/en-US/firefox
  - glype代理，如`http://example.com/browse.php?u=a&b=4`。请根据实际情况修改`b`的名称。glype是目前使用最广的php在线代理，使用时请取消勾选“加密url(Encrypt URL)”、勾选“允许cookies (Allow Cookies)”后随意打开一个网页，然后把网址粘贴进来
 
 可以指定多个代理，格式如`['socks5://127.0.0.1:1080', 'http://127.0.0.1:8080']`。
+
+默认情况下代理仅会被用于扫描网页，如果需要使用代理下载图片，请在配置文件中设置`proxy_image`为**True**，或者在运行时加上`--proxy-image`参数。
+
+如果使用代理仅用于突破封锁的目的，则此项可以设置为`False`；如果需要保证隐私，请将此项设置为`True`。使用glype代理的用户建议将此项设为`False`。
 
 ## 其他说明
 
