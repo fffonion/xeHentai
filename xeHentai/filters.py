@@ -35,9 +35,9 @@ def flt_metadata(r, suc, fail):
     # add gallery meta if suc; return errorcode if fail
     # TODO: catch re exceptions
     if r.status_code == 404:
-        fail(ERR_GALLERY_REMOVED)
+        return fail(ERR_GALLERY_REMOVED)
     if re.match("This gallery is pining for the fjords", r.text):
-        fail(ERR_ONLY_VISIBLE_EXH)
+        return fail(ERR_ONLY_VISIBLE_EXH)
     elif re.match("Your IP address has been temporarily banned", r.text):
         fail(ERR_IP_BANNED)
         return re.findall("The ban expires in (.+)", r.text)[0]

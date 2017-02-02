@@ -277,6 +277,7 @@ class xeHentai(object):
                             mon.vote(tid, 0)),
                         lambda x, tid = tid: (
                             task.page_q.put(task.get_reload_url(x[1])),# if x[0] != ERR_QUOTA_EXCEEDED else None,
+                            task.reload_map.pop(x[1]) if x[1] in task.reload_map else None, # delete old url in reload_map
                             self.logger.debug("%s put a failed file into queue" % tid),
                             mon.vote(tid, x[0])),
                         mon.wrk_keepalive)

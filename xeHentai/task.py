@@ -60,7 +60,7 @@ class Task(object):
         self.meta = {}
 
     def migrate_exhentai(self):
-        _ = re.findall("(?:%s)(.+)" % RESTR_SITE, self.url)
+        _ = re.findall("(?:https*://[g\.]*e\-hentai\.org)(.+)", self.url)
         if not _:
             return False
         self.url = "https://exhentai.org%s" % _[0]
