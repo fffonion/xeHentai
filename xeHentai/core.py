@@ -107,7 +107,7 @@ class xeHentai(object):
                 self._all_tasks[t.guid].cleanup()
             return 0, t.guid
         self._all_tasks[t.guid] = t
-        if not re.match("^https*://(g\.e\-|ex)hentai\.org/[^/]+/\d+/[^/]+/*#*$", url):
+        if not re.match("^%s/[^/]+/\d+/[^/]+/*#*$" % RESTR_SITE, url):
             t.set_fail(ERR_URL_NOT_RECOGNIZED)
         elif not self.has_login and re.match("^https*://exhentai\.org", url):
             t.set_fail(ERR_CANT_DOWNLOAD_EXH)

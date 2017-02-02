@@ -19,16 +19,11 @@ if PY3K:
 else:
     from Queue import Queue, Empty
 
-index_re = re.compile('.+/(\d+)/([^\/]+)/*')
-gallery_re = re.compile('/([a-f0-9]{10})/[^\-]+\-(\d+)')
-imghash_re = re.compile('/h/([a-f0-9]{40})')
-fullimg_re = re.compile('fullimg.php\?gid=([a-z0-9]+)&page=(\d+)&key=')
-
 class Task(object):
     def __init__(self, url, cfgdict):
         self.url = url
         if url:
-            _ = index_re.findall(url)
+            _ = RE_INDEX.findall(url)
             if _:
                 self.gid, self.sethash = _[0]
         self.failcode = 0
@@ -65,7 +60,7 @@ class Task(object):
         self.meta = {}
 
     def migrate_exhentai(self):
-        _ = re.findall("(?:https*://g\.e\-hentai\.org)(.+)", self.url)
+        _ = re.findall("(?:%s)(.+)" % RESTR_SITE, self.url)
         if not _:
             return False
         self.url = "https://exhentai.org%s" % _[0]
@@ -86,7 +81,7 @@ class Task(object):
     #     del self.meta['sample_hash']
 
     def base_url(self):
-        return re.findall("(https*://(?:g\.e\-|ex)hentai\.org)", self.url)[0]
+        return re.findall(RESTR_SITE, self.url)[0]
 
     # def get_picpage_url(self, pichash):
     #     # if file resized, this url not works
@@ -101,7 +96,7 @@ class Task(object):
             fpath = self.get_fpath()
             old_fid = self.get_fname(imgurl)[0]
             old_f = os.path.join(fpath, self.get_fidpad(old_fid))
-            this_fid = int(gallery_re.findall(reload_url)[0][1])
+            this_fid = int(RE_GALLERY.findall(reload_url)[0][1])
             this_f = os.path.join(fpath, self.get_fidpad(this_fid))
             self._f_lock.acquire()
             if os.path.exists(old_f):
@@ -154,7 +149,7 @@ class Task(object):
         #     if fid not in self._flist_done:
         #         callback(self.get_picpage_url(pichash))
         # elif url:
-        fhash, fid = gallery_re.findall(url)[0]
+        fhash, fid = RE_GALLERY.findall(url)[0]
         # if fhash not in self.meta['filelist']:
         #     self.meta['resampled'][fhash] = int(fid)
         #     self.has_ori = True]
@@ -173,7 +168,7 @@ class Task(object):
         if _: # change it if it's a full image
             fname = _[0]
             self.reload_map[imgurl][1] = fname
-        _, fid = gallery_re.findall(pageurl)[0]
+        _, fid = RE_GALLERY.findall(pageurl)[0]
 
         fn = os.path.join(fpath, self.get_fidpad(int(fid)))
         if os.path.exists(fn) and os.stat(fn).st_size > 0:
@@ -195,7 +190,7 @@ class Task(object):
 
     def get_fname(self, imgurl):
         pageurl, fname = self.reload_map[imgurl]
-        _, fid = gallery_re.findall(pageurl)[0]
+        _, fid = RE_GALLERY.findall(pageurl)[0]
         return int(fid), fname
 
     def get_fpath(self):
@@ -239,7 +234,7 @@ class Task(object):
                 try:
                     os.rename(fname_ori, fname_to)
                 except Exception as ex:
-                    error_list.append(os.path.split(fname_ori)[1], os.path.split(fname_to)[1], str(ex))
+                    error_list.append((os.path.split(fname_ori)[1], os.path.split(fname_to)[1], str(ex)))
             cnt += 1
         if cnt == self.meta['total']:
             with open(os.path.join(fpath, ".xehdone"), "w"):
@@ -269,7 +264,7 @@ class Task(object):
                 [getattr(self, k).put(e, False) for e in j[k]]
             else:
                 setattr(self, k, j[k])
-        _ = index_re.findall(self.url)
+        _ = RE_INDEX.findall(self.url)
         if _:
             self.gid, self.sethash = _[0]
         return self
