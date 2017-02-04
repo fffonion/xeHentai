@@ -5,6 +5,7 @@
 #      fffonion        <fffonion@gmail.com>
 
 import os
+import re
 import sys
 import locale
 
@@ -15,7 +16,7 @@ LOCALE = locale.getdefaultlocale()[0]
 CODEPAGE = locale.getdefaultlocale()[1]
 ANDROID = 'ANDROID_ARGUMENT' in os.environ
 
-__version__ = 2.016
+__version__ = 2.017
 DEVELOPMENT = False
 
 SCRIPT_NAME = "xeHentai"
@@ -30,6 +31,14 @@ else:
     FILEPATH = sys.path[0]
 
 DUMMY_FILENAME = "-dummy-"
+RENAME_TMPDIR = "-xeh-conflict-"
+
+RE_INDEX = re.compile('.+/(\d+)/([^\/]+)/*')
+RE_GALLERY = re.compile('/([a-f0-9]{10})/[^\-]+\-(\d+)')
+RE_IMGHASH = re.compile('/h/([a-f0-9]{40})')
+RE_FULLIMG = re.compile('fullimg.php\?gid=([a-z0-9]+)&page=(\d+)&key=')
+
+RESTR_SITE = "https*://(?:[g\.]*e\-|ex)hentai\.org"
 
 XEH_STATE_RUNNING = 0
 XEH_STATE_SOFT_EXIT = 1 # wait until current task finish and exit

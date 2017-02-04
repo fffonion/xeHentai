@@ -19,16 +19,11 @@ if PY3K:
 else:
     from Queue import Queue, Empty
 
-index_re = re.compile('.+/(\d+)/([^\/]+)/*')
-gallery_re = re.compile('/([a-f0-9]{10})/[^\-]+\-(\d+)')
-imghash_re = re.compile('/h/([a-f0-9]{40})')
-fullimg_re = re.compile('fullimg.php\?gid=([a-z0-9]+)&page=(\d+)&key=')
-
 class Task(object):
     def __init__(self, url, cfgdict):
         self.url = url
         if url:
-            _ = index_re.findall(url)
+            _ = RE_INDEX.findall(url)
             if _:
                 self.gid, self.sethash = _[0]
         self.failcode = 0
@@ -65,7 +60,7 @@ class Task(object):
         self.meta = {}
 
     def migrate_exhentai(self):
-        _ = re.findall("(?:https*://g\.e\-hentai\.org)(.+)", self.url)
+        _ = re.findall("(?:https*://[g\.]*e\-hentai\.org)(.+)", self.url)
         if not _:
             return False
         self.url = "https://exhentai.org%s" % _[0]
@@ -86,7 +81,7 @@ class Task(object):
     #     del self.meta['sample_hash']
 
     def base_url(self):
-        return re.findall("(https*://(?:g\.e\-|ex)hentai\.org)", self.url)[0]
+        return re.findall(RESTR_SITE, self.url)[0]
 
     # def get_picpage_url(self, pichash):
     #     # if file resized, this url not works
@@ -101,7 +96,7 @@ class Task(object):
             fpath = self.get_fpath()
             old_fid = self.get_fname(imgurl)[0]
             old_f = os.path.join(fpath, self.get_fidpad(old_fid))
-            this_fid = int(gallery_re.findall(reload_url)[0][1])
+            this_fid = int(RE_GALLERY.findall(reload_url)[0][1])
             this_f = os.path.join(fpath, self.get_fidpad(this_fid))
             self._f_lock.acquire()
             if os.path.exists(old_f):
@@ -154,7 +149,7 @@ class Task(object):
         #     if fid not in self._flist_done:
         #         callback(self.get_picpage_url(pichash))
         # elif url:
-        fhash, fid = gallery_re.findall(url)[0]
+        fhash, fid = RE_GALLERY.findall(url)[0]
         # if fhash not in self.meta['filelist']:
         #     self.meta['resampled'][fhash] = int(fid)
         #     self.has_ori = True]
@@ -173,7 +168,7 @@ class Task(object):
         if _: # change it if it's a full image
             fname = _[0]
             self.reload_map[imgurl][1] = fname
-        _, fid = gallery_re.findall(pageurl)[0]
+        _, fid = RE_GALLERY.findall(pageurl)[0]
 
         fn = os.path.join(fpath, self.get_fidpad(int(fid)))
         if os.path.exists(fn) and os.stat(fn).st_size > 0:
@@ -195,7 +190,7 @@ class Task(object):
 
     def get_fname(self, imgurl):
         pageurl, fname = self.reload_map[imgurl]
-        _, fid = gallery_re.findall(pageurl)[0]
+        _, fid = RE_GALLERY.findall(pageurl)[0]
         return int(fid), fname
 
     def get_fpath(self):
@@ -208,15 +203,23 @@ class Task(object):
 
     def rename_fname(self):
         fpath = self.get_fpath()
+        tmppath = os.path.join(fpath, RENAME_TMPDIR)
         cnt = 0
         error_list = []
+        # we need to track renamed fid's to decide 
+        # whether to rename into a temp filename or add (1)
+        # only need it when rename_ori = True
+        done_list = set()
         for h in self.reload_map:
             fid, fname = self.get_fname(h)
             # if we don't need to rename to original name and file type matches
             if not self.config['rename_ori'] and os.path.splitext(fname)[1].lower() == '.jpg':
                 continue
-            fname_ori = os.path.join(fpath, self.get_fidpad(fid)) # id
+            fname_ori = os.path.join(fpath, self.get_fidpad(fid)) # id          
             if self.config['rename_ori']:
+                if os.path.exists(os.path.join(tmppath, self.get_fidpad(fid))):
+                    # if we previously put it into a temporary folder, we need to change fname_ori
+                    fname_ori = os.path.join(tmppath, self.get_fidpad(fid))
                 fname_to = os.path.join(fpath, util.legalpath(fname))
             else:
                 # Q: Why we don't just use id.ext when saving files instead of using
@@ -226,12 +229,22 @@ class Task(object):
                 #   thus can't determine if this id is downloaded, because file type is not
                 #   necessarily .jpg
                 fname_to = os.path.join(fpath, self.get_fidpad(fid, os.path.splitext(fname)[1][1:]))
-            if fname_ori != fname_to:
+            while fname_ori != fname_to:
                 if os.path.exists(fname_ori):
                     while os.path.exists(fname_to):
                         _base, _ext = os.path.splitext(fname_to)
                         _ = re.findall("\((\d+)\)$", _base)
+                        if self.config['rename_ori'] and fname_to not in done_list:
+                            # if our auto numbering conflicts with original naming
+                            # we move it into a temporary folder
+                            # It's safe since this file is same with one of our auto numbering filename,
+                            # it could never be conflicted with other files in tmppath
+                            if not os.path.exists(tmppath):
+                                os.mkdir(tmppath)
+                            os.rename(fname_to, os.path.join(tmppath, os.path.split(fname_to)[1]))
+                            break
                         if _ :# if ...(1) exists, use ...(2)
+                            print(_base)
                             _base = re.sub("\((\d+)\)$", _base, lambda x:"(%d)" % (int(x.group(1)) + 1))
                         else:
                             _base = "%s(1)" % _base
@@ -239,11 +252,19 @@ class Task(object):
                 try:
                     os.rename(fname_ori, fname_to)
                 except Exception as ex:
-                    error_list.append(os.path.split(fname_ori)[1], os.path.split(fname_to)[1], str(ex))
+                    error_list.append((os.path.split(fname_ori)[1], os.path.split(fname_to)[1], str(ex)))
+                    break
+                if self.config['rename_ori']:
+                    done_list.add(fname_to)
+                break
             cnt += 1
         if cnt == self.meta['total']:
             with open(os.path.join(fpath, ".xehdone"), "w"):
                 pass
+        try:
+            os.rmdir(tmppath)
+        except: # we will leave it undeleted if it's not empty
+            pass
         return error_list
 
     def make_archive(self):
@@ -269,7 +290,7 @@ class Task(object):
                 [getattr(self, k).put(e, False) for e in j[k]]
             else:
                 setattr(self, k, j[k])
-        _ = index_re.findall(self.url)
+        _ = RE_INDEX.findall(self.url)
         if _:
             self.gid, self.sethash = _[0]
         return self

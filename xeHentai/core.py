@@ -108,7 +108,7 @@ class xeHentai(object):
                 self._all_tasks[t.guid].cleanup()
             return 0, t.guid
         self._all_tasks[t.guid] = t
-        if not re.match("^https*://(g\.e\-|ex)hentai\.org/[^/]+/\d+/[^/]+/*#*$", url):
+        if not re.match("^%s/[^/]+/\d+/[^/]+/*#*$" % RESTR_SITE, url):
             t.set_fail(ERR_URL_NOT_RECOGNIZED)
         elif not self.has_login and re.match("^https*://exhentai\.org", url):
             t.set_fail(ERR_CANT_DOWNLOAD_EXH)
@@ -278,6 +278,7 @@ class xeHentai(object):
                             mon.vote(tid, 0)),
                         lambda x, tid = tid: (
                             task.page_q.put(task.get_reload_url(x[1])),# if x[0] != ERR_QUOTA_EXCEEDED else None,
+                            task.reload_map.pop(x[1]) if x[1] in task.reload_map else None, # delete old url in reload_map
                             self.logger.debug("%s put a failed file into queue" % tid),
                             mon.vote(tid, x[0])),
                         mon.wrk_keepalive)

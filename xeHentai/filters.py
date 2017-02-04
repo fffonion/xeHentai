@@ -35,14 +35,15 @@ def flt_metadata(r, suc, fail):
     # add gallery meta if suc; return errorcode if fail
     # TODO: catch re exceptions
     if r.status_code == 404:
-        fail(ERR_GALLERY_REMOVED)
+        return fail(ERR_GALLERY_REMOVED)
     if re.match("This gallery is pining for the fjords", r.text):
-        fail(ERR_ONLY_VISIBLE_EXH)
+        return fail(ERR_ONLY_VISIBLE_EXH)
     elif re.match("Your IP address has been temporarily banned", r.text):
         fail(ERR_IP_BANNED)
         return re.findall("The ban expires in (.+)", r.text)[0]
     meta = {}
-    # sample_hash = re.findall('<a href="https*://(?:g.e-hentai|exhentai).org/./([a-f0-9]{10})/\d+\-\d+"><img', r.text)
+    # print(r.text)
+    # sample_hash = re.findall('<a href="%s/./([a-f0-9]{10})/\d+\-\d+"><img' % RESTR_SITE, r.text)
     # meta['sample_hash'] = sample_hash
     # meta['resampled'] = {}
     meta['gjname'] = util.htmlescape(re.findall('="gj">(.*?)</h1>', r.text)[0])
@@ -58,7 +59,7 @@ def flt_metadata(r, suc, fail):
 
     suc(meta)
     # _ = re.findall(
-    #    'https*://(g\.e\-|ex)hentai\.org/[^/]+/(\d+)/[^/]+/\?p=\d*" onclick="return false"(.*?)</a>',
+    #    '%s/[^/]+/(\d+)/[^/]+/\?p=\d*" onclick="return false"(.*?)</a>' % RESTR_SITE,
     #    r.text)
     # meta['pagecount'] = 1 if len(_) <= 1 else int(pagecount[-2])
 
@@ -96,7 +97,7 @@ def flt_pageurl(r, suc, fail):
     # input gallery response
     # add per image urls if suc; finish task if fail
     picpage = re.findall(
-        '<a href="(https*://(?:[g\.]*e-hentai|exhentai).org/./[a-f0-9]{10}/\d+\-\d+)"><img[^>]+blank.gif',
+        '<a href="(%s/./[a-f0-9]{10}/\d+\-\d+)"><img alt="\d+" title="Page' % RESTR_SITE,
         r.text)
     if not picpage:
         fail(ERR_NO_PAGEURL_FOUND)
