@@ -17,7 +17,7 @@ CODEPAGE = locale.getdefaultlocale()[1]
 ANDROID = 'ANDROID_ARGUMENT' in os.environ
 
 __version__ = 2.017
-DEVELOPMENT = True
+DEVELOPMENT = False
 
 SCRIPT_NAME = "xeHentai"
 
@@ -31,6 +31,7 @@ else:
     FILEPATH = sys.path[0]
 
 DUMMY_FILENAME = "-dummy-"
+RENAME_TMPDIR = "-xeh-conflict-"
 
 RE_INDEX = re.compile('.+/(\d+)/([^\/]+)/*')
 RE_GALLERY = re.compile('/([a-f0-9]{10})/[^\-]+\-(\d+)')

@@ -203,15 +203,23 @@ class Task(object):
 
     def rename_fname(self):
         fpath = self.get_fpath()
+        tmppath = os.path.join(fpath, RENAME_TMPDIR)
         cnt = 0
         error_list = []
+        # we need to track renamed fid's to decide 
+        # whether to rename into a temp filename or add (1)
+        # only need it when rename_ori = True
+        done_list = set()
         for h in self.reload_map:
             fid, fname = self.get_fname(h)
             # if we don't need to rename to original name and file type matches
             if not self.config['rename_ori'] and os.path.splitext(fname)[1].lower() == '.jpg':
                 continue
-            fname_ori = os.path.join(fpath, self.get_fidpad(fid)) # id
+            fname_ori = os.path.join(fpath, self.get_fidpad(fid)) # id          
             if self.config['rename_ori']:
+                if os.path.exists(os.path.join(tmppath, self.get_fidpad(fid))):
+                    # if we previously put it into a temporary folder, we need to change fname_ori
+                    fname_ori = os.path.join(tmppath, self.get_fidpad(fid))
                 fname_to = os.path.join(fpath, util.legalpath(fname))
             else:
                 # Q: Why we don't just use id.ext when saving files instead of using
@@ -221,12 +229,22 @@ class Task(object):
                 #   thus can't determine if this id is downloaded, because file type is not
                 #   necessarily .jpg
                 fname_to = os.path.join(fpath, self.get_fidpad(fid, os.path.splitext(fname)[1][1:]))
-            if fname_ori != fname_to:
+            while fname_ori != fname_to:
                 if os.path.exists(fname_ori):
                     while os.path.exists(fname_to):
                         _base, _ext = os.path.splitext(fname_to)
                         _ = re.findall("\((\d+)\)$", _base)
+                        if self.config['rename_ori'] and fname_to not in done_list:
+                            # if our auto numbering conflicts with original naming
+                            # we move it into a temporary folder
+                            # It's safe since this file is same with one of our auto numbering filename,
+                            # it could never be conflicted with other files in tmppath
+                            if not os.path.exists(tmppath):
+                                os.mkdir(tmppath)
+                            os.rename(fname_to, os.path.join(tmppath, os.path.split(fname_to)[1]))
+                            break
                         if _ :# if ...(1) exists, use ...(2)
+                            print(_base)
                             _base = re.sub("\((\d+)\)$", _base, lambda x:"(%d)" % (int(x.group(1)) + 1))
                         else:
                             _base = "%s(1)" % _base
@@ -235,10 +253,18 @@ class Task(object):
                     os.rename(fname_ori, fname_to)
                 except Exception as ex:
                     error_list.append((os.path.split(fname_ori)[1], os.path.split(fname_to)[1], str(ex)))
+                    break
+                if self.config['rename_ori']:
+                    done_list.add(fname_to)
+                break
             cnt += 1
         if cnt == self.meta['total']:
             with open(os.path.join(fpath, ".xehdone"), "w"):
                 pass
+        try:
+            os.rmdir(tmppath)
+        except: # we will leave it undeleted if it's not empty
+            pass
         return error_list
 
     def make_archive(self):
