@@ -93,6 +93,19 @@ def main(xeH, opt):
     -f  --force           即使超出配额也下载，默认为否
     -j  --no-jp-name      是否不使用日语命名，默认为否'''
 
+def _parse_range(s):
+    rg = []
+    s = s.replace("，", ",")
+    for r in s.split(','):
+        r = r.strip()
+        m = re.match(r'(\d+)(?:-(\d+))?$', r)
+        if not m:
+            raise argparse.ArgumentTypeError(logger.safestr(i18n.c(ERR_NOT_RANGE_FORMAT) % r))
+        start = int(m.group(1))
+        end = int(m.group(2) or start)
+        rg.append((start, end))
+    return sorted(rg)
+
 def parse_opt():
     _def = {k:v for k,v in default_config.__dict__.items() if not k.startswith("_")}
     _def.update({k:v for k,v in config.__dict__.items() if not k.startswith("_")})
@@ -140,12 +153,15 @@ def parse_opt():
     parser.add_argument('-a', '--archive', type = bool, metavar = "BOOL", default = _def['make_archive'],
                         dest = 'make_archive', help = i18n.XEH_OPT_a)
     parser.add_argument('-j', '--jpn-title', type = bool, metavar = "BOOL", default = _def['jpn_title'],
-                        dest = 'jpn_title', help = i18n.XEH_OPT_j)                   
+                        dest = 'jpn_title', help = i18n.XEH_OPT_j)
+    parser.add_argument('--download-range', type = _parse_range, metavar = "a-b,c-d,e", default = None,
+                        dest = 'download_range', help = i18n.XEH_OPT_download_range)
     parser.add_argument('-h','--help', action = 'help', help = i18n.XEH_OPT_h)
-    parser.add_argument('--version', action = 'version', version = '%s v%.3f' % (SCRIPT_NAME, __version__),
+    parser.add_argument('--version', action = 'version',
+                        version = '%s v%.3f%s' % (SCRIPT_NAME, __version__, '-dev' if DEVELOPMENT else ""),
                         help = i18n.XEH_OPT_version)
-
     args = parser.parse_args()
+
     return args
 
 def interactive(xeH):
@@ -163,7 +179,7 @@ def interactive(xeH):
         while not pwd:
             pwd = _readline(i18n.PS_PASSWD)
         xeH.login_exhentai(uname, pwd)
-    url = proxy = ""
+    url = proxy = download_range = ""
     while not url:
         url = _readline(i18n.PS_URL)
     url = url.split(",")
@@ -177,5 +193,17 @@ def interactive(xeH):
     rename_ori = _readline(i18n.PS_RENAME_ORI, 'y' if xeH.cfg['rename_ori'] else 'n') == 'y'
     make_archive = _readline(i18n.PS_MAKE_ARCHIVE, 'y' if xeH.cfg['make_archive'] else 'n') == 'y'
     jpn_title = _readline(i18n.PS_JPN_TITLE, 'y' if xeH.cfg['jpn_title'] else 'n') == 'y'
+    while not download_range:
+        _ = _readline(i18n.PS_DOWNLOAD_RANGE)
+        if not _:
+            download_range = []
+            break
+        try:
+            download_range = _parse_range(logger.safestr(_))
+        except argparse.ArgumentTypeError as ex:
+            print(ex)
+        else:
+            break
     return {'urls': url, 'proxy': proxy, 'download_ori': download_ori, 'dir': _dir, 'rename_ori':rename_ori,
-            'make_archive': make_archive, 'jpn_title': jpn_title, 'save_tasks': False}
+            'make_archive': make_archive, 'jpn_title': jpn_title, 'save_tasks': False,
+            'download_range': download_range}

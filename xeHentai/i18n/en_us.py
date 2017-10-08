@@ -18,6 +18,7 @@ err_msg = {
     ERR_TASK_CANNOT_RESUME: "this task can't be resumed",
     ERR_CANNOT_CREATE_DIR: "can't create directory %s",
     ERR_CANNOT_MAKE_ARCHIVE: "can't make archive %s",
+    ERR_NOT_RANGE_FORMAT: "'%s' is not a range format, expecting '1-2' or '3'",
 #    ERR_HATHDL_NOTFOUND: "hathdl not found",
     ERR_RPC_PARSE_ERROR: "Parse error.",
     ERR_RPC_INVALID_REQUEST: "Invalid request.",
@@ -54,6 +55,8 @@ XEH_OPT_rpc_port = "bind jsonrpc server to this port (current: %(default)s)"
 XEH_OPT_rpc_secret = "jsonrpc secret string (current: %(default)s)"
 XEH_OPT_a = "make an archive (.zip) after download and delete directory (current: %(default)s)"
 XEH_OPT_j = "use Japanese title, use English/Romaji title if turned off (current: %(default)s)"
+XEH_OPT_download_range = "specify ranges of images to be downloaded, in format start-end, or single index, " \
+"use comma to concat multiple ranges, e.g.: 5-10,15,20-25, default to download all images"
 XEH_OPT_h = "show this help message and exit"
 XEH_OPT_version = "show program's version number and exit"
 XEH_OPT_IGNORING_I = "ignoring -i option in daemon mode"
@@ -67,6 +70,7 @@ PS_DOWNLOAD_ORI = "Download original (y/n, default:%s)? > "
 PS_RENAME_ORI = "Rename to original name (y/n, default:%s)? > "
 PS_MAKE_ARCHIVE = "Make archive (y/n, default:%s)? > "
 PS_JPN_TITLE = "Use Japanese title (y/n, default:%s)? > "
+PS_DOWNLOAD_RANGE = "Download range, press enter to download all > "
 PS_DOWNLOAD_DIR = "Download to (default: %s)\npress enter or enter new > "
 
 PROXY_CANDIDATE_CNT = "proxy pool has %d candidates"

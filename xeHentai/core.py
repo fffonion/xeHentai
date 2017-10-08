@@ -97,7 +97,7 @@ class xeHentai(object):
         url = url.strip()
         cfg = {k:v for k, v in self.cfg.items() if k in (
             "dir", "download_ori", "download_thread_cnt", "scan_thread_cnt",
-            "rename_ori", "make_archive", "jpn_title")}
+            "rename_ori", "make_archive", "jpn_title", "download_range")}
         cfg.update(cfg_dict)
         if cfg['download_ori'] and not self.has_login:
             self.logger.warning(i18n.XEH_DOWNLOAD_ORI_NEED_LOGIN)
@@ -250,7 +250,7 @@ class xeHentai(object):
                 self.logger.info(i18n.TASK_TITLE % (
                     task_guid, task.meta['title']))
                 self.logger.info(i18n.TASK_WILL_DOWNLOAD_CNT % (
-                    task_guid, task.meta['total'] - len(task._flist_done),
+                    task_guid, task.meta['total'] - task.meta['finished'],
                     task.meta['total']))
                 # spawn thread to scan images
                 for i in range(task.config['scan_thread_cnt']):

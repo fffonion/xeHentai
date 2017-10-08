@@ -18,6 +18,7 @@ err_msg = {
     ERR_TASK_CANNOT_RESUME: "这个任务无法被恢复",
     ERR_CANNOT_CREATE_DIR: "无法创建文件夹 %s",
     ERR_CANNOT_MAKE_ARCHIVE: "无法制作压缩包 %s",
+    ERR_NOT_RANGE_FORMAT: "'%s'不符合范围的格式, 正确的格式为 1-3 或者 5",
 #    ERR_HATHDL_NOTFOUND: "hathdl文件未找到"
     ERR_RPC_PARSE_ERROR: "Parse error.",
     ERR_RPC_INVALID_REQUEST: "Invalid request.",
@@ -53,6 +54,8 @@ XEH_OPT_rpc_port = "设置JSON-RPC监听端口 (当前: %(default)s)"
 XEH_OPT_rpc_secret = "设置JSON-RPC密钥 (当前: %(default)s)"
 XEH_OPT_a = "下载完成后生成zip压缩包并删除下载目录 (当前: %(default)s)"
 XEH_OPT_j = "使用日语标题, 如果关闭则使用英文或罗马字标题 (当前: %(default)s)"
+XEH_OPT_download_range = "设置下载的图片范围, 格式为 开始位置-结束位置, 或者单张图片的位置, " \
+"使用逗号来分隔多个范围, 例如 5-10,15,20-25, 默认为下载所有"
 XEH_OPT_h = "显示本帮助信息"
 XEH_OPT_version = "显示版本信息"
 XEH_OPT_IGNORING_I = "后台模式已忽略 -i 参数"
@@ -67,6 +70,7 @@ PS_DOWNLOAD_ORI = "是否下载原图（默认%s） (y/n)? > "
 PS_RENAME_ORI  = "是否自动重命名（默认%s） (y/n)? > "
 PS_MAKE_ARCHIVE = "是否制作zip压缩包（默认%s） (y/n)? > "
 PS_JPN_TITLE = "是否使用日语标题（默认%s） (y/n)? > "
+PS_DOWNLOAD_RANGE = "下载范围, 使用逗号分割多个范围, 回车下载全部 > "
 PS_DOWNLOAD_DIR = "下载目录 (当前: %s)\n回车确认或输入新路径 > "
 
 PROXY_CANDIDATE_CNT = "代理池中有%d个代理"

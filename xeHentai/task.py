@@ -139,8 +139,24 @@ class Task(object):
         donefile = False
         if os.path.exists(os.path.join(fpath, ".xehdone")) or os.path.exists("%s.zip" % fpath):
             donefile = True
-        # can only check un-renamed files
+        _range_idx = 0
         for fid in range(1, self.meta['total'] + 1):
+            # check download range
+            if self.config['download_range']:
+                _found = False
+                # download_range is sorted asc
+                for start, end in self.config['download_range'][_range_idx:]:
+                    if fid > end: # out of range right bound move to next range
+                        _range_idx += 1
+                    elif start <= fid <= end: # in range
+                        _found = True
+                        break
+                    elif fid < start: # out of range left bound
+                        break
+                if not _found:
+                    self._flist_done.add(int(fid))
+                    continue
+            # can only check un-renamed files
             fname = os.path.join(fpath, self.get_fidpad(fid)) # id
             if donefile or (os.path.exists(fname) and os.stat(fname).st_size > 0):
                 self._flist_done.add(int(fid))

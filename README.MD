@@ -47,10 +47,14 @@ xeH
 用法: xeH [-u USERNAME] [-k KEY] [-c COOKIE] [-i] [-o] [-t N] [-d DIR]
            [--daemon] [-l /path/to/eh.log] [-p PROXY] [--proxy-image] [-v]
            [--rpc-interface ADDR] [--rpc-port PORT] [--rpc-secret ...]
-           [-r BOOL] [-a BOOL] [-h] [--version]
+           [-r BOOL] [-a BOOL] [-j BOOL] [--download-range a-b,c-d,e] [-h]
+           [--version]
            [url [url ...]]
 
 绅♂士下载器
+
+必选参数:
+  url                   下载页的网址
 
 可选参数:
   -h, --help            显示帮助
@@ -77,10 +81,13 @@ xeH
                         将图片重命名为原始名称，如果关闭则使用序号 (默认: True)
   -a BOOL, --archive BOOL
                         下载完成后生成zip压缩包并删除下载目录 (默认: False)
+  -j BOOL, --jpn-title BOOL
+                        使用日语标题, 如果关闭则使用英文或罗马字标题 (默认: True)
+  --download-range a-b,c-d,e
+                        设置需要下载的图片范围, 格式为 开始位置-结束位置, 或者单张图片的位置,
+                        可以使用逗号来分隔多个范围, 例如 5-10,15,20-25
   -h, --help            显示本帮助信息
   --version             显示版本信息
-
-如果参数未指定，则使用config.py中的默认值
 
 ```
 
@@ -131,6 +138,15 @@ Firefox用户需要安装[Greasemonkey](https://addons.mozilla.org/en-US/firefox
 默认情况下代理仅会被用于扫描网页，如果需要使用代理下载图片，请在配置文件中设置`proxy_image`为**True**，或者在运行时加上`--proxy-image`参数。
 
 如果使用代理仅用于突破封锁的目的，则此项可以设置为`False`；如果需要保证隐私，请将此项设置为`True`。使用glype代理的用户建议将此项设为`False`。
+
+### 下载范围
+
+下载范围仅可通过命令行模式或者交互模式设置。格式为使用`开始位置-结束位置`，例如`5-10`表示下载第5到第10张图片，包括第5和第10张；或者单个位置，例如`15`表示下载第15张图片。
+
+可以通过逗号来分割多个范围，例如`5-10,15`表示下载第5到第10张图片以及第15张图片。
+
+如果不输入下载范围，则默认下载所有图片。
+
 
 ## 其他说明
 
