@@ -48,7 +48,8 @@ def flt_metadata(r, suc, fail):
     # meta['resampled'] = {}
     meta['gjname'] = util.htmlescape(re.findall('="gj">(.*?)</h1>', r.text)[0])
     meta['gnname']= util.htmlescape(re.findall('="gn">(.*?)</h1>', r.text)[0])
-    meta['title'] = meta['gjname'] if meta['gjname'] else meta['gnname']
+    # don't assign title now, select gj/gn based on cfg['jpn_title']
+    # meta['title'] = meta['gjname'] if meta['gjname'] else meta['gnname']
     meta['total'] = int(re.findall('Length:</td><td class="gdt2">(\d+)\s+page', r.text)[0])
     meta['finished'] = 0
     meta['tags'] = {}

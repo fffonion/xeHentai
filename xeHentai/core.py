@@ -96,7 +96,8 @@ class xeHentai(object):
     def add_task(self, url, cfg_dict = {}):
         url = url.strip()
         cfg = {k:v for k, v in self.cfg.items() if k in (
-            "dir", "download_ori", "download_thread_cnt", "scan_thread_cnt", "rename_ori", "make_archive")}
+            "dir", "download_ori", "download_thread_cnt", "scan_thread_cnt",
+            "rename_ori", "make_archive", "jpn_title")}
         cfg.update(cfg_dict)
         if cfg['download_ori'] and not self.has_login:
             self.logger.warning(i18n.XEH_DOWNLOAD_ORI_NEED_LOGIN)
@@ -196,7 +197,7 @@ class xeHentai(object):
                 try:
                     r = req.request("GET", task.url,
                         filters.flt_metadata,
-                        lambda x:task.meta.update(x),
+                        lambda x:task.update_meta(x),
                         lambda x:task.set_fail(x))
                 except Exception as ex:
                     self.logger.error(i18n.TASK_ERROR % (task.guid, traceback.format_exc()))
@@ -247,7 +248,7 @@ class xeHentai(object):
             elif task.state == TASK_STATE_SCAN_IMG:
                 # print here so that see it after we can join former threads
                 self.logger.info(i18n.TASK_TITLE % (
-                    task_guid, task.meta['gjname'] or task.meta['gnname']))
+                    task_guid, task.meta['title']))
                 self.logger.info(i18n.TASK_WILL_DOWNLOAD_CNT % (
                     task_guid, task.meta['total'] - len(task._flist_done),
                     task.meta['total']))

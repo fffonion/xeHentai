@@ -18,3 +18,4 @@ rpc_port = None
 rpc_secret = None
 save_tasks = False
 make_archive = False
+jpn_title = True

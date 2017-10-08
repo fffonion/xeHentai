@@ -16,8 +16,8 @@ LOCALE = locale.getdefaultlocale()[0]
 CODEPAGE = locale.getdefaultlocale()[1]
 ANDROID = 'ANDROID_ARGUMENT' in os.environ
 
-__version__ = 2.017
-DEVELOPMENT = False
+__version__ = 2.018
+DEVELOPMENT = True
 
 SCRIPT_NAME = "xeHentai"
 

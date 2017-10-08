@@ -68,6 +68,13 @@ class Task(object):
         self.failcode = 0
         return True
 
+    def update_meta(self, meta):
+        self.meta.update(meta)
+        if self.config['jpn_title'] and self.meta['gjname']:
+            self.meta['title'] = self.meta['gjname']
+        else:
+            self.meta['title'] = self.meta['gnname']
+
     # def guess_ori(self):
     #     # guess if this gallery has resampled files depending on some sample hashes
     #     # return True if it's ori

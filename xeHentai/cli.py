@@ -139,6 +139,8 @@ def parse_opt():
                         help = i18n.XEH_OPT_r)
     parser.add_argument('-a', '--archive', type = bool, metavar = "BOOL", default = _def['make_archive'],
                         dest = 'make_archive', help = i18n.XEH_OPT_a)
+    parser.add_argument('-j', '--jpn-title', type = bool, metavar = "BOOL", default = _def['jpn_title'],
+                        dest = 'jpn_title', help = i18n.XEH_OPT_j)                   
     parser.add_argument('-h','--help', action = 'help', help = i18n.XEH_OPT_h)
     parser.add_argument('--version', action = 'version', version = '%s v%.3f' % (SCRIPT_NAME, __version__),
                         help = i18n.XEH_OPT_version)
@@ -174,5 +176,6 @@ def interactive(xeH):
     _dir = _readline(i18n.PS_DOWNLOAD_DIR % __def_dir) or xeH.cfg['dir']
     rename_ori = _readline(i18n.PS_RENAME_ORI, 'y' if xeH.cfg['rename_ori'] else 'n') == 'y'
     make_archive = _readline(i18n.PS_MAKE_ARCHIVE, 'y' if xeH.cfg['make_archive'] else 'n') == 'y'
+    jpn_title = _readline(i18n.PS_JPN_TITLE, 'y' if xeH.cfg['jpn_title'] else 'n') == 'y'
     return {'urls': url, 'proxy': proxy, 'download_ori': download_ori, 'dir': _dir, 'rename_ori':rename_ori,
-            'make_archive': make_archive, 'save_tasks': False}
+            'make_archive': make_archive, 'jpn_title': jpn_title, 'save_tasks': False}
