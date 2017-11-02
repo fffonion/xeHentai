@@ -35,7 +35,7 @@ RENAME_TMPDIR = "-xeh-conflict-"
 
 RE_INDEX = re.compile('.+/(\d+)/([^\/]+)/*')
 RE_GALLERY = re.compile('/([a-f0-9]{10})/[^\-]+\-(\d+)')
-RE_IMGHASH = re.compile('/h/([a-f0-9]{40})')
+RE_IMGHASH = re.compile('/([a-f0-9]{40})-(\d+)-(\d+)-(\d+)-([a-z]{,4})')
 RE_FULLIMG = re.compile('fullimg.php\?gid=([a-z0-9]+)&page=(\d+)&key=')
 
 RESTR_SITE = "https*://(?:[g\.]*e\-|ex)hentai\.org"
@@ -70,6 +70,7 @@ ERR_NO_PAGEURL_FOUND = 1008
 ERR_CONNECTION_ERROR = 1009
 ERR_IP_BANNED = 1010
 ERR_HATH_NOT_FOUND = 1011
+ERR_IMAGE_BROKEN = 1012
 ERR_TASK_NOT_FOUND = 1101
 ERR_SAVE_SESSION_FAILED = 1103
 ERR_TASK_LEVEL_UNDEF = 1104

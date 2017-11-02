@@ -40,11 +40,9 @@ class HttpReq(object):
 
     def request(self, method, url, _filter, suc, fail, data = None):
         retry = 0
-        while True:
-            if retry >= self.retry:
-                break
+        while retry < self.retry:
             try:
-                if self.proxy and (self.proxy_image or re.match('^https*://(?:[g\.]*e-hentai|exhentai).org', url)):
+                if self.proxy and (self.proxy_image or RESTR_SITE.match(url)):
                     f, __not_good = self.proxy.proxied_request(self.session)
                 else:
                     f = self.session.request

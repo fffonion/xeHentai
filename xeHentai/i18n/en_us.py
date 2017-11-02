@@ -8,9 +8,11 @@ err_msg = {
     ERR_ONLY_VISIBLE_EXH: "this gallery is only visible in exhentai.org",
     ERR_MALFORMED_HATHDL: "malformed .hathdl, can't parse",
     ERR_GALLERY_REMOVED: "this gallery has been removed, may be visible in exhentai",
+    ERR_KEY_EXPIRED: "image url is expired",
     ERR_NO_PAGEURL_FOUND: "no page url found, change of site structure?",
     ERR_CONNECTION_ERROR: "a connection problem occurs",
     ERR_IP_BANNED: "IP has been banned, retry in %s",
+    ERR_IMAGE_BROKEN: "downloaded image is broken",
     ERR_TASK_NOT_FOUND: "no such task guid",
     ERR_TASK_LEVEL_UNDEF: "task filter level unknown",
     ERR_DELETE_RUNNING_TASK: "can't delete a running task",
@@ -103,6 +105,7 @@ XEH_CRITICAL_ERROR = "xeHentai throws critical error:\n%s"
 XEH_DOWNLOAD_ORI_NEED_LOGIN = "haven't login, so I won't download original images"
 XEH_FILE_DOWNLOADED = "file downloaded #%d %s"
 XEH_RENAME_HAS_ERRORS = "some files are not renamed:\n%s"
+XEH_DOWNLOAD_HAS_ERROR = "thread-%s retry because of error: %s"
 
 RPC_STARTED = "RPC server listening on %s:%d"
 RPC_TOO_OPEN = "RPC server is listening on public interface (%s) but no rpc_secret defined, which is not safe"

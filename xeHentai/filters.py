@@ -161,7 +161,13 @@ def download_file_wrapper(dirpath):
         # input image/archive response
         # return (binary, url) if suc; return (errocode, url) if fail
         if r.status_code == 404:
-            fail((ERR_HATH_NOT_FOUND, r._real_url, r.url))
+            return fail((ERR_HATH_NOT_FOUND, r._real_url, r.url))
+        p = RE_IMGHASH.findall(r.url)
+        # if multiple hash-size-h-w-type is found, use the last one
+        # the first is original and the last is scaled
+        # _FakeReponse will be filtered in flt_quota_check
+        if p and p[-1] and int(p[-1][1]) != len(r.content):
+            return fail((ERR_IMAGE_BROKEN, r._real_url, r.url))
         suc((r.content, r._real_url, r.url))
 
     return download_file

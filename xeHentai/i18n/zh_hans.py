@@ -8,9 +8,11 @@ err_msg = {
     ERR_ONLY_VISIBLE_EXH: "这个本子只有里站能看到",
     ERR_MALFORMED_HATHDL: "hathdl文件有猫饼，解析失败",
     ERR_GALLERY_REMOVED: "这个本子被移除了，大概里站能看到",
+    ERR_KEY_EXPIRED: "下载链接不太正常",
     ERR_NO_PAGEURL_FOUND: "没有找到页面链接，网站改版了嘛？",
     ERR_CONNECTION_ERROR: "连接有问题？",
     ERR_IP_BANNED: "IP被ban了, 恢复时间: %s",
+    ERR_IMAGE_BROKEN: "下载的图片有猫饼",
     ERR_TASK_NOT_FOUND: "没有该GUID对应的任务",
     ERR_TASK_LEVEL_UNDEF: "任务过滤等级不存在",
     ERR_DELETE_RUNNING_TASK: "无法删除运行中的任务",
@@ -102,7 +104,8 @@ XEH_CLEANUP = "擦干净..."
 XEH_CRITICAL_ERROR = "xeHentai 抽风啦:\n%s"
 XEH_DOWNLOAD_ORI_NEED_LOGIN = "下载原图需要登录"
 XEH_FILE_DOWNLOADED = "图片已下载 #%d %s"
-XEH_RENAME_HAS_ERRORS = "部分图片重命名失败:%s"
+XEH_RENAME_HAS_ERRORS = "部分图片重命名失败:\n%s"
+XEH_DOWNLOAD_HAS_ERROR = "绅士-%s 下载图片时出错: %s, 将在稍后重试"
 
 RPC_STARTED = "RPC服务器监听在 %s:%d"
 RPC_TOO_OPEN = "RPC服务器监听在公网IP (%s)，为了安全起见应该设置rpc_secret"
