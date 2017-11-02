@@ -21,8 +21,10 @@ class tz_GMT8(datetime.tzinfo):
 def safestr(s):
     if (PY3K and isinstance(s, bytes)) or (not PY3K and not isinstance(s, unicode)):
         s = s.decode("utf-8")
-    _ = s.encode(locale.getdefaultlocale()[1] or 'utf-8', 'replace')
-    return _.decode('utf-8') if PY3K else _
+    if PY3K:
+        return s
+    return s.encode(locale.getdefaultlocale()[1] or 'utf-8', 'replace')
+    #return _.decode('utf-8') if PY3K else _
 
 class Logger(object):
     # paste from goagent
