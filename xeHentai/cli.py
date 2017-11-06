@@ -119,43 +119,47 @@ def parse_opt():
     parser.add_argument('-c', '--cookie', help = i18n.XEH_OPT_c)
     parser.add_argument('-i', '--interactive', action = 'store_true', default = False,
                         help = i18n.XEH_OPT_i)
+    parser.add_argument('--daemon', action = 'store_true', default = _def['daemon'],
+                        help = i18n.XEH_OPT_daemon)
     # the followings are passed to xeHentai
     parser.add_argument('urls', metavar = 'url', type = str, nargs = '*',
                         help = i18n.XEH_OPT_URLS)
-    parser.add_argument('-o', '--download-ori',
-                        action = 'store_true', default = _def['download_ori'],
-                        help = i18n.XEH_OPT_o)
-    parser.add_argument('-t', '--thread', type = int, metavar = 'N',
-                        default = _def['download_thread_cnt'], dest = 'download_thread_cnt',
-                        help = i18n.XEH_OPT_t)
     # parser.add_argument('-f', '--fast-scan', action = 'store_true', default = _def.fast_scan,
     #                     help = i18n.XEH_OPT_f)
     parser.add_argument('-d', '--dir', default = os.path.abspath(_def['dir']),
                         help = i18n.XEH_OPT_d)
-    parser.add_argument('--daemon', action = 'store_true', default = _def['daemon'],
-                        help = i18n.XEH_OPT_daemon)
-    parser.add_argument('-l', '--logpath', metavar = '/path/to/eh.log',
-                        default = os.path.abspath(_def['log_path']), help = i18n.XEH_OPT_l)
+    parser.add_argument('-o', '--download-ori',
+                        action = 'store_true', default = _def['download_ori'],
+                        help = i18n.XEH_OPT_o)
+    parser.add_argument('-j', '--jpn-title', type = bool, metavar = "BOOL", default = _def['jpn_title'],
+                        dest = 'jpn_title', help = i18n.XEH_OPT_j)
+    parser.add_argument('-r', '--rename-ori', type = bool, metavar = "BOOL", default = _def['rename_ori'],
+                        help = i18n.XEH_OPT_r)
+
     parser.add_argument('-p', '--proxy', action = 'append', default = _def['proxy'],
                         help = i18n.XEH_OPT_p)
     parser.add_argument('--proxy-image', action = 'store_true', default = _def['proxy_image'],
                         help = i18n.XEH_OPT_proxy_image)
-    parser.add_argument('-v', '--verbose', action = 'count', default = _def['log_verbose'],
-                        help = i18n.XEH_OPT_v)
     parser.add_argument('--rpc-interface', metavar = "ADDR", default = _def['rpc_interface'],
                         help = i18n.XEH_OPT_rpc_interface)
     parser.add_argument('--rpc-port', type = int, metavar = "PORT", default = _def['rpc_port'],
                         help = i18n.XEH_OPT_rpc_port)
     parser.add_argument('--rpc-secret', metavar = "...", default = _def['rpc_secret'],
                         help = i18n.XEH_OPT_rpc_secret)
-    parser.add_argument('-r', '--rename-ori', type = bool, metavar = "BOOL", default = _def['rename_ori'],
-                        help = i18n.XEH_OPT_r)
     parser.add_argument('-a', '--archive', type = bool, metavar = "BOOL", default = _def['make_archive'],
                         dest = 'make_archive', help = i18n.XEH_OPT_a)
-    parser.add_argument('-j', '--jpn-title', type = bool, metavar = "BOOL", default = _def['jpn_title'],
-                        dest = 'jpn_title', help = i18n.XEH_OPT_j)
     parser.add_argument('--download-range', type = _parse_range, metavar = "a-b,c-d,e", default = None,
                         dest = 'download_range', help = i18n.XEH_OPT_download_range)
+    parser.add_argument('-t', '--thread', type = int, metavar = 'N',
+                        default = _def['download_thread_cnt'], dest = 'download_thread_cnt',
+                        help = i18n.XEH_OPT_t)
+    parser.add_argument('--timeout', type = int, metavar = "N", default = _def['download_timeout'],
+                        dest = 'download_timeout', help = i18n.XEH_OPT_timeout)
+    parser.add_argument('-l', '--logpath', metavar = '/path/to/eh.log',
+                        default = os.path.abspath(_def['log_path']), help = i18n.XEH_OPT_l)
+
+    parser.add_argument('-v', '--verbose', action = 'count', default = _def['log_verbose'],
+                        help = i18n.XEH_OPT_v)
     parser.add_argument('-h','--help', action = 'help', help = i18n.XEH_OPT_h)
     parser.add_argument('--version', action = 'version',
                         version = '%s v%.3f%s' % (SCRIPT_NAME, __version__, '-dev' if DEVELOPMENT else ""),

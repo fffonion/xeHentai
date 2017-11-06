@@ -86,18 +86,18 @@ class xeHentai(object):
         self.logger.set_logfile(self.cfg['log_path'])
 
     def _get_httpreq(self):
-        return HttpReq(self.headers, logger = self.logger, proxy = self.proxy, proxy_image = self.cfg['proxy_image'])
+        return HttpReq(self.headers, logger = self.logger, proxy = self.proxy)
 
-    def _get_httpworker(self, tid, task_q, flt, suc, fail, keep_alive):
+    def _get_httpworker(self, tid, task_q, flt, suc, fail, keep_alive, proxy_image, timeout):
         return HttpWorker(tid, task_q, flt, suc, fail,
-            headers = self.headers, proxy = self.proxy, proxy_image = self.cfg['proxy_image'],
-            logger = self.logger, keep_alive = keep_alive)
+            headers = self.headers, proxy = self.proxy, logger = self.logger,
+            keep_alive = keep_alive, proxy_image = proxy_image, timeout = timeout)
 
     def add_task(self, url, cfg_dict = {}):
         url = url.strip()
         cfg = {k:v for k, v in self.cfg.items() if k in (
             "dir", "download_ori", "download_thread_cnt", "scan_thread_cnt",
-            "rename_ori", "make_archive", "jpn_title", "download_range")}
+            "rename_ori", "make_archive", "jpn_title", "download_range", "download_timeout")}
         cfg.update(cfg_dict)
         if cfg['download_ori'] and not self.has_login:
             self.logger.warning(i18n.XEH_DOWNLOAD_ORI_NEED_LOGIN)
@@ -261,7 +261,10 @@ class xeHentai(object):
                             task.set_reload_url(x[0], x[1], x[2]),
                             mon.vote(tid, 0)),
                         lambda x, tid = tid: (mon.vote(tid, x)),
-                        mon.wrk_keepalive)
+                        mon.wrk_keepalive,
+                        False, 10)
+                        # we don't need proxy_image in the scan thread
+                        # we use default timeout in the scan thread
                     # _._exit = lambda t: t._finish_queue()
                     self._all_threads[TASK_STATE_SCAN_IMG].append(_)
                     _.start()
@@ -282,7 +285,8 @@ class xeHentai(object):
                             task.reload_map.pop(x[1]) if x[1] in task.reload_map else None, # delete old url in reload_map
                             self.logger.debug(i18n.XEH_DOWNLOAD_HAS_ERROR % (tid, i18n.c(x[0]))),
                             mon.vote(tid, x[0])),
-                        mon.wrk_keepalive)
+                        mon.wrk_keepalive,
+                        task.config['proxy_image'], task.config['download_timeout'])
                     self._all_threads[TASK_STATE_DOWNLOAD].append(_)
                     _.start()
                 # spawn archiver if we need
