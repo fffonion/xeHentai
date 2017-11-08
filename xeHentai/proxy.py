@@ -82,7 +82,7 @@ class Pool(object):
         return _
 
     def add_proxy(self, addr):
-        if re.match("socks[45]a*://([^:^/]+)(\:\d{1,5})*/*$", addr):
+        if re.match("socks[45][ah]*://([^:^/]+)(\:\d{1,5})*/*$", addr):
             p = socks_proxy(addr, self.trace_proxy)
         elif re.match("https*://([^:^/]+)(\:\d{1,5})*/*$", addr):
             p = http_proxy(addr, self.trace_proxy)

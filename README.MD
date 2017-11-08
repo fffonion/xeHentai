@@ -34,7 +34,7 @@ xeH
 
 高级参数：
 
- - **proxy** 代理列表，形如`["socks://127.0.0.1:1080", "http://127.0.0.1:8080"]`, 代理默认只用于扫描网页
+ - **proxy** 代理列表，形如`["socks5h://127.0.0.1:1080", "http://127.0.0.1:8080"]`, 代理默认只用于扫描网页
  - **proxy_image** 是否同时使用代理来下载图片和扫描网页，默认为是
  - **proxy_image_only** 是否仅使用代理来下载图片, 不用于扫描网页, 默认为否
  - **rpc_interface** RPC绑定的IP，默认为`localhost`
@@ -139,11 +139,11 @@ Firefox用户需要安装[Greasemonkey](https://addons.mozilla.org/en-US/firefox
 
 目前支持三种模式的代理：
 
- - socks代理，如`socks5://127.0.0.1:1080`。
+ - socks代理，如`socks5h://127.0.0.1:1080`；如果需要在客户端解析DNS，请使用`socks5://127.0.0.1:1080`。
  - http(s)代理，如`http://127.0.0.1:8080`。
  - glype代理，如`http://example.com/browse.php?u=a&b=4`。请根据实际情况修改`b`的名称。glype是目前使用最广的php在线代理，使用时请取消勾选“加密url(Encrypt URL)”、勾选“允许cookies (Allow Cookies)”后随意打开一个网页，然后把网址粘贴进来
 
-可以指定多个代理，格式如`['socks5://127.0.0.1:1080', 'http://127.0.0.1:8080']`。
+可以指定多个代理，格式如`['socks5h://127.0.0.1:1080', 'http://127.0.0.1:8080']`。
 
 默认情况下代理仅会被用于扫描网页，如果需要使用代理下载图片，请在配置文件中设置`proxy_image`为**True**，或者在运行时加上`--proxy-image`参数。
 
