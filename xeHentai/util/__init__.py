@@ -40,6 +40,13 @@ def make_ua():
         rrange(21, 27, 10), rrange(0, 9999, 10), rrange(535, 538, 10)
     )
 
+def get_proxy_policy(cfg):
+    if cfg['proxy_image_only']:
+        return RE_URL_IMAGE
+    if cfg['proxy_image']:
+        return RE_URL_ALL
+    return RE_URL_WEBPAGE
+
 def parse_human_time(s):
     rt = 0
     day = re.findall('(\d+)\sdays*', s)

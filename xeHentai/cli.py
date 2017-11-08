@@ -138,8 +138,11 @@ def parse_opt():
 
     parser.add_argument('-p', '--proxy', action = 'append', default = _def['proxy'],
                         help = i18n.XEH_OPT_p)
-    parser.add_argument('--proxy-image', action = 'store_true', default = _def['proxy_image'],
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--proxy-image', action = 'store_true', default = _def['proxy_image'],
                         help = i18n.XEH_OPT_proxy_image)
+    group.add_argument('--proxy-image-only', action = 'store_true', default = _def['proxy_image_only'],
+                        help = i18n.XEH_OPT_proxy_image_only)
     parser.add_argument('--rpc-interface', metavar = "ADDR", default = _def['rpc_interface'],
                         help = i18n.XEH_OPT_rpc_interface)
     parser.add_argument('--rpc-port', type = int, metavar = "PORT", default = _def['rpc_port'],

@@ -17,7 +17,7 @@ CODEPAGE = locale.getdefaultlocale()[1]
 ANDROID = 'ANDROID_ARGUMENT' in os.environ
 
 __version__ = 2.018
-DEVELOPMENT = True
+DEVELOPMENT = False
 
 SCRIPT_NAME = "xeHentai"
 
@@ -37,6 +37,12 @@ RE_INDEX = re.compile('.+/(\d+)/([^\/]+)/*')
 RE_GALLERY = re.compile('/([a-f0-9]{10})/[^\-]+\-(\d+)')
 RE_IMGHASH = re.compile('/([a-f0-9]{40})-(\d+)-(\d+)-(\d+)-([a-z]{,4})')
 RE_FULLIMG = re.compile('fullimg.php\?gid=([a-z0-9]+)&page=(\d+)&key=')
+
+__restr_webpage = '^https*://([^\.]+\.)*(?:[g\.]*e-|ex)hentai.org'
+RE_URL_WEBPAGE = re.compile(__restr_webpage)
+RE_URL_IMAGE = re.compile('(?!%s)' % __restr_webpage)
+# matches all
+RE_URL_ALL = re.compile('.')
 
 RESTR_SITE = "https*://(?:[g\.]*e\-|ex)hentai\.org"
 

@@ -34,8 +34,9 @@ xeH
 
 高级参数：
 
- - **proxy** 代理列表，形如`["socks://127.0.0.1:1080", "http://127.0.0.1:8080"]`
- - **proxy_image** 是否使用代理下载图片，如果设为否则只将代理用于扫描网页，默认为是
+ - **proxy** 代理列表，形如`["socks://127.0.0.1:1080", "http://127.0.0.1:8080"]`, 代理默认只用于扫描网页
+ - **proxy_image** 是否同时使用代理来下载图片和扫描网页，默认为是
+ - **proxy_image_only** 是否仅使用代理来下载图片, 不用于扫描网页, 默认为否
  - **rpc_interface** RPC绑定的IP，默认为`localhost`
  - **rpc_port** RPC绑定的端口，默认为`None`
  - **rpc_secret** RPC密钥，默认为`None`
@@ -51,11 +52,11 @@ xeH
 
 ### 命令行模式
 ```
-用法: xeH [-u USERNAME] [-k KEY] [-c COOKIE] [-i] [-o] [-t N] [-d DIR]
-           [--daemon] [-l /path/to/eh.log] [-p PROXY] [--proxy-image] [-v]
+用法: xeH [-u USERNAME] [-k KEY] [-c COOKIE] [-i] [--daemon] [-d DIR] [-o]
+           [-j BOOL] [-r BOOL] [-p PROXY] [--proxy-image | --proxy-image-only]
            [--rpc-interface ADDR] [--rpc-port PORT] [--rpc-secret ...]
-           [-r BOOL] [-a BOOL] [-j BOOL] [--download-range a-b,c-d,e] [-h]
-           [--version]
+           [-a BOOL] [--download-range a-b,c-d,e] [-t N] [--timeout N]
+           [-l /path/to/eh.log] [-v] [-h] [--version]
            [url [url ...]]
 
 绅♂士下载器
@@ -78,8 +79,10 @@ xeH
   -r BOOL, --rename-ori BOOL
                         将图片重命名为原始名称，如果关闭则使用序号 (默认: False)
   -p PROXY, --proxy PROXY
-                        设置代理, 可以指定多次, 默认支持的类型: socks5/4a, http(s), glype (默认: 无)
-  --proxy-image         同时使用代理来下载图片，如果设为否则只将代理用于扫描网页（默认: True)
+                        设置代理, 可以指定多次, 当前支持的类型: socks5/4a, http(s), glype.
+                        代理默认只用于扫描网页 (默认: 空)
+  --proxy-image         同时使用代理来下载图片和扫描网页（默认: True)
+  --proxy-image-only    仅使用代理来下载图片, 不用于扫描网页 (默认: False)
   --rpc-interface ADDR  设置JSON-RPC监听IP (默认: localhost)
   --rpc-port PORT       设置JSON-RPC监听端口 (默认: None)
   --rpc-secret ...      设置JSON-RPC密钥 (默认: None)
@@ -145,6 +148,8 @@ Firefox用户需要安装[Greasemonkey](https://addons.mozilla.org/en-US/firefox
 默认情况下代理仅会被用于扫描网页，如果需要使用代理下载图片，请在配置文件中设置`proxy_image`为**True**，或者在运行时加上`--proxy-image`参数。
 
 如果使用代理仅用于突破封锁的目的，则此项可以设置为`False`；如果需要保证隐私，请将此项设置为`True`。使用glype代理的用户建议将此项设为`False`。
+
+如果仅需要使用代理下载图片，不需要扫描网页，请在配置文件中设置`proxy_image_only`为**True**，或者在运行时加上`--proxy-image-only`参数。如果在配置中的`proxy_image`和`proxy_image_only`均为**True**，则`proxy_image`将被忽略。
 
 ### 下载范围
 

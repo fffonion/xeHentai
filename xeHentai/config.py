@@ -17,9 +17,13 @@ rename_ori = False
 
 # set download proxies
 # currenlty supported: socks5/4a, http(s), glype
+# by default, proxy is only used on webpages
 proxy = []
 # also use proxy to download images
 proxy_image = True
+# only use proxy on images, not webpages
+# if set to True, the value of proxy_image will be ignored
+proxy_image_only = False
 
 # bind jsonrpc server to this address
 rpc_interface = 'localhost'

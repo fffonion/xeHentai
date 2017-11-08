@@ -85,19 +85,19 @@ class xeHentai(object):
             self.rpc.start()
         self.logger.set_logfile(self.cfg['log_path'])
 
-    def _get_httpreq(self):
-        return HttpReq(self.headers, logger = self.logger, proxy = self.proxy)
+    def _get_httpreq(self, proxy_policy):
+        return HttpReq(self.headers, logger = self.logger, proxy = self.proxy, proxy_policy = proxy_policy)
 
-    def _get_httpworker(self, tid, task_q, flt, suc, fail, keep_alive, proxy_image, timeout):
+    def _get_httpworker(self, tid, task_q, flt, suc, fail, keep_alive, proxy_policy, timeout):
         return HttpWorker(tid, task_q, flt, suc, fail,
             headers = self.headers, proxy = self.proxy, logger = self.logger,
-            keep_alive = keep_alive, proxy_image = proxy_image, timeout = timeout)
+            keep_alive = keep_alive, proxy_policy = proxy_policy, timeout = timeout)
 
     def add_task(self, url, cfg_dict = {}):
         url = url.strip()
         cfg = {k:v for k, v in self.cfg.items() if k in (
             "dir", "download_ori", "download_thread_cnt", "scan_thread_cnt",
-            "proxy", "proxy_image",
+            "proxy", "proxy_image", "proxy_image_only",
             "rename_ori", "make_archive", "jpn_title", "download_range", "download_timeout")}
         cfg.update(cfg_dict)
         if cfg['download_ori'] and not self.has_login:
@@ -160,7 +160,7 @@ class xeHentai(object):
         task = self._all_tasks[task_guid]
         if task.state == TASK_STATE_WAITING:
             task.state = TASK_STATE_GET_META
-        req = self._get_httpreq()
+        req = self._get_httpreq(util.get_proxy_policy(task.config))
         if not task.page_q:
             task.page_q = Queue() # per image page queue
         if not task.img_q:
@@ -263,7 +263,8 @@ class xeHentai(object):
                             mon.vote(tid, 0)),
                         lambda x, tid = tid: (mon.vote(tid, x)),
                         mon.wrk_keepalive,
-                        False, 10)
+                        util.get_proxy_policy(task.config),
+                        10)
                         # we don't need proxy_image in the scan thread
                         # we use default timeout in the scan thread
                     # _._exit = lambda t: t._finish_queue()
@@ -287,7 +288,8 @@ class xeHentai(object):
                             self.logger.debug(i18n.XEH_DOWNLOAD_HAS_ERROR % (tid, i18n.c(x[0]))),
                             mon.vote(tid, x[0])),
                         mon.wrk_keepalive,
-                        task.config['proxy_image'], task.config['download_timeout'])
+                        util.get_proxy_policy(task.config),
+                        task.config['download_timeout'])
                     self._all_threads[TASK_STATE_DOWNLOAD].append(_)
                     _.start()
                 # spawn archiver if we need
@@ -427,7 +429,7 @@ class xeHentai(object):
             'bt':'pone',
             'PassWord':pwd
         }
-        req = self._get_httpreq()
+        req = self._get_httpreq(util.get_proxy_policy(self.cfg))
         req.request("POST", "http://forums.e-hentai.org/index.php?act=Login&CODE=01",
             filters.login_exhentai,
             lambda x:(

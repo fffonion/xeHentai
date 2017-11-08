@@ -28,12 +28,12 @@ class _FakeResponse(object):
         self.url = self._real_url = url
 
 class HttpReq(object):
-    def __init__(self, headers = {}, proxy = None, proxy_image = False, retry = 10, timeout = 20, logger = None, tname = "main"):
+    def __init__(self, headers = {}, proxy = None, proxy_policy = None, retry = 10, timeout = 20, logger = None, tname = "main"):
         self.session = requests.Session()
         self.headers = headers
         self.retry = retry
         self.proxy = proxy
-        self.proxy_image = proxy_image
+        self.proxy_policy = proxy_policy
         self.timeout = timeout
         self.logger = logger
         self.tname = tname
@@ -42,7 +42,8 @@ class HttpReq(object):
         retry = 0
         while retry < self.retry:
             try:
-                if self.proxy and (self.proxy_image or re.match('^https*://([^\.]+\.)*(?:[g\.]*e-|ex)hentai.org', url)):
+                # if proxy_policy is set and match current url, use proxy
+                if self.proxy and self.proxy_policy and self.proxy_policy.match(url):
                     f, __not_good = self.proxy.proxied_request(self.session)
                 else:
                     f = self.session.request
@@ -75,9 +76,9 @@ class HttpReq(object):
 
 
 class HttpWorker(Thread, HttpReq):
-    def __init__(self, tname, task_queue, flt, suc, fail, headers = {}, proxy = None, proxy_image = False,
+    def __init__(self, tname, task_queue, flt, suc, fail, headers = {}, proxy = None, proxy_policy = None,
             retry = 3, timeout = 10, logger = None, keep_alive = None):
-        HttpReq.__init__(self, headers, proxy, proxy_image, retry, timeout, logger, tname = tname)
+        HttpReq.__init__(self, headers, proxy, proxy_policy, retry, timeout, logger, tname = tname)
         Thread.__init__(self, name = tname)
         Thread.setDaemon(self, True)
         self.task_queue = task_queue
