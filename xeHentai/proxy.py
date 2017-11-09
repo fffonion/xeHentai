@@ -172,17 +172,18 @@ def glype_proxy(addr, trace_proxy):
                     if _:
                         coo[_[0]] = coo[k]
                 rt.headers['set-cookie'] = util.make_cookie(coo)
-            # change url back
+            # change url back, only change on text/* mime types
             rt.url = url
-            if PY3K:
-                rt._content = rt._content.decode('utf-8')
-            _ = re.match('<div id="error">(.*?)</div>', rt.content)
-            if _:
-                raise PoolException("glype returns: %s" % _[0])
-            # change transformed url back
-            rt._content = urlre.sub(lambda x:(urllib.parse if PY3K else urllib).unquote(x.group(1)), rt._content)
-            if PY3K:
-                rt._content = rt._content.encode('utf-8')
+            if rt.headers.get('content-type').startswith("text"):
+                if PY3K:
+                    rt._content = rt._content.decode('utf-8')
+                _ = re.match('<div id="error">(.*?)</div>', rt.content)
+                if _:
+                    raise PoolException("glype returns: %s" % _[0])
+                # change transformed url back
+                rt._content = urlre.sub(lambda x:(urllib.parse if PY3K else urllib).unquote(x.group(1)), rt._content)
+                if PY3K:
+                    rt._content = rt._content.encode('utf-8')
             return rt
 
         return f
