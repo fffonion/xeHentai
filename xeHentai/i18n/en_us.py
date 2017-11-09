@@ -13,6 +13,7 @@ err_msg = {
     ERR_CONNECTION_ERROR: "a connection problem occurs",
     ERR_IP_BANNED: "IP has been banned, retry in %s",
     ERR_IMAGE_BROKEN: "downloaded image is broken",
+    ERR_QUOTA_EXCEEDED: "quota exceeded",
     ERR_TASK_NOT_FOUND: "no such task guid",
     ERR_TASK_LEVEL_UNDEF: "task filter level unknown",
     ERR_DELETE_RUNNING_TASK: "can't delete a running task",

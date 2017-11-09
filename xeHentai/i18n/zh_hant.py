@@ -13,6 +13,7 @@ err_msg = {
     ERR_CONNECTION_ERROR: "連接有問題？",
     ERR_IP_BANNED: "IP被ban了, 恢復時間: %s",
     ERR_IMAGE_BROKEN: "下載的圖片有貓餅",
+    ERR_QUOTA_EXCEEDED: "配額超限",
     ERR_TASK_NOT_FOUND: "沒有該GUID對應的任務",
     ERR_TASK_LEVEL_UNDEF: "任務過濾等級不存在",
     ERR_DELETE_RUNNING_TASK: "無法刪除運行中的任務",

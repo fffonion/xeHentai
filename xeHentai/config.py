@@ -46,6 +46,12 @@ download_thread_cnt = 5
 # set image download timeout
 download_timeout = 10
 
+# ignore these error codes, continue download
+# to use predefined error codes, use:
+# import const as __c
+# ignored_errors = [__c.ERR_QUOTA_EXCEEDED]
+ignored_errors = []
+
 # define log path
 log_path = "eh.log"
 # set log level
