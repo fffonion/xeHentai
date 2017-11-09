@@ -373,7 +373,7 @@ class xeHentai(object):
                         {k: v.to_dict() for k,v in self._all_tasks.items()},
                     'cookies':self.cookies}))
             except Exception as ex:
-                self.logger.warning(i18n.SESSION_LOAD_EXCEPTION % traceback.format_exc())
+                self.logger.warning(i18n.SESSION_WRITE_EXCEPTION % traceback.format_exc())
                 return ERR_SAVE_SESSION_FAILED, str(ex)
         return ERR_NO_ERROR, None
 
@@ -383,7 +383,7 @@ class xeHentai(object):
                 try:
                     j = json.loads(f.read())
                 except Exception as ex:
-                    self.logger.warning(i18n.SESSION_WRITE_EXCEPTION % traceback.format_exc())
+                    self.logger.warning(i18n.SESSION_LOAD_EXCEPTION % traceback.format_exc())
                     return ERR_SAVE_SESSION_FAILED, str(ex)
                 else:
                     for _ in j['tasks'].values():
