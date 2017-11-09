@@ -174,10 +174,12 @@ class Monitor(Thread):
         self._exit = exit_check if exit_check else lambda x: False
         self._cleaning_up = False
         if os.name == "nt":
-            self.set_title = lambda s:os.system("TITLE %s" % s.encode(CODEPAGE, 'replace'))
+            self.set_title = lambda s:os.system("TITLE %s" % (
+                s if PY3K else s.encode(CODEPAGE, 'replace')))
         elif os.name == 'posix':
             import sys
-            self.set_title = lambda s:sys.stdout.write("\033]2;%s\007" % s.encode(CODEPAGE, 'replace'))
+            self.set_title = lambda s:sys.stdout.write("\033]2;%s\007" % (
+                s if PY3K else s.encode(CODEPAGE, 'replace')))
 
     def set_vote_ns(self, tnames):
         t = time.time()

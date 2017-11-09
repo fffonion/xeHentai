@@ -26,6 +26,11 @@ def safestr(s):
     return s.encode(locale.getdefaultlocale()[1] or 'utf-8', 'replace')
     #return _.decode('utf-8') if PY3K else _
 
+if os.name == 'nt':
+    endl = '\r\n'
+else:# assume posix
+    endl = '\n'
+
 class Logger(object):
     # paste from goagent
     CRITICAL = 5
@@ -80,7 +85,7 @@ class Logger(object):
     def set_logfile(self, fpath):
         if self.logf:
             self.logf.close()
-        self.logf = open(fpath, "a")
+        self.logf = open(fpath, "ab")
 
     def set_level(self, level):
         f = ('verbose', 'debug', 'info')
@@ -97,8 +102,8 @@ class Logger(object):
             self.__write('%-4s - [%s] %s\n' % (level, datetime.datetime.now(tz_GMT8()).strftime('%X'), fmt % args))
         sys.stdout.flush()
         if self.logf:
-            _ = ('[%s] %s\n' % (datetime.datetime.now(tz_GMT8()).strftime('%b %d %X'), fmt % args))
-            self.logf.write(_ if PY3K else _.encode("utf-8"))
+            _ = ('[%s] %s%s' % (datetime.datetime.now(tz_GMT8()).strftime('%b %d %X'), fmt % args, endl))
+            self.logf.write(_.encode("utf-8", 'replace'))
 
     def dummy(self, *args, **kwargs):
         pass

@@ -112,7 +112,7 @@ def flt_quota_check(func):
         elif r.status_code == 509 or len(r.content) in [925, 28658, 144, 210, 1009] or '509.gif' in r.url:
             fail((ERR_QUOTA_EXCEEDED, None))
             # will not call the decorated filter
-        elif len(r.content) < 200 and re.findall("exceeded your image viewing limits", r.content):
+        elif len(r.content) < 200 and re.findall("exceeded your image viewing limits", r.text):
             fail((ERR_QUOTA_EXCEEDED, None))
             # will not call the decorated filter
         elif r.status_code == 403:
