@@ -46,6 +46,8 @@ RE_URL_ALL = re.compile('.')
 
 RESTR_SITE = "https*://(?:[g\.]*e\-|ex)hentai\.org"
 
+DEFAULT_MAX_REDIRECTS = 30
+
 XEH_STATE_RUNNING = 0
 XEH_STATE_SOFT_EXIT = 1 # wait until current task finish and exit
 XEH_STATE_FULL_EXIT = 2 # finish current task stage and exit

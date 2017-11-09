@@ -40,22 +40,35 @@ class HttpReq(object):
 
     def request(self, method, url, _filter, suc, fail, data = None):
         retry = 0
+        url_history = [url]
         while retry < self.retry:
             try:
                 # if proxy_policy is set and match current url, use proxy
                 if self.proxy and self.proxy_policy and self.proxy_policy.match(url):
                     f, __not_good = self.proxy.proxied_request(self.session)
                 else:
+                    print("not use proxy %s" % url)
                     f = self.session.request
                 r = f(method, url,
-                    headers = self.headers,
-                    timeout = self.timeout,
+                    headers=self.headers,
+                    timeout=self.timeout,
+                    allow_redirects=False,
                     data = data)
             except requests.RequestException as ex:
                 self.logger.warning("%s-%s %s %s: %s" % (i18n.THREAD, self.tname, method, url, ex))
                 time.sleep(random.random() + 0.618)
             else:
                 self.logger.verbose("%s-%s %s %s %d %d" % (i18n.THREAD, self.tname, method, url, r.status_code, len(r.content)))
+                # if it's a redirect, 3xx
+                if r.status_code > 300 and r.status_code < 400:
+                    _new_url = r.headers.get("location")
+                    if _new_url:
+                        url_history.append(url)
+                        if len(url_history) > DEFAULT_MAX_REDIRECTS:
+                            self.logger.warning("%s-%s %s %s: too many redirects" % (i18n.THREAD, self.tname, method, url))
+                            return _filter(_FakeResponse(url_history[0]), suc, fail)
+                        url = _new_url
+                        continue
                 # intercept some error to see if we can change IP
                 if self.proxy and len(r.content) < 1024 and re.match("Your IP address has been temporarily banned", r.text):
                     _t = util.parse_human_time(r.text)
@@ -63,15 +76,14 @@ class HttpReq(object):
                     # fail this proxy immediately and set expire time
                     __not_good(expire = _t)
                     continue
+                
                 r.encoding = "utf-8"
                 # r._text_bytes = r.text.encode("utf-8")
-                if r.history:
-                    r._real_url = r.history[-1].url
-                else:
-                    r._real_url = r.url
+                r._real_url = url_history[-1]
+
                 return _filter(r, suc, fail)
             retry += 1
-        return _filter(_FakeResponse(url), suc, fail)
+        return _filter(_FakeResponse(url_history[0]), suc, fail)
 
 
 
