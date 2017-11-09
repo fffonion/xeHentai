@@ -1,0 +1,23 @@
+os:
+    - linux
+    - windows
+    - osx
+
+language: python
+python:
+    - 2.7
+    - 3.3
+    - 3.4
+    - 3.5
+    - 3.6
+
+install:
+    - python setup.py install
+
+script:
+    - xeH --help
+    - xeH $TEST_URL_E --dir test1
+    - LANG=zh_CN.utf-8 LC_ALL=zh_CN.utf-8 xeH $TEST_URL_E --dir test1
+    - LANG=zh_TW.utf-8 LC_ALL=zh_TW.utf-8 xeH $TEST_URL_E --dir test1
+    - xeH $TEST_URL_E --dir test1 --archive true 
+
