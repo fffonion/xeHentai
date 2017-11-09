@@ -47,7 +47,6 @@ class HttpReq(object):
                 if self.proxy and self.proxy_policy and self.proxy_policy.match(url):
                     f, __not_good = self.proxy.proxied_request(self.session)
                 else:
-                    print("not use proxy %s" % url)
                     f = self.session.request
                 r = f(method, url,
                     headers=self.headers,
