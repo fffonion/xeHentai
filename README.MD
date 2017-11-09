@@ -1,5 +1,7 @@
 ﻿# 绅♂士♂站♂小♂爬♂虫
 
+[![Build Status](https://travis-ci.org/fffonion/xeHentai.svg?branch=dev)](https://travis-ci.org/fffonion/xeHentai)
+
 ## 快速入门
 
 windows用户可以下载可执行文件 [这里](https://github.com/fffonion/xeHentai/releases) [或这里](http://dl.yooooo.us/share/xeHentai/)
