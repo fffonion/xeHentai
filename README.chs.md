@@ -1,6 +1,6 @@
 ﻿# 绅♂士♂站♂小♂爬♂虫
 
-[![Build Status](https://travis-ci.org/fffonion/xeHentai.svg?branch=dev)](https://travis-ci.org/fffonion/xeHentai)
+[![Build Status](https://travis-ci.org/fffonion/xeHentai.svg?branch=master)](https://travis-ci.org/fffonion/xeHentai)
 
 [English](README.md) [繁體中文](README.cht.md)
 
