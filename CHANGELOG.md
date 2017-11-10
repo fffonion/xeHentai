@@ -5,6 +5,7 @@
 - 增加`download_range`选项，选择下载范围
 - 增加`timeout`选项，设置下载图片的超时
 - 增加`proxy_image_only`选项，设置仅使用代理下载图片
+- 命令行增加`--force`选项，设置忽略配额继续下载; 配置增加`ignored_errors`选项，设置忽略的错误码
 - 检查下载的图片是否完整
 - 识别`socks5h`代理字符串
 

@@ -106,6 +106,21 @@ def _parse_range(s):
         rg.append((start, end))
     return sorted(rg)
 
+class _AddToListAction(argparse.Action):
+    ''' This action add a value 'add_value' to the list 'dest' '''
+    def __init__(self, option_strings, dest, add_value=None, current=None, nargs=None, **kwargs):
+        super(_AddToListAction, self).__init__(option_strings, dest, default=None, nargs=0, **kwargs)
+        self.add_value = add_value
+        # to use in formatting output
+        self.current = current
+    
+    def __call__(self, parser, namespace, values, option_string=None):
+        if getattr(namespace, self.dest, None) is None:
+            setattr(namespace, self.dest, [])
+        items = list(getattr(namespace, self.dest))
+        items.append(self.add_value)
+        setattr(namespace, self.dest, items)
+
 def parse_opt():
     _def = {k:v for k,v in default_config.__dict__.items() if not k.startswith("_")}
     _def.update({k:v for k,v in config.__dict__.items() if not k.startswith("_")})
@@ -158,6 +173,11 @@ def parse_opt():
                         help = i18n.XEH_OPT_t)
     parser.add_argument('--timeout', type = int, metavar = "N", default = _def['download_timeout'],
                         dest = 'download_timeout', help = i18n.XEH_OPT_timeout)
+    parser.add_argument('-f', '--force', action = _AddToListAction,
+                        current = ERR_QUOTA_EXCEEDED in _def['ignored_errors'],
+                        add_value = ERR_QUOTA_EXCEEDED, dest='ignored_errors',
+                        help = i18n.XEH_OPT_f)
+
     parser.add_argument('-l', '--logpath', metavar = '/path/to/eh.log',
                         default = os.path.abspath(_def['log_path']), help = i18n.XEH_OPT_l)
 

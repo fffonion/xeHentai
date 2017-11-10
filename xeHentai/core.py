@@ -44,6 +44,7 @@ class xeHentai(object):
         self._all_tasks = {} # for saving states
         self._all_threads = [[] for i in range(20)]
         self.cfg = {k:v for k,v in default_config.__dict__.items() if not k.startswith("_")}
+        # note that ignored_errors are overwritten using val from custom config
         self.cfg.update({k:v for k,v in config.__dict__.items() if not k.startswith("_")})
         self.proxy = None
         self.cookies = {"nw": "1"}
@@ -58,7 +59,10 @@ class xeHentai(object):
         self.rpc = None
 
     def update_config(self, cfg_dict):
-        self.cfg.update({k:v for k, v in cfg_dict.items() if k in cfg_dict})
+        self.cfg.update({k:v for k, v in cfg_dict.items() if k in cfg_dict and k not in ('ignored_errors',)})
+        # merge ignored errors list
+        if 'ignored_errors' in cfg_dict and cfg_dict['ignored_errors']:
+            self.cfg['ignored_errors'] = list(set(self.cfg['ignored_errors'] + cfg_dict['ignored_errors']))
         self.logger.set_level(logger.Logger.WARNING - self.cfg['log_verbose'])
         self.logger.verbose("cfg %s" % self.cfg)
         if cfg_dict['proxy']:

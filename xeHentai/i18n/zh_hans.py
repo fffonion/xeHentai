@@ -60,7 +60,8 @@ XEH_OPT_a = "下载完成后生成zip压缩包并删除下载目录 (当前: %(d
 XEH_OPT_j = "使用日语标题, 如果关闭则使用英文或罗马字标题 (当前: %(default)s)"
 XEH_OPT_download_range = "设置下载的图片范围, 格式为 开始位置-结束位置, 或者单张图片的位置, " \
 "使用逗号来分隔多个范围, 例如 5-10,15,20-25, 默认为下载所有"
-XEH_OPT_timeout = "设置下载图片的超时 (当前: %(default)ss)"
+XEH_OPT_timeout = "设置下载图片的超时 (当前: %(default)s秒)"
+XEH_OPT_f = "忽略配额判断，继续下载 (当前: %(current)s)"
 XEH_OPT_h = "显示本帮助信息"
 XEH_OPT_version = "显示版本信息"
 XEH_OPT_IGNORING_I = "后台模式已忽略 -i 参数"
