@@ -44,6 +44,7 @@ class xeHentai(object):
         self._all_tasks = {} # for saving states
         self._all_threads = [[] for i in range(20)]
         self.cfg = {k:v for k,v in default_config.__dict__.items() if not k.startswith("_")}
+        # note that ignored_errors are overwritten using val from custom config
         self.cfg.update({k:v for k,v in config.__dict__.items() if not k.startswith("_")})
         self.proxy = None
         self.cookies = {"nw": "1"}
@@ -58,7 +59,10 @@ class xeHentai(object):
         self.rpc = None
 
     def update_config(self, cfg_dict):
-        self.cfg.update({k:v for k, v in cfg_dict.items() if k in cfg_dict})
+        self.cfg.update({k:v for k, v in cfg_dict.items() if k in cfg_dict and k not in ('ignored_errors',)})
+        # merge ignored errors list
+        if 'ignored_errors' in cfg_dict and cfg_dict['ignored_errors']:
+            self.cfg['ignored_errors'] = list(set(self.cfg['ignored_errors'] + cfg_dict['ignored_errors']))
         self.logger.set_level(logger.Logger.WARNING - self.cfg['log_verbose'])
         self.logger.verbose("cfg %s" % self.cfg)
         if cfg_dict['proxy']:
@@ -97,7 +101,7 @@ class xeHentai(object):
         url = url.strip()
         cfg = {k:v for k, v in self.cfg.items() if k in (
             "dir", "download_ori", "download_thread_cnt", "scan_thread_cnt",
-            "proxy", "proxy_image", "proxy_image_only",
+            "proxy", "proxy_image", "proxy_image_only", "ignored_errors",
             "rename_ori", "make_archive", "jpn_title", "download_range", "download_timeout")}
         cfg.update(cfg_dict)
         if cfg['download_ori'] and not self.has_login:
@@ -179,7 +183,7 @@ class xeHentai(object):
             if task.state >= TASK_STATE_SCAN_IMG and not monitor_started:
                 self.logger.verbose("state %d >= %d, bring up montior" % (task.state, TASK_STATE_SCAN_IMG))
                 # bring up the monitor here, ahead of workers
-                mon = Monitor(req, self.proxy, self.logger, task)
+                mon = Monitor(req, self.proxy, self.logger, task, ignored_errors=task.config['ignored_errors'])
                 _ = ['down-%d' % (i + 1) for i in range(task.config['download_thread_cnt'])]
                 # if we jumpstart from a saved session to DOQNLOAD
                 # there will be no scan_thread

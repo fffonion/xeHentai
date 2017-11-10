@@ -154,11 +154,13 @@ class ArchiveWorker(Thread):
 
 
 class Monitor(Thread):
-    def __init__(self, req, proxy, logger, task, exit_check = None):
+    def __init__(self, req, proxy, logger, task, exit_check=None, ignored_errors=[]):
         Thread.__init__(self, name = "monitor%s" % task.guid)
         Thread.setDaemon(self, True)
+        # the count of votes per error code
         self.vote_result = {}
-        self.vote_cleared = set()
+        # the error code to be ignored
+        self.vote_cleared = set().union(ignored_errors)
         self.thread_last_seen = {}
         self.dctlock = RLock()
         self.votelock = RLock()
@@ -187,7 +189,7 @@ class Monitor(Thread):
     def vote(self, tname, code):
         # thread_id, result_code
         self.votelock.acquire()
-        if code != 0:
+        if code != ERR_NO_ERROR:
             self.logger.verbose("t-%s vote:%s" % (tname, code))
         if code not in self.vote_result:
             self.vote_result[code] = 1
@@ -241,6 +243,7 @@ class Monitor(Thread):
             self.task.meta['has_ori'] = True
             self.vote_cleared.add(ERR_IMAGE_RESAMPLED)
         elif ERR_QUOTA_EXCEEDED in self.vote_result and \
+            ERR_QUOTA_EXCEEDED not in self.vote_cleared and \
             self.vote_result[ERR_QUOTA_EXCEEDED] >= len(self.thread_last_seen):
             self.logger.error(i18n.TASK_STOP_QUOTA_EXCEEDED % self.task.guid)
             self.task.state = TASK_STATE_FAILED

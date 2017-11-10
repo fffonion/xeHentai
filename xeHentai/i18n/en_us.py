@@ -13,6 +13,7 @@ err_msg = {
     ERR_CONNECTION_ERROR: "a connection problem occurs",
     ERR_IP_BANNED: "IP has been banned, retry in %s",
     ERR_IMAGE_BROKEN: "downloaded image is broken",
+    ERR_QUOTA_EXCEEDED: "quota exceeded",
     ERR_TASK_NOT_FOUND: "no such task guid",
     ERR_TASK_LEVEL_UNDEF: "task filter level unknown",
     ERR_DELETE_RUNNING_TASK: "can't delete a running task",
@@ -62,6 +63,7 @@ XEH_OPT_j = "use Japanese title, use English/Romaji title if turned off (current
 XEH_OPT_download_range = "specify ranges of images to be downloaded, in format start-end, or single index, " \
 "use comma to concat multiple ranges, e.g.: 5-10,15,20-25, default to download all images"
 XEH_OPT_timeout = "set image download timeout (current: %(default)ss)"
+XEH_OPT_f = "download regardless of quota exceeded warning (current: %(current)s)"
 XEH_OPT_h = "show this help message and exit"
 XEH_OPT_version = "show program's version number and exit"
 XEH_OPT_IGNORING_I = "ignoring -i option in daemon mode"

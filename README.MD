@@ -47,6 +47,7 @@ xeH
  - **scan_thread_cnt** 扫描线程数，默认为1
  - **download_thread_cnt** 下载线程数，默认为5
  - **download_timeout** 设置下载图片的超时，默认为10
+ - **ignored_errors** 设置忽略的错误码, 默认为空, 错误码可以从`const.py`中获得
  - **log_path** 日志路径，默认为`eh.log`
  - **log_verbose** 日志等级，可选1-3，值越大输出越详细，默认为2
  - **save_tasks** 是否保存任务到`h.json`，默认为否
@@ -94,7 +95,8 @@ xeH
                         设置下载的图片范围, 格式为 开始位置-结束位置, 或者单张图片的位置, 使用逗号来分隔多个范围, 例如
                         5-10,15,20-25, 默认为下载所有
   -t N, --thread N      下载线程数 (默认: 5)
-  --timeout N           设置下载图片的超时 (默认: 10s)
+  --timeout N           设置下载图片的超时 (默认: 10秒)
+  -f, --force           忽略配额判断，继续下载 (默认: False)
   -l /path/to/eh.log, --logpath /path/to/eh.log
                         保存日志的路径 (默认: eh.log)
   -v, --verbose         设置日志装逼等级 (默认: 2)
