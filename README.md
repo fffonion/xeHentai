@@ -1,6 +1,6 @@
 ﻿# E-Hentai Dōjinshi Downloader
 
-[![Build Status](https://travis-ci.org/fffonion/xeHentai.svg?branch=dev)](https://travis-ci.org/fffonion/xeHentai)
+[![Build Status](https://travis-ci.org/fffonion/xeHentai.svg?branch=master)](https://travis-ci.org/fffonion/xeHentai)
 
 [简体中文](README.chs.md) [繁體中文](README.cht.md)
 
