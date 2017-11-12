@@ -8,7 +8,7 @@ from ..const import *
 from . import en_us as lng_fallback
 
 try:
-    _locale = LOCALE.lower()
+    _locale = LOCALE.lower() if LOCALE else 'en_us'
     if _locale in ('zh_cn', 'zh_sg'):
         _locale = 'zh_hans'
     elif _locale in ('zh_tw', 'zh_hk', 'zh_mo'):
