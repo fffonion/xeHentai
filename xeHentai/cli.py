@@ -197,7 +197,7 @@ def interactive(xeH):
             x = x % default
         _ = input(logger.safestr(x)) if PY3K else raw_input(logger.safestr(x))
         _ = _ or default
-        return _.decode(locale.getdefaultlocale()[1] or 'utf-8')
+        return _ if PY3K else _.decode(locale.getdefaultlocale()[1] or 'utf-8')
 
     if not xeH.has_login and _readline(i18n.PS_LOGIN) == 'y':
         uname = pwd = ""

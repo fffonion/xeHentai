@@ -16,6 +16,9 @@ if os.name == 'nt':
 else:# assume posix
     filename_filter = re.compile("[\/:]")
 
+if PY3K:
+    unichr = chr
+
 def parse_cookie(coostr):
     ret = {}
     for coo in coostr.split(";"):
@@ -63,8 +66,6 @@ def parse_human_time(s):
     return rt
 
 def htmlescape(s):
-    if PY3K:
-        unichr = chr
     def replc(match):
         #print match.group(0),match.group(1),match.group(2)
         dict={'amp':'&','nbsp':' ','quot':'"','lt':'<','gt':'>','copy':'©','reg':'®'}
