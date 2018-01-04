@@ -265,7 +265,7 @@ class xeHentai(object):
                         lambda x, tid = tid: (task.img_q.put(x[0]),
                             task.set_reload_url(x[0], x[1], x[2]),
                             mon.vote(tid, 0)),
-                        lambda x, tid = tid: (mon.vote(tid, x)),
+                        lambda x, tid = tid: (mon.vote(tid, x[0])),
                         mon.wrk_keepalive,
                         util.get_proxy_policy(task.config),
                         10)

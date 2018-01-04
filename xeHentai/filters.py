@@ -125,33 +125,54 @@ def flt_imgurl_wrapper(ori):
     @flt_quota_check
     def flt_imgurl(r, suc, fail, ori = ori):
         # input per image page response
-        # add (image url, reload url, filename) to queue if suc; return errorcode if fail
-        # TODO: catch re exceptions
+        # add (image url, reload url, filename) to queue if suc
+        # return (errorcode, page_url) if fail
         if re.match('Invalid page', r.text):
-            return fail(ERR_IMAGE_RESAMPLED)
-        try:
-            picurl = util.htmlescape(re.findall('src="([^"]+keystamp[^"]+)"', r.text)[0])
-        except IndexError:
-            picurl = util.htmlescape(re.findall('src="([^"]+)"\s+style="', r.text)[0])
-        filename = re.findall('</a></div><div>(.*?) ::.+::.+</di', r.text)[0]
-        if 'image.php' in filename:
-            filename = re.findall('n=(.+)', picurl)[0]
-        fmt = re.findall('.+\.([a-zA-Z]+)', filename)[0]
-        # http://exhentai.org/fullimg.php?gid=577354&page=2&key=af594b7cf3
-        index = re.findall('.+/(\d+)-(\d*)', r._real_url)[0]
-        fullurl = re.findall('class="mr".+<a href="(.+)"\s*>Download original', r.text)
-        fullsize = re.findall('Download\soriginal\s[0-9]+\sx\s[0-9]+\s(.*)\ssource', r.text)  # like 2.20MB
-        if fullurl:
-            fullurl = util.htmlescape(fullurl[0])
-        else:
-            fullurl = picurl
-        js_nl = re.findall("return nl\('([\d\-]+)'\)", r.text)[0]
-        reload_url = "%s%snl=%s" % (r._real_url, "&" if "?" in r._real_url else "?", js_nl)
-        if ori:
-            # we will parse the 302 url to get original filename
-            suc((fullurl, reload_url, filename))
-        else:
-            suc((picurl, reload_url, filename))
+            return fail((ERR_IMAGE_RESAMPLED, r._real_url))
+        while True:
+            _ = re.findall('src="([^"]+keystamp[^"]+)"', r.text)
+            if not _:
+                _ = re.findall('src="([^"]+)"\s+style="', r.text)
+            if not _:
+                break
+            picurl = util.htmlescape(_[0])
+
+            _ = re.findall('</a></div><div>(.*?) ::.+::.+</di', r.text)
+            if not _:
+                break
+            filename = _[0]
+            if 'image.php' in filename:
+                _ = re.findall('n=(.+)', picurl)
+                if not _:
+                    break
+                filename = _[0]
+            _ = re.findall('.+\.([a-zA-Z]+)', filename)
+            if not _:
+                break
+            fmt = _[0]
+            # http://exhentai.org/fullimg.php?gid=577354&page=2&key=af594b7cf3
+            _ = re.findall('.+/(\d+)-(\d*)', r._real_url)
+            if not _:
+                break
+            index = _[0]
+            fullurl = re.findall('class="mr".+<a href="(.+)"\s*>Download original', r.text)
+            fullsize = re.findall('Download\soriginal\s[0-9]+\sx\s[0-9]+\s(.*)\ssource', r.text)  # like 2.20MB
+            if fullurl:
+                fullurl = util.htmlescape(fullurl[0])
+            else:
+                fullurl = picurl
+            _= re.findall("return nl\('([\d\-]+)'\)", r.text)
+            if not _:
+                break
+            js_nl = _[0]
+            reload_url = "%s%snl=%s" % (r._real_url, "&" if "?" in r._real_url else "?", js_nl)
+            if ori:
+                # we will parse the 302 url to get original filename
+                return suc((fullurl, reload_url, filename))
+            else:
+                return suc((picurl, reload_url, filename))
+
+        return fail((ERR_SCAN_REGEX_FAILED, r._real_url))
 
     return flt_imgurl
 

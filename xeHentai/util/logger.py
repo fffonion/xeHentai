@@ -96,10 +96,13 @@ class Logger(object):
     def log(self, level, fmt, *args, **kwargs):
         # fmt=du8(fmt)
         try:
-            self.__write('%-4s - [%s] %s\n' % (level, datetime.datetime.now(tz_GMT8()).strftime('%X'), fmt % args))
-        except (ValueError, TypeError):
-            fmt = fmt.replace('%','%%')
-            self.__write('%-4s - [%s] %s\n' % (level, datetime.datetime.now(tz_GMT8()).strftime('%X'), fmt % args))
+            try:
+                self.__write('%-4s - [%s] %s\n' % (level, datetime.datetime.now(tz_GMT8()).strftime('%X'), fmt % args))
+            except (ValueError, TypeError):
+                fmt = fmt.replace('%','%%')
+                self.__write('%-4s - [%s] %s\n' % (level, datetime.datetime.now(tz_GMT8()).strftime('%X'), fmt % args))
+        except IOError: # fix for Windows console
+            pass
         sys.stdout.flush()
         if self.logf:
             _ = ('[%s] %s%s' % (datetime.datetime.now(tz_GMT8()).strftime('%b %d %X'), fmt % args, endl))
