@@ -187,9 +187,24 @@ def download_file_wrapper(dirpath):
         # if multiple hash-size-h-w-type is found, use the last one
         # the first is original and the last is scaled
         # _FakeReponse will be filtered in flt_quota_check
-        if p and p[-1] and int(p[-1][1]) != len(r.content):
+        if not r.headers.get('content-length') or \
+            p and p[-1] and int(p[-1][1]) != int(r.headers.get('content-length')):
             return fail((ERR_IMAGE_BROKEN, r._real_url, r.url))
-        suc((r.content, r._real_url, r.url))
+        if not hasattr(r, 'iter_content_cb'):
+            return fail((ERR_STREAM_NOT_IMPLEMENTED, r._real_url, r.url))
+
+        # merge the iter_content iterator with our custom stream_cb
+        def _yield(chunk_size=16384, _r=r):
+            length_read = 0
+            for _ in _r.iter_content(chunk_size):
+                length_read += len(_)
+                _r.iter_content_cb(_)
+                yield _
+            if length_read != int(r.headers.get('content-length')):
+                fail((ERR_IMAGE_BROKEN, r._real_url, r.url))
+                raise StopIteration()
+            
+        suc((_yield, r._real_url, r.url))
 
     return download_file
 

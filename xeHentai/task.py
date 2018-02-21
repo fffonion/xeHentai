@@ -179,7 +179,7 @@ class Task(object):
         if int(fid) not in self._flist_done:
             callback(url)
 
-    def save_file(self, imgurl, redirect_url, binary):
+    def save_file(self, imgurl, redirect_url, binary_iter):
         # TODO: Rlock for finished += 1
         fpath = self.get_fpath()
         self._f_lock.acquire()
@@ -200,15 +200,24 @@ class Task(object):
         self.meta['finished'] += 1
         self._cnt_lock.release()
         self._f_lock.acquire()
-        with open(fn, "wb") as f:
-            f.write(binary)
-        if imgurl in self.filehash_map:
-            for fid, _ in self.filehash_map[imgurl]:
-                fn_rep = os.path.join(fpath, self.get_fidpad(fid))
-                with open(fn_rep, "wb") as f:
-                    f.write(binary)
-                self.meta['finished'] += 1
-            del self.filehash_map[imgurl]
+        try:
+            try:
+                with open(fn, "wb") as f:
+                    for binary in binary_iter():
+                        f.write(binary)
+            except StopIteration as ex:
+                os.remove(fn)
+                self._f_lock.release()
+                return
+            if imgurl in self.filehash_map:
+                for fid, _ in self.filehash_map[imgurl]:
+                    fn_rep = os.path.join(fpath, self.get_fidpad(fid))
+                    shutil.copyfile(fn, fn_rep)
+                    self.meta['finished'] += 1
+                del self.filehash_map[imgurl]
+        except Exception as ex:
+            self._f_lock.release()
+            raise ex
         self._f_lock.release()
 
     def get_fname(self, imgurl):
