@@ -276,9 +276,9 @@ class xeHentai(object):
                     tid = 'down-%d' % (i + 1)
                     _ = self._get_httpworker(tid, task.img_q,
                         filters.download_file_wrapper(task.config['dir']),
-                        lambda x, tid = tid: (task.save_file(x[1], x[2], x[0]),
-                            self.logger.debug(i18n.XEH_FILE_DOWNLOADED % (task.get_fname(x[1]))),
-                            mon.vote(tid, 0)),
+                        lambda x, tid = tid: (task.save_file(x[1], x[2], x[0]) and \
+                            (self.logger.debug(i18n.XEH_FILE_DOWNLOADED % (task.get_fname(x[1]))),
+                                mon.vote(tid, 0))),
                         lambda x, tid = tid: (
                             task.page_q.put(task.get_reload_url(x[1])),# if x[0] != ERR_QUOTA_EXCEEDED else None,
                             task.reload_map.pop(x[1]) if x[1] in task.reload_map else None, # delete old url in reload_map

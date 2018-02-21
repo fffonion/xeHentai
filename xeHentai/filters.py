@@ -111,10 +111,12 @@ def flt_quota_check(func):
             fail((ERR_CONNECTION_ERROR, r._real_url))
         elif r.status_code == 403:
             fail((ERR_KEY_EXPIRED, r._real_url))
-        elif r.status_code == 509 or len(r.content) in [925, 28658, 144, 210, 1009] or '509.gif' in r.url:
+        elif r.status_code == 509 or r.content_length in [925, 28658, 144, 210, 1009] or '509.gif' in r.url:
             fail((ERR_QUOTA_EXCEEDED, r._real_url))
             # will not call the decorated filter
-        elif len(r.content) < 200 and re.findall("exceeded your image viewing limits", r.text):
+        elif r.content_length < 200 and \
+                r.headers.get('content-type') and r.headers.get('content-type').startswith('text') and \
+                re.findall("exceeded your image viewing limits", r.text):
             fail((ERR_QUOTA_EXCEEDED, r._real_url))
             # will not call the decorated filter
         else:
@@ -187,8 +189,8 @@ def download_file_wrapper(dirpath):
         # if multiple hash-size-h-w-type is found, use the last one
         # the first is original and the last is scaled
         # _FakeReponse will be filtered in flt_quota_check
-        if not r.headers.get('content-length') or \
-            p and p[-1] and int(p[-1][1]) != int(r.headers.get('content-length')):
+        if not r.content_length or \
+            p and p[-1] and int(p[-1][1]) != r.content_length:
             return fail((ERR_IMAGE_BROKEN, r._real_url, r.url))
         if not hasattr(r, 'iter_content_cb'):
             return fail((ERR_STREAM_NOT_IMPLEMENTED, r._real_url, r.url))
@@ -200,9 +202,9 @@ def download_file_wrapper(dirpath):
                 length_read += len(_)
                 _r.iter_content_cb(_)
                 yield _
-            if length_read != int(r.headers.get('content-length')):
+            if length_read != r.content_length:
                 fail((ERR_IMAGE_BROKEN, r._real_url, r.url))
-                raise StopIteration()
+                raise DownloadAbortedException()
             
         suc((_yield, r._real_url, r.url))
 
