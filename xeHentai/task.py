@@ -199,16 +199,20 @@ class Task(object):
         self._cnt_lock.acquire()
         self.meta['finished'] += 1
         self._cnt_lock.release()
+        # create a femp file first
+        # we don't need _f_lock because this will not be in a sequence
+        # and we can't do that otherwise we are breaking the multi threading
+        fn_tmp = os.path.join(fpath, ".%s" % self.get_fidpad(int(fid)))
+        try:
+            with open(fn_tmp, "wb") as f:
+                for binary in binary_iter():
+                    f.write(binary)
+        except DownloadAbortedException as ex:
+            os.remove(fn_tmp)
+            return
         self._f_lock.acquire()
         try:
-            try:
-                with open(fn, "wb") as f:
-                    for binary in binary_iter():
-                        f.write(binary)
-            except StopIteration as ex:
-                os.remove(fn)
-                self._f_lock.release()
-                return
+            os.rename(fn_tmp, fn)
             if imgurl in self.filehash_map:
                 for fid, _ in self.filehash_map[imgurl]:
                     fn_rep = os.path.join(fpath, self.get_fidpad(fid))
@@ -219,6 +223,7 @@ class Task(object):
             self._f_lock.release()
             raise ex
         self._f_lock.release()
+        return True
 
     def get_fname(self, imgurl):
         pageurl, fname = self.reload_map[imgurl]

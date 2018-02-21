@@ -56,7 +56,13 @@ class HttpReq(object):
                 self.logger.warning("%s-%s %s %s: %s" % (i18n.THREAD, self.tname, method, url, ex))
                 time.sleep(random.random() + 0.618)
             else:
-                self.logger.verbose("%s-%s %s %s %d %d" % (i18n.THREAD, self.tname, method, url, r.status_code, len(r.content)))
+                if r.headers.get('content-length'):
+                    r.content_length = int(r.headers.get('content-length'))
+                elif not stream_cb:
+                    r.content_length = len(r.content)
+                else:
+                    r.content_length = 0
+                self.logger.verbose("%s-%s %s %s %d %d" % (i18n.THREAD, self.tname, method, url, r.status_code, r.content_length))
                 # if it's a redirect, 3xx
                 if r.status_code > 300 and r.status_code < 400:
                     _new_url = r.headers.get("location")
@@ -68,9 +74,7 @@ class HttpReq(object):
                         url = _new_url
                         continue
                 # intercept some error to see if we can change IP
-                if self.proxy and \
-                    ((r.headers.get('content-length') and int(r.headers.get('content-length')) < 1024) or \
-                        (not stream_cb and len(r.content) < 1024)) and \
+                if self.proxy and r.content_length < 1024 and \
                     re.match("Your IP address has been temporarily banned", r.text):
                     _t = util.parse_human_time(r.text)
                     self.logger.warn(i18n.PROXY_DISABLE_BANNED % _t)
