@@ -36,7 +36,7 @@ sys.path.pop(1)
 
 class xeHentai(object):
     def __init__(self):
-        self.verstr = "%s%s" % (__version__, '-dev' if DEVELOPMENT else "")
+        self.verstr = "%.3f%s" % (__version__, '-dev' if DEVELOPMENT else "")
         self.logger = logger.Logger()
         self._exit = False
         self.tasks = Queue() # for queueing, stores gid only
@@ -92,10 +92,10 @@ class xeHentai(object):
     def _get_httpreq(self, proxy_policy):
         return HttpReq(self.headers, logger = self.logger, proxy = self.proxy, proxy_policy = proxy_policy)
 
-    def _get_httpworker(self, tid, task_q, flt, suc, fail, keep_alive, proxy_policy, timeout):
+    def _get_httpworker(self, tid, task_q, flt, suc, fail, keep_alive, proxy_policy, timeout, stream_mode):
         return HttpWorker(tid, task_q, flt, suc, fail,
             headers = self.headers, proxy = self.proxy, logger = self.logger,
-            keep_alive = keep_alive, proxy_policy = proxy_policy, timeout = timeout)
+            keep_alive = keep_alive, proxy_policy = proxy_policy, timeout = timeout, stream_mode = stream_mode)
 
     def add_task(self, url, cfg_dict = {}):
         url = url.strip()
@@ -151,14 +151,6 @@ class xeHentai(object):
             return ERR_TASK_CANNOT_RESUME, None
         t.state = max(t.state, TASK_STATE_WAITING)
         return ERR_NO_ERROR, ""
-
-    def list_tasks(self, level = "download"):
-        level = "TASK_STATE_%s" % level.upper()
-        if level not in globals():
-            return ERR_TASK_LEVEL_UNDEF, None
-        lv = globals()[level]
-        rt = {k:v.to_dict() for k, v in self._all_tasks.items() if v.state == lv}
-        return ERR_NO_ERROR, rt
 
     def _do_task(self, task_guid):
         task = self._all_tasks[task_guid]
@@ -268,7 +260,8 @@ class xeHentai(object):
                         lambda x, tid = tid: (mon.vote(tid, x[0])),
                         mon.wrk_keepalive,
                         util.get_proxy_policy(task.config),
-                        10)
+                        10,
+                        False)
                         # we don't need proxy_image in the scan thread
                         # we use default timeout in the scan thread
                     # _._exit = lambda t: t._finish_queue()
@@ -293,7 +286,8 @@ class xeHentai(object):
                             mon.vote(tid, x[0])),
                         mon.wrk_keepalive,
                         util.get_proxy_policy(task.config),
-                        task.config['download_timeout'])
+                        task.config['download_timeout'],
+                        True)
                     self._all_threads[TASK_STATE_DOWNLOAD].append(_)
                     _.start()
                 # spawn archiver if we need

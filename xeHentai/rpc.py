@@ -71,9 +71,9 @@ def path_filter(func):
 class Handler(BaseHTTPRequestHandler):
 
     def __init__(self, xeH, secret, *args):
-        self.xeH = xeH
         self.secret = secret
         self.args = args
+        self.xeH = xeHentaiRPCExtended(xeH)
         BaseHTTPRequestHandler.__init__(self, *args)
 
     def version_string(self):
@@ -170,6 +170,23 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
         return
+
+# extend xeHentai class for rpc commands
+class xeHentaiRPCExtended(object):
+    def __init__(self, xeH):
+        self.xeH = xeH
+    
+    def list_tasks(self, level = "download"):
+        level = "TASK_STATE_%s" % level.upper()
+        if level not in globals():
+            return ERR_TASK_LEVEL_UNDEF, None
+        lv = globals()[level]
+        rt = {k:v.to_dict() for k, v in self._all_tasks.items() if v.state == lv}
+        return ERR_NO_ERROR, rt
+    
+    def __getattr__(self, k):
+        # fallback attribute handler
+        return getattr(self.xeH, k)
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     """Handle requests in a separate thread."""

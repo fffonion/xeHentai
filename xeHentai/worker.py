@@ -30,15 +30,15 @@ class _FakeResponse(object):
 class HttpReq(object):
     def __init__(self, headers = {}, proxy = None, proxy_policy = None, retry = 10, timeout = 20, logger = None, tname = "main"):
         self.session = requests.Session()
-        self.headers = headers
+        self.session.headers = headers
+        self.session.timeout = timeout
         self.retry = retry
         self.proxy = proxy
         self.proxy_policy = proxy_policy
-        self.timeout = timeout
         self.logger = logger
         self.tname = tname
 
-    def request(self, method, url, _filter, suc, fail, data = None):
+    def request(self, method, url, _filter, suc, fail, data=None, stream_cb=None):
         retry = 0
         url_history = [url]
         while retry < self.retry:
@@ -49,10 +49,9 @@ class HttpReq(object):
                 else:
                     f = self.session.request
                 r = f(method, url,
-                    headers=self.headers,
-                    timeout=self.timeout,
                     allow_redirects=False,
-                    data = data)
+                    data=data,
+                    stream=stream_cb != None)
             except requests.RequestException as ex:
                 self.logger.warning("%s-%s %s %s: %s" % (i18n.THREAD, self.tname, method, url, ex))
                 time.sleep(random.random() + 0.618)
@@ -69,7 +68,10 @@ class HttpReq(object):
                         url = _new_url
                         continue
                 # intercept some error to see if we can change IP
-                if self.proxy and len(r.content) < 1024 and re.match("Your IP address has been temporarily banned", r.text):
+                if self.proxy and \
+                    ((r.headers.get('content-length') and int(r.headers.get('content-length')) < 1024) or \
+                        (not stream_cb and len(r.content) < 1024)) and \
+                    re.match("Your IP address has been temporarily banned", r.text):
                     _t = util.parse_human_time(r.text)
                     self.logger.warn(i18n.PROXY_DISABLE_BANNED % _t)
                     # fail this proxy immediately and set expire time
@@ -80,6 +82,8 @@ class HttpReq(object):
                 # r._text_bytes = r.text.encode("utf-8")
                 r._real_url = url_history[-1]
 
+                r.iter_content_cb = stream_cb
+
                 return _filter(r, suc, fail)
             retry += 1
         return _filter(_FakeResponse(url_history[0]), suc, fail)
@@ -87,8 +91,26 @@ class HttpReq(object):
 
 
 class HttpWorker(Thread, HttpReq):
-    def __init__(self, tname, task_queue, flt, suc, fail, headers = {}, proxy = None, proxy_policy = None,
-            retry = 3, timeout = 10, logger = None, keep_alive = None):
+    def __init__(self, tname, task_queue, flt, suc, fail, headers={}, proxy=None, proxy_policy=None,
+            retry=3, timeout=10, logger=None, keep_alive=None, stream_mode=False):
+        """
+        Construct a new 'HttpWorker' obkect
+
+        :param tname: The name of this http worker
+        :param task_queue: The task Queue instance
+        :param flt: the filter function
+        :param suc: the function to call when succeeded
+        :param fail: the function to call when failed
+        :param headers: custom HTTP headers
+        :param proxy: proxy dict
+        :param proxy_policy: a function to determine whether proxy should be used
+        :param retry: retry count
+        :param timeout: timeout in seconds
+        :param logger: the Logger instance
+        :param keep_alive: the callback to send keep alive
+        :param stream_mode: set the request to use stream mode, keep_alive will be called every iteration
+        :return: returns nothing
+        """
         HttpReq.__init__(self, headers, proxy, proxy_policy, retry, timeout, logger, tname = tname)
         Thread.__init__(self, name = tname)
         Thread.setDaemon(self, True)
@@ -99,6 +121,7 @@ class HttpWorker(Thread, HttpReq):
         self.flt = flt
         self.f_suc = suc
         self.f_fail = fail
+        self.stream_mode = stream_mode
         self.run_once = False
 
     def _finish_queue(self, *args):
@@ -107,6 +130,9 @@ class HttpWorker(Thread, HttpReq):
 
     def run(self):
         self.logger.verbose("t-%s start" % self.name)
+        _stream_cb = None
+        if self.stream_mode:
+            _stream_cb = lambda x:self._keepalive(self)
         while not self._keepalive(self) and not self._exit(self):
             try:
                 url = self.task_queue.get(False)
@@ -115,7 +141,7 @@ class HttpWorker(Thread, HttpReq):
                 continue
             self.run_once = True
             try:
-                self.request("GET", url, self.flt, self.f_suc, self.f_fail)
+                self.request("GET", url, self.flt, self.f_suc, self.f_fail, stream_cb=_stream_cb)
             except PoolException as ex:
                 self.logger.warning("%s-%s %s" % (i18n.THREAD, self.tname, str(ex)))
                 break

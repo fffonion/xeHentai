@@ -136,9 +136,7 @@ def glype_proxy(addr, trace_proxy):
             # change url
             url = args[1]
             args = (args[0], mkurl(url),)
-            if 'headers' not in kwargs:
-                kwargs['headers'] = {}
-            kwargs['headers'] = dict(kwargs['headers'])
+            kwargs['headers'] = dict(session.headers)
             # anti hotlinking
             kwargs['headers'].update({'Referer':"%s/%s%s" % (server, inst_loc, script)})
             _coo_new = dict(g_session) if g_session['s'] else {}
