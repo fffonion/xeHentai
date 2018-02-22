@@ -6,7 +6,7 @@
 import re
 import time
 import random
-from requests.exceptions import ConnectTimeout, ConnectionError, InvalidSchema
+from requests.exceptions import ConnectTimeout, ConnectionError, ProxyError, InvalidSchema
 from requests.packages.urllib3.exceptions import ProxySchemeUnknown
 from . import util
 from .const import *
@@ -59,8 +59,11 @@ class Pool(object):
                     r = func(*args, **kwargs)
                 except Exception as _ex:
                     ex = _ex
-                    for e in [ConnectTimeout, ConnectionError] + exceptions:
+                    for e in [ConnectTimeout, ConnectionError, ProxyError] + exceptions:
                         if isinstance(ex, e):
+                            # ignore BadStatusLine, this doesn't mean the proxy is bad
+                            if e == ConnectionError and 'BadStatusLine' in str(e):
+                                continue
                             self.proxies[addr][2] += weight
                             break
                 else:
