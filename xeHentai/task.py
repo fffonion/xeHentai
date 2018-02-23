@@ -48,6 +48,9 @@ class Task(object):
             self.page_q = None
             self.list_q = None
             self.reload_map = {}
+        else:
+            # if we cleanup early, this task is not finised, put it into waiting state
+            self.state = TASK_STATE_WAITING
             # if 'filelist' in self.meta:
             #     del self.meta['filelist']
             # if 'resampled' in self.meta:
@@ -206,6 +209,8 @@ class Task(object):
         try:
             with open(fn_tmp, "wb") as f:
                 for binary in binary_iter():
+                    if self.state == TASK_STATE_WAITING:
+                        raise DownloadAbortedException()
                     f.write(binary)
         except DownloadAbortedException as ex:
             os.remove(fn_tmp)
@@ -214,8 +219,11 @@ class Task(object):
         try:
             os.rename(fn_tmp, fn)
             if imgurl in self.filehash_map:
-                for fid, _ in self.filehash_map[imgurl]:
-                    fn_rep = os.path.join(fpath, self.get_fidpad(fid))
+                for _fid, _ in self.filehash_map[imgurl]:
+                    # if a file download is interrupted, it will appear in self.filehash_map as well
+                    if _fid == int(fid):
+                        continue
+                    fn_rep = os.path.join(fpath, self.get_fidpad(_fid))
                     shutil.copyfile(fn, fn_rep)
                     self.meta['finished'] += 1
                 del self.filehash_map[imgurl]
