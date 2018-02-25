@@ -57,6 +57,7 @@ XEH_OPT_rpc_interface = "设置JSON-RPC监听IP (当前: %(default)s)"
 XEH_OPT_rpc_port = "设置JSON-RPC监听端口 (当前: %(default)s)"
 XEH_OPT_rpc_secret = "设置JSON-RPC密钥 (当前: %(default)s)"
 XEH_OPT_a = "下载完成后生成zip压缩包并删除下载目录 (当前: %(default)s)"
+XEH_OPT_delete_task_files = "删除任务时同时删除下载的文件 (current: %(default)s)"
 XEH_OPT_j = "使用日语标题, 如果关闭则使用英文或罗马字标题 (当前: %(default)s)"
 XEH_OPT_download_range = "设置下载的图片范围, 格式为 开始位置-结束位置, 或者单张图片的位置, " \
 "使用逗号来分隔多个范围, 例如 5-10,15,20-25, 默认为下载所有"

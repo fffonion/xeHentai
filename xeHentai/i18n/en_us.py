@@ -59,6 +59,7 @@ XEH_OPT_rpc_interface = "bind jsonrpc server to this address (current: %(default
 XEH_OPT_rpc_port = "bind jsonrpc server to this port (current: %(default)s)"
 XEH_OPT_rpc_secret = "jsonrpc secret string (current: %(default)s)"
 XEH_OPT_a = "make an archive (.zip) after download and delete directory (current: %(default)s)"
+XEH_OPT_delete_task_files = "delete downloaded files when deleting a task (current: %(default)s)"
 XEH_OPT_j = "use Japanese title, use English/Romaji title if turned off (current: %(default)s)"
 XEH_OPT_download_range = "specify ranges of images to be downloaded, in format start-end, or single index, " \
 "use comma to concat multiple ranges, e.g.: 5-10,15,20-25, default to download all images"

@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.020
+- 增加RPC帮助函数：`get_info`，`get_config`，`update_config`，`get_image`
+- 增加通过RPC看图和下载压缩包功能
+- 增加`delete_task_files`选项，设置是否删除任务时同时删除下载的文件
+
 ## 2.019
 - 增加图片地址解析时的错误处理
 - 增加使用流模式下载图片，优化判断丧尸线程

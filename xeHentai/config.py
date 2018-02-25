@@ -60,3 +60,6 @@ log_verbose = 2
 # save tasks to h.json
 save_tasks = False
 
+# delete files when deleting a task
+delete_task_files = False
+

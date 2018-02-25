@@ -4,6 +4,8 @@
 
 [English](README.md) [繁體中文](README.cht.md)
 
+[xeHentai Web界面](https://github.com/fffonion/xeHentai-webui)
+
 ## 快速入门
 
 windows用户可以下载可执行文件 [这里](https://github.com/fffonion/xeHentai/releases) [或这里](http://dl.yooooo.us/share/xeHentai/)
@@ -44,6 +46,7 @@ xeH
  - **rpc_interface** RPC绑定的IP，参见[JSON-RPC](#json-rpc)，默认为`localhost`
  - **rpc_port** RPC绑定的端口，默认为`None`
  - **rpc_secret** RPC密钥，默认为`None` (不开启RPC服务器)
+ - **delete_task_files** 是否删除任务时同时删除下载的文件，默认为否
  - **make_archive** 是否下载完成后生成zip压缩包，并删除下载目录，默认为否
  - **download_range** 设置下载的图片范围，参见[下载范围](#下载范围)
  - **scan_thread_cnt** 扫描线程数，默认为`1`
@@ -60,8 +63,9 @@ xeH
 用法: xeH [-u USERNAME] [-k KEY] [-c COOKIE] [-i] [--daemon] [-d DIR] [-o]
            [-j BOOL] [-r BOOL] [-p PROXY] [--proxy-image | --proxy-image-only]
            [--rpc-interface ADDR] [--rpc-port PORT] [--rpc-secret ...]
-           [-a BOOL] [--download-range a-b,c-d,e] [-t N] [--timeout N] [-f]
-           [-l /path/to/eh.log] [-v] [-h] [--version]
+           [--delete-task-files BOOL] [-a BOOL] [--download-range a-b,c-d,e]
+           [-t N] [--timeout N] [-f] [-l /path/to/eh.log] [-v] [-h]
+           [--version]
            [url [url ...]]
 
 绅♂士下载器
@@ -91,6 +95,8 @@ xeH
   --rpc-interface ADDR  设置JSON-RPC监听IP (默认: localhost)
   --rpc-port PORT       设置JSON-RPC监听端口 (默认: None)
   --rpc-secret ...      设置JSON-RPC密钥 (默认: None)
+  --delete-task-files BOOL
+                        删除任务时同时删除下载的文件 (默认: False)
   -a BOOL, --archive BOOL
                         下载完成后生成zip压缩包并删除下载目录 (默认: False)
   --download-range a-b,c-d,e

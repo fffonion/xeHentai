@@ -4,6 +4,8 @@
 
 [简体中文](README.chs.md) [繁體中文](README.cht.md)
 
+[xeHentai WebUI](https://github.com/fffonion/xeHentai-webui)
+
 ## TL;DR
 
 Windows users can download packed binaries from [here](https://github.com/fffonion/xeHentai/releases) or [here](http://dl.yooooo.us/share/xeHentai/). The package is built using [PyInstaller](http://www.pyinstaller.org/).
@@ -42,6 +44,7 @@ Configuration keys：
  - **rpc_interface** RPC server binding IP. Refer to [JSON-RPC](#json-rpc). Default to `localhost`.
  - **rpc_port** RPC server binding port. Default to `none` (not serving).
  - **rpc_secret** RPC secret key. Default to `None`.
+ - **delete_task_files** Set to delete downloaded files when deleting a task. Default to `False`.
  - **make_archive** Set to make a ZIP archive after download and delete downloaded directory. Default to `False`.
  - **download_range** Set image download range. Refer to [Download range](#download-range). Default to download all images.
  - **scan_thread_cnt** Thread count for scanning webpages. Default to `1`.
@@ -58,8 +61,9 @@ Configuration keys：
 Usage: xeH [-u USERNAME] [-k KEY] [-c COOKIE] [-i] [--daemon] [-d DIR] [-o]
            [-j BOOL] [-r BOOL] [-p PROXY] [--proxy-image | --proxy-image-only]
            [--rpc-interface ADDR] [--rpc-port PORT] [--rpc-secret ...]
-           [-a BOOL] [--download-range a-b,c-d,e] [-t N] [--timeout N] [-f]
-           [-l /path/to/eh.log] [-v] [-h] [--version]
+           [--delete-task-files BOOL] [-a BOOL] [--download-range a-b,c-d,e]
+           [-t N] [--timeout N] [-f] [-l /path/to/eh.log] [-v] [-h]
+           [--version]
            [url [url ...]]
 
 xeHentai Downloader NG
@@ -74,46 +78,49 @@ optional arguments:
   -c COOKIE, --cookie COOKIE
                         cookie string, will be overriden if given -u and -k
   -i, --interactive     interactive mode, will be ignored in daemon mode
-                        (current: False)
-  --daemon              daemon mode, can't use with -i (current: False)
+                        (default: False)
+  --daemon              daemon mode, can't use with -i (default: False)
   -d DIR, --dir DIR     set download directory (current:
                         /Users/fffonion/Dev/Python/xeHentai)
   -o, --download-ori    download original images, needs to login (current:
                         True)
   -j BOOL, --jpn-title BOOL
                         use Japanese title, use English/Romaji title if turned
-                        off (current: True)
+                        off (default: True)
   -r BOOL, --rename-ori BOOL
                         rename gallery image to original name, use sequence
-                        name if turned off (current: False)
+                        name if turned off (default: False)
   -p PROXY, --proxy PROXY
                         set download proxies, can be used multiple times,
                         currenlty supported: socks5/4a, http(s), glype.
                         Proxies are only used on webpages by default (current:
                         ['socks5h://127.0.0.1:16963'])
-  --proxy-image         use proxies on images and webpages (current: True)
+  --proxy-image         use proxies on images and webpages (default: True)
   --proxy-image-only    only use proxies on images, not webpages (current:
                         False)
   --rpc-interface ADDR  bind jsonrpc server to this address (current:
                         localhost)
-  --rpc-port PORT       bind jsonrpc server to this port (current: 8010)
-  --rpc-secret ...      jsonrpc secret string (current: None)
+  --rpc-port PORT       bind jsonrpc server to this port (default: 8010)
+  --rpc-secret ...      jsonrpc secret string (default: None)
+  --delete-task-files BOOL
+                        delete downloaded files when deleting a task (default:
+                        True)
   -a BOOL, --archive BOOL
                         make an archive (.zip) after download and delete
-                        directory (current: False)
+                        directory (default: False)
   --download-range a-b,c-d,e
                         specify ranges of images to be downloaded, in format
                         start-end, or single index, use comma to concat
                         multiple ranges, e.g.: 5-10,15,20-25, default to
                         download all images
-  -t N, --thread N      download threads count (current: 5)
-  --timeout N           set image download timeout (current: 10s)
+  -t N, --thread N      download threads count (default: 5)
+  --timeout N           set image download timeout (default: 10s)
   -f, --force           download regardless of quota exceeded warning
-                        (current: False)
+                        (default: False)
   -l /path/to/eh.log, --logpath /path/to/eh.log
                         define log path (current:
                         /Users/fffonion/Dev/Python/xeHentai/eh.log)
-  -v, --verbose         show more detailed log (current: 3)
+  -v, --verbose         show more detailed log (default: 3)
   -h, --help            show this help message and exit
   --version             show program's version number and exit
 

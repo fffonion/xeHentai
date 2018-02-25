@@ -43,12 +43,21 @@ class Task(object):
         self._cnt_lock = RLock()
         self._f_lock = RLock()
 
-    def cleanup(self):
-        if self.state in (TASK_STATE_FINISHED, TASK_STATE_FAILED):
+    def cleanup(self, before_delete=False):
+        if before_delete:
+            if 'delete_task_files' in self.config and self.config['delete_task_files']:
+                fpath = self.get_fpath()
+                if os.path.exists(fpath):
+                    shutil.rmtree(fpath)
+                zippath = "%s.zip" % fpath
+                if os.path.exists(zippath):
+                    os.remove(zippath)
+        elif self.state in (TASK_STATE_FINISHED, TASK_STATE_FAILED):
             self.img_q = None
             self.page_q = None
             self.list_q = None
             self.reload_map = {}
+        
             # if 'filelist' in self.meta:
             #     del self.meta['filelist']
             # if 'resampled' in self.meta:

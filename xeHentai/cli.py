@@ -164,6 +164,8 @@ def parse_opt():
                         help = i18n.XEH_OPT_rpc_port)
     parser.add_argument('--rpc-secret', metavar = "...", default = _def['rpc_secret'],
                         help = i18n.XEH_OPT_rpc_secret)
+    parser.add_argument('--delete-task-files', type = bool, metavar = "BOOL", default = _def['delete_task_files'],
+                        dest = 'delete_task_files', help = i18n.XEH_OPT_delete_task_files)
     parser.add_argument('-a', '--archive', type = bool, metavar = "BOOL", default = _def['make_archive'],
                         dest = 'make_archive', help = i18n.XEH_OPT_a)
     parser.add_argument('--download-range', type = _parse_range, metavar = "a-b,c-d,e", default = None,

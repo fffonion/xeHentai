@@ -103,7 +103,7 @@ class xeHentai(object):
         cfg = {k:v for k, v in self.cfg.items() if k in (
             "dir", "download_ori", "download_thread_cnt", "scan_thread_cnt",
             "proxy_image", "proxy_image_only", "ignored_errors",
-            "rename_ori", "make_archive", "jpn_title", "download_range", "download_timeout")}
+            "rename_ori", "make_archive", "delete_task_files", "jpn_title", "download_range", "download_timeout")}
         cfg.update(cfg_dict)
         if cfg['download_ori'] and not self.has_login:
             self.logger.warning(i18n.XEH_DOWNLOAD_ORI_NEED_LOGIN)
@@ -130,6 +130,7 @@ class xeHentai(object):
             return ERR_TASK_NOT_FOUND, None
         if TASK_STATE_PAUSED< self._all_tasks[guid].state < TASK_STATE_FINISHED:
             return ERR_DELETE_RUNNING_TASK, None
+        self._all_tasks[guid].cleanup(before_delete=True)
         del self._all_tasks[guid]
         return ERR_NO_ERROR, ""
 
