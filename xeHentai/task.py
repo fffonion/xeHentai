@@ -199,9 +199,6 @@ class Task(object):
         fn = os.path.join(fpath, self.get_fidpad(int(fid)))
         if os.path.exists(fn) and os.stat(fn).st_size > 0:
             return fn
-        self._cnt_lock.acquire()
-        self.meta['finished'] += 1
-        self._cnt_lock.release()
         # create a femp file first
         # we don't need _f_lock because this will not be in a sequence
         # and we can't do that otherwise we are breaking the multi threading
@@ -215,6 +212,10 @@ class Task(object):
         except DownloadAbortedException as ex:
             os.remove(fn_tmp)
             return
+        self._cnt_lock.acquire()
+        self.meta['finished'] += 1
+        self._cnt_lock.release()
+
         self._f_lock.acquire()
         try:
             os.rename(fn_tmp, fn)
