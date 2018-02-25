@@ -45,7 +45,7 @@ def start():
         main(xeH, opt)
 
 def main(xeH, opt):
-    xeH.update_config(vars(opt))
+    xeH.update_config(**vars(opt))
     log = xeH.logger
     log.info(i18n.XEH_STARTED % xeH.verstr)
     if opt.cookie:
@@ -56,7 +56,7 @@ def main(xeH, opt):
         try:
             r = interactive(xeH)
             opt.__dict__.update(r)
-            xeH.update_config(r)
+            xeH.update_config(**r)
         except (KeyboardInterrupt, SystemExit):
             log.info(i18n.XEH_CLEANUP)
             xeH._cleanup()

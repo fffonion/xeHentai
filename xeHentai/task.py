@@ -34,6 +34,7 @@ class Task(object):
         self.has_ori = False
         self.reload_map = {} # {url:reload_url}
         self.filehash_map = {} # map same hash to different ids, {url:((id, fname), )}
+        self.renamed_map = {} # map fid to renamed file name, used in finding a file by id in RPC
         self.img_q = None
         self.page_q = None
         self.list_q = None
@@ -48,9 +49,6 @@ class Task(object):
             self.page_q = None
             self.list_q = None
             self.reload_map = {}
-        else:
-            # if we cleanup early, this task is not finised, put it into waiting state
-            self.state = TASK_STATE_WAITING
             # if 'filelist' in self.meta:
             #     del self.meta['filelist']
             # if 'resampled' in self.meta:
@@ -206,7 +204,7 @@ class Task(object):
         try:
             with open(fn_tmp, "wb") as f:
                 for binary in binary_iter():
-                    if self.state == TASK_STATE_WAITING:
+                    if self._monitor._exit(None):
                         raise DownloadAbortedException()
                     f.write(binary)
         except DownloadAbortedException as ex:
@@ -226,7 +224,9 @@ class Task(object):
                         continue
                     fn_rep = os.path.join(fpath, self.get_fidpad(_fid))
                     shutil.copyfile(fn, fn_rep)
+                    self._cnt_lock.acquire()
                     self.meta['finished'] += 1
+                    self._cnt_lock.release()
                 del self.filehash_map[imgurl]
         except Exception as ex:
             self._f_lock.release()
@@ -297,6 +297,7 @@ class Task(object):
                         fname_to = "".join((_base, _ext))
                 try:
                     os.rename(fname_ori, fname_to)
+                    self.renamed_map[str(fid)] = os.path.split(fname_to)[1]
                 except Exception as ex:
                     error_list.append((os.path.split(fname_ori)[1], os.path.split(fname_to)[1], str(ex)))
                     break
@@ -313,7 +314,7 @@ class Task(object):
             pass
         return error_list
 
-    def make_archive(self):
+    def make_archive(self, remove=True):
         dpath = self.get_fpath()
         arc = "%s.zip" % dpath
         if os.path.exists(arc):
@@ -324,7 +325,8 @@ class Task(object):
             for f in sorted(os.listdir(dpath)):
                 fullpath = os.path.join(dpath, f)
                 zipFile.write(fullpath, f, zipfile.ZIP_STORED)
-        shutil.rmtree(dpath)
+        if remove:
+            shutil.rmtree(dpath)
         return arc
 
     def from_dict(self, j):

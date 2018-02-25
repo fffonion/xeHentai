@@ -233,7 +233,7 @@ class Monitor(Thread):
             self.thread_zombie.remove(tname)
         # all image downloaded
         # task is finished or failed
-        # monitor is exiting or  worker notify its exit
+        # monitor is exiting or worker notify its exit
         _ = self.task.meta['finished'] == self.task.meta['total'] or \
             self.task.state in (TASK_STATE_FINISHED, TASK_STATE_FAILED) or \
             self._exit("mon") or _exit

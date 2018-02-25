@@ -58,7 +58,7 @@ class xeHentai(object):
         self.load_session()
         self.rpc = None
 
-    def update_config(self, cfg_dict):
+    def update_config(self, **cfg_dict):
         self.cfg.update({k:v for k, v in cfg_dict.items() if k in cfg_dict and k not in ('ignored_errors',)})
         # merge ignored errors list
         if 'ignored_errors' in cfg_dict and cfg_dict['ignored_errors']:
@@ -88,6 +88,7 @@ class xeHentai(object):
                 self.logger.warning(i18n.RPC_TOO_OPEN % self.cfg['rpc_interface'])
             self.rpc.start()
         self.logger.set_logfile(self.cfg['log_path'])
+        return ERR_NO_ERROR, ""
 
     def _get_httpreq(self, proxy_policy):
         return HttpReq(self.headers, logger = self.logger, proxy = self.proxy, proxy_policy = proxy_policy)
@@ -97,11 +98,11 @@ class xeHentai(object):
             headers = self.headers, proxy = self.proxy, logger = self.logger,
             keep_alive = keep_alive, proxy_policy = proxy_policy, timeout = timeout, stream_mode = stream_mode)
 
-    def add_task(self, url, cfg_dict = {}):
+    def add_task(self, url, **cfg_dict):
         url = url.strip()
         cfg = {k:v for k, v in self.cfg.items() if k in (
             "dir", "download_ori", "download_thread_cnt", "scan_thread_cnt",
-            "proxy", "proxy_image", "proxy_image_only", "ignored_errors",
+            "proxy_image", "proxy_image_only", "ignored_errors",
             "rename_ori", "make_archive", "jpn_title", "download_range", "download_timeout")}
         cfg.update(cfg_dict)
         if cfg['download_ori'] and not self.has_login:
@@ -127,7 +128,7 @@ class xeHentai(object):
     def del_task(self, guid):
         if guid not in self._all_tasks:
             return ERR_TASK_NOT_FOUND, None
-        if TASK_STATE_FAILED< self._all_tasks[guid].state < TASK_STATE_FINISHED:
+        if TASK_STATE_PAUSED< self._all_tasks[guid].state < TASK_STATE_FINISHED:
             return ERR_DELETE_RUNNING_TASK, None
         del self._all_tasks[guid]
         return ERR_NO_ERROR, ""
@@ -147,9 +148,11 @@ class xeHentai(object):
         if guid not in self._all_tasks:
             return ERR_TASK_NOT_FOUND, None
         t = self._all_tasks[guid]
-        if TASK_STATE_FAILED< t.state < TASK_STATE_FINISHED:
+        if TASK_STATE_PAUSED< t.state < TASK_STATE_FINISHED:
             return ERR_TASK_CANNOT_RESUME, None
         t.state = max(t.state, TASK_STATE_WAITING)
+
+        self.tasks.put(guid)
         return ERR_NO_ERROR, ""
 
     def _do_task(self, task_guid):
@@ -185,6 +188,7 @@ class xeHentai(object):
                     _ += ['scan-%d' % (i + 1) for i in range(task.config['scan_thread_cnt'])]
                 mon.set_vote_ns(_)
                 self._monitor = mon
+                task._monitor = mon
                 mon.start()
                 # put in the lowest state
                 self._all_threads[TASK_STATE_SCAN_IMG].append(mon)

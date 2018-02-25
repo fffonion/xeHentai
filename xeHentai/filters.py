@@ -52,7 +52,7 @@ def flt_metadata(r, suc, fail):
     # meta['title'] = meta['gjname'] if meta['gjname'] else meta['gnname']
     meta['total'] = int(re.findall('Length:</td><td class="gdt2">(\d+)\s+page', r.text)[0])
     meta['finished'] = 0
-    meta['tags'] = {}
+    meta['tags'] = re.findall("toggle_tagmenu\('([^']+)'", r.text)
 
     # TODO: parse cookie to calc thumbnail_cnt (tr_2, ts_m)
     _ = re.findall("Showing (\d+) \- (\d+) of ([\d,]+) images", r.text)[0]
