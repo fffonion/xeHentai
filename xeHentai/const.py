@@ -44,6 +44,8 @@ RE_URL_IMAGE = re.compile('(?!%s)' % __restr_webpage)
 # matches all
 RE_URL_ALL = re.compile('.')
 
+RE_LOCAL_ADDR = re.compile('(^localhost)|(^127\.)|(^192\.168\.)|(^10\.)|(^172\.1[6-9]\.)|(^172\.2[0-9]\.)|(^172\.3[0-1]\.)|(^::1$)|(^[fF][cCdD])')
+
 RESTR_SITE = "https*://(?:[g\.]*e\-|ex)hentai\.org"
 
 DEFAULT_MAX_REDIRECTS = 30
