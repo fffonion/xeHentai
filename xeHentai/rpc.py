@@ -17,9 +17,13 @@ if PY3K:
     from socketserver import ThreadingMixIn
     from http.server import HTTPServer, BaseHTTPRequestHandler
     from io import IOBase
+    from io import BytesIO as StringIO
+    from urllib.parse import urlparse
 else:
     from SocketServer import ThreadingMixIn
     from BaseHTTPServer import HTTPServer, BaseHTTPRequestHandler
+    from cStringIO import StringIO 
+    from urlparse import urlparse
 
 cmdre = re.compile("([a-z])([A-Z])")
 pathre = re.compile("/(?:jsonrpc|img|zip)")
@@ -63,6 +67,28 @@ def hash_link(secret, url):
         _ = _.encode('utf-8')
     return md5(_).hexdigest()[:8]
 
+def gen_thumbnail(fh, args):
+    # returns a new file handler if resized
+    # and a boolean indicates there'e error
+    try:
+        from PIL import Image
+    except:
+        return fh, True
+    if 'w' not in args and 'h' not in args:
+        return fh, False
+    size = (int(args['w']) if 'w' in args else int(args['h']),
+            int(args['h']) if 'h' in args else int(args['w']))
+    if not is_file_obj(fh):
+        fh = StringIO(fh)
+    with Image.open(fh) as img:
+        img.thumbnail(size)
+        ret_fh = StringIO()
+        img.save(ret_fh, format=img.format)
+        ret = ret_fh.getvalue()
+        ret_fh.close()
+        fh.close()
+        return ret, False
+    
 def jsonrpc_resp(request, ret = None, error_code = None, error_msg = None):
     r = {
         "id":None if not request["id"] else request["id"],
@@ -126,12 +152,12 @@ class Handler(BaseHTTPRequestHandler):
         mime = "text/html"
         while True:
             if imgpathre.match(self.path):
-                _ = self.path.split("/")
+                args = dict(q.split("=") for q in urlparse(self.path).query.split("&"))
+                _ = urlparse(self.path).path.split("/")
                 if len(_) < 5:
                     code = 400
                     break
                 _, _, _hash, guid, fid = _[:5]
-                fid = fid.split('?')[0]
                 right_hash = hash_link(self.secret, "%s/%s" % (guid, fid))
                 if right_hash != _hash:
                     self.xeH.logger.warning("RPC: hash mismatch %s != %s" % (right_hash, _hash))
@@ -155,8 +181,12 @@ class Handler(BaseHTTPRequestHandler):
                         z.close()
                 else:
                     rt = open(os.path.join(path, f), 'rb')
+                rt, _error = gen_thumbnail(rt, args)
+                if _error:
+                    self.xeH.logger.warning("RPC: PIL needed for generating thumbnail")
             elif zippathre.match(self.path):
-                _ = self.path.split("/")
+                # args = urlparse(_).query
+                _ = urlparse(self.path).path.split("/")
                 if len(_) < 5:
                     code = 400
                     break
