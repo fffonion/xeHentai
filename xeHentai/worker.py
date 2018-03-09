@@ -16,8 +16,10 @@ from .i18n import i18n
 from .proxy import PoolException
 if PY3K:
     from queue import Queue, Empty
+    from urllib.parse import urlparse, urlunparse
 else:
     from Queue import Queue, Empty
+    from urlparse import urlparse, urlunparse
 
 # pinfo = {'http':'socks5://127.0.0.1:16963', 'https':'socks5://127.0.0.1:16963'}
 
@@ -26,12 +28,50 @@ class _FakeResponse(object):
         self.status_code = 600
         self.content = None
         self.url = self._real_url = url
+        self.headers = {}
+
+class FallbackIpAdapter(requests.adapters.HTTPAdapter):
+    def __init__(self, ip_map=FALLBACK_IP_MAP, **kwargs):
+        self.ip_map = ip_map
+        requests.adapters.HTTPAdapter.__init__(self, **kwargs)
+
+    # override
+    def get_connection(self, url, proxies=None):
+        if not proxies:
+            parsed = urlparse(url)
+            _hostname = parsed.hostname
+            _scheme = parsed.scheme
+            if _hostname in self.ip_map:
+                _parsed = list(parsed)
+                # alter the hostname
+                _hostname = '%s%s' % (random.choice(self.ip_map[_hostname]),
+                                        (":%d" % parsed.port) if parsed.port else "")
+                _scheme = 'https'
+            return self.poolmanager.connection_from_host(_hostname, parsed.port, scheme=_scheme,
+                                                            pool_kwargs={'assert_hostname': parsed.hostname})
+        else:
+            # fallback
+            return requests.adapters.HTTPAdapter.get_connection(self, url, proxies)
+    
+    def add_headers(self, request, **kwargs):
+        if not request.headers.get('Host'):
+            parsed = urlparse(request.url)
+            request.headers['Host'] = parsed.hostname
+    
+    def cert_verify(self, conn, url, verify, cert):
+        # let the super run verify process
+        if url.startswith('http://'):
+            url = "https://%s" % url[7:]
+        return requests.adapters.HTTPAdapter.cert_verify(self, conn, url, verify, cert)
 
 class HttpReq(object):
     def __init__(self, headers = {}, proxy = None, proxy_policy = None, retry = 10, timeout = 20, logger = None, tname = "main"):
         self.session = requests.Session()
         self.session.headers = headers
         self.session.timeout = timeout
+        for u in ('forums.e-hentai.org', 'e-hentai.org', 'exhentai.org'):
+            self.session.mount('http://%s' % u, FallbackIpAdapter())
+            self.session.mount('https://%s' % u, FallbackIpAdapter())
         self.retry = retry
         self.proxy = proxy
         self.proxy_policy = proxy_policy
@@ -43,6 +83,7 @@ class HttpReq(object):
         url_history = [url]
         while retry < self.retry:
             try:
+                headers = {}
                 # if proxy_policy is set and match current url, use proxy
                 if self.proxy and self.proxy_policy and self.proxy_policy.match(url):
                     f, __not_good = self.proxy.proxied_request(self.session)

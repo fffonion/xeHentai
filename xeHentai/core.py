@@ -433,7 +433,7 @@ class xeHentai(object):
             'PassWord':pwd
         }
         req = self._get_httpreq(util.get_proxy_policy(self.cfg))
-        req.request("POST", "http://forums.e-hentai.org/index.php?act=Login&CODE=01",
+        req.request("POST", "https://forums.e-hentai.org/index.php?act=Login&CODE=01",
             filters.login_exhentai,
             lambda x:(
                 setattr(self, 'cookies', x),
