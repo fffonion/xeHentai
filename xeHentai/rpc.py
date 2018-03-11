@@ -132,7 +132,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", size)
         f.seek(0, os.SEEK_SET)
         self.end_headers()
-        for buf in iter(lambda: f.read(), ''):
+        while True:
+            buf = f.read(51200)
+            if not buf:
+                break
             self.wfile.write(buf)
         return size
 
@@ -148,11 +151,11 @@ class Handler(BaseHTTPRequestHandler):
     @path_filter
     def do_GET(self):
         code = 200
-        rt = ""
+        rt = b''
         mime = "text/html"
         while True:
             if imgpathre.match(self.path):
-                args = dict(q.split("=") for q in urlparse(self.path).query.split("&"))
+                args = dict(q.split("=") for q in urlparse(self.path).query.split("&") if q)
                 _ = urlparse(self.path).path.split("/")
                 if len(_) < 5:
                     code = 400
@@ -230,8 +233,8 @@ class Handler(BaseHTTPRequestHandler):
         _get_header = lambda h: self.headers.get_all(h)[0] if PY3K else \
             self.headers.getheader(h)
         d = self.rfile.read(int(_get_header('Content-Length')))
-        rt = ""
         code = 200
+        rt = b''
         while True:
             try:
                 if PY3K:
@@ -331,7 +334,8 @@ class xeHentaiRPCExtended(object):
     
     def update_config(self, **cfg_dict):
         cfg_dict = {k: v for k, v in cfg_dict.items() if not k.startswith('rpc_') and k not in ('urls',)}
-        self.xeH.update_config(**cfg_dict)
+        if 'proxy' in cfg_dict:
+            self.xeH.update_config(**cfg_dict)
         return self.get_config()
            
     def list_tasks(self, level = "download"):
@@ -343,7 +347,8 @@ class xeHentaiRPCExtended(object):
         if level not in globals():
             return ERR_TASK_LEVEL_UNDEF, None
         lv = globals()[level]
-        rt = [{_k:_v for _k, _v in v.to_dict().items() if _k not in ('reload_map', 'filehash_map', 'renamed_map')}
+        rt = [{_k:_v for _k, _v in v.to_dict().items() if _k not in
+            ('reload_map', 'filehash_map', 'renamed_map', 'img_q', 'page_q')}
                  for _, v in self._all_tasks.items() if 
                     (reverse_mode and v.state != lv) or (not reverse_mode and v.state == lv)]
         return ERR_NO_ERROR, rt
