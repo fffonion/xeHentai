@@ -45,8 +45,10 @@ class Task(object):
 
     def cleanup(self, before_delete=False):
         if before_delete:
-            if 'delete_task_files' in self.config and self.config['delete_task_files']:
+            if 'delete_task_files' in self.config and self.config['delete_task_files'] and \
+                'title' in self.meta: # maybe it's a error task and meta is empty
                 fpath = self.get_fpath()
+                # TODO: ascii can't decode? locale not enus, also check save_file
                 if os.path.exists(fpath):
                     shutil.rmtree(fpath)
                 zippath = "%s.zip" % fpath
@@ -168,8 +170,13 @@ class Task(object):
                     continue
             # can only check un-renamed files
             fname = os.path.join(fpath, self.get_fidpad(fid)) # id
-            if donefile or (os.path.exists(fname) and os.stat(fname).st_size > 0):
+            if donefile:
                 self._flist_done.add(int(fid))
+            elif os.path.exists(fname):
+                if os.stat(fname).st_size == 0:
+                    os.remove(fname)
+                else:
+                    self._flist_done.add(int(fid))
         self.meta['finished'] = len(self._flist_done)
         if self.meta['finished'] == self.meta['total']:
             self.state == TASK_STATE_FINISHED
@@ -209,7 +216,7 @@ class Task(object):
         # create a femp file first
         # we don't need _f_lock because this will not be in a sequence
         # and we can't do that otherwise we are breaking the multi threading
-        fn_tmp = os.path.join(fpath, ".%s" % self.get_fidpad(int(fid)))
+        fn_tmp = os.path.join(fpath, ".%s.xeh" % self.get_fidpad(int(fid)))
         try:
             with open(fn_tmp, "wb") as f:
                 for binary in binary_iter():
