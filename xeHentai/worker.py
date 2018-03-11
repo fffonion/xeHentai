@@ -8,6 +8,7 @@ import math
 import time
 import random
 import requests
+from requests.adapters import HTTPAdapter
 import traceback
 from threading import Thread, RLock
 from . import util
@@ -30,9 +31,10 @@ class _FakeResponse(object):
         self.url = self._real_url = url
         self.headers = {}
 
-class FallbackIpAdapter(requests.adapters.HTTPAdapter):
+class FallbackIpAdapter(HTTPAdapter):
     def __init__(self, ip_map=FALLBACK_IP_MAP, **kwargs):
         self.ip_map = ip_map
+        kwargs.update({'max_retries': 1})
         requests.adapters.HTTPAdapter.__init__(self, **kwargs)
 
     # override
@@ -68,11 +70,12 @@ class HttpReq(object):
     def __init__(self, headers = {}, proxy = None, proxy_policy = None, retry = 10, timeout = 20, logger = None, tname = "main"):
         self.session = requests.Session()
         self.session.headers = headers
-        self.session.timeout = timeout
         for u in ('forums.e-hentai.org', 'e-hentai.org', 'exhentai.org'):
             self.session.mount('http://%s' % u, FallbackIpAdapter())
             self.session.mount('https://%s' % u, FallbackIpAdapter())
+        self.session.mount('http://', HTTPAdapter(max_retries=0))
         self.retry = retry
+        self.timeout = timeout
         self.proxy = proxy
         self.proxy_policy = proxy_policy
         self.logger = logger
@@ -92,6 +95,7 @@ class HttpReq(object):
                 r = f(method, url,
                     allow_redirects=False,
                     data=data,
+                    timeout=self.timeout,
                     stream=stream_cb != None)
             except requests.RequestException as ex:
                 self.logger.warning("%s-%s %s %s: %s" % (i18n.THREAD, self.tname, method, url, ex))

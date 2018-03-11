@@ -197,11 +197,16 @@ def download_file_wrapper(dirpath):
 
         # merge the iter_content iterator with our custom stream_cb
         def _yield(chunk_size=16384, _r=r):
+            from requests.exceptions import ConnectionError
             length_read = 0
-            for _ in _r.iter_content(chunk_size):
-                length_read += len(_)
-                _r.iter_content_cb(_)
-                yield _
+            try:
+                for _ in _r.iter_content(chunk_size):
+                    length_read += len(_)
+                    _r.iter_content_cb(_)
+                    yield _
+            except ConnectionError: # read timeout
+                fail((ERR_IMAGE_BROKEN, r._real_url, r.url))
+                raise DownloadAbortedException()
             if length_read != r.content_length:
                 fail((ERR_IMAGE_BROKEN, r._real_url, r.url))
                 raise DownloadAbortedException()
