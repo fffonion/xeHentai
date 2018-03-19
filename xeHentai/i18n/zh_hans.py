@@ -108,7 +108,7 @@ XEH_PLATFORM_NO_DAEMON = "后台模式不支持您的系统: %s"
 XEH_CLEANUP = "擦干净..."
 XEH_CRITICAL_ERROR = "xeHentai 抽风啦:\n%s"
 XEH_DOWNLOAD_ORI_NEED_LOGIN = "下载原图需要登录"
-XEH_FILE_DOWNLOADED = "图片已下载 #%d %s"
+XEH_FILE_DOWNLOADED = "绅士-{} 已下载图片 #{} {}"
 XEH_RENAME_HAS_ERRORS = "部分图片重命名失败:\n%s"
 XEH_DOWNLOAD_HAS_ERROR = "绅士-%s 下载图片时出错: %s, 将在稍后重试"
 

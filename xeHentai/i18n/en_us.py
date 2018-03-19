@@ -109,7 +109,7 @@ XEH_PLATFORM_NO_DAEMON = "daemon mode is not supported on platform: %s"
 XEH_CLEANUP = "cleaning up..."
 XEH_CRITICAL_ERROR = "xeHentai throws critical error:\n%s"
 XEH_DOWNLOAD_ORI_NEED_LOGIN = "haven't login, so I won't download original images"
-XEH_FILE_DOWNLOADED = "file downloaded #%d %s"
+XEH_FILE_DOWNLOADED = "file downloaded by thread-{} #{} {}"
 XEH_RENAME_HAS_ERRORS = "some files are not renamed:\n%s"
 XEH_DOWNLOAD_HAS_ERROR = "thread-%s retry because of error: %s"
 

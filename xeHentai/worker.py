@@ -171,6 +171,8 @@ class HttpWorker(Thread, HttpReq):
         self.f_suc = suc
         self.f_fail = fail
         self.stream_mode = stream_mode
+        # if we don't checkin in this zombie_threshold time, monitor will regard us as zombie
+        self.zombie_threshold = timeout * (retry + 1) 
         self.run_once = False
 
     def _finish_queue(self, *args):
@@ -334,8 +336,9 @@ class Monitor(Thread):
             intv += 1
             self._check_vote()
             for k in list(self.thread_last_seen.keys()):
-                if time.time() - self.thread_last_seen[k] > 30:
-                    if k in self.thread_ref and self.thread_ref[k].is_alive():
+                _zombie_threshold = self.thread_ref[k].zombie_threshold if k in self.thread_ref else 30
+                if time.time() - self.thread_last_seen[k] > _zombie_threshold:
+                    if k not in self.thread_ref and self.thread_ref[k].is_alive():
                         self.logger.warning(i18n.THREAD_MAY_BECOME_ZOMBIE % k)
                         self.thread_zombie.add(k)
                     else:
