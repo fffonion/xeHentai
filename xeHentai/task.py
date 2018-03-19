@@ -226,13 +226,13 @@ class Task(object):
         except DownloadAbortedException as ex:
             os.remove(fn_tmp)
             return
-        self._cnt_lock.acquire()
-        self.meta['finished'] += 1
-        self._cnt_lock.release()
 
         self._f_lock.acquire()
         try:
             os.rename(fn_tmp, fn)
+            self._cnt_lock.acquire()
+            self.meta['finished'] += 1
+            self._cnt_lock.release()
             if imgurl in self.filehash_map:
                 for _fid, _ in self.filehash_map[imgurl]:
                     # if a file download is interrupted, it will appear in self.filehash_map as well
