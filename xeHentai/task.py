@@ -19,6 +19,8 @@ if PY3K:
 else:
     from Queue import Queue, Empty
 
+from PIL import ImageFile
+
 class Task(object):
     def __init__(self, url, cfgdict):
         self.url = url
@@ -79,6 +81,31 @@ class Task(object):
         self.state = TASK_STATE_WAITING if self.state == TASK_STATE_FAILED else self.state
         self.failcode = 0
         return True
+
+    
+    def encodeMetaForZipComment(self):
+        zipmeta = {}
+        zipmeta.setdefault('gjname',self.meta['gjname'])
+        zipmeta.setdefault('gnname',self.meta['gnname'])
+        zipmeta.setdefault('tags',self.meta['tags'])
+        zipmeta.setdefault('total',self.meta['total'])
+        zipmeta.setdefault('title',self.meta['title'])
+        zipmeta.setdefault('url',self.url)
+        jsonzipmeta = json.dumps(zipmeta);
+        return ("xeHentai Archiver v%s customized by Dynilath\n%s" % ( __version__, jsonzipmeta)).encode('UTF-8')
+
+    def decodeMetaFromZipComment(self,comment):
+        comment_str = comment.decode('UTF-8')
+
+        splits = comment.decode('UTF-8').split('\n')
+        if splits[0].endswith('Dynilath'):
+            return json.loads(splits[1])
+        else:
+            httppos = comment_str.find('http')
+            urltext = comment_str[httppos:]
+            meta = {}
+            meta.setdefault('url',urltext)
+            return meta;
 
     def update_meta(self, meta):
         self.meta.update(meta)
@@ -149,8 +176,55 @@ class Task(object):
     def scan_downloaded(self, scaled = True):
         fpath = self.get_fpath()
         donefile = False
-        if os.path.exists(os.path.join(fpath, ".xehdone")) or os.path.exists("%s.zip" % fpath):
+        if os.path.exists(os.path.join(fpath, ".xehdone")):
             donefile = True
+
+        #existing of a file doesn't mean the file is corectly downloaded
+        arc = "%s.zip" % fpath
+        if os.path.exists(arc):
+            #if the zipfile exists, check the url written in the zipfile
+            with zipfile.ZipFile(arc,'r') as zipfileTarget:
+                metadata = self.decodeMetaFromZipComment(zipfileTarget.comment)
+                if 'url' in metadata and metadata['url'] == self.url:
+                    #when url matches, check every image
+                    filenameList = zipfileTarget.namelist()
+                    isTruncated = False
+                    truncated_img_list = []
+                    for in_zip_file_name in filenameList:
+                        zipinfo = zipfileTarget.getinfo(in_zip_file_name)
+                        if not zipinfo.is_dir():
+                            try:
+                                fp = zipfileTarget.open(in_zip_file_name)
+                                imagep = ImageFile.Parser()
+                                while True:
+                                    buffer = fp.read(1024)
+                                    if not buffer:
+                                        break
+                                    imagep.feed(buffer)
+                                image = imagep.close()
+                                fp.close()
+                                image.close()
+                            except IOError:
+                                isTruncated = True
+                                fp.close()
+                                truncated_img_list.append(in_zip_file_name)
+                                continue
+
+                    if isTruncated:
+                        #extract all image when some images is truncated
+                        #and remove those truncated file
+                        zipfileTarget.extractall(fpath)
+                        zipfileTarget.close()
+                        shutil.remove(arc)
+                        for truncated_img_name in truncated_img_list:
+                            imgpath = os.path.join(arc,truncated_img_name)
+                            shutil.remove(imgpath)
+                    elif not len(zipfileTarget.comment) == len(self.encodeMetaForZipComment()):
+                        zipfileTarget.extractall(fpath)
+                    else:
+                        donefile = True
+
+
         _range_idx = 0
         for fid in range(1, self.meta['total'] + 1):
             # check download range
@@ -334,10 +408,19 @@ class Task(object):
         dpath = self.get_fpath()
         arc = "%s.zip" % dpath
         if os.path.exists(arc):
-            return arc
+            #when truncated images not exist, the zip file is considered fully downloaded
+            #but tags still need  update
+            nochange = True
+            with zipfile.ZipFile(arc, 'r') as zipfileTarget:
+                if zipfileTarget.comment == self.encodeMetaForZipComment():
+                    return arc
+
         with zipfile.ZipFile(arc, 'w')  as zipFile:
-            zipFile.comment = ("xeHentai Archiver v%s\nTitle:%s\nOriginal URL:%s" % (
-                __version__, self.meta['title'], self.url)).encode('utf-8')
+            #zip comment created
+            #zipFile.comment = ("xeHentai Archiver v%s customized by Dynilath\n%s" % ( __version__, jsonzipmeta)).encode('utf-8')
+            #store json info in respective zip file
+            #thus metadata can be packed with comic it self in a single file
+            zipFile.comment = self.encodeMetaForZipComment()
             for f in sorted(os.listdir(dpath)):
                 fullpath = os.path.join(dpath, f)
                 zipFile.write(fullpath, f, zipfile.ZIP_STORED)

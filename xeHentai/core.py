@@ -108,21 +108,37 @@ class xeHentai(object):
         if cfg['download_ori'] and not self.has_login:
             self.logger.warning(i18n.XEH_DOWNLOAD_ORI_NEED_LOGIN)
         t = Task(url, cfg)
-        if t.guid in self._all_tasks:
-            if self._all_tasks[t.guid].state in (TASK_STATE_FINISHED, TASK_STATE_FAILED):
-                self.logger.debug(i18n.TASK_PUT_INTO_WAIT % t.guid)
-                self._all_tasks[t.guid].state = TASK_STATE_WAITING
-                self._all_tasks[t.guid].cleanup()
-            return 0, t.guid
-        self._all_tasks[t.guid] = t
-        if not re.match("^%s/[^/]+/\d+/[^/]+/*#*$" % RESTR_SITE, url):
-            t.set_fail(ERR_URL_NOT_RECOGNIZED)
-        elif not self.has_login and re.match("^https*://exhentai\.org", url):
-            t.set_fail(ERR_CANT_DOWNLOAD_EXH)
-        else:
-            self.tasks.put(t.guid)
-            return 0, t.guid
-        self.logger.error(i18n.TASK_ERROR % (t.guid, i18n.c(t.failcode)))
+
+        #check if task on same url already exists
+        #well, you may need to download from a link and save images in different zip files
+        #but in react, this program doesnt support auto rename zip files
+        #and as for me, i prefer restart the same task when i click 'add to xehentai', in order to repair truncated images
+        taskExists = False
+        for taskitem in self._all_tasks.items():
+            if url == taskitem[1].url:
+                rguid = taskitem[0]
+                self._all_tasks.pop(rguid)
+                t.guid = rguid
+                self._all_tasks[t.guid] = t
+                self.tasks.put(t.guid)
+                return 0, t.guid
+        
+        if not taskExists:
+            if t.guid in self._all_tasks:
+                if self._all_tasks[t.guid].state in (TASK_STATE_FINISHED, TASK_STATE_FAILED):
+                    self.logger.debug(i18n.TASK_PUT_INTO_WAIT % t.guid)
+                    self._all_tasks[t.guid].state = TASK_STATE_WAITING
+                    self._all_tasks[t.guid].cleanup()
+                return 0, t.guid
+            self._all_tasks[t.guid] = t
+            if not re.match("^%s/[^/]+/\d+/[^/]+/*#*$" % RESTR_SITE, url):
+                t.set_fail(ERR_URL_NOT_RECOGNIZED)
+            elif not self.has_login and re.match("^https*://exhentai\.org", url):
+                t.set_fail(ERR_CANT_DOWNLOAD_EXH)
+            else:
+                self.tasks.put(t.guid)
+                return 0, t.guid
+            self.logger.error(i18n.TASK_ERROR % (t.guid, i18n.c(t.failcode)))
         return t.failcode, None
 
     def del_task(self, guid):
