@@ -215,10 +215,10 @@ class Task(object):
                         #and remove those truncated file
                         zipfileTarget.extractall(fpath)
                         zipfileTarget.close()
-                        shutil.remove(arc)
+                        os.remove(arc)
                         for truncated_img_name in truncated_img_list:
-                            imgpath = os.path.join(arc,truncated_img_name)
-                            shutil.remove(imgpath)
+                            imgpath = os.path.join(fpath,truncated_img_name)
+                            os.remove(imgpath)
                     elif not len(zipfileTarget.comment) == len(self.encodeMetaForZipComment()):
                         zipfileTarget.extractall(fpath)
                     else:
@@ -284,13 +284,20 @@ class Task(object):
             self.reload_map[imgurl][1] = fname
         _, fid = RE_GALLERY.findall(pageurl)[0]
 
-        fn = os.path.join(fpath, self.get_fidpad(int(fid)))
+        #if a same file exists
+        #assumimg that file is downloaded by other means
+        ext = os.path.splitext(fname)[1]
+        fn = os.path.join(fpath, self.get_fidpad(int(fid),ext))
         if os.path.exists(fn) and os.stat(fn).st_size > 0:
-            return fn
+            self._cnt_lock.acquire()
+            self.meta['finished'] += 1
+            self._cnt_lock.release()
+            return True
+
         # create a femp file first
         # we don't need _f_lock because this will not be in a sequence
         # and we can't do that otherwise we are breaking the multi threading
-        fn_tmp = os.path.join(fpath, ".%s.xeh" % self.get_fidpad(int(fid)))
+        fn_tmp = os.path.join(fpath, ".%s.xeh" % self.get_fidpad(int(fid),ext))
         try:
             with open(fn_tmp, "wb") as f:
                 for binary in binary_iter():
@@ -332,9 +339,9 @@ class Task(object):
     def get_fpath(self):
         return os.path.join(self.config['dir'], util.legalpath(self.meta['title']))
 
-    def get_fidpad(self, fid, ext = 'jpg'):
+    def get_fidpad(self, fid, ext = '.jpg'):
         fid = int(fid)
-        _ = "%%0%dd.%%s" % (len(str(self.meta['total'])))
+        _ = "%%0%dd%%s" % (len(str(self.meta['total'])))
         return _ % (fid, ext)
 
     def rename_fname(self):
@@ -381,7 +388,8 @@ class Task(object):
                             break
                         if _ :# if ...(1) exists, use ...(2)
                             print(_base)
-                            _base = re.sub("\((\d+)\)$", _base, lambda x:"(%d)" % (int(x.group(1)) + 1))
+                            #_base = re.sub("\((\d+)\)$", _base, lambda x:"(%d)" % (int(x.group(1)) + 1))
+                            _base = re.sub("\((\d+)\)$", _base, lambda x:"(%d)" % (int(x.group(0)) + 1))
                         else:
                             _base = "%s(1)" % _base
                         fname_to = "".join((_base, _ext))

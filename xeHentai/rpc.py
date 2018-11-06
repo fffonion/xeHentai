@@ -174,14 +174,19 @@ class Handler(BaseHTTPRequestHandler):
                         code = 404
                         break
                     else:
-                        z = zipfile.ZipFile(zipf)
-                        try:
-                            rt = z.read(f)
-                        except Exception as ex:
-                            self.xeH.logger.warning("RPC: can't find %s in zipfile: %s" % (f, ex))
-                            code = 404
-                            break
-                        z.close()
+                        with zipfile.ZipFile(zipf,'r') as z:
+                            try:
+                                intfid = int(fid) - 1
+                                #pfname = f
+                                fnamelist = z.namelist()
+                                if fnamelist.count('.xehdone') > 0:
+                                    fnamelist.remove('.xehdone')
+                                pfname = fnamelist[intfid]
+                                rt = z.read(pfname)
+                            except Exception as ex:
+                                self.xeH.logger.warning("RPC: can't find %s in zipfile: %s" % (f, ex))
+                                code = 404
+                                break
                 else:
                     rt = open(os.path.join(path, f), 'rb')
                 rt, _error = gen_thumbnail(rt, args)
