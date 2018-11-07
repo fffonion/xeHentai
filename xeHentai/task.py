@@ -287,7 +287,10 @@ class Task(object):
         #if int(fid) not in self._flist_done:
         #    callback1(img_tuble[0])
         callback1(int(img_tuble[1]),img_tuble[0])
-        callback2(img_tuble[1],img_tuble[2])
+        if not self.config['download_ori'] and os.path.splitext(img_tuble[2])[1] == '.png':
+            callback2(img_tuble[1],os.path.splitext(img_tuble[2])[0] + '.jpg')
+        else:
+            callback2(img_tuble[1],img_tuble[2])
 
     def save_file(self, imgurl, redirect_url, binary_iter):
         # TODO: Rlock for finished += 1
@@ -391,7 +394,7 @@ class Task(object):
                 #   will have zero knowledge about file type before scanning all per page,
                 #   thus can't determine if this id is downloaded, because file type is not
                 #   necessarily .jpg
-                fname_to = os.path.join(fpath, self.get_fidpad(fid, os.path.splitext(fname)[1][1:]))
+                fname_to = os.path.join(fpath, self.get_fidpad("%d" % fid, os.path.splitext(fname)[1][1:]))
             while fname_ori != fname_to:
                 if os.path.exists(fname_ori):
                     while os.path.exists(fname_to):
