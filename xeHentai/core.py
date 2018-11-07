@@ -269,7 +269,7 @@ class xeHentai(object):
                         "%s/?p=%d" % (task.url, x),
                         filters.flt_pageurl,
                         #i need wrapper to interact with original_file_name_map
-                        lambda x: task.queue_wrapper(temp_page_q.setdefault,task.original_file_name_map.setdefault, img_tuble = x),
+                        lambda x: task.queue_wrapper(temp_page_q.setdefault,img_tuble = x),
                         lambda x: task.set_fail(x))
                     if task.failcode:
                         break
@@ -291,7 +291,7 @@ class xeHentai(object):
                     tid = 'scan-%d' % (i + 1)
                     _ = self._get_httpworker(tid, task.page_q,
                         filters.flt_imgurl_wrapper(task.config['download_ori'] and self.has_login),
-                        lambda x, tid = tid: (task.set_reload_url(x[0], x[1], x[2]),
+                        lambda x, tid = tid: (task.set_reload_url(x[0], x[1], x[2],task.file_name_map),
                             task.img_q.put(x[0]),
                             mon.vote(tid, 0)),
                         lambda x, tid = tid: (mon.vote(tid, x[0])),
@@ -438,7 +438,7 @@ class xeHentai(object):
                             _t.reload_map = {}
                             _t.filehash_map = {}
                             _t.renamed_map = {}
-                            _t.original_file_name_map = {}
+                            _t.file_name_map = {}
                             _t.state = TASK_STATE_GET_META
                         self._all_tasks[_['guid']] = _t
                         self.tasks.put(_['guid'])

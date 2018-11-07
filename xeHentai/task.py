@@ -10,6 +10,9 @@ import json
 import uuid
 import shutil
 import zipfile
+
+import glob
+
 from threading import RLock
 from . import util
 from .const import *
@@ -38,7 +41,7 @@ class Task(object):
         self.filehash_map = {} # map same hash to different ids, {url:((id, fname), )}
         self.renamed_map = {} # map fid to renamed file name, used in finding a file by id in RPC
         
-        self.original_file_name_map = {} # map fid to file original name 
+        self.file_name_map = {} # map fid to file original name 
         
         self.img_q = None
         self.page_q = None
@@ -139,11 +142,15 @@ class Task(object):
     #         self.base_url(), pichash[:10], self.gid, self.meta['filelist'][pichash][0]
     #     )
 
-    def set_reload_url(self, imgurl, reload_url, fname):
+    def set_reload_url(self, imgurl, reload_url, fname , file_name_map):
         # if same file occurs severl times in a gallery
         if imgurl in self.reload_map:
             fpath = self.get_fpath()
             old_fid = self.get_fname(imgurl)[0]
+
+            if not old_fid in real_file_name_map.keys():
+                file_name_map.setdefault(old_fid,fname)
+
             old_f = os.path.join(fpath, self.get_fidpad(old_fid))
             this_fid = int(RE_GALLERY.findall(reload_url)[0][1])
             this_f = os.path.join(fpath, self.get_fidpad(this_fid))
@@ -169,7 +176,15 @@ class Task(object):
                 self.filehash_map[imgurl].append((this_fid, old_fid))
                 self._f_lock.release()
         else:
+            this_fid = RE_GALLERY.findall(reload_url)[0][1]
+            if not self.config['download_ori']:
+                realfname = "%s%s"% (this_fid,os.path.splitext(fname)[1])
+                file_name_map.setdefault(this_fid,realfname)
+            else:
+                file_name_map.setdefault(this_fid,fname)
+
             self.reload_map[imgurl] = [reload_url, fname]
+
 
     def get_reload_url(self, imgurl):
         if not imgurl:
@@ -242,6 +257,19 @@ class Task(object):
         if os.path.exists(os.path.join(fpath, ".xehdone")):
             donefile = True
         _range_idx = 0
+
+        fidlist = {}
+        totaldigit = len(str(self.meta['total']))
+        nametemplate = '[0-9]'
+        for i in range(1,totaldigit):
+            nametemplate = '%s%s' %(nametemplate,'[0-9]')
+
+        filelist = glob.glob(os.path.join(glob.escape(fpath),'%s%s' % (nametemplate,'.*')))
+
+        for filename in filelist:
+            fbasename = os.path.basename(filename)
+            fidlist.setdefault(int(os.path.splitext(fbasename)[0]), filename)
+
         for fid in range(1, self.meta['total'] + 1):
             # check download range
             if self.config['download_range']:
@@ -259,10 +287,12 @@ class Task(object):
                     self._flist_done.add(int(fid))
                     continue
             # can only check un-renamed files
-            fname = os.path.join(fpath, self.get_fidpad("%d" % fid)) # id
+            #fname = os.path.join(fpath, self.get_fidpad("%d" % fid)) # id
+            
             if donefile:
                 self._flist_done.add(int(fid))
-            elif os.path.exists(fname):
+            elif fid in fidlist.keys():
+                fname = fidlist[fid]
                 if os.stat(fname).st_size == 0:
                     os.remove(fname)
                 else:
@@ -271,7 +301,7 @@ class Task(object):
         if self.meta['finished'] == self.meta['total']:
             self.state == TASK_STATE_FINISHED
 
-    def queue_wrapper(self, callback1, callback2, pichash = None, img_tuble = None):
+    def queue_wrapper(self, callback, pichash = None, img_tuble = None):
         # if url is not finished, call callback to put into queue
         # type 1: normal file; type 2: resampled url
         # if pichash:
@@ -286,11 +316,7 @@ class Task(object):
         #     self.has_ori = True]
         #if int(fid) not in self._flist_done:
         #    callback1(img_tuble[0])
-        callback1(int(img_tuble[1]),img_tuble[0])
-        if not self.config['download_ori'] and os.path.splitext(img_tuble[2])[1] == '.png':
-            callback2(img_tuble[1],os.path.splitext(img_tuble[2])[0] + '.jpg')
-        else:
-            callback2(img_tuble[1],img_tuble[2])
+        callback(int(img_tuble[1]),img_tuble[0])
 
     def save_file(self, imgurl, redirect_url, binary_iter):
         # TODO: Rlock for finished += 1
@@ -362,7 +388,8 @@ class Task(object):
         return os.path.join(self.config['dir'], util.legalpath(self.meta['title']))
 
     def get_fidpad(self, fid, ext = '.jpg'):
-        ext = os.path.splitext(self.original_file_name_map[fid])[1]
+        if fid in self.file_name_map:
+            ext = os.path.splitext(self.file_name_map[fid])[1]
         fid = int(fid)
         _ = "%%0%dd%%s" % (len(str(self.meta['total'])))
         return _ % (fid, ext)
