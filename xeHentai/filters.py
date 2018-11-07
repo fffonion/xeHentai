@@ -97,12 +97,15 @@ def flt_metadata(r, suc, fail):
 def flt_pageurl(r, suc, fail):
     # input gallery response
     # add per image urls if suc; finish task if fail
-    picpage = re.findall(
-        '<a href="(%s/./[a-f0-9]{10}/\d+\-\d+)"><img alt="\d+" title="Page' % RESTR_SITE,
+    #picpage = re.findall(
+    #    '<a href="(%s/./[a-f0-9]{10}/\d+\-\d+)"><img alt="\d+" title="Page' % RESTR_SITE,
+    #    r.text)
+    picpageR = re.findall(
+        '<a href="(%s/./[a-f0-9]{10}/\d+\-\d+)"><img alt="\d+" title="Page (\d+): ([^"]*)"' % RESTR_SITE,
         r.text)
-    if not picpage:
+    if not picpageR:
         fail(ERR_NO_PAGEURL_FOUND)
-    for p in picpage:
+    for p in picpageR:
         suc(p)
 
 def flt_quota_check(func):

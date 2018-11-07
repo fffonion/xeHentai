@@ -120,6 +120,7 @@ class xeHentai(object):
                 self._all_tasks.pop(rguid)
                 t.guid = rguid
                 self._all_tasks[t.guid] = t
+                self._all_tasks[t.guid].state = TASK_STATE_WAITING
                 self.tasks.put(t.guid)
                 return 0, t.guid
         
@@ -251,7 +252,15 @@ class xeHentai(object):
                 # else:
                 # scan by our own, should not be here currently
                 # start backup thread
-                task.scan_downloaded()
+                
+                #dont need blind scan
+                #task.scan_downloaded()
+
+                #scan zip file instead
+                task.scan_downloaded_zipfile()
+
+                temp_page_q = {}
+
                 if task.state == TASK_STATE_FINISHED:
                     continue
                 for x in range(0,
@@ -259,10 +268,17 @@ class xeHentai(object):
                     r = req.request("GET",
                         "%s/?p=%d" % (task.url, x),
                         filters.flt_pageurl,
-                        lambda x: task.queue_wrapper(task.page_q.put, url = x),
+                        #i need wrapper to interact with original_file_name_map
+                        lambda x: task.queue_wrapper(temp_page_q.setdefault,task.original_file_name_map.setdefault, img_tuble = x),
                         lambda x: task.set_fail(x))
                     if task.failcode:
                         break
+                #then scan downloaded
+                task.scan_downloaded()
+                for fid,page_url in temp_page_q.items():
+                    if not fid in task._flist_done:
+                        task.page_q.put(page_url)
+
             elif task.state == TASK_STATE_SCAN_IMG:
                 # print here so that see it after we can join former threads
                 self.logger.info(i18n.TASK_TITLE % (
@@ -288,6 +304,7 @@ class xeHentai(object):
                     # _._exit = lambda t: t._finish_queue()
                     self._all_threads[TASK_STATE_SCAN_IMG].append(_)
                     _.start()
+
                 task.state = TASK_STATE_DOWNLOAD - 1
             elif task.state == TASK_STATE_SCAN_ARCHIVE:
                 task.state = TASK_STATE_DOWNLOAD - 1
@@ -412,8 +429,17 @@ class xeHentai(object):
                                 #_t.meta['has_ori'] and task.config['download_ori'])
                         # since we don't block on scan_img state, an unempty page_q
                         # indicates we should start from scan_img state,
-                        if _t.state == TASK_STATE_DOWNLOAD and _t.page_q:
-                            _t.state = TASK_STATE_SCAN_IMG
+                        # if _t.state == TASK_STATE_DOWNLOAD and _t.page_q:
+                        #     _t.state = TASK_STATE_SCAN_IMG
+
+                        # page may have changed by the uploader, rescan pages (rescan from metadata in practice) instead
+                        if _t.state == TASK_STATE_SCAN_PAGE or _t.state == TASK_STATE_SCAN_IMG or _t.state == TASK_STATE_DOWNLOAD:
+                            _t.page_q = {}
+                            _t.reload_map = {}
+                            _t.filehash_map = {}
+                            _t.renamed_map = {}
+                            _t.original_file_name_map = {}
+                            _t.state = TASK_STATE_GET_META
                         self._all_tasks[_['guid']] = _t
                         self.tasks.put(_['guid'])
                     if self._all_tasks:

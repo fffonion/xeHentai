@@ -37,6 +37,9 @@ class Task(object):
         self.reload_map = {} # {url:reload_url}
         self.filehash_map = {} # map same hash to different ids, {url:((id, fname), )}
         self.renamed_map = {} # map fid to renamed file name, used in finding a file by id in RPC
+        
+        self.original_file_name_map = {} # map fid to file original name 
+        
         self.img_q = None
         self.page_q = None
         self.list_q = None
@@ -82,7 +85,7 @@ class Task(object):
         self.failcode = 0
         return True
 
-    
+    #write some metadata into zip file
     def encodeMetaForZipComment(self):
         zipmeta = {}
         zipmeta.setdefault('gjname',self.meta['gjname'])
@@ -171,9 +174,11 @@ class Task(object):
     def get_reload_url(self, imgurl):
         if not imgurl:
             return
+        if not imgurl in self.reload_map:
+            return (imgurl,self.get_fidpad(imgurl))
         return self.reload_map[imgurl][0]
 
-    def scan_downloaded(self, scaled = True):
+    def scan_downloaded_zipfile(self):
         fpath = self.get_fpath()
         donefile = False
         if os.path.exists(os.path.join(fpath, ".xehdone")):
@@ -223,8 +228,19 @@ class Task(object):
                         zipfileTarget.extractall(fpath)
                     else:
                         donefile = True
+        
+        #a zip file properly commented is trustworth, so program will assume it was completed
+        if donefile:
+            self._flist_done.update(range(1, self.meta['total'] + 1))
+        self.meta['finished'] = len(self._flist_done)
+        if self.meta['finished'] == self.meta['total']:
+            self.state == TASK_STATE_FINISHED
 
-
+    def scan_downloaded(self, scaled = True):
+        fpath = self.get_fpath()
+        donefile = False
+        if os.path.exists(os.path.join(fpath, ".xehdone")):
+            donefile = True
         _range_idx = 0
         for fid in range(1, self.meta['total'] + 1):
             # check download range
@@ -243,7 +259,7 @@ class Task(object):
                     self._flist_done.add(int(fid))
                     continue
             # can only check un-renamed files
-            fname = os.path.join(fpath, self.get_fidpad(fid)) # id
+            fname = os.path.join(fpath, self.get_fidpad("%d" % fid)) # id
             if donefile:
                 self._flist_done.add(int(fid))
             elif os.path.exists(fname):
@@ -255,7 +271,7 @@ class Task(object):
         if self.meta['finished'] == self.meta['total']:
             self.state == TASK_STATE_FINISHED
 
-    def queue_wrapper(self, callback, pichash = None, url = None):
+    def queue_wrapper(self, callback1, callback2, pichash = None, img_tuble = None):
         # if url is not finished, call callback to put into queue
         # type 1: normal file; type 2: resampled url
         # if pichash:
@@ -263,12 +279,15 @@ class Task(object):
         #     if fid not in self._flist_done:
         #         callback(self.get_picpage_url(pichash))
         # elif url:
-        fhash, fid = RE_GALLERY.findall(url)[0]
+        fhash, fid = RE_GALLERY.findall(img_tuble[0])[0]
+
         # if fhash not in self.meta['filelist']:
         #     self.meta['resampled'][fhash] = int(fid)
         #     self.has_ori = True]
-        if int(fid) not in self._flist_done:
-            callback(url)
+        #if int(fid) not in self._flist_done:
+        #    callback1(img_tuble[0])
+        callback1(int(img_tuble[1]),img_tuble[0])
+        callback2(img_tuble[1],img_tuble[2])
 
     def save_file(self, imgurl, redirect_url, binary_iter):
         # TODO: Rlock for finished += 1
@@ -287,7 +306,7 @@ class Task(object):
         #if a same file exists
         #assumimg that file is downloaded by other means
         ext = os.path.splitext(fname)[1]
-        fn = os.path.join(fpath, self.get_fidpad(int(fid),ext))
+        fn = os.path.join(fpath, self.get_fidpad(fid,ext))
         if os.path.exists(fn) and os.stat(fn).st_size > 0:
             self._cnt_lock.acquire()
             self.meta['finished'] += 1
@@ -297,7 +316,7 @@ class Task(object):
         # create a femp file first
         # we don't need _f_lock because this will not be in a sequence
         # and we can't do that otherwise we are breaking the multi threading
-        fn_tmp = os.path.join(fpath, ".%s.xeh" % self.get_fidpad(int(fid),ext))
+        fn_tmp = os.path.join(fpath, ".%s.xeh" % self.get_fidpad(fid,ext))
         try:
             with open(fn_tmp, "wb") as f:
                 for binary in binary_iter():
@@ -340,6 +359,7 @@ class Task(object):
         return os.path.join(self.config['dir'], util.legalpath(self.meta['title']))
 
     def get_fidpad(self, fid, ext = '.jpg'):
+        ext = os.path.splitext(self.original_file_name_map[fid])[1]
         fid = int(fid)
         _ = "%%0%dd%%s" % (len(str(self.meta['total'])))
         return _ % (fid, ext)
@@ -358,7 +378,7 @@ class Task(object):
             # if we don't need to rename to original name and file type matches
             if not self.config['rename_ori'] and os.path.splitext(fname)[1].lower() == '.jpg':
                 continue
-            fname_ori = os.path.join(fpath, self.get_fidpad(fid)) # id          
+            fname_ori = os.path.join(fpath, self.get_fidpad("%d" % fid)) # id          
             if self.config['rename_ori']:
                 if os.path.exists(os.path.join(tmppath, self.get_fidpad(fid))):
                     # if we previously put it into a temporary folder, we need to change fname_ori

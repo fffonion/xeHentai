@@ -413,7 +413,7 @@ class xeHentaiRPCExtended(object):
             if fid in t.renamed_map:
                 f = t.renamed_map[fid]
             else:
-                f = t.get_fidpad(fid)
+                f = t.get_fidpad("%d" % fid)
             uri = "%s/%s" % (t.guid, fid)
             rt.append('/img/%s/%s/%s' % (hash_link(self.secret, uri), uri, f))
         return ERR_NO_ERROR, rt
