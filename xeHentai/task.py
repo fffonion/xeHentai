@@ -39,10 +39,42 @@ class Task(object):
         self.has_ori = False
         self.reload_map = {} # {url:reload_url}
         self.filehash_map = {} # map same hash to different ids, {url:((id, fname), )}
+
+        # renamed map just don't work well with extension part
+        
+        # this situation happens especially with animated galleries
+        # in which you would download an original file even you dont use the Download original link
+        # renamed map still thinks the .gif file is a .jpg file
+        # thus you can only view the first frame of the gif
+
+        # when downloading original file, renamed map still choose the extension in single image page
+        # you will get an png file renamed to be a jpg file
+        # well, in fact you can view the file just fine
+        # but photoshop says "no, png file have to be a png file"
+
+        # besides, in some rare cases, the original png file is so small
+        # that you will get an original png file when not download original
+        
+        # it is somehow hard to upgrade the old method
+        # i choose to write a new one
         self.renamed_map = {} # map fid to renamed file name, used in finding a file by id in RPC
-        
-        self.file_name_map = {} # map fid to file original name 
-        
+       
+        # original file name only apears in gallery page
+        # in single image page it shows an formarted image other than original file name
+
+        # file that was in the folder, used to check downloaded files
+        # map file name to file size
+        # file size check grant more precision in downloaded file check
+        self._file_in_download_folder = {}
+        # map fid to file original name, which appears on gallery pages
+        self.original_fname_map = {}
+        # map fid to file name, just like the old self.renamed_map
+        self.fid_fname_map = {}
+        # aaaand, the fid in these map will all be str
+        # when int key dumps into files by python, it is somehow transformed into str
+        # and an error would occur when you load it again 
+
+
         self.img_q = None
         self.page_q = None
         self.list_q = None
@@ -96,9 +128,12 @@ class Task(object):
         zipmeta.setdefault('tags',self.meta['tags'])
         zipmeta.setdefault('total',self.meta['total'])
         zipmeta.setdefault('title',self.meta['title'])
+        zipmeta.setdefault('rename_ori',self.config['rename_ori'])
+        zipmeta.setdefault('download_ori',self.config['download_ori'])
         zipmeta.setdefault('url',self.url)
+        zipmeta.setdefault('fid_fname_map',self.fid_fname_map)
         jsonzipmeta = json.dumps(zipmeta);
-        return ("xeHentai Archiver v%s customized by Dynilath\n%s" % ( __version__, jsonzipmeta)).encode('UTF-8')
+        return ("xeHentai Archiver v%s r1 customized by Dynilath\n%s" % ( __version__, jsonzipmeta)).encode('UTF-8')
 
     def decodeMetaFromZipComment(self,comment):
         comment_str = comment.decode('UTF-8')
@@ -142,8 +177,10 @@ class Task(object):
     #         self.base_url(), pichash[:10], self.gid, self.meta['filelist'][pichash][0]
     #     )
 
-    def set_reload_url(self, imgurl, reload_url, fname , file_name_map):
+    def set_reload_url(self, imgurl, reload_url, fname, filesize):
         # if same file occurs severl times in a gallery
+        # to be done with new rename logic
+
         if imgurl in self.reload_map:
             fpath = self.get_fpath()
             old_fid = self.get_fname(imgurl)[0]
@@ -177,13 +214,29 @@ class Task(object):
                 self._f_lock.release()
         else:
             this_fid = RE_GALLERY.findall(reload_url)[0][1]
-            if not self.config['download_ori']:
-                realfname = "%s%s"% (this_fid,os.path.splitext(fname)[1])
-                file_name_map.setdefault(this_fid,realfname)
-            else:
-                file_name_map.setdefault(this_fid,fname)
-
-            self.reload_map[imgurl] = [reload_url, fname]
+            realfname = self.original_fname_map[this_fid]
+            if not self.config['rename_ori']:
+                realfname = "%%0%dd%%s" % (len(str(self.meta['total']))) % (int(this_fid),os.path.splitext(realfname)[1])
+            self.fid_fname_map.setdefault(this_fid,realfname)
+            
+            file_existed = False
+            if realfname in self._file_in_download_folder:
+                fpath = self.get_fpath()
+                fsize = self._file_in_download_folder[realfname]
+                float_size = float(fsize)/1024
+                size_unit = 'KB'
+                if float_size > 1024:
+                    float_size = float_size / 1024
+                    size_unit = 'MB'
+                if float_size > 100:
+                    size_text = '%.1f %s' % ( float_size, size_unit)
+                else:
+                    size_text = '%.2f %s' % ( float_size, size_unit)
+                if size_text == filesize:
+                    file_existed = True
+            if not file_existed:
+                self.img_q.put(imgurl)
+            self.reload_map[imgurl] = [reload_url, realfname]
 
 
     def get_reload_url(self, imgurl):
@@ -196,39 +249,57 @@ class Task(object):
     def scan_downloaded_zipfile(self):
         fpath = self.get_fpath()
         donefile = False
+        isOutdated = False
         if os.path.exists(os.path.join(fpath, ".xehdone")):
             donefile = True
-
+        metadata = {}
         #existing of a file doesn't mean the file is corectly downloaded
         arc = "%s.zip" % fpath
         if os.path.exists(arc):
             #if the zipfile exists, check the url written in the zipfile
             with zipfile.ZipFile(arc,'r') as zipfileTarget:
                 metadata = self.decodeMetaFromZipComment(zipfileTarget.comment)
-                if 'url' in metadata and metadata['url'] == self.url:
+                #check fidmap in the file, if there isn't one, then just renew the zip
+                if 'fid_fname_map' in metadata:
+                    fid_map = metadata['fid_fname_map']
+                else:
+                   isOutdated = True
+
+                if not isOutdated and 'url' in metadata and metadata['url'] == self.url:
                     #when url matches, check every image
+                    
                     filenameList = zipfileTarget.namelist()
                     isTruncated = False
                     truncated_img_list = []
+                    goodimgList = []
                     for in_zip_file_name in filenameList:
                         zipinfo = zipfileTarget.getinfo(in_zip_file_name)
                         if not zipinfo.is_dir():
-                            try:
-                                fp = zipfileTarget.open(in_zip_file_name)
-                                imagep = ImageFile.Parser()
-                                while True:
-                                    buffer = fp.read(1024)
-                                    if not buffer:
-                                        break
-                                    imagep.feed(buffer)
-                                image = imagep.close()
-                                fp.close()
-                                image.close()
-                            except IOError:
-                                isTruncated = True
-                                fp.close()
-                                truncated_img_list.append(in_zip_file_name)
+                            ext = os.path.splitext(in_zip_file_name)
+                            if ext == '.xehdown':
                                 continue
+                            elif ext == '.xeh':
+                                isTruncated = True
+                            else:
+                                try:
+                                    fp = zipfileTarget.open(in_zip_file_name)
+                                    imagep = ImageFile.Parser()
+                                    while True:
+                                        buffer = fp.read(1024)
+                                        if not buffer:
+                                            break
+                                        imagep.feed(buffer)
+                                    image = imagep.close()
+                                    fp.close()
+                                    image.close()
+                                    goodimgList.append(in_zip_file_name)
+                                except IOError:
+                                    isTruncated = True
+                                    fp.close()
+                                    truncated_img_list.append(in_zip_file_name)
+                                    continue
+                    if not len(goodimgList) == len(fid_map):
+                        isTruncated = True
 
                     if isTruncated:
                         #extract all image when some images is truncated
@@ -239,10 +310,13 @@ class Task(object):
                         for truncated_img_name in truncated_img_list:
                             imgpath = os.path.join(fpath,truncated_img_name)
                             os.remove(imgpath)
-                    elif not len(zipfileTarget.comment) == len(self.encodeMetaForZipComment()):
+                    elif not len(fid_fname_map) == metadata['total']:
+                        #not finished
                         zipfileTarget.extractall(fpath)
                     else:
                         donefile = True
+                elif isOutdated:
+                    zipfileTarget.extractall(fpath)
         
         #a zip file properly commented is trustworth, so program will assume it was completed
         if donefile:
@@ -258,6 +332,16 @@ class Task(object):
             donefile = True
         _range_idx = 0
 
+        for root,dirs,files in os.walk(fpath):
+            for file_name_in_fpath in files:
+                si_fpath = os.path.join(fpath,file_name_in_fpath)
+                self._file_in_download_folder.setdefault(file_name_in_fpath,os.stat(si_fpath).st_size)
+
+
+
+        if self.config['rename_ori']:
+            return
+
         fidlist = {}
         totaldigit = len(str(self.meta['total']))
         nametemplate = '[0-9]'
@@ -267,25 +351,27 @@ class Task(object):
         filelist = glob.glob(os.path.join(glob.escape(fpath),'%s%s' % (nametemplate,'.*')))
 
         for filename in filelist:
-            fbasename = os.path.basename(filename)
-            fidlist.setdefault(int(os.path.splitext(fbasename)[0]), filename)
+            fname,ext = os.path.splitext(os.path.basename(filename))
+            #sometimes the archiver archived some unfinished files
+            if not ext == '.xeh':
+                fidlist.setdefault(int(fname), filename)
 
         for fid in range(1, self.meta['total'] + 1):
             # check download range
-            if self.config['download_range']:
-                _found = False
+            #if self.config['download_range']:
+            #    _found = False
                 # download_range is sorted asc
-                for start, end in self.config['download_range'][_range_idx:]:
-                    if fid > end: # out of range right bound move to next range
-                        _range_idx += 1
-                    elif start <= fid <= end: # in range
-                        _found = True
-                        break
-                    elif fid < start: # out of range left bound
-                        break
-                if not _found:
-                    self._flist_done.add(int(fid))
-                    continue
+            #    for start, end in self.config['download_range'][_range_idx:]:
+            #        if fid > end: # out of range right bound move to next range
+            #            _range_idx += 1
+            #       elif start <= fid <= end: # in range
+            #            _found = True
+            #            break
+            #        elif fid < start: # out of range left bound
+            #            break
+            #    if not _found:
+            #        self._flist_done.add(int(fid))
+            #        continue
             # can only check un-renamed files
             #fname = os.path.join(fpath, self.get_fidpad("%d" % fid)) # id
             
@@ -297,11 +383,12 @@ class Task(object):
                     os.remove(fname)
                 else:
                     self._flist_done.add(int(fid))
+                    self.fid_fname_map.setdefault('%d' % fid, os.path.basename(fname))
         self.meta['finished'] = len(self._flist_done)
         if self.meta['finished'] == self.meta['total']:
             self.state == TASK_STATE_FINISHED
 
-    def queue_wrapper(self, callback, pichash = None, img_tuble = None):
+    def queue_wrapper(self, pichash = None, img_tuble = None):
         # if url is not finished, call callback to put into queue
         # type 1: normal file; type 2: resampled url
         # if pichash:
@@ -316,7 +403,8 @@ class Task(object):
         #     self.has_ori = True]
         #if int(fid) not in self._flist_done:
         #    callback1(img_tuble[0])
-        callback(int(img_tuble[1]),img_tuble[0])
+        self.original_fname_map.setdefault(img_tuble[1],img_tuble[2])
+        self.page_q.put(img_tuble[0])
 
     def save_file(self, imgurl, redirect_url, binary_iter):
         # TODO: Rlock for finished += 1
@@ -388,8 +476,8 @@ class Task(object):
         return os.path.join(self.config['dir'], util.legalpath(self.meta['title']))
 
     def get_fidpad(self, fid, ext = '.jpg'):
-        if fid in self.file_name_map:
-            ext = os.path.splitext(self.file_name_map[fid])[1]
+        if fid in self.fid_fname_map:
+            ext = os.path.splitext(self.fid_fname_map[fid])[1]
         fid = int(fid)
         _ = "%%0%dd%%s" % (len(str(self.meta['total'])))
         return _ % (fid, ext)

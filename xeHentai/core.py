@@ -259,7 +259,7 @@ class xeHentai(object):
                 #scan zip file instead
                 task.scan_downloaded_zipfile()
 
-                temp_page_q = {}
+                #temp_page_q = {}
 
                 if task.state == TASK_STATE_FINISHED:
                     continue
@@ -268,16 +268,16 @@ class xeHentai(object):
                     r = req.request("GET",
                         "%s/?p=%d" % (task.url, x),
                         filters.flt_pageurl,
-                        #i need wrapper to interact with original_file_name_map
-                        lambda x: task.queue_wrapper(temp_page_q.setdefault,img_tuble = x),
+                        #there, we will get original file name while scaning image pages
+                        lambda x: task.queue_wrapper(img_tuble = x),
                         lambda x: task.set_fail(x))
                     if task.failcode:
                         break
                 #then scan downloaded
                 task.scan_downloaded()
-                for fid,page_url in temp_page_q.items():
-                    if not fid in task._flist_done:
-                        task.page_q.put(page_url)
+                #for fid,page_url in temp_page_q.items():
+                #    if not fid in task._flist_done:
+                #        task.page_q.put(page_url)
 
             elif task.state == TASK_STATE_SCAN_IMG:
                 # print here so that see it after we can join former threads
@@ -290,9 +290,8 @@ class xeHentai(object):
                 for i in range(task.config['scan_thread_cnt']):
                     tid = 'scan-%d' % (i + 1)
                     _ = self._get_httpworker(tid, task.page_q,
-                        filters.flt_imgurl_wrapper(task.config['download_ori'] and self.has_login),
-                        lambda x, tid = tid: (task.set_reload_url(x[0], x[1], x[2],task.file_name_map),
-                            task.img_q.put(x[0]),
+                        filters.flt_imgurl_wrapper(task.config['download_ori'] and self.has_login,task._file_in_download_folder),
+                        lambda x, tid = tid: (task.set_reload_url(x[0], x[1], x[2],x[3]),
                             mon.vote(tid, 0)),
                         lambda x, tid = tid: (mon.vote(tid, x[0])),
                         mon.wrk_keepalive,
@@ -433,12 +432,13 @@ class xeHentai(object):
                         #     _t.state = TASK_STATE_SCAN_IMG
 
                         # page may have changed by the uploader, rescan pages (rescan from metadata in practice) instead
+                        # besides, ip address of exhentai server may have changed, rescan on reload is essential 
                         if _t.state == TASK_STATE_SCAN_PAGE or _t.state == TASK_STATE_SCAN_IMG or _t.state == TASK_STATE_DOWNLOAD:
                             _t.page_q = {}
                             _t.reload_map = {}
                             _t.filehash_map = {}
                             _t.renamed_map = {}
-                            _t.file_name_map = {}
+                            _t.fid_fname_map = {}
                             _t.state = TASK_STATE_GET_META
                         self._all_tasks[_['guid']] = _t
                         self.tasks.put(_['guid'])
