@@ -133,20 +133,23 @@ class Task(object):
         zipmeta.setdefault('url',self.url)
         zipmeta.setdefault('fid_fname_map',self.fid_fname_map)
         jsonzipmeta = json.dumps(zipmeta);
-        return ("xeHentai Archiver v%s r1 customized by Dynilath\n%s" % ( __version__, jsonzipmeta)).encode('UTF-8')
+        return ("xeHentai Archiver v%s r1\n%s" % ( __version__, jsonzipmeta)).encode('UTF-8')
 
     def decodeMetaFromZipComment(self,comment):
         comment_str = comment.decode('UTF-8')
-
-        splits = comment.decode('UTF-8').split('\n')
-        if splits[0].endswith('Dynilath'):
-            return json.loads(splits[1])
+        _ = re.search('{.+}',comment_str)
+        if _:
+            metaStr = _[0]
+            return json.loads(metaStr)
         else:
-            httppos = comment_str.find('http')
-            urltext = comment_str[httppos:]
-            meta = {}
-            meta.setdefault('url',urltext)
-            return meta;
+            #adapt to older versions
+            _ = re.findall('URL:(http.+\/)',comment_str)
+            if _:
+                metadata = {}
+                metadata.setdefault('url',_[0])
+                return metadata;
+            else:
+                return {}
 
     def update_meta(self, meta):
         self.meta.update(meta)
@@ -254,21 +257,18 @@ class Task(object):
             self.reload_map[imgurl] = [reload_url, realfname]
 
 
-    def get_reload_url(self, imgurl):
+    def get_reload_url(self, imgurl, fid):
         if not imgurl:
             return
-        if not imgurl in self.reload_map:
-            this_fid = RE_GALLERY.findall(imgurl)[0][1]
-            realfname = self.original_fname_map[this_fid]
-            if not self.config['rename_ori']:
-                realfname = "%%0%dd%%s" % (len(str(self.meta['total']))) % (int(this_fid),os.path.splitext(realfname)[1])
-            return (imgurl,realfname)
         return self.reload_map[imgurl][0]
 
     def scan_downloaded_zipfile(self):
         fpath = self.get_fpath()
+
         donefile = False
         isOutdated = False
+        removeAll = False
+
         if os.path.exists(os.path.join(fpath, ".xehdone")):
             donefile = True
         metadata = {}
@@ -284,6 +284,16 @@ class Task(object):
                 else:
                    isOutdated = True
 
+                if 'download_ori' in metadata:
+                    if not metadata['download_ori'] == self.config['download_ori']:
+                        removeAll = True
+                        isTruncated = True
+
+                if 'rename_ori' in metadata:
+                    if not metadata['rename_ori'] == self.config['rename_ori']:
+                        removeAll = True
+                        isTruncated = True
+
                 if not isOutdated and 'url' in metadata and metadata['url'] == self.url:
                     #when url matches, check every image
                     
@@ -295,10 +305,13 @@ class Task(object):
                         zipinfo = zipfileTarget.getinfo(in_zip_file_name)
                         if not zipinfo.is_dir():
                             ext = os.path.splitext(in_zip_file_name)
-                            if ext == '.xehdown':
+                            if ext == '.xehdone':
                                 continue
                             elif ext == '.xeh':
                                 isTruncated = True
+                                truncated_img_list.append(in_zip_file_name)
+                            elif removeAll:
+                                truncated_img_list.append(in_zip_file_name)
                             else:
                                 try:
                                     fp = zipfileTarget.open(in_zip_file_name)
@@ -355,8 +368,6 @@ class Task(object):
             for file_name_in_fpath in files:
                 si_fpath = os.path.join(fpath,file_name_in_fpath)
                 self._file_in_download_folder.setdefault(file_name_in_fpath,os.stat(si_fpath).st_size)
-
-
 
         if self.config['rename_ori']:
             return

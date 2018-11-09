@@ -256,7 +256,8 @@ class xeHentai(object):
                 #dont need blind scan
                 #task.scan_downloaded()
 
-                #scan zip file instead
+                # scan zip, zip file has metadata in comment
+                # if some image is truncated or outdated, download them again
                 task.scan_downloaded_zipfile()
 
                 #temp_page_q = {}
@@ -273,19 +274,22 @@ class xeHentai(object):
                         lambda x: task.set_fail(x))
                     if task.failcode:
                         break
-                #then scan downloaded
+
+                # scan downloaded
+                # this is just a rough scan, it scans every file and stores their size info in _file_in_download_folder
                 task.scan_downloaded()
-                #for fid,page_url in temp_page_q.items():
-                #    if not fid in task._flist_done:
-                #        task.page_q.put(page_url)
 
             elif task.state == TASK_STATE_SCAN_IMG:
                 # print here so that see it after we can join former threads
                 self.logger.info(i18n.TASK_TITLE % (
                     task_guid, task.meta['title']))
+
+                # log at here is quite too early
+                # finished file counting will be cleared after page scan
                 self.logger.info(i18n.TASK_WILL_DOWNLOAD_CNT % (
                     task_guid, task.meta['total'] - task.meta['finished'],
                     task.meta['total']))
+
                 # spawn thread to scan images
                 for i in range(task.config['scan_thread_cnt']):
                     tid = 'scan-%d' % (i + 1)
