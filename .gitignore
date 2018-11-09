@@ -13,3 +13,6 @@ make.bat
 config.py
 README.html
 CHANGELOG.html
+*.sln
+*.pyproj
+.vs
