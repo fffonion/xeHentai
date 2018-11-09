@@ -365,6 +365,7 @@ class Monitor(Thread):
                         self.logger.warning(i18n.TASK_STUCK % self.task.guid)
                         break
             time.sleep(0.5)
+
         if self.task.meta['finished'] == self.task.meta['total']:
             _err = self.task.rename_fname()
             if _err:

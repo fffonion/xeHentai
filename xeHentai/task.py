@@ -215,12 +215,22 @@ class Task(object):
         else:
             this_fid = RE_GALLERY.findall(reload_url)[0][1]
             realfname = self.original_fname_map[this_fid]
+
+            ext = os.path.splitext(fname)[1]
+            if self.config['download_ori']:
+                ext = os.path.splitext(realfname)[1]
+
             if not self.config['rename_ori']:
-                realfname = "%%0%dd%%s" % (len(str(self.meta['total']))) % (int(this_fid),os.path.splitext(realfname)[1])
+                realfname = "%%0%dd%%s" % (len(str(self.meta['total']))) % (int(this_fid),ext)
             self.fid_fname_map.setdefault(this_fid,realfname)
             
+            # check file size for downloaded file
+            # i would like a hash check
+            # but i cant get a hash before downloading the file
             file_existed = False
+            unexpected_file = False
             if realfname in self._file_in_download_folder:
+                file_existed = True
                 fpath = self.get_fpath()
                 fsize = self._file_in_download_folder[realfname]
                 float_size = float(fsize)/1024
@@ -232,10 +242,15 @@ class Task(object):
                     size_text = '%.1f %s' % ( float_size, size_unit)
                 else:
                     size_text = '%.2f %s' % ( float_size, size_unit)
-                if size_text == filesize:
-                    file_existed = True
+                if not size_text == filesize:
+                    unexpected_file = True
+
             if not file_existed:
                 self.img_q.put(imgurl)
+            elif unexpected_file:
+                self.meta['finished'] -= 1
+                self.img_q.put(imgurl)
+
             self.reload_map[imgurl] = [reload_url, realfname]
 
 
@@ -243,7 +258,11 @@ class Task(object):
         if not imgurl:
             return
         if not imgurl in self.reload_map:
-            return (imgurl,self.get_fidpad(imgurl))
+            this_fid = RE_GALLERY.findall(imgurl)[0][1]
+            realfname = self.original_fname_map[this_fid]
+            if not self.config['rename_ori']:
+                realfname = "%%0%dd%%s" % (len(str(self.meta['total']))) % (int(this_fid),os.path.splitext(realfname)[1])
+            return (imgurl,realfname)
         return self.reload_map[imgurl][0]
 
     def scan_downloaded_zipfile(self):
@@ -310,7 +329,7 @@ class Task(object):
                         for truncated_img_name in truncated_img_list:
                             imgpath = os.path.join(fpath,truncated_img_name)
                             os.remove(imgpath)
-                    elif not len(fid_fname_map) == metadata['total']:
+                    elif not len(self.fid_fname_map) == metadata['total']:
                         #not finished
                         zipfileTarget.extractall(fpath)
                     else:
@@ -420,8 +439,10 @@ class Task(object):
             self.reload_map[imgurl][1] = fname
         _, fid = RE_GALLERY.findall(pageurl)[0]
 
-        #if a same file exists
-        #assumimg that file is downloaded by other means
+        # if a same file exists
+        # assumimg that file is downloaded by other means
+        # for example, another instance of xehentai
+        # or user just downloaded herself, by dragging from browser
         ext = os.path.splitext(fname)[1]
         fn = os.path.join(fpath, self.get_fidpad(fid,ext))
         if os.path.exists(fn) and os.stat(fn).st_size > 0:

@@ -371,8 +371,11 @@ class xeHentaiRPCExtended(object):
             return None, None, None
         t = self._all_tasks[guid]
         fid = str(fid)
-        if fid in t.renamed_map:
-            f = t.renamed_map[fid]
+
+        #if fid in t.renamed_map:
+        #    f = t.renamed_map[fid]
+        if fid in t.fid_fname_map:
+            f = t.fid_fname_map[fid]
         else:
             f = t.get_fidpad(fid)
 

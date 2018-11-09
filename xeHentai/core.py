@@ -432,6 +432,7 @@ class xeHentai(object):
                         #     _t.state = TASK_STATE_SCAN_IMG
 
                         # page may have changed by the uploader, rescan pages (rescan from metadata in practice) instead
+                        # meta can be changed too
                         # besides, ip address of exhentai server may have changed, rescan on reload is essential 
                         if _t.state == TASK_STATE_SCAN_PAGE or _t.state == TASK_STATE_SCAN_IMG or _t.state == TASK_STATE_DOWNLOAD:
                             _t.page_q = {}
