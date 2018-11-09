@@ -421,7 +421,7 @@ class Task(object):
                         #self.fid_fname_map.setdefault(str(fid), expected_file_name)
             else:
                 if fid in fid_2_file_in_folder_map:
-                    expected_fpath = self.fid_2_file_in_folder_map[fid]
+                    expected_fpath = fid_2_file_in_folder_map[fid]
                     if os.stat(expected_fpath).st_size == 0:
                         os.remove(expected_fpath)
                     else:
