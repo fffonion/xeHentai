@@ -64,16 +64,13 @@ class Task(object):
 
         # file that was in the folder, used to check downloaded files
         # map file name to file size
-        # file size check grant more precision in downloaded file check
-        self._file_in_download_folder = {}
-        # map fid to file original name, which appears on gallery pages
-        self.original_fname_map = {}
-        # map fid to file name, just like the old self.renamed_map
-        self.fid_fname_map = {}
+        self._file_in_download_folder = {} # file size check grant more precision in downloaded file check
+        self.original_fname_map = {} # map fid to file original name, which appears on gallery pages
+        self.fid_fname_map = {} # map fid to file name, just like the old self.renamed_map
+        self.download_range = [] # download range list, former method is too hard to maintain
         # aaaand, the fid in these map will all be str
         # when int key dumps into files by python, it is somehow transformed into str
         # and an error would occur when you load it again 
-
 
         self.img_q = None
         self.page_q = None
@@ -185,36 +182,37 @@ class Task(object):
         # to be done with new rename logic
 
         if imgurl in self.reload_map:
-            fpath = self.get_fpath()
-            old_fid = self.get_fname(imgurl)[0]
+            return
+            #fpath = self.get_fpath()
+            #old_fid = self.get_fname(imgurl)[0]
 
-            if not old_fid in real_file_name_map.keys():
-                file_name_map.setdefault(old_fid,fname)
+            #if not old_fid in real_file_name_map.keys():
+            #    file_name_map.setdefault(old_fid,fname)
 
-            old_f = os.path.join(fpath, self.get_fidpad(old_fid))
-            this_fid = int(RE_GALLERY.findall(reload_url)[0][1])
-            this_f = os.path.join(fpath, self.get_fidpad(this_fid))
-            self._f_lock.acquire()
-            if os.path.exists(old_f):
-                # we can just copy old file if already downloaded
-                try:
-                    with open(old_f, 'rb') as _of:
-                        with open(this_f, 'wb') as _nf:
-                            _nf.write(_of.read())
-                except Exception as ex:
-                    self._f_lock.release()
-                    raise ex
-                else:
-                    self._f_lock.release()
-                    self._cnt_lock.acquire()
-                    self.meta['finished'] += 1
-                    self._cnt_lock.release()
-            else:
+            #old_f = os.path.join(fpath, self.get_fidpad(old_fid))
+            #this_fid = int(RE_GALLERY.findall(reload_url)[0][1])
+            #this_f = os.path.join(fpath, self.get_fidpad(this_fid))
+            #self._f_lock.acquire()
+            #if os.path.exists(old_f):
+            #    # we can just copy old file if already downloaded
+            #    try:
+            #        with open(old_f, 'rb') as _of:
+            #            with open(this_f, 'wb') as _nf:
+            #                _nf.write(_of.read())
+            #    except Exception as ex:
+            #        self._f_lock.release()
+            #        raise ex
+            #    else:
+            #        self._f_lock.release()
+            #        self._cnt_lock.acquire()
+            #        self.meta['finished'] += 1
+            #        self._cnt_lock.release()
+            #else:
                 # if not downloaded, we will copy them in save_file
-                if imgurl not in self.filehash_map:
-                    self.filehash_map[imgurl] = []
-                self.filehash_map[imgurl].append((this_fid, old_fid))
-                self._f_lock.release()
+                #if imgurl not in self.filehash_map:
+                #    self.filehash_map[imgurl] = []
+                #self.filehash_map[imgurl].append((this_fid, old_fid))
+                #self._f_lock.release()
         else:
             this_fid = RE_GALLERY.findall(reload_url)[0][1]
             realfname = self.original_fname_map[this_fid]
@@ -251,13 +249,15 @@ class Task(object):
             if not file_existed:
                 self.img_q.put(imgurl)
             elif unexpected_file:
+                self._cnt_lock.aquire()
                 self.meta['finished'] -= 1
+                self.__cnt_lock.release()
                 self.img_q.put(imgurl)
 
             self.reload_map[imgurl] = [reload_url, realfname]
 
 
-    def get_reload_url(self, imgurl, fid):
+    def get_reload_url(self, imgurl):
         if not imgurl:
             return
         return self.reload_map[imgurl][0]
@@ -364,57 +364,73 @@ class Task(object):
             donefile = True
         _range_idx = 0
 
+        # prepare _file_in_download_folder, it is used in page scan to finally decide whether a image file is correct
         for root,dirs,files in os.walk(fpath):
             for file_name_in_fpath in files:
                 si_fpath = os.path.join(fpath,file_name_in_fpath)
                 self._file_in_download_folder.setdefault(file_name_in_fpath,os.stat(si_fpath).st_size)
 
-        if self.config['rename_ori']:
-            return
+        #if self.config['rename_ori']:
+        #    return
 
-        fidlist = {}
-        totaldigit = len(str(self.meta['total']))
-        nametemplate = '[0-9]'
-        for i in range(1,totaldigit):
-            nametemplate = '%s%s' %(nametemplate,'[0-9]')
+        # in this section, i dont know what format the downloaded file would be
+        # so 01.png, 01.gif, 01.jpg or what else is regarded equally
+        if not self.config['rename_ori']:
+            fid_2_file_in_folder_map = {}
+            totaldigit = len(str(self.meta['total']))
+            nametemplate = '[0-9]'
+            for i in range(1,totaldigit):
+                nametemplate = '%s%s' %(nametemplate,'[0-9]')
 
-        filelist = glob.glob(os.path.join(glob.escape(fpath),'%s%s' % (nametemplate,'.*')))
+            filelist = glob.glob(os.path.join(glob.escape(fpath),'%s%s' % (nametemplate,'.*')))
 
-        for filename in filelist:
-            fname,ext = os.path.splitext(os.path.basename(filename))
-            #sometimes the archiver archived some unfinished files
-            if not ext == '.xeh':
-                fidlist.setdefault(int(fname), filename)
+            for filename in filelist:
+                fname,ext = os.path.splitext(os.path.basename(filename))
+                #sometimes the archiver archived some unfinished files
+                if not ext == '.xeh':
+                    fid_2_file_in_folder_map.setdefault(int(fname), filename)
 
         for fid in range(1, self.meta['total'] + 1):
             # check download range
-            #if self.config['download_range']:
-            #    _found = False
+            if self.config['download_range']:
+                if not fid in self.download_range:
+                    continue
                 # download_range is sorted asc
-            #    for start, end in self.config['download_range'][_range_idx:]:
-            #        if fid > end: # out of range right bound move to next range
-            #            _range_idx += 1
-            #       elif start <= fid <= end: # in range
-            #            _found = True
-            #            break
-            #        elif fid < start: # out of range left bound
-            #            break
-            #    if not _found:
-            #        self._flist_done.add(int(fid))
-            #        continue
-            # can only check un-renamed files
-            #fname = os.path.join(fpath, self.get_fidpad("%d" % fid)) # id
-            
+                #_found = False
+                #for start, end in self.config['download_range'][_range_idx:]:
+                #    if fid > end: # out of range right bound move to next range
+                #        _range_idx += 1
+                #    elif start <= fid <= end: # in range
+                #        _found = True
+                #        break
+                #    elif fid < start: # out of range left bound
+                #        break
+                #if not _found:
+                #    continue
+
             if donefile:
                 self._flist_done.add(int(fid))
-            elif fid in fidlist.keys():
-                fname = fidlist[fid]
-                if os.stat(fname).st_size == 0:
-                    os.remove(fname)
-                else:
-                    self._flist_done.add(int(fid))
-                    self.fid_fname_map.setdefault('%d' % fid, os.path.basename(fname))
+            elif self.config['rename_ori']:
+                expected_file_name = self.original_fname_map[str(fid)]
+                expected_fpath = os.path.join(fpath,expected_file_name)
+                if os.path.exists(expected_fpath):
+                    if os.stat(expected_fpath).st_size == 0:
+                        os.remove(expected_fpath)
+                    else:
+                        self._flist_done.add(int(fid))
+                        #self.fid_fname_map.setdefault(str(fid), expected_file_name)
+            else:
+                if fid in fid_2_file_in_folder_map:
+                    expected_fpath = self.fid_2_file_in_folder_map[fid]
+                    if os.stat(expected_fpath).st_size == 0:
+                        os.remove(expected_fpath)
+                    else:
+                        self._flist_done.add(int(fid))
+                        #self.fid_fname_map.setdefault('%d' % fid, os.path.basename(expected_fpath))
+
         self.meta['finished'] = len(self._flist_done)
+        if self.config['download_range']:
+            self.meta['finished'] += (self.meta['total']  - len(self.download_range))
         if self.meta['finished'] == self.meta['total']:
             self.state == TASK_STATE_FINISHED
 
@@ -433,8 +449,29 @@ class Task(object):
         #     self.has_ori = True]
         #if int(fid) not in self._flist_done:
         #    callback1(img_tuble[0])
-        self.original_fname_map.setdefault(img_tuble[1],img_tuble[2])
-        self.page_q.put(img_tuble[0])
+
+        _page_url, _fid, _original_fname = img_tuble
+
+        if self.config['download_range']:
+            if not int(_fid) in self.download_range:
+                return
+
+        # if same original name occurs several times
+        # this will solve it 
+        append_quote = 1
+        while True:
+            isCrashed = False
+            for fid_in_list,fname_in_list in self.original_fname_map.items():
+                if _original_fname == fname_in_list:
+                    _fname,_ext = os.path.splitext(_original_fname)
+                    _original_fname = '%s_%d%s' %(_fname,append_quote,_ext)
+                    isCrashed = True
+                    append_quote += 1
+            if not isCrashed:
+                break
+
+        self.original_fname_map.setdefault(_fid,_original_fname)
+        self.page_q.put(_page_url)
 
     def save_file(self, imgurl, redirect_url, binary_iter):
         # TODO: Rlock for finished += 1
@@ -454,8 +491,11 @@ class Task(object):
         # assumimg that file is downloaded by other means
         # for example, another instance of xehentai
         # or user just downloaded herself, by dragging from browser
-        ext = os.path.splitext(fname)[1]
-        fn = os.path.join(fpath, self.get_fidpad(fid,ext))
+        
+        fname = self.fid_fname_map[fid]
+
+        #ext = os.path.splitext(fname)[1]
+        fn = os.path.join(fpath, fname)
         if os.path.exists(fn) and os.stat(fn).st_size > 0:
             self._cnt_lock.acquire()
             self.meta['finished'] += 1
@@ -465,7 +505,7 @@ class Task(object):
         # create a femp file first
         # we don't need _f_lock because this will not be in a sequence
         # and we can't do that otherwise we are breaking the multi threading
-        fn_tmp = os.path.join(fpath, ".%s.xeh" % self.get_fidpad(fid,ext))
+        fn_tmp = os.path.join(fpath, ".%s.xeh" % fname)
         try:
             with open(fn_tmp, "wb") as f:
                 for binary in binary_iter():
@@ -487,7 +527,7 @@ class Task(object):
                     # if a file download is interrupted, it will appear in self.filehash_map as well
                     if _fid == int(fid):
                         continue
-                    fn_rep = os.path.join(fpath, self.get_fidpad(_fid))
+                    fn_rep = os.path.join(fpath, fname)
                     shutil.copyfile(fn, fn_rep)
                     self._cnt_lock.acquire()
                     self.meta['finished'] += 1

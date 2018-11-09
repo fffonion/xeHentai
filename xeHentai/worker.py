@@ -351,7 +351,7 @@ class Monitor(Thread):
                     i18n.THREAD,
                     len(self.thread_last_seen), len(self.thread_zombie),
                     i18n.QUEUE,
-                    self.task.img_q.qsize(),
+                    self.task.img_q.qsize() if self.task.img_q else 0,
                     self.task.meta['finished'])
                 self.logger.info(_)
                 self.set_title(_)
@@ -367,11 +367,12 @@ class Monitor(Thread):
             time.sleep(0.5)
 
         if self.task.meta['finished'] == self.task.meta['total']:
-            _err = self.task.rename_fname()
-            if _err:
-                self.logger.warning(i18n.XEH_RENAME_HAS_ERRORS % (
-                    "\n".join(map(lambda x:"%s => %s : %s" % x, _err))
-                ))
+            # rename is finished along with downloading process
+            #_err = self.task.rename_fname()
+            #if _err:
+            #    self.logger.warning(i18n.XEH_RENAME_HAS_ERRORS % (
+            #        "\n".join(map(lambda x:"%s => %s : %s" % x, _err))
+            #    ))
             self.set_title(i18n.TASK_FINISHED % self.task.guid)
             self.logger.info(i18n.TASK_FINISHED % self.task.guid)
             self.task.state = TASK_STATE_FINISHED

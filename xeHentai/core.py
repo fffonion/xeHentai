@@ -232,6 +232,12 @@ class xeHentai(object):
                     task.state = TASK_STATE_FAILED
                     break
 
+                if task.config['download_range']:
+                    task_total = task.meta['total']
+                    for dRange in task.config['download_range']:
+                        task.download_range.extend(range(dRange[0],
+                                                         dRange[1]+1 if dRange[1] < task_total else task_total + 1))
+
             # elif task.state == TASK_STATE_GET_HATHDL: # download hathdl
             #     r = req.request("GET",
             #         "%s/hathdler.php?gid=%s&t=%s" % (task.base_url(), task.gid, task.sethash),
