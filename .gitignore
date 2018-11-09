@@ -1,5 +1,11 @@
 *.py[cod]
 
+*.sln
+*.pyproj
+/.vs
+*.suo
+*.sqlite
+
 *.pyc
 *.json
 *.sh
