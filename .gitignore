@@ -4,6 +4,8 @@
 *.pyproj
 /.vs
 *.suo
+*.sqlite
+
 *.pyc
 *.json
 *.sh
