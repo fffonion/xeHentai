@@ -1,5 +1,9 @@
 *.py[cod]
 
+*.sln
+*.pyproj
+/.vs
+*.suo
 *.pyc
 *.json
 *.sh
@@ -13,6 +17,3 @@ make.bat
 config.py
 README.html
 CHANGELOG.html
-*.sln
-*.pyproj
-.vs
