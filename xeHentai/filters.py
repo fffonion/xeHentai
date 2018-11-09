@@ -97,12 +97,16 @@ def flt_metadata(r, suc, fail):
 def flt_pageurl(r, suc, fail):
     # input gallery response
     # add per image urls if suc; finish task if fail
-    picpage = re.findall(
-        '<a href="(%s/./[a-f0-9]{10}/\d+\-\d+)"><img alt="\d+" title="Page' % RESTR_SITE,
+    #picpage = re.findall(
+    #    '<a href="(%s/./[a-f0-9]{10}/\d+\-\d+)"><img alt="\d+" title="Page' % RESTR_SITE,
+    #    r.text)
+    picpageR = re.findall(
+        '<a href="(%s/./[a-f0-9]{10}/\d+\-\d+)"><img alt="\d+" title="Page (\d+): ([^"]*)"' % RESTR_SITE,
         r.text)
-    if not picpage:
+    #(page url, page id, original file name)
+    if not picpageR:
         fail(ERR_NO_PAGEURL_FOUND)
-    for p in picpage:
+    for p in picpageR:
         suc(p)
 
 def flt_quota_check(func):
@@ -123,9 +127,9 @@ def flt_quota_check(func):
             func(r, suc, fail)
     return _
 
-def flt_imgurl_wrapper(ori):
+def flt_imgurl_wrapper(ori,folder_list):
     @flt_quota_check
-    def flt_imgurl(r, suc, fail, ori = ori):
+    def flt_imgurl(r, suc, fail, ori = ori,folder_list = folder_list):
         # input per image page response
         # add (image url, reload url, filename) to queue if suc
         # return (errorcode, page_url) if fail
@@ -139,10 +143,11 @@ def flt_imgurl_wrapper(ori):
                 break
             picurl = util.htmlescape(_[0])
 
-            _ = re.findall('</a></div><div>(.*?) ::.+::.+</di', r.text)
+            _ = re.findall('</a></div><div>(.*?) ::[ 0-9x]+:: ([0-9/.]+ [A-Z]{2})</di', r.text)
             if not _:
                 break
-            filename = _[0]
+            filename,filesize = _[0]
+
             if 'image.php' in filename:
                 _ = re.findall('n=(.+)', picurl)
                 if not _:
@@ -170,15 +175,16 @@ def flt_imgurl_wrapper(ori):
             reload_url = "%s%snl=%s" % (r._real_url, "&" if "?" in r._real_url else "?", js_nl)
             if ori:
                 # we will parse the 302 url to get original filename
-                return suc((fullurl, reload_url, filename))
+                return suc((fullurl, reload_url, filename,filesize))
             else:
-                return suc((picurl, reload_url, filename))
+                return suc((picurl, reload_url, filename,filesize))
 
         return fail((ERR_SCAN_REGEX_FAILED, r._real_url))
 
     return flt_imgurl
 
 def download_file_wrapper(dirpath):
+
     @flt_quota_check
     def download_file(r, suc, fail, dirpath = dirpath):
         # input image/archive response

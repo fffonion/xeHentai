@@ -108,21 +108,38 @@ class xeHentai(object):
         if cfg['download_ori'] and not self.has_login:
             self.logger.warning(i18n.XEH_DOWNLOAD_ORI_NEED_LOGIN)
         t = Task(url, cfg)
-        if t.guid in self._all_tasks:
-            if self._all_tasks[t.guid].state in (TASK_STATE_FINISHED, TASK_STATE_FAILED):
-                self.logger.debug(i18n.TASK_PUT_INTO_WAIT % t.guid)
+
+        #check if task on same url already exists
+        #well, you may need to download from a link and save images in different zip files
+        #but in react, this program doesnt support auto rename zip files
+        #and as for me, i prefer restart the same task when i click 'add to xehentai', in order to repair truncated images
+        taskExists = False
+        for taskitem in self._all_tasks.items():
+            if url == taskitem[1].url:
+                rguid = taskitem[0]
+                self._all_tasks.pop(rguid)
+                t.guid = rguid
+                self._all_tasks[t.guid] = t
                 self._all_tasks[t.guid].state = TASK_STATE_WAITING
-                self._all_tasks[t.guid].cleanup()
-            return 0, t.guid
-        self._all_tasks[t.guid] = t
-        if not re.match("^%s/[^/]+/\d+/[^/]+/*#*$" % RESTR_SITE, url):
-            t.set_fail(ERR_URL_NOT_RECOGNIZED)
-        elif not self.has_login and re.match("^https*://exhentai\.org", url):
-            t.set_fail(ERR_CANT_DOWNLOAD_EXH)
-        else:
-            self.tasks.put(t.guid)
-            return 0, t.guid
-        self.logger.error(i18n.TASK_ERROR % (t.guid, i18n.c(t.failcode)))
+                self.tasks.put(t.guid)
+                return 0, t.guid
+        
+        if not taskExists:
+            if t.guid in self._all_tasks:
+                if self._all_tasks[t.guid].state in (TASK_STATE_FINISHED, TASK_STATE_FAILED):
+                    self.logger.debug(i18n.TASK_PUT_INTO_WAIT % t.guid)
+                    self._all_tasks[t.guid].state = TASK_STATE_WAITING
+                    self._all_tasks[t.guid].cleanup()
+                return 0, t.guid
+            self._all_tasks[t.guid] = t
+            if not re.match("^%s/[^/]+/\d+/[^/]+/*#*$" % RESTR_SITE, url):
+                t.set_fail(ERR_URL_NOT_RECOGNIZED)
+            elif not self.has_login and re.match("^https*://exhentai\.org", url):
+                t.set_fail(ERR_CANT_DOWNLOAD_EXH)
+            else:
+                self.tasks.put(t.guid)
+                return 0, t.guid
+            self.logger.error(i18n.TASK_ERROR % (t.guid, i18n.c(t.failcode)))
         return t.failcode, None
 
     def del_task(self, guid):
@@ -215,6 +232,12 @@ class xeHentai(object):
                     task.state = TASK_STATE_FAILED
                     break
 
+                if task.config['download_range']:
+                    task_total = task.meta['total']
+                    for dRange in task.config['download_range']:
+                        task.download_range.extend(range(dRange[0],
+                                                         dRange[1]+1 if dRange[1] < task_total else task_total + 1))
+
             # elif task.state == TASK_STATE_GET_HATHDL: # download hathdl
             #     r = req.request("GET",
             #         "%s/hathdler.php?gid=%s&t=%s" % (task.base_url(), task.gid, task.sethash),
@@ -235,7 +258,16 @@ class xeHentai(object):
                 # else:
                 # scan by our own, should not be here currently
                 # start backup thread
-                task.scan_downloaded()
+                
+                #dont need blind scan
+                #task.scan_downloaded()
+
+                # scan zip, zip file has metadata in comment
+                # if some image is truncated or outdated, download them again
+                task.scan_downloaded_zipfile()
+
+                #temp_page_q = {}
+
                 if task.state == TASK_STATE_FINISHED:
                     continue
                 for x in range(0,
@@ -243,24 +275,33 @@ class xeHentai(object):
                     r = req.request("GET",
                         "%s/?p=%d" % (task.url, x),
                         filters.flt_pageurl,
-                        lambda x: task.queue_wrapper(task.page_q.put, url = x),
+                        #there, we will get original file name while scaning image pages
+                        lambda x: task.queue_wrapper(img_tuble = x),
                         lambda x: task.set_fail(x))
                     if task.failcode:
                         break
+
+                # scan downloaded
+                # this is just a rough scan, it scans every file and stores their size info in _file_in_download_folder
+                task.scan_downloaded()
+
             elif task.state == TASK_STATE_SCAN_IMG:
                 # print here so that see it after we can join former threads
                 self.logger.info(i18n.TASK_TITLE % (
                     task_guid, task.meta['title']))
+
+                # log at here is quite too early
+                # finished file counting will be cleared after page scan
                 self.logger.info(i18n.TASK_WILL_DOWNLOAD_CNT % (
                     task_guid, task.meta['total'] - task.meta['finished'],
                     task.meta['total']))
+
                 # spawn thread to scan images
                 for i in range(task.config['scan_thread_cnt']):
                     tid = 'scan-%d' % (i + 1)
                     _ = self._get_httpworker(tid, task.page_q,
-                        filters.flt_imgurl_wrapper(task.config['download_ori'] and self.has_login),
-                        lambda x, tid = tid: (task.set_reload_url(x[0], x[1], x[2]),
-                            task.img_q.put(x[0]),
+                        filters.flt_imgurl_wrapper(task.config['download_ori'] and self.has_login,task._file_in_download_folder),
+                        lambda x, tid = tid: (task.set_reload_url(x[0], x[1], x[2],x[3]),
                             mon.vote(tid, 0)),
                         lambda x, tid = tid: (mon.vote(tid, x[0])),
                         mon.wrk_keepalive,
@@ -272,6 +313,7 @@ class xeHentai(object):
                     # _._exit = lambda t: t._finish_queue()
                     self._all_threads[TASK_STATE_SCAN_IMG].append(_)
                     _.start()
+
                 task.state = TASK_STATE_DOWNLOAD - 1
             elif task.state == TASK_STATE_SCAN_ARCHIVE:
                 task.state = TASK_STATE_DOWNLOAD - 1
@@ -396,8 +438,19 @@ class xeHentai(object):
                                 #_t.meta['has_ori'] and task.config['download_ori'])
                         # since we don't block on scan_img state, an unempty page_q
                         # indicates we should start from scan_img state,
-                        if _t.state == TASK_STATE_DOWNLOAD and _t.page_q:
-                            _t.state = TASK_STATE_SCAN_IMG
+                        # if _t.state == TASK_STATE_DOWNLOAD and _t.page_q:
+                        #     _t.state = TASK_STATE_SCAN_IMG
+
+                        # page may have changed by the uploader, rescan pages (rescan from metadata in practice) instead
+                        # meta can be changed too
+                        # besides, ip address of exhentai server may have changed, rescan on reload is essential 
+                        if _t.state == TASK_STATE_SCAN_PAGE or _t.state == TASK_STATE_SCAN_IMG or _t.state == TASK_STATE_DOWNLOAD:
+                            _t.page_q = {}
+                            _t.reload_map = {}
+                            _t.filehash_map = {}
+                            _t.renamed_map = {}
+                            _t.fid_fname_map = {}
+                            _t.state = TASK_STATE_GET_META
                         self._all_tasks[_['guid']] = _t
                         self.tasks.put(_['guid'])
                     if self._all_tasks:
