@@ -269,7 +269,12 @@ class Task(object):
         isOutdated = False
         removeAll = False
 
+        # use infomation in .xehdone to check downloaded files
+        # just like a extracted zip file
         if os.path.exists(os.path.join(fpath, ".xehdone")):
+            with open(os.path.join(fpath, ".xehdone")) as xehdone:
+                comment = xehdone.readlines(2)
+                metadata = self.decodeMetaFromZipComment(comment)
             donefile = True
         metadata = {}
         #existing of a file doesn't mean the file is corectly downloaded
@@ -377,18 +382,21 @@ class Task(object):
         # so 01.png, 01.gif, 01.jpg or what else is regarded equally
         if not self.config['rename_ori']:
             fid_2_file_in_folder_map = {}
-            totaldigit = len(str(self.meta['total']))
-            nametemplate = '[0-9]'
-            for i in range(1,totaldigit):
-                nametemplate = '%s%s' %(nametemplate,'[0-9]')
+            
+            re_filename = '[\d]{%d}' % len(str(self.meta['total']))
+            if os.path.exists(fpath) :
+                for filename in os.listdir(fpath):
+                    sfpath = os.path.join(fpath,filename)
+                    if os.path.isfile(sfpath):
+                        fname,ext = os.path.splitext(os.path.basename(filename))
+                        if not ext == '.xeh' and re.match(re_filename, fname):
+                            fid_2_file_in_folder_map.setdefault(int(fname), filename)
 
-            filelist = glob.glob(os.path.join(glob.escape(fpath),'%s%s' % (nametemplate,'.*')))
-
-            for filename in filelist:
-                fname,ext = os.path.splitext(os.path.basename(filename))
-                #sometimes the archiver archived some unfinished files
-                if not ext == '.xeh':
-                    fid_2_file_in_folder_map.setdefault(int(fname), filename)
+            #for filename in filelist:
+            #    fname,ext = os.path.splitext(os.path.basename(filename))
+            #    #sometimes the archiver archived some unfinished files
+            #    if not ext == '.xeh':
+            #        fid_2_file_in_folder_map.setdefault(int(fname), filename)
 
         for fid in range(1, self.meta['total'] + 1):
             # check download range
@@ -421,7 +429,7 @@ class Task(object):
                         #self.fid_fname_map.setdefault(str(fid), expected_file_name)
             else:
                 if fid in fid_2_file_in_folder_map:
-                    expected_fpath = fid_2_file_in_folder_map[fid]
+                    expected_fpath = os.path.join(fpath,fid_2_file_in_folder_map[fid])
                     if os.stat(expected_fpath).st_size == 0:
                         os.remove(expected_fpath)
                     else:
@@ -614,7 +622,9 @@ class Task(object):
                 break
             cnt += 1
         if cnt == self.meta['total']:
-            with open(os.path.join(fpath, ".xehdone"), "w"):
+            # try to store some infomation in xehdone file
+            with open(os.path.join(fpath, ".xehdone"), "w") as xedone:
+                xedone.writelines(self.encodeMetaForZipComment())
                 pass
         try:
             os.rmdir(tmppath)
@@ -626,8 +636,9 @@ class Task(object):
         dpath = self.get_fpath()
         arc = "%s.zip" % dpath
         if os.path.exists(arc):
-            #when truncated images not exist, the zip file is considered fully downloaded
-            #but tags still need  update
+            # [s]when truncated images not exist, the zip file is considered fully downloaded[\s]
+            # [s]but tags still need  update[\s]
+            # in fact you can not edit the comment without rezip files, just leave it
             nochange = True
             with zipfile.ZipFile(arc, 'r') as zipfileTarget:
                 if zipfileTarget.comment == self.encodeMetaForZipComment():
@@ -635,11 +646,15 @@ class Task(object):
 
         with zipfile.ZipFile(arc, 'w')  as zipFile:
             #zip comment created
-            #zipFile.comment = ("xeHentai Archiver v%s customized by Dynilath\n%s" % ( __version__, jsonzipmeta)).encode('utf-8')
             #store json info in respective zip file
             #thus metadata can be packed with comic it self in a single file
             zipFile.comment = self.encodeMetaForZipComment()
             for f in sorted(os.listdir(dpath)):
+                ext = os.path.splitext(f)
+                # never pack xeh files
+                # keep the scaning method to keep available for older version 
+                if ext == '.xehdone' or ext == '.xeh':
+                    continue
                 fullpath = os.path.join(dpath, f)
                 zipFile.write(fullpath, f, zipfile.ZIP_STORED)
         if remove:
