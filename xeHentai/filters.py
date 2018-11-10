@@ -106,7 +106,7 @@ def flt_pageurl(r, suc, fail):
     #(page url, page id, original file name)
     if not picpage:
         fail(ERR_NO_PAGEURL_FOUND)
-    for p in picpageR:
+    for p in picpage:
         suc(p)
 
 def flt_quota_check(func):
@@ -143,7 +143,7 @@ def flt_imgurl_wrapper(ori,folder_list):
                 break
             picurl = util.htmlescape(_[0])
 
-            _ = re.findall('</a></div><div>(.*?) ::[ 0-9x]+:: ([0-9/.]+ [A-Z]{2})</di', r.text)
+            _ = re.findall('</a></div><div>(.*?) ::.*?:: ([0-9/.]+ [A-Z]{2})</di', r.text)
             if not _:
                 break
             filename,filesize = _[0]

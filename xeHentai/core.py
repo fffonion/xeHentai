@@ -111,7 +111,7 @@ class xeHentai(object):
 
         #check if task on same url already exists
         #well, you may need to download from a link and save images in different zip files
-        #but in react, this program doesnt support auto rename zip files
+        #but in fact, this program doesnt support auto rename zip files
         #and as for me, i prefer restart the same task when i click 'add to xehentai', in order to repair truncated images
         for taskitem in self._all_tasks.items():
             if url == taskitem[1].url:
