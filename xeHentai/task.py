@@ -118,7 +118,7 @@ class Task(object):
         return True
 
     #write some metadata into zip file
-    def encodeMetaForZipComment(self):
+    def encode_meta(self):
         zipmeta = {}
         zipmeta.setdefault('gjname',self.meta['gjname'])
         zipmeta.setdefault('gnname',self.meta['gnname'])
@@ -132,7 +132,7 @@ class Task(object):
         jsonzipmeta = json.dumps(zipmeta);
         return ("xeHentai Archiver v%s r1\n%s" % ( __version__, jsonzipmeta)).encode('UTF-8')
 
-    def decodeMetaFromZipComment(self,comment):
+    def decode_meta(self,comment):
         comment_str = comment.decode('UTF-8')
         _ = re.search('{.+}',comment_str)
         if _:
@@ -274,7 +274,7 @@ class Task(object):
         if os.path.exists(os.path.join(fpath, ".xehdone")):
             with open(os.path.join(fpath, ".xehdone")) as xehdone:
                 comment = xehdone.readlines(2)
-                metadata = self.decodeMetaFromZipComment(comment)
+                metadata = self.decode_meta(comment)
             donefile = True
         metadata = {}
         #existing of a file doesn't mean the file is corectly downloaded
@@ -282,7 +282,7 @@ class Task(object):
         if os.path.exists(arc):
             #if the zipfile exists, check the url written in the zipfile
             with zipfile.ZipFile(arc,'r') as zipfileTarget:
-                metadata = self.decodeMetaFromZipComment(zipfileTarget.comment)
+                metadata = self.decode_meta(zipfileTarget.comment)
                 #check fidmap in the file, if there isn't one, then just renew the zip
                 if 'fid_fname_map' in metadata:
                     fid_map = metadata['fid_fname_map']
@@ -624,7 +624,7 @@ class Task(object):
         if cnt == self.meta['total']:
             # try to store some infomation in xehdone file
             with open(os.path.join(fpath, ".xehdone"), "w") as xedone:
-                xedone.writelines(self.encodeMetaForZipComment())
+                xedone.writelines(self.encode_meta())
                 pass
         try:
             os.rmdir(tmppath)
@@ -640,15 +640,15 @@ class Task(object):
             # [s]but tags still need  update[\s]
             # in fact you can not edit the comment without rezip files, just leave it
             nochange = True
-            with zipfile.ZipFile(arc, 'r') as zipfileTarget:
-                if zipfileTarget.comment == self.encodeMetaForZipComment():
+            with zipfile.ZipFile(arc, 'r') as zipfile_target:
+                if zipfile_target.comment == self.encode_meta():
                     return arc
 
-        with zipfile.ZipFile(arc, 'w')  as zipFile:
+        with zipfile.ZipFile(arc, 'w')  as zipfile_target:
             #zip comment created
             #store json info in respective zip file
             #thus metadata can be packed with comic it self in a single file
-            zipFile.comment = self.encodeMetaForZipComment()
+            zipfile_target.comment = self.encode_meta()
             for f in sorted(os.listdir(dpath)):
                 ext = os.path.splitext(f)
                 # never pack xeh files
@@ -656,7 +656,7 @@ class Task(object):
                 if ext == '.xehdone' or ext == '.xeh':
                     continue
                 fullpath = os.path.join(dpath, f)
-                zipFile.write(fullpath, f, zipfile.ZIP_STORED)
+                zipfile_target.write(fullpath, f, zipfile.ZIP_STORED)
         if remove:
             shutil.rmtree(dpath)
         return arc

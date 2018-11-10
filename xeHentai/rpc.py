@@ -179,6 +179,7 @@ class Handler(BaseHTTPRequestHandler):
                                 intfid = int(fid) - 1
                                 #pfname = f
                                 fnamelist = z.namelist()
+                                fnamelist.sort()
                                 if fnamelist.count('.xehdone') > 0:
                                     fnamelist.remove('.xehdone')
                                 pfname = fnamelist[intfid]
@@ -372,8 +373,6 @@ class xeHentaiRPCExtended(object):
         t = self._all_tasks[guid]
         fid = str(fid)
 
-        #if fid in t.renamed_map:
-        #    f = t.renamed_map[fid]
         if fid in t.fid_fname_map:
             f = t.fid_fname_map[fid]
         else:

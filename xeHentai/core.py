@@ -113,7 +113,6 @@ class xeHentai(object):
         #well, you may need to download from a link and save images in different zip files
         #but in react, this program doesnt support auto rename zip files
         #and as for me, i prefer restart the same task when i click 'add to xehentai', in order to repair truncated images
-        taskExists = False
         for taskitem in self._all_tasks.items():
             if url == taskitem[1].url:
                 rguid = taskitem[0]
@@ -124,22 +123,22 @@ class xeHentai(object):
                 self.tasks.put(t.guid)
                 return 0, t.guid
         
-        if not taskExists:
-            if t.guid in self._all_tasks:
-                if self._all_tasks[t.guid].state in (TASK_STATE_FINISHED, TASK_STATE_FAILED):
-                    self.logger.debug(i18n.TASK_PUT_INTO_WAIT % t.guid)
-                    self._all_tasks[t.guid].state = TASK_STATE_WAITING
-                    self._all_tasks[t.guid].cleanup()
+        # task don't exists
+        if t.guid in self._all_tasks:
+            if self._all_tasks[t.guid].state in (TASK_STATE_FINISHED, TASK_STATE_FAILED):
+                self.logger.debug(i18n.TASK_PUT_INTO_WAIT % t.guid)
+                self._all_tasks[t.guid].state = TASK_STATE_WAITING
+                self._all_tasks[t.guid].cleanup()
                 return 0, t.guid
-            self._all_tasks[t.guid] = t
-            if not re.match("^%s/[^/]+/\d+/[^/]+/*#*$" % RESTR_SITE, url):
-                t.set_fail(ERR_URL_NOT_RECOGNIZED)
-            elif not self.has_login and re.match("^https*://exhentai\.org", url):
-                t.set_fail(ERR_CANT_DOWNLOAD_EXH)
-            else:
-                self.tasks.put(t.guid)
-                return 0, t.guid
-            self.logger.error(i18n.TASK_ERROR % (t.guid, i18n.c(t.failcode)))
+        self._all_tasks[t.guid] = t
+        if not re.match("^%s/[^/]+/\d+/[^/]+/*#*$" % RESTR_SITE, url):
+            t.set_fail(ERR_URL_NOT_RECOGNIZED)
+        elif not self.has_login and re.match("^https*://exhentai\.org", url):
+            t.set_fail(ERR_CANT_DOWNLOAD_EXH)
+        else:
+            self.tasks.put(t.guid)
+            return 0, t.guid
+        self.logger.error(i18n.TASK_ERROR % (t.guid, i18n.c(t.failcode)))
         return t.failcode, None
 
     def del_task(self, guid):
@@ -258,10 +257,7 @@ class xeHentai(object):
                 # else:
                 # scan by our own, should not be here currently
                 # start backup thread
-                
-                #dont need blind scan
-                #task.scan_downloaded()
-
+               
                 # scan zip, zip file has metadata in comment
                 # if some image is truncated or outdated, download them again
                 task.scan_downloaded_zipfile()

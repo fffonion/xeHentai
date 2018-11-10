@@ -338,8 +338,6 @@ class Monitor(Thread):
             for k in list(self.thread_last_seen.keys()):
                 _zombie_threshold = self.thread_ref[k].zombie_threshold if k in self.thread_ref else 30
                 if time.time() - self.thread_last_seen[k] > _zombie_threshold:
-                    #k not in thread_ref then thread_ref[k]?????
-                    #if k not in self.thread_ref and self.thread_ref[k].is_alive():
                     if k in self.thread_ref and self.thread_ref[k].is_alive():
                         self.logger.warning(i18n.THREAD_MAY_BECOME_ZOMBIE % k)
                         self.thread_zombie.add(k)
