@@ -22,8 +22,6 @@ if PY3K:
 else:
     from Queue import Queue, Empty
 
-from PIL import ImageFile
-
 class Task(object):
     def __init__(self, url, cfgdict):
         self.url = url
@@ -249,9 +247,9 @@ class Task(object):
             if not file_existed:
                 self.img_q.put(imgurl)
             elif unexpected_file:
-                self._cnt_lock.aquire()
+                self._cnt_lock.acquire()
                 self.meta['finished'] -= 1
-                self.__cnt_lock.release()
+                self._cnt_lock.release()
                 self.img_q.put(imgurl)
 
             self.reload_map[imgurl] = [reload_url, realfname]
@@ -281,8 +279,8 @@ class Task(object):
         arc = "%s.zip" % fpath
         if os.path.exists(arc):
             #if the zipfile exists, check the url written in the zipfile
-            with zipfile.ZipFile(arc,'r') as zipfileTarget:
-                metadata = self.decode_meta(zipfileTarget.comment)
+            with zipfile.ZipFile(arc,'r') as zipfile_target:
+                metadata = self.decode_meta(zipfile_target.comment)
                 #check fidmap in the file, if there isn't one, then just renew the zip
                 if 'fid_fname_map' in metadata:
                     fid_map = metadata['fid_fname_map']
@@ -302,12 +300,12 @@ class Task(object):
                 if not isOutdated and 'url' in metadata and metadata['url'] == self.url:
                     #when url matches, check every image
                     
-                    filenameList = zipfileTarget.namelist()
+                    filenameList = zipfile_target.namelist()
                     isTruncated = False
                     truncated_img_list = []
                     goodimgList = []
                     for in_zip_file_name in filenameList:
-                        zipinfo = zipfileTarget.getinfo(in_zip_file_name)
+                        zipinfo = zipfile_target.getinfo(in_zip_file_name)
                         if not zipinfo.is_dir():
                             ext = os.path.splitext(in_zip_file_name)
                             if ext == '.xehdone':
@@ -318,42 +316,32 @@ class Task(object):
                             elif removeAll:
                                 truncated_img_list.append(in_zip_file_name)
                             else:
-                                try:
-                                    fp = zipfileTarget.open(in_zip_file_name)
-                                    imagep = ImageFile.Parser()
-                                    while True:
-                                        buffer = fp.read(1024)
-                                        if not buffer:
-                                            break
-                                        imagep.feed(buffer)
-                                    image = imagep.close()
-                                    fp.close()
-                                    image.close()
-                                    goodimgList.append(in_zip_file_name)
-                                except IOError:
+                                # remove PIL check, since there is a file size check afterward
+                                if zipinfo.file_size == 0:
                                     isTruncated = True
-                                    fp.close()
                                     truncated_img_list.append(in_zip_file_name)
                                     continue
+                                else:
+                                    goodimgList.append(in_zip_file_name)
                     if not len(goodimgList) == len(fid_map):
                         isTruncated = True
 
                     if isTruncated:
                         #extract all image when some images is truncated
                         #and remove those truncated file
-                        zipfileTarget.extractall(fpath)
-                        zipfileTarget.close()
+                        zipfile_target.extractall(fpath)
+                        zipfile_target.close()
                         os.remove(arc)
                         for truncated_img_name in truncated_img_list:
                             imgpath = os.path.join(fpath,truncated_img_name)
                             os.remove(imgpath)
                     elif not len(self.fid_fname_map) == metadata['total']:
                         #not finished
-                        zipfileTarget.extractall(fpath)
+                        zipfile_target.extractall(fpath)
                     else:
                         donefile = True
                 elif isOutdated:
-                    zipfileTarget.extractall(fpath)
+                    zipfile_target.extractall(fpath)
         
         #a zip file properly commented is trustworth, so program will assume it was completed
         if donefile:
