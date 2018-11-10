@@ -296,7 +296,7 @@ class xeHentai(object):
                 for i in range(task.config['scan_thread_cnt']):
                     tid = 'scan-%d' % (i + 1)
                     _ = self._get_httpworker(tid, task.page_q,
-                        filters.flt_imgurl_wrapper(task.config['download_ori'] and self.has_login,task._file_in_download_folder),
+                        filters.flt_imgurl_wrapper(task.config['download_ori'] and self.has_login),
                         lambda x, tid = tid: (task.set_reload_url(x[0], x[1], x[2],x[3]),
                             mon.vote(tid, 0)),
                         lambda x, tid = tid: (mon.vote(tid, x[0])),

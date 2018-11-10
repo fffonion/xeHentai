@@ -175,72 +175,88 @@ class Task(object):
     #         self.base_url(), pichash[:10], self.gid, self.meta['filelist'][pichash][0]
     #     )
 
+    def get_size_text(self, path):
+        fsize = os.stat(path).st_size
+        float_size = float(fsize)/1024
+        size_unit = 'KB'
+        if float_size > 1024:
+            float_size = float_size / 1024
+            size_unit = 'MB'
+        if float_size > 100:
+            return '%.1f %s' % ( float_size, size_unit)
+        else:
+            return '%.2f %s' % ( float_size, size_unit)
+
+
     def set_reload_url(self, imgurl, reload_url, fname, filesize):
         # if same file occurs severl times in a gallery
         # to be done with new rename logic
+        
+        this_fid = RE_GALLERY.findall(reload_url)[0][1]
+        realfname = self.original_fname_map[this_fid]
+            
+        ext = os.path.splitext(fname)[1]
+        if self.config['download_ori']:
+            ext = os.path.splitext(realfname)[1]
+
+        if not self.config['rename_ori']:
+            realfname = "%%0%dd%%s" % (len(str(self.meta['total']))) % (int(this_fid),ext)
+        self.fid_fname_map.setdefault(this_fid,realfname)
 
         if imgurl in self.reload_map:
-            return
-            #fpath = self.get_fpath()
-            #old_fid = self.get_fname(imgurl)[0]
 
-            #if not old_fid in real_file_name_map.keys():
-            #    file_name_map.setdefault(old_fid,fname)
+            self._f_lock.acquire()
+            existed_file_name = self.reload_map[imgurl][1]
+            fpath = self.get_fpath()
+            old_f = os.path.join(fpath,existed_file_name)
+            this_f = os.path.join(fpath,realfname)
+            file_existed = False
+            unexpected_file = False
 
-            #old_f = os.path.join(fpath, self.get_fidpad(old_fid))
-            #this_fid = int(RE_GALLERY.findall(reload_url)[0][1])
-            #this_f = os.path.join(fpath, self.get_fidpad(this_fid))
-            #self._f_lock.acquire()
-            #if os.path.exists(old_f):
-            #    # we can just copy old file if already downloaded
-            #    try:
-            #        with open(old_f, 'rb') as _of:
-            #            with open(this_f, 'wb') as _nf:
-            #                _nf.write(_of.read())
-            #    except Exception as ex:
-            #        self._f_lock.release()
-            #        raise ex
-            #    else:
-            #        self._f_lock.release()
-            #        self._cnt_lock.acquire()
-            #        self.meta['finished'] += 1
-            #        self._cnt_lock.release()
-            #else:
+            if os.path.exists(old_f):
+                file_existed = True
+                size_text = self.get_size_text(old_f)
+                if not size_text == filesize:
+                    unexpected_file = True
+                    
+            if file_existed and not unexpected_file:
+                # we can just copy old file if already downloaded
+                self._f_lock.acquire()
+                try:
+                    with open(old_f, 'rb') as _of:
+                        with open(this_f, 'wb') as _nf:
+                           _nf.write(_of.read())
+                except Exception as ex:
+                    self._f_lock.release()
+                    raise ex
+                else:
+                    self._f_lock.release()
+                    self._cnt_lock.acquire()
+                    self.meta['finished'] += 1
+                    self._cnt_lock.release()
+            elif unexpected_file:
+                self._cnt_lock.acquire()
+                self.meta['finished'] -= 1
+                self._cnt_lock.release()
+                self.img_q.put(imgurl)
+
+            if not file_existed or unexpected_file:
                 # if not downloaded, we will copy them in save_file
-                #if imgurl not in self.filehash_map:
-                #    self.filehash_map[imgurl] = []
-                #self.filehash_map[imgurl].append((this_fid, old_fid))
-                #self._f_lock.release()
+                if imgurl not in self.filehash_map:
+                    self.filehash_map[imgurl] = []
+                self.filehash_map[imgurl].append((this_fid, old_fid))
+                self._f_lock.release()
         else:
-            this_fid = RE_GALLERY.findall(reload_url)[0][1]
-            realfname = self.original_fname_map[this_fid]
-
-            ext = os.path.splitext(fname)[1]
-            if self.config['download_ori']:
-                ext = os.path.splitext(realfname)[1]
-
-            if not self.config['rename_ori']:
-                realfname = "%%0%dd%%s" % (len(str(self.meta['total']))) % (int(this_fid),ext)
-            self.fid_fname_map.setdefault(this_fid,realfname)
-            
             # check file size for downloaded file
             # i would like a hash check
             # but i cant get a hash before downloading the file
             file_existed = False
             unexpected_file = False
-            if realfname in self._file_in_download_folder:
+            fpath = self.get_fpath()
+            target_file_path = os.path.join(fpath,realfname)
+            if os.path.exists(target_file_path):
                 file_existed = True
-                fpath = self.get_fpath()
-                fsize = self._file_in_download_folder[realfname]
-                float_size = float(fsize)/1024
-                size_unit = 'KB'
-                if float_size > 1024:
-                    float_size = float_size / 1024
-                    size_unit = 'MB'
-                if float_size > 100:
-                    size_text = '%.1f %s' % ( float_size, size_unit)
-                else:
-                    size_text = '%.2f %s' % ( float_size, size_unit)
+                size_text = self.get_size_text(target_file_path)
                 if not size_text == filesize:
                     unexpected_file = True
 
@@ -371,14 +387,15 @@ class Task(object):
         if not self.config['rename_ori']:
             fid_2_file_in_folder_map = {}
             
-            re_filename = '[\d]{%d}' % len(str(self.meta['total']))
+            re_filename = '([\d]{%d})\..*' % len(str(self.meta['total']))
             if os.path.exists(fpath) :
                 for filename in os.listdir(fpath):
                     sfpath = os.path.join(fpath,filename)
                     if os.path.isfile(sfpath):
                         fname,ext = os.path.splitext(os.path.basename(filename))
-                        if not ext == '.xeh' and re.match(re_filename, fname):
-                            fid_2_file_in_folder_map.setdefault(int(fname), filename)
+                        id_in_file_name = re.findall(re_filename, os.path.basename(filename))
+                        if not ext == '.xeh' and id_in_file_name:
+                            fid_2_file_in_folder_map.setdefault(int(id_in_file_name[0]), filename)
 
             #for filename in filelist:
             #    fname,ext = os.path.splitext(os.path.basename(filename))
@@ -466,7 +483,8 @@ class Task(object):
             if not isCrashed:
                 break
 
-        self.original_fname_map.setdefault(_fid,_original_fname)
+        if not _fid in self.original_fname_map:
+            self.original_fname_map.setdefault(_fid,_original_fname)
         self.page_q.put(_page_url)
 
     def save_file(self, imgurl, redirect_url, binary_iter):

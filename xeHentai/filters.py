@@ -127,9 +127,9 @@ def flt_quota_check(func):
             func(r, suc, fail)
     return _
 
-def flt_imgurl_wrapper(ori,folder_list):
+def flt_imgurl_wrapper(ori):
     @flt_quota_check
-    def flt_imgurl(r, suc, fail, ori = ori,folder_list = folder_list):
+    def flt_imgurl(r, suc, fail, ori = ori):
         # input per image page response
         # add (image url, reload url, filename) to queue if suc
         # return (errorcode, page_url) if fail
@@ -163,9 +163,10 @@ def flt_imgurl_wrapper(ori,folder_list):
                 break
             index = _[0]
             fullurl = re.findall('class="mr".+<a href="(.+)"\s*>Download original', r.text)
-            ori_file_size = re.findall('>Download original [0-9]+ x [0-9]+ ([0-9/.]+ [A-Z]{2}) source</a>', r.text)[0]  # like 2.20MB
-            if not _:
-                ori_file_size = filesize
+            ori_file_size = re.findall('>Download original [0-9]+ x [0-9]+ ([0-9/.]+ [A-Z]{2}) source</a>', r.text)  # like 2.20MB
+            if not ori_file_size:
+                ori_file_size = [filesize]
+
             if fullurl:
                 fullurl = util.htmlescape(fullurl[0])
             else:
@@ -177,9 +178,9 @@ def flt_imgurl_wrapper(ori,folder_list):
             reload_url = "%s%snl=%s" % (r._real_url, "&" if "?" in r._real_url else "?", js_nl)
             if ori:
                 # we will parse the 302 url to get original filename
-                return suc((fullurl, reload_url, filename,filesize))
+                return suc((fullurl, reload_url, filename,ori_file_size[0]))
             else:
-                return suc((picurl, reload_url, filename,ori_file_size))
+                return suc((picurl, reload_url, filename,filesize))
 
         return fail((ERR_SCAN_REGEX_FAILED, r._real_url))
 
