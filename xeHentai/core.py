@@ -115,7 +115,8 @@ class xeHentai(object):
         # check if task on same url already exists
         # well, you may need to download from a link and save images in different zip files
         # but in fact, this program doesnt support auto rename zip files
-        # and as for me, i prefer restart the same task when i click 'add to xehentai', in order to repair truncated images
+        # and as for me, i prefer restart the same task when i click 'add to xehentai'
+        # in order to repair truncated images
         for taskitem in self._all_tasks.items():
             if url == taskitem[1].url:
                 rguid = taskitem[0]
@@ -322,12 +323,10 @@ class xeHentai(object):
                     tid = 'down-%d' % (i + 1)
                     _ = self._get_httpworker(tid, task.img_q,
                                              filters.download_file_wrapper(task.config['dir']),
-                                             lambda x, tid=tid: (task.save_file(x[1], x[2], x[0]) and \
-                                                                 (self.logger.debug(i18n.XEH_FILE_DOWNLOADED.format(tid,
-                                                                                                                    *task.get_fname(
-                                                                                                                        x[
-                                                                                                                            1]))),
-                                                                  mon.vote(tid, 0))),
+                                             lambda x, tid=tid: (
+                                                     task.save_file(x[1], x[2], x[0])
+                                                     and (self.logger.debug(i18n.XEH_FILE_DOWNLOADED.format(tid, *task.get_fname(x[1]))),
+                                                          mon.vote(tid, 0))),
                                              lambda x, tid=tid: (
                                                  task.page_q.put(task.get_reload_url(x[1])),
                                                  # if x[0] != ERR_QUOTA_EXCEEDED else None,

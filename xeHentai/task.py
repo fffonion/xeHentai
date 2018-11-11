@@ -183,9 +183,9 @@ class Task(object):
             float_size = float_size / 1024
             size_unit = 'MB'
         if float_size > 100:
-            return '%.1f %s' % ( float_size, size_unit)
+            return '%.1f %s' % (float_size, size_unit)
         else:
-            return '%.2f %s' % ( float_size, size_unit)
+            return '%.2f %s' % (float_size, size_unit)
 
     def set_reload_url(self, image_url, reload_url, fname, filesize):
         # if same file occurs several times in a gallery
@@ -199,7 +199,7 @@ class Task(object):
             ext = os.path.splitext(real_file_name)[1]
 
         if not self.config['rename_ori']:
-            real_file_name = "%%0%dd%%s" % (len(str(self.meta['total']))) % (int(this_fid),ext)
+            real_file_name = "%%0%dd%%s" % (len(str(self.meta['total']))) % (int(this_fid), ext)
         self.fid_2_file_name_map.setdefault(this_fid, real_file_name)
 
         if image_url in self.reload_map:
@@ -355,12 +355,12 @@ class Task(object):
                 else:
                     good_img_list.append(file_name)
 
-        if len(truncated_img_list) > 0 and len(good_img_list) == metadata['total'] and not is_outdated:
+        if len(truncated_img_list) == 0 and len(good_img_list) == self.meta['total'] and not is_outdated:
+            is_done_file = True
+        elif len(truncated_img_list) > 0:
             for truncated_img_name in truncated_img_list:
                 img_path = os.path.join(folder_path, truncated_img_name)
                 os.remove(img_path)
-        else:
-            is_done_file = True
         # a zip file properly commented is trustworthy, so program will assume it was completed
         if is_done_file:
             self._flist_done.update(range(1, self.meta['total'] + 1))
@@ -376,7 +376,7 @@ class Task(object):
         _range_idx = 0
 
         # prepare _file_in_download_folder, it is used in page scan to finally decide whether a image file is correct
-        for root,dirs,files in os.walk(folder_path):
+        for root, dirs, files in os.walk(folder_path):
             for file_name_in_folder_path in files:
                 si_fpath = os.path.join(folder_path, file_name_in_folder_path)
                 self._file_in_download_folder.setdefault(file_name_in_folder_path, os.stat(si_fpath).st_size)
@@ -387,7 +387,7 @@ class Task(object):
         if not self.config['rename_ori']:
 
             re_filename = '([\d]{%d})\..*' % len(str(self.meta['total']))
-            if os.path.exists(folder_path) :
+            if os.path.exists(folder_path):
                 for file_name in os.listdir(folder_path):
                     image_file_path = os.path.join(folder_path, file_name)
                     if os.path.isfile(image_file_path):
