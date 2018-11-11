@@ -450,7 +450,6 @@ class xeHentai(object):
                             _t.page_q = {}
                             _t.reload_map = {}
                             _t.filehash_map = {}
-                            _t.renamed_map = {}
                             _t.fid_fname_map = {}
                             _t.state = TASK_STATE_GET_META
                         self._all_tasks[_['guid']] = _t
