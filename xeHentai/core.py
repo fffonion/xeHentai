@@ -264,11 +264,8 @@ class xeHentai(object):
 
                 # scan zip, zip file has metadata in comment
                 # if some image is truncated or outdated, download them again
-                task.prescan_downloaded()
-
-                # temp_page_q = {}
-
-                if task.state == TASK_STATE_FINISHED:
+                if task.prescan_downloaded():
+                    task.state = TASK_STATE_DOWNLOAD
                     continue
                 for x in range(0,
                                int(math.ceil(1.0 * task.meta['total'] / int(task.meta['thumbnail_cnt'])))):
@@ -283,7 +280,9 @@ class xeHentai(object):
 
                 # scan downloaded
                 # this is just a rough scan, it scans every file and stores their size info in _file_in_download_folder
-                task.scan_downloaded()
+                if task.scan_downloaded():
+                    task.state = TASK_STATE_DOWNLOAD
+                    continue
 
             elif task.state == TASK_STATE_SCAN_IMG:
                 # print here so that see it after we can join former threads

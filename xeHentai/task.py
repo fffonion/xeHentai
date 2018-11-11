@@ -312,7 +312,7 @@ class Task(object):
                     zip_info = zipfile_target.getinfo(in_zip_file_name)
                     if not zip_info.is_dir():
                         _name, _ext = os.path.splitext(in_zip_file_name)
-                        if zip_info.st_size == 0\
+                        if zip_info.file_size == 0\
                                 or _ext == '.xeh' or shall_remove_all:
                             truncated_img_list.append(in_zip_file_name)
                         elif _ext == '.xehdone':
@@ -330,7 +330,6 @@ class Task(object):
         elif os.path.exists(os.path.join(folder_path, '.xehdone')):
             # use infomation in .xehdone to check downloaded files
             # just like a extracted zip file
-
             with open(os.path.join(folder_path, '.xehdone'), 'r') as xehdone:
                 comment = xehdone.readline()
                 if comment:
@@ -366,7 +365,8 @@ class Task(object):
             self._flist_done.update(range(1, self.meta['total'] + 1))
         self.meta['finished'] = len(self._flist_done)
         if self.meta['finished'] == self.meta['total']:
-            self.state = TASK_STATE_FINISHED
+            return True
+        return False
 
     def scan_downloaded(self, scaled = True):
         folder_path = self.get_fpath()
@@ -391,9 +391,9 @@ class Task(object):
                 for file_name in os.listdir(folder_path):
                     image_file_path = os.path.join(folder_path, file_name)
                     if os.path.isfile(image_file_path):
-                        file_name, ext = os.path.splitext(os.path.basename(file_name))
-                        id_in_file_name = re.findall(re_filename, os.path.basename(file_name))
-                        if not ext == '.xeh' and id_in_file_name:
+                        _file_name, _ext = os.path.splitext(os.path.basename(file_name))
+                        id_in_file_name = re.findall(re_filename, file_name)
+                        if not _ext == '.xeh' and id_in_file_name:
                             fid_2_file_in_folder_map.setdefault(int(id_in_file_name[0]), file_name)
 
         for fid in range(1, self.meta['total'] + 1):
@@ -425,7 +425,8 @@ class Task(object):
         if self.config['download_range']:
             self.meta['finished'] += (self.meta['total'] - len(self.download_range))
         if self.meta['finished'] == self.meta['total']:
-            self.state = TASK_STATE_FINISHED
+            return True
+        return False
 
     def queue_wrapper(self, pichash = None, img_tuble = None):
         # if url is not finished, call callback to put into queue
