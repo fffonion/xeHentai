@@ -2,9 +2,10 @@
 
 *.sln
 *.pyproj
-/.vs
+/.vs/*
 *.suo
 *.sqlite
+/.idea/*
 
 *.pyc
 *.json
