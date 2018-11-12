@@ -315,7 +315,7 @@ class Task(object):
                 # when url matches, check every image
                 file_name_list = zipfile_target.namelist()
                 if not is_fid_file_name_map_NOT_existed:
-                    for _fid, _file_name in metadata['fid_fname_map']:
+                    for _fid, _file_name in metadata['fid_fname_map'].items():
                         if _file_name in file_name_list:
                             zip_info = zipfile_target.getinfo(_file_name)
                             _name, _ext = os.path.splitext(_file_name)
@@ -364,7 +364,7 @@ class Task(object):
 
             file_name_list = os.listdir(folder_path)
             if is_fid_file_name_map_NOT_existed:
-                for _fid, _file_name in metadata['fid_fname_map']:
+                for _fid, _file_name in metadata['fid_fname_map'].items():
                     if _file_name in file_name_list:
                         _name, _ext = os.path.splitext(_file_name)
                         file_path = os.path.join(folder_path, _file_name)
