@@ -559,6 +559,8 @@ class Task(object):
             with zipfile.ZipFile(arc, 'r') as zipfile_target:
                 if zipfile_target.comment == self.encode_meta():
                     return arc
+                else:
+                    zipfile_target.extractall(dpath)
 
         with zipfile.ZipFile(arc, 'w')  as zipfile_target:
             # zip comment created
