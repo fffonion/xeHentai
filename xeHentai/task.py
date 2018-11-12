@@ -261,6 +261,10 @@ class Task(object):
 
             if not file_existed:
                 self.img_q.put(image_url)
+            elif file_existed and not unexpected_file:
+                self._cnt_lock.acquire()
+                self.meta['finished'] += 1
+                self._cnt_lock.release()
             elif unexpected_file:
                 self._cnt_lock.acquire()
                 self.meta['finished'] -= 1
@@ -280,7 +284,7 @@ class Task(object):
         folder_path = self.get_fpath()
 
         is_done_file = False
-        is_outdated = False
+        is_fid_file_name_map_NOT_existed = False
         shall_remove_all = False
 
         # TODO: what to do with this situation
@@ -297,30 +301,45 @@ class Task(object):
             with zipfile.ZipFile(arc, 'r') as zipfile_target:
                 metadata = self.decode_meta(zipfile_target.comment.decode('UTF-8'))
                 # check fidmap in the file, if there isn't one, then just renew the zip
-                if 'fid_fname_map' not in metadata:
-                    is_outdated = True
+                # TODO: in some cases, self.meta['total'] == 0,
+                # TODO: this is obviously an error in meta scanning, yet is able to be detected
+                if 'fid_fname_map' not in metadata or not len(metadata['fid_fname_map']) == self.meta['total']:
+                    is_fid_file_name_map_NOT_existed = True
                 if 'download_ori' in metadata and not metadata['download_ori'] == self.config['download_ori']:
                     shall_remove_all = True
                 if 'rename_ori' in metadata and not metadata['rename_ori'] == self.config['rename_ori']:
                     shall_remove_all = True
-                if 'url' in metadata and metadata['url'] == self.url:
+                if 'url' in metadata and not metadata['url'] == self.url:
                     what_a_same_file_with_different_url = True
 
                 # when url matches, check every image
                 file_name_list = zipfile_target.namelist()
-                for in_zip_file_name in file_name_list:
-                    zip_info = zipfile_target.getinfo(in_zip_file_name)
-                    if not zip_info.is_dir():
-                        _name, _ext = os.path.splitext(in_zip_file_name)
-                        if zip_info.file_size == 0\
-                                or _ext == '.xeh' or shall_remove_all:
-                            truncated_img_list.append(in_zip_file_name)
-                        elif _ext == '.xehdone':
-                            continue
-                        else:
-                            good_img_list.append(in_zip_file_name)
+                if not is_fid_file_name_map_NOT_existed:
+                    for _fid, _file_name in metadata['fid_fname_map']:
+                        if _file_name in file_name_list:
+                            zip_info = zipfile_target.getinfo(_file_name)
+                            _name, _ext = os.path.splitext(_file_name)
+                            if zip_info.file_size == 0\
+                                    or _ext == '.xeh' or shall_remove_all:
+                                truncated_img_list.append(_file_name)
+                            elif _ext == '.xehdone':
+                                continue
+                            else:
+                                good_img_list.append(_file_name)
+                else:
+                    for in_zip_file_name in file_name_list:
+                        zip_info = zipfile_target.getinfo(in_zip_file_name)
+                        if not zip_info.is_dir():
+                            _name, _ext = os.path.splitext(in_zip_file_name)
+                            if zip_info.file_size == 0\
+                                    or _ext == '.xeh' or shall_remove_all:
+                                truncated_img_list.append(in_zip_file_name)
+                            elif _ext == '.xehdone':
+                                continue
+                            else:
+                                good_img_list.append(in_zip_file_name)
 
-                if len(truncated_img_list) > 0 or not len(good_img_list) == metadata['total'] or is_outdated:
+                if len(truncated_img_list) > 0 or not len(good_img_list) == self.meta['total'] or is_fid_file_name_map_NOT_existed:
                     # extract all image when some images is truncated
                     # or when download is not finished
                     zipfile_target.extractall(folder_path)
@@ -334,8 +353,8 @@ class Task(object):
                 comment = xehdone.readline()
                 if comment:
                     metadata = self.decode_meta(comment)
-            if 'fid_fname_map' not in metadata:
-                is_outdated = True
+            if 'fid_fname_map' not in metadata or not len(metadata['fid_fname_map']) == self.meta['total']:
+                is_fid_file_name_map_NOT_existed = True
             if 'download_ori' in metadata and not metadata['download_ori'] == self.config['download_ori']:
                 shall_remove_all = True
             if 'rename_ori' in metadata and not metadata['rename_ori'] == self.config['rename_ori']:
@@ -343,18 +362,32 @@ class Task(object):
             if 'url' in metadata and not metadata['url'] == self.url:
                 what_a_same_file_with_different_url = True
 
-            for file_name in os.listdir(folder_path):
-                _name, _ext = os.path.splitext(file_name)
-                file_path = os.path.join(folder_path, file_name)
-                if os.stat(file_path).st_size == 0\
-                        or _ext == '.xeh' or shall_remove_all:
-                    truncated_img_list.append(file_name)
-                elif _ext == '.xehdone':
-                    continue
-                else:
-                    good_img_list.append(file_name)
+            file_name_list = os.listdir(folder_path)
+            if is_fid_file_name_map_NOT_existed:
+                for _fid, _file_name in metadata['fid_fname_map']:
+                    if _file_name in file_name_list:
+                        _name, _ext = os.path.splitext(_file_name)
+                        file_path = os.path.join(folder_path, _file_name)
+                        if os.stat(file_path).st_size == 0 \
+                                or _ext == '.xeh' or shall_remove_all:
+                            truncated_img_list.append(_file_name)
+                        elif _ext == '.xehdone':
+                            continue
+                        else:
+                            good_img_list.append(_file_name)
+            else:
+                for file_name in file_name_list:
+                    _name, _ext = os.path.splitext(file_name)
+                    file_path = os.path.join(folder_path, file_name)
+                    if os.stat(file_path).st_size == 0\
+                            or _ext == '.xeh' or shall_remove_all:
+                        truncated_img_list.append(file_name)
+                    elif _ext == '.xehdone':
+                        continue
+                    else:
+                        good_img_list.append(file_name)
 
-        if len(truncated_img_list) == 0 and len(good_img_list) == self.meta['total'] and not is_outdated:
+        if len(truncated_img_list) == 0 and len(good_img_list) == self.meta['total'] and not is_fid_file_name_map_NOT_existed:
             is_done_file = True
         elif len(truncated_img_list) > 0:
             for truncated_img_name in truncated_img_list:

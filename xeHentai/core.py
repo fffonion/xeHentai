@@ -278,11 +278,15 @@ class xeHentai(object):
                     if task.failcode:
                         break
 
+                # i encountered one case that task failed but still continued
+                if task.state == TASK_STATE_FAILED:
+                    break
+
                 # scan downloaded
                 # this is just a rough scan, it scans every file and stores their size info in _file_in_download_folder
-                if task.scan_downloaded():
-                    task.state = TASK_STATE_SCAN_IMG
-                    continue
+                #if task.scan_downloaded():
+                #    task.state = TASK_STATE_SCAN_IMG
+                #   continue
 
             elif task.state == TASK_STATE_SCAN_IMG:
                 # print here so that see it after we can join former threads
@@ -324,6 +328,7 @@ class xeHentai(object):
                                              filters.download_file_wrapper(task.config['dir']),
                                              lambda x, tid=tid: (
                                                      task.save_file(x[1], x[2], x[0])
+                                             # TODO: some times error with x[1] is not in reload_map
                                                      and (self.logger.debug(i18n.XEH_FILE_DOWNLOADED.format(tid, *task.get_fname(x[1]))),
                                                           mon.vote(tid, 0))),
                                              lambda x, tid=tid: (
