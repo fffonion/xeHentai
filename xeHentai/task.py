@@ -223,7 +223,7 @@ class Task(object):
             if os.path.exists(existed_file):
                 file_existed = True
                 size_bottom, size_top = self.get_size_range(filesize)
-                existed_file_size = os.stat(existed_file)
+                existed_file_size = os.stat(existed_file).st_size
                 if not size_bottom <= existed_file_size < size_top:
                     unexpected_file = True
 
@@ -265,7 +265,7 @@ class Task(object):
             if os.path.exists(target_file_path):
                 file_existed = True
                 size_bottom, size_top = self.get_size_range(filesize)
-                existed_file_size = os.stat(target_file_path)
+                existed_file_size = os.stat(target_file_path).st_size
                 if not size_bottom <= existed_file_size < size_top:
                     unexpected_file = True
 
