@@ -281,12 +281,10 @@ class xeHentai(object):
                 # i encountered one case that task failed but still continued
                 if task.state == TASK_STATE_FAILED:
                     break
-
-                # scan downloaded
-                # this is just a rough scan, it scans every file and stores their size info in _file_in_download_folder
-                #if task.scan_downloaded():
-                #    task.state = TASK_STATE_SCAN_IMG
-                #   continue
+                # after scan will change _flist_done and shorten the download queue
+                if task.scan_downloaded():
+                    task.state = TASK_STATE_SCAN_IMG
+                    continue
 
             elif task.state == TASK_STATE_SCAN_IMG:
                 # print here so that see it after we can join former threads

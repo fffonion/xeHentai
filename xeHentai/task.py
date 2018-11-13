@@ -293,7 +293,6 @@ class Task(object):
     def prescan_downloaded(self):
         folder_path = self.get_fpath()
 
-        is_done_file = False
         is_fid_file_name_map_NOT_existed = False
         shall_remove_all = False
 
@@ -375,7 +374,7 @@ class Task(object):
                 what_a_same_file_with_different_url = True
 
             file_name_list = os.listdir(folder_path)
-            if is_fid_file_name_map_NOT_existed:
+            if not is_fid_file_name_map_NOT_existed:
                 for _fid, _file_name in metadata['fid_fname_map'].items():
                     if _file_name in file_name_list:
                         _name, _ext = os.path.splitext(_file_name)
@@ -399,15 +398,14 @@ class Task(object):
                     else:
                         good_img_list.append(file_name)
 
+        # a zip file properly commented is trustworthy, so program will assume it was completed
         if len(truncated_img_list) == 0 and len(good_img_list) == self.meta['total'] and not is_fid_file_name_map_NOT_existed:
-            is_done_file = True
+            self._flist_done.update(range(1, self.meta['total'] + 1))
         elif len(truncated_img_list) > 0:
             for truncated_img_name in truncated_img_list:
                 img_path = os.path.join(folder_path, truncated_img_name)
                 os.remove(img_path)
-        # a zip file properly commented is trustworthy, so program will assume it was completed
-        if is_done_file:
-            self._flist_done.update(range(1, self.meta['total'] + 1))
+
         self.meta['finished'] = len(self._flist_done)
         if self.meta['finished'] == self.meta['total']:
             return True
@@ -416,55 +414,33 @@ class Task(object):
     def scan_downloaded(self, scaled = True):
         folder_path = self.get_fpath()
         is_done_file = False
-        if os.path.exists(os.path.join(folder_path, ".xehdone")):
-            is_done_file = True
         _range_idx = 0
 
-        # prepare _file_in_download_folder, it is used in page scan to finally decide whether a image file is correct
-        for root, dirs, files in os.walk(folder_path):
-            for file_name_in_folder_path in files:
-                si_fpath = os.path.join(folder_path, file_name_in_folder_path)
-                self._file_in_download_folder.setdefault(file_name_in_folder_path, os.stat(si_fpath).st_size)
+        scanning_zip = False
+        scanning_folder = False
 
-        fid_2_file_in_folder_map = {}
-        # in this section, i don't know what format the downloaded file would be
-        # so 01.png, 01.gif, 01.jpg or what else is regarded equally
-        if not self.config['rename_ori']:
+        zip_path = '%s.%s' % (folder_path, ',zip')
 
-            re_filename = '([\d]{%d})\..*' % len(str(self.meta['total']))
-            if os.path.exists(folder_path):
-                for file_name in os.listdir(folder_path):
-                    image_file_path = os.path.join(folder_path, file_name)
-                    if os.path.isfile(image_file_path):
-                        _file_name, _ext = os.path.splitext(os.path.basename(file_name))
-                        id_in_file_name = re.findall(re_filename, file_name)
-                        if not _ext == '.xeh' and id_in_file_name:
-                            fid_2_file_in_folder_map.setdefault(int(id_in_file_name[0]), file_name)
+        if os.path.exists( zip_path ):
+            scanning_zip = True
+        elif os.path.exists(folder_path):
+            scanning_folder = True
+        else:
+            return False
 
-        for fid in range(1, self.meta['total'] + 1):
-
-            # check download range
-            if self.config['download_range']:
-                if fid not in self.download_range:
-                    continue
-
-            if is_done_file:
-                self._flist_done.add(int(fid))
-            elif self.config['rename_ori']:
-                expected_file_name = self.fid_2_original_file_name_map[str(fid)]
-                expected_file_path = os.path.join(folder_path, expected_file_name)
-                if os.path.exists(expected_file_path):
-                    if os.stat(expected_file_path).st_size == 0:
-                        os.remove(expected_file_path)
-                    else:
-                        self._flist_done.add(int(fid))
-            else:
-                if fid in fid_2_file_in_folder_map:
-                    expected_file_path = os.path.join(folder_path, fid_2_file_in_folder_map[fid])
-                    if os.stat(expected_file_path).st_size == 0:
-                        os.remove(expected_file_path)
-                    else:
-                        self._flist_done.add(int(fid))
+        # page scan is complete, and fid_2_file_name_map is filled
+        # bad files are already removed in prescan, so there is no size check here
+        for _fid, _file_name in self.fid_2_file_name_map.items():
+            if self.meta['download_rage'] and int(_fid) not in self.download_range:
+                continue
+            if scanning_zip:
+                with zipfile.ZipFile(zip_path) as zip_file_target:
+                    if _file_name in zip_file_target.filelist:
+                        self._flist_done.add(int(_fid))
+            elif scanning_folder:
+                target_file_path = os.path.join(folder_path,_file_name)
+                if os.path.exists(target_file_path):
+                    self._flist_done.add(int(_fid))
 
         self.meta['finished'] = len(self._flist_done)
         if self.config['download_range']:
