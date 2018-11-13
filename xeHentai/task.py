@@ -175,18 +175,25 @@ class Task(object):
     #     )
 
     @staticmethod
-    def get_size_text(path):
-        # 646.25 rounded to 646.2 in python 3.7 but 646.3 in python 2.7
-        file_size = os.stat(path).st_size
-        float_size = float(file_size)/1024
-        size_unit = 'KB'
-        if float_size > 1024:
-            float_size = float_size / 1024
-            size_unit = 'MB'
-        if float_size > 100:
-            return '%.1f %s' % (float_size, size_unit)
+    def get_size_range(size_text):
+        _ = re.findall('(\d+(?:\.(\d+))?) *([M|K]B)', size_text)
+        if _:
+            _number, _decimal, _unit = _[0]
         else:
-            return '%.2f %s' % (float_size, size_unit)
+            return 0, 0
+        number = float(_number)
+        uncertain = 0.5
+
+        if _decimal:
+            for i in range(0, len(_decimal)):
+                uncertain /= 10
+
+        unit = 1
+        if _unit == 'KB':
+            unit *= 1024
+        elif _unit == 'MB':
+            unit *= 1048576
+        return (number - uncertain) * unit, (number + uncertain) * unit
 
     def set_reload_url(self, image_url, reload_url, fname, filesize):
         # if same file occurs several times in a gallery
@@ -215,8 +222,9 @@ class Task(object):
             existed_file_id = RE_GALLERY.findall(existed_image_url)
             if os.path.exists(existed_file):
                 file_existed = True
-                size_text = self.get_size_text(existed_file)
-                if not size_text == filesize:
+                size_bottom, size_top = self.get_size_range(filesize)
+                existed_file_size = os.stat(existed_file)
+                if not size_bottom <= existed_file_size < size_top:
                     unexpected_file = True
 
             if file_existed and not unexpected_file:
@@ -256,8 +264,9 @@ class Task(object):
             target_file_path = os.path.join(folder_path, real_file_name)
             if os.path.exists(target_file_path):
                 file_existed = True
-                size_text = self.get_size_text(target_file_path)
-                if not size_text == filesize:
+                size_bottom, size_top = self.get_size_range(filesize)
+                existed_file_size = os.stat(target_file_path)
+                if not size_bottom <= existed_file_size < size_top:
                     unexpected_file = True
 
             if not file_existed:
