@@ -176,6 +176,7 @@ class Task(object):
 
     @staticmethod
     def get_size_text(path):
+        # 646.25 rounded to 646.2 in python 3.7 but 646.3 in python 2.7
         file_size = os.stat(path).st_size
         float_size = float(file_size)/1024
         size_unit = 'KB'
@@ -233,10 +234,10 @@ class Task(object):
                     self._cnt_lock.acquire()
                     self.meta['finished'] += 1
                     self._cnt_lock.release()
-            elif unexpected_file:
-                self._cnt_lock.acquire()
-                self.meta['finished'] -= 1
-                self._cnt_lock.release()
+            elif file_existed and unexpected_file:
+                # self._cnt_lock.acquire()
+                # self.meta['finished'] -= 1
+                # self._cnt_lock.release()
                 self.img_q.put(image_url)
 
             if not file_existed or unexpected_file:
@@ -265,10 +266,10 @@ class Task(object):
                 self._cnt_lock.acquire()
                 self.meta['finished'] += 1
                 self._cnt_lock.release()
-            elif unexpected_file:
-                self._cnt_lock.acquire()
-                self.meta['finished'] -= 1
-                self._cnt_lock.release()
+            elif file_existed and unexpected_file:
+                # self._cnt_lock.acquire()
+                # self.meta['finished'] -= 1
+                # self._cnt_lock.release()
                 self.img_q.put(image_url)
 
             self.reload_map[image_url] = [reload_url, real_file_name]
@@ -295,6 +296,7 @@ class Task(object):
         good_img_list = []
 
         # existing of a file doesn't mean the file is correctly downloaded
+        # scan zip
         arc = "%s.zip" % folder_path
         if os.path.exists(arc):
             # if the zipfile exists, check the url written in the zipfile
@@ -346,6 +348,7 @@ class Task(object):
                     zipfile_target.close()
                     os.remove(arc)
 
+        # scan xehdone
         elif os.path.exists(os.path.join(folder_path, '.xehdone')):
             # use infomation in .xehdone to check downloaded files
             # just like a extracted zip file
@@ -523,11 +526,8 @@ class Task(object):
         fname = self.fid_2_file_name_map[fid]
 
         fn = os.path.join(fpath, fname)
-        if os.path.exists(fn) and os.stat(fn).st_size > 0:
-            self._cnt_lock.acquire()
-            self.meta['finished'] += 1
-            self._cnt_lock.release()
-            return True
+        if os.path.exists(fn):
+            os.remove(fn)
 
         # create a femp file first
         # we don't need _f_lock because this will not be in a sequence
