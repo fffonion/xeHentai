@@ -61,10 +61,22 @@ class Task(object):
 
         # file that was in the folder, used to check downloaded files
         # map file name to file size
-        self._file_in_download_folder = {}  # file size check grant more precision in downloaded file check
-        self.fid_2_original_file_name_map = {}  # map fid to file original name, which appears on gallery pages
-        self.fid_2_file_name_map = {}  # map fid to file name, just like the old self.renamed_map
-        self.download_range = []  # download range list, former method is too hard to maintain
+
+        # file size check grant more precision in downloaded file check
+        self._file_in_download_folder = []
+
+        # map fid to file original name, which appears on gallery pages
+        self.fid_2_original_file_name_map = {}
+
+        # map fid to file name, just like the old self.renamed_map
+        self.fid_2_file_name_map = {}
+
+        # download range list, former method is too hard to maintain
+        self.download_range = []
+
+        # times of image page loading is used by ehentai for counting bandwidth limit
+        self.fid_2_file_size_map = {}  # map fid to file size text, reduce image page load
+
         # and, the fid in these map will all be str
         # when int key dumps into files by python, it is somehow transformed into str
         # and an error would occur when you load it again 
@@ -93,6 +105,11 @@ class Task(object):
             self.page_q = None
             self.list_q = None
             self.reload_map = {}
+
+            self._file_in_download_folder = []
+            self.fid_2_file_size_map = {}
+            self.fid_2_original_file_name_map = {}
+            self.download_range = []
 
             # if 'filelist' in self.meta:
             #     del self.meta['filelist']
@@ -208,7 +225,16 @@ class Task(object):
 
         if not self.config['rename_ori']:
             real_file_name = "%%0%dd%%s" % (len(str(self.meta['total']))) % (int(this_fid), ext)
-        self.fid_2_file_name_map.setdefault(this_fid, real_file_name)
+
+        if this_fid in self.fid_2_file_name_map:
+            self.fid_2_file_name_map[this_fid] = real_file_name
+        else:
+            self.fid_2_file_name_map.setdefault(this_fid, real_file_name)
+
+        if this_fid not in self.fid_2_file_size_map:
+            self.fid_2_file_size_map.setdefault(this_fid, filesize)
+        else:
+            self.fid_2_file_size_map[this_fid] = filesize
 
         if image_url in self.reload_map:
 
@@ -269,6 +295,8 @@ class Task(object):
                 if not size_bottom <= existed_file_size < size_top:
                     unexpected_file = True
 
+            self.reload_map.setdefault(image_url, [reload_url, real_file_name])
+
             if not file_existed:
                 self.img_q.put(image_url)
             elif file_existed and not unexpected_file:
@@ -281,7 +309,6 @@ class Task(object):
                 # self._cnt_lock.release()
                 self.img_q.put(image_url)
 
-            self.reload_map[image_url] = [reload_url, real_file_name]
 
     def get_reload_url(self, imgurl):
         if not imgurl:
@@ -293,7 +320,7 @@ class Task(object):
     def prescan_downloaded(self):
         folder_path = self.get_fpath()
 
-        is_fid_file_name_map_NOT_existed = False
+        is_fid_file_name_map_existed = True
         shall_remove_all = False
 
         # TODO: what to do with this situation
@@ -314,7 +341,7 @@ class Task(object):
                 # TODO: in some cases, self.meta['total'] == 0,
                 # TODO: this is obviously an error in meta scanning, yet is able to be detected
                 if 'fid_fname_map' not in metadata or not len(metadata['fid_fname_map']) == self.meta['total']:
-                    is_fid_file_name_map_NOT_existed = True
+                    is_fid_file_name_map_existed = False
                 if 'download_ori' in metadata and not metadata['download_ori'] == self.config['download_ori']:
                     shall_remove_all = True
                 if 'rename_ori' in metadata and not metadata['rename_ori'] == self.config['rename_ori']:
@@ -324,7 +351,7 @@ class Task(object):
 
                 # when url matches, check every image
                 file_name_list = zipfile_target.namelist()
-                if not is_fid_file_name_map_NOT_existed:
+                if is_fid_file_name_map_existed:
                     for _fid, _file_name in metadata['fid_fname_map'].items():
                         if _file_name in file_name_list:
                             zip_info = zipfile_target.getinfo(_file_name)
@@ -349,7 +376,7 @@ class Task(object):
                             else:
                                 good_img_list.append(in_zip_file_name)
 
-                if len(truncated_img_list) > 0 or not len(good_img_list) == self.meta['total'] or is_fid_file_name_map_NOT_existed:
+                if len(truncated_img_list) > 0 or not len(good_img_list) == self.meta['total'] or not is_fid_file_name_map_existed:
                     # extract all image when some images is truncated
                     # or when download is not finished
                     zipfile_target.extractall(folder_path)
@@ -365,7 +392,7 @@ class Task(object):
                 if comment:
                     metadata = self.decode_meta(comment)
             if 'fid_fname_map' not in metadata or not len(metadata['fid_fname_map']) == self.meta['total']:
-                is_fid_file_name_map_NOT_existed = True
+                is_fid_file_name_map_existed = False
             if 'download_ori' in metadata and not metadata['download_ori'] == self.config['download_ori']:
                 shall_remove_all = True
             if 'rename_ori' in metadata and not metadata['rename_ori'] == self.config['rename_ori']:
@@ -374,7 +401,7 @@ class Task(object):
                 what_a_same_file_with_different_url = True
 
             file_name_list = os.listdir(folder_path)
-            if not is_fid_file_name_map_NOT_existed:
+            if is_fid_file_name_map_existed:
                 for _fid, _file_name in metadata['fid_fname_map'].items():
                     if _file_name in file_name_list:
                         _name, _ext = os.path.splitext(_file_name)
@@ -399,8 +426,9 @@ class Task(object):
                         good_img_list.append(file_name)
 
         # a zip file properly commented is trustworthy, so program will assume it was completed
-        if len(truncated_img_list) == 0 and len(good_img_list) == self.meta['total'] and not is_fid_file_name_map_NOT_existed:
+        if len(truncated_img_list) == 0 and len(good_img_list) == self.meta['total'] and is_fid_file_name_map_existed:
             self._flist_done.update(range(1, self.meta['total'] + 1))
+            self.fid_2_file_name_map = metadata['fid_fname_map']
         elif len(truncated_img_list) > 0:
             for truncated_img_name in truncated_img_list:
                 img_path = os.path.join(folder_path, truncated_img_name)
@@ -411,7 +439,7 @@ class Task(object):
             return True
         return False
 
-    def scan_downloaded(self, scaled = True):
+    def scan_downloaded(self, fid_2_page_url_map, scaled = True):
         folder_path = self.get_fpath()
         is_done_file = False
         _range_idx = 0
@@ -419,28 +447,61 @@ class Task(object):
         scanning_zip = False
         scanning_folder = False
 
-        zip_path = '%s.%s' % (folder_path, ',zip')
+        # scan folder only
+        # if there is any problem in zip
+        # prescan should have extracted it
 
-        if os.path.exists( zip_path ):
-            scanning_zip = True
-        elif os.path.exists(folder_path):
+        if os.path.exists(folder_path):
             scanning_folder = True
         else:
+            for _fid, _page_url in fid_2_page_url_map.items():
+                self.page_q.put(_page_url)
             return False
 
-        # page scan is complete, and fid_2_file_name_map is filled
-        # bad files are already removed in prescan, so there is no size check here
-        for _fid, _file_name in self.fid_2_file_name_map.items():
-            if self.meta['download_rage'] and int(_fid) not in self.download_range:
-                continue
-            if scanning_zip:
-                with zipfile.ZipFile(zip_path) as zip_file_target:
-                    if _file_name in zip_file_target.filelist:
-                        self._flist_done.add(int(_fid))
-            elif scanning_folder:
-                target_file_path = os.path.join(folder_path,_file_name)
-                if os.path.exists(target_file_path):
-                    self._flist_done.add(int(_fid))
+        file_name = ''
+
+        guess_fid_2_file_name_map = {}
+
+        re_name_filter = re.compile('^(\d{%d})\..+$' % len(str(self.meta['total'])))
+        self._file_in_download_folder = []
+
+        for _file_name in os.listdir(folder_path):
+            _ext = os.path.splitext(_file_name)[1]
+            if _ext == '.xeh':
+                os.remove(os.path.join(folder_path, _file_name))
+            else:
+                self._file_in_download_folder.append(_file_name)
+
+        if self.config['rename_ori']:
+            for _fid, _file_name in self.fid_2_original_file_name_map:
+                if os.path.exists(os.path.join(folder_path, _file_name)):
+                    guess_fid_2_file_name_map.setdefault(_fid, _file_name)
+        else:
+            for _file_name in self._file_in_download_folder:
+                _ = re_name_filter.findall(_file_name)
+                if _:
+                    guess_fid_2_file_name_map.setdefault(str(int(_[0])), _file_name)
+
+        for _fid, _url in fid_2_page_url_map.items():
+            image_done_file = False
+            if _fid in self.fid_2_file_size_map\
+                    and _fid in guess_fid_2_file_name_map:
+                size_text = self.fid_2_file_size_map[_fid]
+                guess_file_name = guess_fid_2_file_name_map[_fid]
+                bottom, top = self.get_size_range(size_text)
+                size = os.stat(os.path.join(folder_path, guess_file_name)).st_size
+                if bottom <= size < top:
+                    file_name = guess_file_name
+                    image_done_file = True
+
+            if not image_done_file:
+                self.page_q.put(_url)
+            else:
+                if _fid not in self.fid_2_file_name_map:
+                    self.fid_2_file_name_map.setdefault(_fid, file_name)
+                else:
+                    self.fid_2_file_name_map[_fid] = file_name
+                self._flist_done.add(int(_fid))
 
         self.meta['finished'] = len(self._flist_done)
         if self.config['download_range']:
@@ -449,7 +510,7 @@ class Task(object):
             return True
         return False
 
-    def queue_wrapper(self, pichash = None, img_tuble = None):
+    def queue_wrapper(self, callback_page_url_setdefault, pichash = None, img_tuble = None):
         # if url is not finished, call callback to put into queue
         # type 1: normal file; type 2: resampled url
         # if pichash:
@@ -485,9 +546,9 @@ class Task(object):
             if not is_crashed:
                 break
 
-        if not _fid in self.fid_2_original_file_name_map:
+        if _fid not in self.fid_2_original_file_name_map:
             self.fid_2_original_file_name_map.setdefault(_fid, _original_file_name)
-        self.page_q.put(_page_url)
+        callback_page_url_setdefault(_fid, _page_url)
 
     def save_file(self, imgurl, redirect_url, binary_iter):
         # TODO: Rlock for finished += 1
@@ -580,21 +641,18 @@ class Task(object):
                 else:
                     zipfile_target.extractall(dpath)
 
-        with zipfile.ZipFile(arc, 'w')  as zipfile_target:
+        with zipfile.ZipFile(arc, 'w') as zipfile_target:
             # zip comment created
             # store json info in respective zip file
             # thus metadata can be packed with comic it self in a single file
             zipfile_target.comment = self.encode_meta()
-            for f in sorted(os.listdir(dpath)):
-                ext = os.path.splitext(f)
-                # never pack xeh files
-                # keep the scanning method to keep available for older version
-                if ext == '.xehdone' or ext == '.xeh':
-                    continue
-                full_path = os.path.join(dpath, f)
-                zipfile_target.write(full_path, f, zipfile.ZIP_STORED)
+            for _fid, _fname in self.fid_2_file_name_map.items():
+                full_path = os.path.join(dpath, _fname)
+                zipfile_target.write(full_path, _fname, zipfile.ZIP_STORED)
         if remove:
+            self._f_lock.acquire()
             shutil.rmtree(dpath)
+            self._f_lock.release()
         return arc
 
     def from_dict(self, j):

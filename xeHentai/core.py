@@ -267,22 +267,26 @@ class xeHentai(object):
                 if task.prescan_downloaded():
                     task.state = TASK_STATE_SCAN_IMG
                     continue
+
+                temp_fid_2_page_url_map = {}
                 for x in range(0,
                                int(math.ceil(1.0 * task.meta['total'] / int(task.meta['thumbnail_cnt'])))):
                     r = req.request("GET",
                                     "%s/?p=%d" % (task.url, x),
                                     filters.flt_pageurl,
                                     # there, we will get original file name while scaning image pages
-                                    lambda x: task.queue_wrapper(img_tuble=x),
+                                    lambda x: task.queue_wrapper( temp_fid_2_page_url_map.setdefault, img_tuble=x),
                                     lambda x: task.set_fail(x))
                     if task.failcode:
                         break
+
+
 
                 # i encountered one case that task failed but still continued
                 if task.state == TASK_STATE_FAILED:
                     break
                 # after scan will change _flist_done and shorten the download queue
-                if task.scan_downloaded():
+                if task.scan_downloaded(temp_fid_2_page_url_map):
                     task.state = TASK_STATE_SCAN_IMG
                     continue
 
