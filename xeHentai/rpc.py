@@ -222,16 +222,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Content-Type", mime)
-        
-        if is_file_obj(rt):
-            size = self.serve_file(rt)
-            rt.close()
-        else:
-            self.xeH.logger.verbose("GET %s 200 %d %s" % (self.path, len(rt), self.client_address[0]))
-            self.send_header("Content-Length", len(rt))
-            self.end_headers()
-            self.wfile.write(rt)
-        self.wfile.write(b'\n')
+        try:
+            if is_file_obj(rt):
+                size = self.serve_file(rt)
+                rt.close()
+            else:
+                self.xeH.logger.verbose("GET %s 200 %d %s" % (self.path, len(rt), self.client_address[0]))
+                self.send_header("Content-Length", len(rt))
+                self.end_headers()
+                self.wfile.write(rt)
+            self.wfile.write(b'\n')
+        except ConnectionError as e:
+            self.xeH.logger.verbose('Connection Error : %s' % e)
         return
 
     @path_filter
