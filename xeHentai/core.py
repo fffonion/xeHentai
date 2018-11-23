@@ -123,7 +123,7 @@ class xeHentai(object):
                 self._all_tasks.pop(rguid)
                 t.guid = rguid
                 self._all_tasks[t.guid] = t
-                self._all_tasks[t.guid].state = TASK_STATE_WAITING
+                self._all_tasks[t.guid].state = TASK_STATE_GET_META
                 self.tasks.put(t.guid)
                 return 0, t.guid
 
@@ -163,6 +163,11 @@ class xeHentai(object):
         if t._monitor:
             t._monitor._exit = lambda x: True
         t.state = TASK_STATE_PAUSED
+        # image link is changed everytime the page is reloaded
+        # so img_q need clean up
+        t.page_q = Queue()
+        t.img_q = Queue()
+        t.reload_map = {}
         return ERR_NO_ERROR, ""
 
     def resume_task(self, guid):
@@ -172,7 +177,9 @@ class xeHentai(object):
         if TASK_STATE_PAUSED < t.state < TASK_STATE_FINISHED:
             return ERR_TASK_CANNOT_RESUME, None
         t.state = max(t.state, TASK_STATE_WAITING)
-
+        # img_q is cleaned, so we need to re scan them
+        if t.state > TASK_STATE_SCAN_PAGE:
+            t.state = TASK_STATE_SCAN_PAGE
         self.tasks.put(guid)
         return ERR_NO_ERROR, ""
 
@@ -334,7 +341,8 @@ class xeHentai(object):
                                                      and (self.logger.debug(i18n.XEH_FILE_DOWNLOADED.format(tid, *task.get_fname(x[1]))),
                                                           mon.vote(tid, 0))),
                                              lambda x, tid=tid: (
-                                                 task.page_q.put(task.get_reload_url(x[1])),
+                                                 task.page_q.put(task.get_reload_url(x[1]))
+                                                 if '509.gif' not in x[1] else None,
                                                  # if x[0] != ERR_QUOTA_EXCEEDED else None,
                                                  task.reload_map.pop(x[1]) if x[1] in task.reload_map else None,
                                                  # delete old url in reload_map
@@ -454,7 +462,7 @@ class xeHentai(object):
                         # meta can be changed too
                         # besides, ip address of exhentai server may have changed, rescan on reload is essential 
                         if _t.state == TASK_STATE_SCAN_PAGE or _t.state == TASK_STATE_SCAN_IMG or _t.state == TASK_STATE_DOWNLOAD:
-                            _t.page_q = {}
+                            _t.page_q = Queue()
                             _t.reload_map = {}
                             _t.filehash_map = {}
                             _t.fid_fname_map = {}
