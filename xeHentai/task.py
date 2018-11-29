@@ -193,7 +193,7 @@ class Task(object):
 
     @staticmethod
     def get_size_range(size_text):
-        _ = re.findall('(\d+(?:\.(\d+))?) *([M|K]B)', size_text)
+        _ = re.findall('(\d+(?:\.(\d+))?) *([M|K]?B)', size_text)
         if _:
             _number, _decimal, _unit = _[0]
         else:
