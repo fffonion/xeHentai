@@ -537,6 +537,8 @@ class Task(object):
         append_quote = 1
         while True:
             is_crashed = False
+            if _fid in self.fid_2_original_file_name_map:
+                break
             for fid_in_list, file_name_in_list in self.fid_2_original_file_name_map.items():
                 if _original_file_name == file_name_in_list:
                     _file_name, _ext = os.path.splitext(_original_file_name)
