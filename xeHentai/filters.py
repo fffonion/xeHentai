@@ -143,7 +143,7 @@ def flt_imgurl_wrapper(ori):
                 break
             picurl = util.htmlescape(_[0])
 
-            _ = re.findall('</a></div><div>(.*?) ::.*?:: ([0-9/.]+ [A-Z]{1,2})</di', r.text)
+            _ = re.findall('</a></div><div>(.*?) ::.*?:: ([0-9/.]+ [M|K]?B)</di', r.text)
             if not _:
                 break
             filename,filesize = _[0]
