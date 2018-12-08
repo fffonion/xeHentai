@@ -323,9 +323,6 @@ class Task(object):
         is_fid_file_name_map_existed = True
         shall_remove_all = False
 
-        # TODO: what to do with this situation
-        what_a_same_file_with_different_url = False
-
         metadata = {}
         truncated_img_list = []
         good_img_list = []
@@ -348,7 +345,7 @@ class Task(object):
                 if 'rename_ori' in metadata and not metadata['rename_ori'] == self.config['rename_ori']:
                     shall_remove_all = True
                 if 'url' in metadata and not metadata['url'] == self.url:
-                    what_a_same_file_with_different_url = True
+                    shall_remove_all = True
 
                 # when url matches, check every image
                 file_name_list = zipfile_target.namelist()
@@ -400,7 +397,7 @@ class Task(object):
             if 'rename_ori' in metadata and not metadata['rename_ori'] == self.config['rename_ori']:
                 shall_remove_all = True
             if 'url' in metadata and not metadata['url'] == self.url:
-                what_a_same_file_with_different_url = True
+                shall_remove_all = True
 
             file_name_list = os.listdir(folder_path)
             if is_fid_file_name_map_existed:
