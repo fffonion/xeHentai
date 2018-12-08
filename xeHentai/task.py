@@ -342,7 +342,8 @@ class Task(object):
                 # TODO: this is obviously an error in meta scanning, yet is able to be detected
                 if 'fid_fname_map' not in metadata or not len(metadata['fid_fname_map']) == self.meta['total']:
                     is_fid_file_name_map_existed = False
-                if 'download_ori' in metadata and not metadata['download_ori'] == self.config['download_ori']:
+                # only remove all file when task is download ori but existing file is not
+                if 'download_ori' in metadata and not metadata['download_ori'] and self.config['download_ori']:
                     shall_remove_all = True
                 if 'rename_ori' in metadata and not metadata['rename_ori'] == self.config['rename_ori']:
                     shall_remove_all = True
@@ -393,7 +394,8 @@ class Task(object):
                     metadata = self.decode_meta(comment)
             if 'fid_fname_map' not in metadata or not len(metadata['fid_fname_map']) == self.meta['total']:
                 is_fid_file_name_map_existed = False
-            if 'download_ori' in metadata and not metadata['download_ori'] == self.config['download_ori']:
+            # only remove all file when task is download ori but existing file is not
+            if 'download_ori' in metadata and not metadata['download_ori'] and self.config['download_ori']:
                 shall_remove_all = True
             if 'rename_ori' in metadata and not metadata['rename_ori'] == self.config['rename_ori']:
                 shall_remove_all = True
