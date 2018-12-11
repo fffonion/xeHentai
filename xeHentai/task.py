@@ -465,7 +465,7 @@ class Task(object):
                 self._file_in_download_folder.append(_file_name)
 
         if self.config['rename_ori']:
-            for _fid, _file_name in self.fid_2_original_file_name_map:
+            for _fid, _file_name in self.fid_2_original_file_name_map.items():
                 if os.path.exists(os.path.join(folder_path, _file_name)):
                     guess_fid_2_file_name_map.setdefault(_fid, _file_name)
         else:
