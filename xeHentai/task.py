@@ -327,6 +327,9 @@ class Task(object):
         truncated_img_list = []
         good_img_list = []
 
+        # TODO: in some cases, self.meta['total'] == 0,
+        # TODO: this is obviously an error in meta scanning, yet is able to be detected
+
         # existing of a file doesn't mean the file is correctly downloaded
         # scan zip
         arc = "%s.zip" % folder_path
@@ -335,8 +338,6 @@ class Task(object):
             with zipfile.ZipFile(arc, 'r') as zipfile_target:
                 metadata = self.decode_meta(zipfile_target.comment.decode('UTF-8'))
                 # check fidmap in the file, if there isn't one, then just renew the zip
-                # TODO: in some cases, self.meta['total'] == 0,
-                # TODO: this is obviously an error in meta scanning, yet is able to be detected
                 if 'fid_fname_map' not in metadata or not len(metadata['fid_fname_map']) == self.meta['total']:
                     is_fid_file_name_map_existed = False
                 # only remove all file when task is download ori but existing file is not
