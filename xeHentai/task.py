@@ -323,6 +323,8 @@ class Task(object):
         is_fid_file_name_map_existed = True
         shall_remove_all = False
 
+        will_extract_old_file = False
+
         metadata = {}
         truncated_img_list = []
         good_img_list = []
@@ -342,11 +344,11 @@ class Task(object):
                     is_fid_file_name_map_existed = False
                 # only remove all file when task is download ori but existing file is not
                 if 'download_ori' in metadata and not metadata['download_ori'] and self.config['download_ori']:
-                    shall_remove_all = True
+                    will_extract_old_file = True
                 if 'rename_ori' in metadata and not metadata['rename_ori'] == self.config['rename_ori']:
-                    shall_remove_all = True
+                    will_extract_old_file = True
                 if 'url' in metadata and not metadata['url'] == self.url:
-                    shall_remove_all = True
+                    will_extract_old_file = True
 
                 # when url matches, check every image
                 file_name_list = zipfile_target.namelist()
@@ -355,8 +357,7 @@ class Task(object):
                         if _file_name in file_name_list:
                             zip_info = zipfile_target.getinfo(_file_name)
                             _name, _ext = os.path.splitext(_file_name)
-                            if zip_info.file_size == 0\
-                                    or _ext == '.xeh' or shall_remove_all:
+                            if zip_info.file_size == 0 or _ext == '.xeh':
                                 truncated_img_list.append(_file_name)
                             elif _ext == '.xehdone':
                                 continue
@@ -367,15 +368,15 @@ class Task(object):
                         zip_info = zipfile_target.getinfo(in_zip_file_name)
                         if not zip_info.is_dir():
                             _name, _ext = os.path.splitext(in_zip_file_name)
-                            if zip_info.file_size == 0\
-                                    or _ext == '.xeh' or shall_remove_all:
+                            if zip_info.file_size == 0 or _ext == '.xeh':
                                 truncated_img_list.append(in_zip_file_name)
                             elif _ext == '.xehdone':
                                 continue
                             else:
                                 good_img_list.append(in_zip_file_name)
 
-                if len(truncated_img_list) > 0 or not len(good_img_list) == self.meta['total'] or not is_fid_file_name_map_existed:
+                if len(truncated_img_list) > 0 or not len(good_img_list) == self.meta['total'] \
+                        or not is_fid_file_name_map_existed or will_extract_old_file:
                     # extract all image when some images is truncated
                     # or when download is not finished
                     zipfile_target.extractall(folder_path)
@@ -392,13 +393,6 @@ class Task(object):
                     metadata = self.decode_meta(comment)
             if 'fid_fname_map' not in metadata or not len(metadata['fid_fname_map']) == self.meta['total']:
                 is_fid_file_name_map_existed = False
-            # only remove all file when task is download ori but existing file is not
-            if 'download_ori' in metadata and not metadata['download_ori'] and self.config['download_ori']:
-                shall_remove_all = True
-            if 'rename_ori' in metadata and not metadata['rename_ori'] == self.config['rename_ori']:
-                shall_remove_all = True
-            if 'url' in metadata and not metadata['url'] == self.url:
-                shall_remove_all = True
 
             file_name_list = os.listdir(folder_path)
             if is_fid_file_name_map_existed:
@@ -406,8 +400,7 @@ class Task(object):
                     if _file_name in file_name_list:
                         _name, _ext = os.path.splitext(_file_name)
                         file_path = os.path.join(folder_path, _file_name)
-                        if os.stat(file_path).st_size == 0 \
-                                or _ext == '.xeh' or shall_remove_all:
+                        if os.stat(file_path).st_size == 0 or _ext == '.xeh':
                             truncated_img_list.append(_file_name)
                         elif _ext == '.xehdone':
                             continue
@@ -417,8 +410,7 @@ class Task(object):
                 for file_name in file_name_list:
                     _name, _ext = os.path.splitext(file_name)
                     file_path = os.path.join(folder_path, file_name)
-                    if os.stat(file_path).st_size == 0\
-                            or _ext == '.xeh' or shall_remove_all:
+                    if os.stat(file_path).st_size == 0 or _ext == '.xeh':
                         truncated_img_list.append(file_name)
                     elif _ext == '.xehdone':
                         continue
