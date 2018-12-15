@@ -308,7 +308,7 @@ class xeHentai(object):
                         filters.flt_imgurl_wrapper(task.config['download_ori'] and self.has_login),
                         lambda x, tid=tid: (task.set_reload_url(x[0], x[1], x[2], x[3]),
                             mon.vote(tid, 0)),
-                        lambda x, tid=tid: (mon.vote(tid, x[0])),
+                        lambda x, tid = tid: (mon.vote(tid, x[0])),
                         mon.wrk_keepalive,
                         util.get_proxy_policy(task.config),
                         10,
@@ -328,10 +328,11 @@ class xeHentai(object):
                     tid = 'down-%d' % (i + 1)
                     _ = self._get_httpworker(tid, task.img_q,
                         filters.download_file_wrapper(task.config['dir']),
-                        lambda x, tid=tid: (task.save_file(x[1], x[2], x[0]) and \
+                        lambda x, tid = tid: (task.save_file(x[1], x[2], x[0]) and \
                             (self.logger.debug(i18n.XEH_FILE_DOWNLOADED.format(tid, *task.get_fname(x[1]))),
                                 mon.vote(tid, 0))),
-                        lambda x, tid=tid: (task.page_q.put(task.get_reload_url(x[1])) if '509.gif' not in x[1] else None,
+                        lambda x, tid = tid: (
+                            task.page_q.put(task.get_reload_url(x[1])) if '509.gif' not in x[1] else None,
                             task.reload_map.pop(x[1]) if x[1] in task.reload_map else None, # delete old url in reload_map
                             self.logger.debug(i18n.XEH_DOWNLOAD_HAS_ERROR % (tid, i18n.c(x[0]))),
                             mon.vote(tid, x[0])),
