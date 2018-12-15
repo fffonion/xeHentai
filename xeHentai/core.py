@@ -306,7 +306,7 @@ class xeHentai(object):
                     tid = 'scan-%d' % (i + 1)
                     _ = self._get_httpworker(tid, task.page_q,
                         filters.flt_imgurl_wrapper(task.config['download_ori'] and self.has_login),
-                        lambda x, tid=tid: (task.set_reload_url(x[0], x[1], x[2], x[3]),
+                        lambda x, tid = tid: (task.set_reload_url(x[0], x[1], x[2], x[3]),
                             mon.vote(tid, 0)),
                         lambda x, tid = tid: (mon.vote(tid, x[0])),
                         mon.wrk_keepalive,
@@ -318,7 +318,6 @@ class xeHentai(object):
                     # _._exit = lambda t: t._finish_queue()
                     self._all_threads[TASK_STATE_SCAN_IMG].append(_)
                     _.start()
-
                 task.state = TASK_STATE_DOWNLOAD - 1
             elif task.state == TASK_STATE_SCAN_ARCHIVE:
                 task.state = TASK_STATE_DOWNLOAD - 1
@@ -420,7 +419,7 @@ class xeHentai(object):
             try:
                 f.write(json.dumps({
                     'tasks':{} if not self.cfg['save_tasks'] else
-                        {k: v.to_dict() for k, v in self._all_tasks.items()},
+                        {k: v.to_dict() for k,v in self._all_tasks.items()},
                     'cookies':self.cookies}))
             except Exception as ex:
                 self.logger.warning(i18n.SESSION_WRITE_EXCEPTION % traceback.format_exc())

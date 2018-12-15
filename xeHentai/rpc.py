@@ -358,7 +358,7 @@ class xeHentaiRPCExtended(object):
         rt = [{_k:_v for _k, _v in v.to_dict().items() if _k not in
             ('reload_map', 'filehash_map', 'img_q', 'page_q')}
                 for _, v in self._all_tasks.items() if
-                    (reverse_mode and v.state != lv) or (not reverse_mode and v.state == lv)]
+                     (reverse_mode and v.state != lv) or (not reverse_mode and v.state == lv)]
         return ERR_NO_ERROR, rt
     
     def _get_image_path(self, guid, fid):
