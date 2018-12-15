@@ -23,7 +23,7 @@ packages = [
     'xeHentai.util',
     'xeHentai.i18n',
 ]
-requires = ['requests','pillow']
+requires = ['requests']
 
 from setuptools import setup
 
