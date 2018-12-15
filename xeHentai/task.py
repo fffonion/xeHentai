@@ -10,7 +10,6 @@ import json
 import uuid
 import shutil
 import zipfile
-
 from threading import RLock
 from . import util
 from .const import *
@@ -19,7 +18,6 @@ if PY3K:
     from queue import Queue, Empty
 else:
     from Queue import Queue, Empty
-
 
 class Task(object):
     def __init__(self, url, cfgdict):
@@ -84,7 +82,7 @@ class Task(object):
         self.img_q = None
         self.page_q = None
         self.list_q = None
-        self._flist_done = set()  # store id, don't save, will generate when scan
+        self._flist_done = set() # store id, don't save, will generate when scan
         self._monitor = None
         self._cnt_lock = RLock()
         self._f_lock = RLock()
@@ -92,7 +90,7 @@ class Task(object):
     def cleanup(self, before_delete=False):
         if before_delete:
             if 'delete_task_files' in self.config and self.config['delete_task_files'] and \
-                    'title' in self.meta: # maybe it's a error task and meta is empty
+                'title' in self.meta: # maybe it's a error task and meta is empty
                 fpath = self.get_fpath()
                 # TODO: ascii can't decode? locale not enus, also check save_file
                 if os.path.exists(fpath):
@@ -110,7 +108,6 @@ class Task(object):
             self.fid_2_file_size_map = {}
             self.fid_2_original_file_name_map = {}
             self.download_range = []
-
             # if 'filelist' in self.meta:
             #     del self.meta['filelist']
             # if 'resampled' in self.meta:
@@ -418,7 +415,8 @@ class Task(object):
                         good_img_list.append(file_name)
 
         # a zip file properly commented is trustworthy, so program will assume it was completed
-        if len(truncated_img_list) == 0 and len(good_img_list) == self.meta['total'] and is_fid_file_name_map_existed:
+        if len(truncated_img_list) == 0 and len(good_img_list) == self.meta['total'] and is_fid_file_name_map_existed\
+                and not will_extract_old_file:
             self._flist_done.update(range(1, self.meta['total'] + 1))
             self.fid_2_file_name_map = metadata['fid_fname_map']
         elif len(truncated_img_list) > 0:
@@ -426,7 +424,8 @@ class Task(object):
                 img_path = os.path.join(folder_path, truncated_img_name)
                 os.remove(img_path)
 
-        self.meta['finished'] = len(self._flist_done)
+        if not will_extract_old_file:
+            self.meta['finished'] = len(self._flist_done)
         if self.meta['finished'] == self.meta['total']:
             return True
         return False

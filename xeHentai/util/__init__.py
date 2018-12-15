@@ -12,7 +12,6 @@ import random
 from ..const import *
 
 if os.name == 'nt':
-    #\.+ to match multiple occurance of . at the end of title
     filename_filter = re.compile("[|:?\\/*'\"<>]|\.+(?:$)")
 else:# assume posix
     filename_filter = re.compile("[\/:]")

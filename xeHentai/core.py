@@ -59,7 +59,7 @@ class xeHentai(object):
         self.rpc = None
 
     def update_config(self, **cfg_dict):
-        self.cfg.update({k:v for k,v in cfg_dict.items() if k in cfg_dict and k not in ('ignored_errors',)})
+        self.cfg.update({k:v for k, v in cfg_dict.items() if k in cfg_dict and k not in ('ignored_errors',)})
         # merge ignored errors list
         if 'ignored_errors' in cfg_dict and cfg_dict['ignored_errors']:
             self.cfg['ignored_errors'] = list(set(self.cfg['ignored_errors'] + cfg_dict['ignored_errors']))
@@ -81,8 +81,8 @@ class xeHentai(object):
                 self.logger.error(i18n.ERR_CANNOT_CREATE_DIR % cfg_dict['dir'])
         if not self.rpc and self.cfg['rpc_port'] and self.cfg['rpc_interface']:
             self.rpc = RPCServer(self, (self.cfg['rpc_interface'], int(self.cfg['rpc_port'])),
-                secret=None if 'rpc_secret' not in self.cfg else self.cfg['rpc_secret'],
-                logger=self.logger)
+                secret = None if 'rpc_secret' not in self.cfg else self.cfg['rpc_secret'],
+                logger = self.logger)
             if not RE_LOCAL_ADDR.match(self.cfg['rpc_interface']) and \
                 not self.cfg['rpc_secret']:
                 self.logger.warning(i18n.RPC_TOO_OPEN % self.cfg['rpc_interface'])
@@ -96,11 +96,11 @@ class xeHentai(object):
     def _get_httpworker(self, tid, task_q, flt, suc, fail, keep_alive, proxy_policy, timeout, stream_mode):
         return HttpWorker(tid, task_q, flt, suc, fail,
             headers = self.headers, proxy = self.proxy, logger = self.logger,
-            keep_alive = keep_alive, proxy_policy = proxy_policy, timeout=timeout, stream_mode = stream_mode)
+            keep_alive = keep_alive, proxy_policy = proxy_policy, timeout = timeout, stream_mode = stream_mode)
 
     def add_task(self, url, **cfg_dict):
         url = url.strip()
-        cfg = {k:v for k,v in self.cfg.items() if k in (
+        cfg = {k:v for k, v in self.cfg.items() if k in (
             "dir", "download_ori", "download_thread_cnt", "scan_thread_cnt",
             "proxy_image", "proxy_image_only", "ignored_errors",
             "rename_ori", "make_archive", "delete_task_files", "jpn_title", "download_range", "download_timeout")}
@@ -220,12 +220,12 @@ class xeHentai(object):
                 self._all_threads[TASK_STATE_SCAN_IMG].append(mon)
                 monitor_started = True
 
-            if task.state == TASK_STATE_GET_META:  # grab meta data
+            if task.state == TASK_STATE_GET_META: # grab meta data
                 try:
                     r = req.request("GET", task.url,
                         filters.flt_metadata,
-                        lambda x: task.update_meta(x),
-                        lambda x: task.set_fail(x))
+                        lambda x:task.update_meta(x),
+                        lambda x:task.set_fail(x))
                 except Exception as ex:
                     self.logger.error(i18n.TASK_ERROR % (task.guid, traceback.format_exc()))
                     task.state = TASK_STATE_FAILED
@@ -279,11 +279,10 @@ class xeHentai(object):
 
                 temp_fid_2_page_url_map = {}
                 for x in range(0,
-                               int(math.ceil(1.0 * task.meta['total'] / int(task.meta['thumbnail_cnt'])))):
+                    int(math.ceil(1.0 * task.meta['total'] / int(task.meta['thumbnail_cnt'])))):
                     r = req.request("GET",
                         "%s/?p=%d" % (task.url, x),
                         filters.flt_pageurl,
-                        # there, we will get original file name while scaning image pages
                         lambda x: task.queue_wrapper( temp_fid_2_page_url_map.setdefault, img_tuble=x),
                         lambda x: task.set_fail(x))
                     if task.failcode:
@@ -306,7 +305,6 @@ class xeHentai(object):
                 self.logger.info(i18n.TASK_WILL_DOWNLOAD_CNT % (
                     task_guid, task.meta['total'] - task.meta['finished'],
                     task.meta['total']))
-
                 # spawn thread to scan images
                 for i in range(task.config['scan_thread_cnt']):
                     tid = 'scan-%d' % (i + 1)
@@ -315,7 +313,7 @@ class xeHentai(object):
                         lambda x, tid=tid: (task.set_reload_url(x[0], x[1], x[2], x[3]),
                             mon.vote(tid, 0)),
                         lambda x, tid=tid: (mon.vote(tid, x[0])),
-                            mon.wrk_keepalive,
+                        mon.wrk_keepalive,
                         util.get_proxy_policy(task.config),
                         10,
                         False)
@@ -334,22 +332,17 @@ class xeHentai(object):
                     tid = 'down-%d' % (i + 1)
                     _ = self._get_httpworker(tid, task.img_q,
                         filters.download_file_wrapper(task.config['dir']),
-                        lambda x, tid=tid: (
-                            task.save_file(x[1], x[2], x[0])
-                                and (self.logger.debug(i18n.XEH_FILE_DOWNLOADED.format(tid, *task.get_fname(x[1]))),
-                            mon.vote(tid, 0))),
-                        lambda x, tid=tid: (
-                            task.page_q.put(task.get_reload_url(x[1]))
-                            if '509.gif' not in x[1] else None,
-                            # if x[0] != ERR_QUOTA_EXCEEDED else None,
-                            task.reload_map.pop(x[1]) if x[1] in task.reload_map else None,
-                            # delete old url in reload_map
+                        lambda x, tid=tid: (task.save_file(x[1], x[2], x[0]) and \
+                            (self.logger.debug(i18n.XEH_FILE_DOWNLOADED.format(tid, *task.get_fname(x[1]))),
+                                mon.vote(tid, 0))),
+                        lambda x, tid=tid: (task.page_q.put(task.get_reload_url(x[1])) if '509.gif' not in x[1] else None,
+                            task.reload_map.pop(x[1]) if x[1] in task.reload_map else None, # delete old url in reload_map
                             self.logger.debug(i18n.XEH_DOWNLOAD_HAS_ERROR % (tid, i18n.c(x[0]))),
                             mon.vote(tid, x[0])),
-                            mon.wrk_keepalive,
-                            util.get_proxy_policy(task.config),
-                            task.config['download_timeout'],
-                            True)
+                        mon.wrk_keepalive,
+                        util.get_proxy_policy(task.config),
+                        task.config['download_timeout'],
+                        True)
                     self._all_threads[TASK_STATE_DOWNLOAD].append(_)
                     _.start()
                 # spawn archiver if we need
@@ -429,9 +422,9 @@ class xeHentai(object):
         with open("h.json", "w") as f:
             try:
                 f.write(json.dumps({
-                    'tasks': {} if not self.cfg['save_tasks'] else
+                    'tasks':{} if not self.cfg['save_tasks'] else
                         {k: v.to_dict() for k, v in self._all_tasks.items()},
-                    'cookies': self.cookies}))
+                    'cookies':self.cookies}))
             except Exception as ex:
                 self.logger.warning(i18n.SESSION_WRITE_EXCEPTION % traceback.format_exc())
                 return ERR_SAVE_SESSION_FAILED, str(ex)
@@ -451,6 +444,7 @@ class xeHentai(object):
                         if 'filelist' in _t.meta:
                             _t.scan_downloaded()
                                 # _t.meta['has_ori'] and task.config['download_ori'])
+
                         # page may have changed by the uploader, rescan pages (rescan from metadata in practice) instead
                         # meta can be changed too
                         # besides, ip address of exhentai server may have changed, rescan on reload is essential 
@@ -468,12 +462,12 @@ class xeHentai(object):
                     if self.cookies:
                         self.headers.update({'Cookie':util.make_cookie(self.cookies)})
                         self.has_login = 'ipb_member_id' in self.cookies and 'ipb_pass_hash' in self.cookies
-        _1xcookie = os.path.join(FILEPATH, ".ehentai.cookie") # 1.x cookie file
+        _1xcookie = os.path.join(FILEPATH, ".ehentai.cookie")# 1.x cookie file
         if not self.has_login and os.path.exists(_1xcookie):
             with open(_1xcookie) as f:
                 try:
                     cid, cpw = f.read().strip().split(",")
-                    self.cookies.update({'ipb_member_id':cid, 'ipb_pass_hash': cpw})
+                    self.cookies.update({'ipb_member_id':cid, 'ipb_pass_hash':cpw})
                     self.headers.update({'Cookie':util.make_cookie(self.cookies)})
                     self.has_login = True
                     self.logger.info(i18n.XEH_LOAD_OLD_COOKIE)
@@ -497,13 +491,13 @@ class xeHentai(object):
         req = self._get_httpreq(util.get_proxy_policy(self.cfg))
         req.request("POST", "https://forums.e-hentai.org/index.php?act=Login&CODE=01",
             filters.login_exhentai,
-            lambda x: (
+            lambda x:(
                 setattr(self, 'cookies', x),
                 setattr(self, 'has_login', True),
-                self.headers.update({'Cookie': util.make_cookie(self.cookies)}),
+                self.headers.update({'Cookie':util.make_cookie(self.cookies)}),
                 self.save_session(),
                 self.logger.info(i18n.XEH_LOGIN_OK)),
-            lambda x: (self.logger.warning(str(x)),
+            lambda x:(self.logger.warning(str(x)),
                 self.logger.info(i18n.XEH_LOGIN_FAILED)),
             logindata)
         return ERR_NO_ERROR, self.has_login
