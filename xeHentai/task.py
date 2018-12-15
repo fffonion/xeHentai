@@ -662,6 +662,7 @@ class Task(object):
             self.gid, self.sethash = _[0]
         return self
 
+
     def to_dict(self):
         d = dict({k:v for k, v in self.__dict__.items()
             if not k.endswith('_q') and not k.startswith("_")})
