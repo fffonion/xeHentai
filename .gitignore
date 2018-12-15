@@ -1,5 +1,12 @@
 *.py[cod]
 
+*.sln
+*.pyproj
+/.vs/*
+*.suo
+*.sqlite
+/.idea/*
+
 *.pyc
 *.json
 *.sh
@@ -13,3 +20,6 @@ make.bat
 config.py
 README.html
 CHANGELOG.html
+.vs/xeHentai/v15/.suo
+xeHentai.pyproj
+*.sln

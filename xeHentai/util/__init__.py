@@ -12,7 +12,7 @@ import random
 from ..const import *
 
 if os.name == 'nt':
-    filename_filter = re.compile("[|:?\\/*'\"<>]|\.(?:$)")
+    filename_filter = re.compile("[|:?\\/*'\"<>]|\.+(?:$)")
 else:# assume posix
     filename_filter = re.compile("[\/:]")
 

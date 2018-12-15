@@ -174,14 +174,20 @@ class Handler(BaseHTTPRequestHandler):
                         code = 404
                         break
                     else:
-                        z = zipfile.ZipFile(zipf)
-                        try:
-                            rt = z.read(f)
-                        except Exception as ex:
-                            self.xeH.logger.warning("RPC: can't find %s in zipfile: %s" % (f, ex))
-                            code = 404
-                            break
-                        z.close()
+                        with zipfile.ZipFile(zipf,'r') as z:
+                            try:
+                                intfid = int(fid) - 1
+                                #pfname = f
+                                fnamelist = z.namelist()
+                                fnamelist.sort()
+                                if fnamelist.count('.xehdone') > 0:
+                                    fnamelist.remove('.xehdone')
+                                pfname = fnamelist[intfid]
+                                rt = z.read(pfname)
+                            except Exception as ex:
+                                self.xeH.logger.warning("RPC: can't find %s in zipfile: %s" % (f, ex))
+                                code = 404
+                                break
                 else:
                     rt = open(os.path.join(path, f), 'rb')
                 rt, _error = gen_thumbnail(rt, args)
@@ -216,16 +222,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Content-Type", mime)
-        
-        if is_file_obj(rt):
-            size = self.serve_file(rt)
-            rt.close()
-        else:
-            self.xeH.logger.verbose("GET %s 200 %d %s" % (self.path, len(rt), self.client_address[0]))
-            self.send_header("Content-Length", len(rt))
-            self.end_headers()
-            self.wfile.write(rt)
-        self.wfile.write(b'\n')
+        try:
+            if is_file_obj(rt):
+                size = self.serve_file(rt)
+                rt.close()
+            else:
+                self.xeH.logger.verbose("GET %s 200 %d %s" % (self.path, len(rt), self.client_address[0]))
+                self.send_header("Content-Length", len(rt))
+                self.end_headers()
+                self.wfile.write(rt)
+            self.wfile.write(b'\n')
+        except ConnectionError as e:
+            self.xeH.logger.verbose('Connection Error : %s' % e)
         return
 
     @path_filter
@@ -348,9 +356,9 @@ class xeHentaiRPCExtended(object):
             return ERR_TASK_LEVEL_UNDEF, None
         lv = globals()[level]
         rt = [{_k:_v for _k, _v in v.to_dict().items() if _k not in
-            ('reload_map', 'filehash_map', 'renamed_map', 'img_q', 'page_q')}
-                 for _, v in self._all_tasks.items() if 
-                    (reverse_mode and v.state != lv) or (not reverse_mode and v.state == lv)]
+            ('reload_map', 'filehash_map', 'img_q', 'page_q')}
+                for _, v in self._all_tasks.items() if
+                     (reverse_mode and v.state != lv) or (not reverse_mode and v.state == lv)]
         return ERR_NO_ERROR, rt
     
     def _get_image_path(self, guid, fid):
@@ -366,8 +374,8 @@ class xeHentaiRPCExtended(object):
             return None, None, None
         t = self._all_tasks[guid]
         fid = str(fid)
-        if fid in t.renamed_map:
-            f = t.renamed_map[fid]
+        if fid in t.fid_2_file_name_map:
+            f = t.fid_2_file_name_map[fid]
         else:
             f = t.get_fidpad(fid)
 
@@ -405,10 +413,10 @@ class xeHentaiRPCExtended(object):
             end = int(_[0]) + 1
         rt = []
         for fid in range(start, end):
-            if fid in t.renamed_map:
-                f = t.renamed_map[fid]
+            if fid in t.fid_2_file_name_map:
+                f = t.fid_2_file_name_map[fid]
             else:
-                f = t.get_fidpad(fid)
+                f = t.get_fidpad("%d" % fid)
             uri = "%s/%s" % (t.guid, fid)
             rt.append('/img/%s/%s/%s' % (hash_link(self.secret, uri), uri, f))
         return ERR_NO_ERROR, rt
