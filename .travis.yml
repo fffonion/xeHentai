@@ -11,7 +11,6 @@ python:
     - 3.7-dev
 
 install:
-    - pip install pillow
     - python setup.py install
 
 script:
