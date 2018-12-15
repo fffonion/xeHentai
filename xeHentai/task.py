@@ -380,40 +380,6 @@ class Task(object):
                     zipfile_target.close()
                     os.remove(arc)
 
-        # scan xehdone
-        elif os.path.exists(os.path.join(folder_path, '.xehdone')):
-            # use infomation in .xehdone to check downloaded files
-            # just like a extracted zip file
-            with open(os.path.join(folder_path, '.xehdone'), 'r') as xehdone:
-                comment = xehdone.readline()
-                if comment:
-                    metadata = self.decode_meta(comment)
-            if 'fid_fname_map' not in metadata or not len(metadata['fid_fname_map']) == self.meta['total']:
-                is_fid_file_name_map_existed = False
-
-            file_name_list = os.listdir(folder_path)
-            if is_fid_file_name_map_existed:
-                for _fid, _file_name in metadata['fid_fname_map'].items():
-                    if _file_name in file_name_list:
-                        _name, _ext = os.path.splitext(_file_name)
-                        file_path = os.path.join(folder_path, _file_name)
-                        if os.stat(file_path).st_size == 0 or _ext == '.xeh':
-                            truncated_img_list.append(_file_name)
-                        elif _ext == '.xehdone':
-                            continue
-                        else:
-                            good_img_list.append(_file_name)
-            else:
-                for file_name in file_name_list:
-                    _name, _ext = os.path.splitext(file_name)
-                    file_path = os.path.join(folder_path, file_name)
-                    if os.stat(file_path).st_size == 0 or _ext == '.xeh':
-                        truncated_img_list.append(file_name)
-                    elif _ext == '.xehdone':
-                        continue
-                    else:
-                        good_img_list.append(file_name)
-
         # a zip file properly commented is trustworthy, so program will assume it was completed
         if len(truncated_img_list) == 0 and len(good_img_list) == self.meta['total'] and is_fid_file_name_map_existed\
                 and not will_extract_old_file:
