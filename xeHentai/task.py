@@ -10,6 +10,7 @@ import json
 import uuid
 import shutil
 import zipfile
+import tempfile
 from threading import RLock
 from . import util
 from .const import *
@@ -216,7 +217,8 @@ class Task(object):
         # create a femp file first
         # we don't need _f_lock because this will not be in a sequence
         # and we can't do that otherwise we are breaking the multi threading
-        fn_tmp = os.path.join(fpath, ".%s.xeh" % self.get_fidpad(int(fid)))
+        fd_tmp, fn_tmp = tempfile.mkstemp(prefix="xehentai-")
+        os.close(fd_tmp)
         try:
             with open(fn_tmp, "wb") as f:
                 for binary in binary_iter():
@@ -224,12 +226,27 @@ class Task(object):
                         raise DownloadAbortedException()
                     f.write(binary)
         except DownloadAbortedException as ex:
-            os.remove(fn_tmp)
+            try:
+                os.unlink(fn_tmp)
+            except:
+                pass
             return
 
         self._f_lock.acquire()
         try:
-            os.rename(fn_tmp, fn)
+            try:
+                os.rename(fn_tmp, fn)
+            except WindowsError as ex:
+                # file is used by another process
+                # do a copy and delete, WindowsError[32]
+                if ex.errno == 13:
+                    shutil.copy(fn_tmp, fn)
+                    try:
+                        os.unlink(fn_tmp)
+                    except:
+                        pass
+                else:
+                    raise ex
             self._cnt_lock.acquire()
             self.meta['finished'] += 1
             self._cnt_lock.release()
