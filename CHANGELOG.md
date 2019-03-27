@@ -4,6 +4,8 @@
 - 增加RPC帮助函数：`get_info`，`get_config`，`update_config`，`get_image`
 - 增加通过RPC看图和下载压缩包功能
 - 增加`delete_task_files`选项，设置是否删除任务时同时删除下载的文件
+- 修复Windows文件夹不能以空格结尾以及文件不能以`.`结尾
+- 修复下载时的临时文件在Windows下报错Error 32的问题
 
 ## 2.019
 - 增加图片地址解析时的错误处理
