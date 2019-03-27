@@ -12,7 +12,7 @@ import random
 from ..const import *
 
 if os.name == 'nt':
-    filename_filter = re.compile("[|:?\\/*'\"<>]|\.(?:$)")
+    filename_filter = re.compile("[|:?\\/*'\"<>]|\.+(?:$)")
 else:# assume posix
     filename_filter = re.compile("[\/:]")
 
@@ -79,4 +79,8 @@ def htmlescape(s):
     return htmlre.sub(replc, s)
 
 def legalpath(s):
-    return filename_filter.sub(lambda x:"", s)
+    sanitized = filename_filter.sub(lambda x:"", s)
+    # windows doesn't like trailing while spaces
+    if os.name == 'nt':
+        sanitized = sanitized.rstrip()
+    return sanitized
