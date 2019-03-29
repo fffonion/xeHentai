@@ -324,7 +324,7 @@ class Task(object):
                             break
                         if _ :# if ...(1) exists, use ...(2)
                             print(_base)
-                            _base = re.sub("\((\d+)\)$", _base, lambda x:"(%d)" % (int(x.group(1)) + 1))
+                            _base = re.sub("\((\d+)\)$", lambda x:"(%d)" % (int(x.group(1)) + 1), _base)
                         else:
                             _base = "%s(1)" % _base
                         fname_to = "".join((_base, _ext))
