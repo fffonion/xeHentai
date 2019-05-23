@@ -81,6 +81,13 @@ class Task(object):
         self.failcode = 0
         return True
 
+    def mpv_url(self):
+        return re.sub(
+            "/./%s/%s" % (self.gid, self.sethash),
+            "/mpv/%s/%s" % (self.gid, self.sethash),
+            self.url
+        )
+
     def update_meta(self, meta):
         self.meta.update(meta)
         if self.config['jpn_title'] and self.meta['gjname']:
