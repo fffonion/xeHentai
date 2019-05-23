@@ -43,7 +43,6 @@ def flt_metadata(r, suc, fail):
         fail(ERR_IP_BANNED)
         return re.findall("The ban expires in (.+)", r.text)[0]
     meta = {}
-    # print(r.text)
     # sample_hash = re.findall('<a href="%s/./([a-f0-9]{10})/\d+\-\d+"><img' % RESTR_SITE, r.text)
     # meta['sample_hash'] = sample_hash
     # meta['resampled'] = {}
@@ -58,6 +57,15 @@ def flt_metadata(r, suc, fail):
     # TODO: parse cookie to calc thumbnail_cnt (tr_2, ts_m)
     _ = re.findall("Showing (\d+) \- (\d+) of ([\d,]+) images", r.text)[0]
     meta['thumbnail_cnt'] = int(_[1]) - int(_[0]) + 1
+
+    # check multi page viewer status in order to call proper flt_pageurl
+    mpv_urls = re.findall(
+            '<a href="(%s/mpv/(\d+)/[a-f0-9]{10})/#page\d+"><img alt="\d+" title="Page' % RESTR_SITE,
+            r.text)
+    if mpv_urls:
+        meta['use_multipage_viewer'] = True
+    else:
+        meta['use_multipage_viewer'] = False
 
     suc(meta)
     # _ = re.findall(
@@ -102,14 +110,7 @@ def flt_pageurl(r, suc, fail):
         '<a href="(%s/./[a-f0-9]{10}/\d+\-\d+)"><img alt="\d+" title="Page' % RESTR_SITE,
         r.text)
     if not picpage:
-        # do we get a multipage viewer?
-        # if so, simply exit and don't set task to fail
-        picpage = re.findall(
-            '<a href="(%s/mpv/(\d+)/[a-f0-9]{10})/#page\d"><img alt="\d+" title="Page' % RESTR_SITE,
-            r.text)
-        if not picpage:
-            fail(ERR_NO_PAGEURL_FOUND)
-        return
+        fail(ERR_NO_PAGEURL_FOUND)
     for p in picpage:
         suc(p)
 
