@@ -238,23 +238,24 @@ class xeHentai(object):
                 task.scan_downloaded()
                 if task.state == TASK_STATE_FINISHED:
                     continue
-                for x in range(0,
-                    int(math.ceil(1.0 * task.meta['total'] / int(task.meta['thumbnail_cnt'])))):
-                    r = req.request("GET",
-                        "%s/?p=%d" % (task.url, x),
-                        filters.flt_pageurl,
-                        lambda x: task.queue_wrapper(task.page_q.put, url = x),
-                        lambda x: task.set_fail(x))
-                    if task.failcode:
-                        break
-                if not task.failcode and \
-                    task.meta['finished'] < task.meta['total'] and task.page_q.empty():
-                    # try multipage viewer
-                    r = req.request("GET",
-                        task.mpv_url(),
-                        filters.flt_pageurl_mpv,
-                        lambda x: task.queue_wrapper(task.page_q.put, url = x),
-                        lambda x: task.set_fail(x))
+                if not task.meta['use_multipage_viewer']:
+                    for x in range(0,
+                        int(math.ceil(1.0 * task.meta['total'] / int(task.meta['thumbnail_cnt'])))):
+                        r = req.request("GET",
+                            "%s/?p=%d" % (task.url, x),
+                            filters.flt_pageurl,
+                            lambda x: task.queue_wrapper(task.page_q.put, url = x),
+                            lambda x: task.set_fail(x))
+                        if task.failcode:
+                            break
+                else:
+                    if task.meta['finished'] < task.meta['total']:
+                        # use multipage viewer
+                        r = req.request("GET",
+                            task.mpv_url(),
+                            filters.flt_pageurl_mpv,
+                            lambda x: task.queue_wrapper(task.page_q.put, url = x),
+                            lambda x: task.set_fail(x))
             elif task.state == TASK_STATE_SCAN_IMG:
                 # print here so that see it after we can join former threads
                 self.logger.info(i18n.TASK_TITLE % (

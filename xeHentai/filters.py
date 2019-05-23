@@ -59,6 +59,15 @@ def flt_metadata(r, suc, fail):
     _ = re.findall("Showing (\d+) \- (\d+) of ([\d,]+) images", r.text)[0]
     meta['thumbnail_cnt'] = int(_[1]) - int(_[0]) + 1
 
+    # check multi page viewer status in order to call proper flt_pageurl
+    mpv_urls = re.findall(
+            '<a href="(%s/mpv/(\d+)/[a-f0-9]{10})/#page\d+"><img alt="\d+" title="Page' % RESTR_SITE,
+            r.text)
+    if mpv_urls:
+        meta['use_multipage_viewer'] = 1
+    else:
+        meta['use_multipage_viewer'] = 0
+
     suc(meta)
     # _ = re.findall(
     #    '%s/[^/]+/(\d+)/[^/]+/\?p=\d*" onclick="return false"(.*?)</a>' % RESTR_SITE,
@@ -102,17 +111,7 @@ def flt_pageurl(r, suc, fail):
         '<a href="(%s/./[a-f0-9]{10}/\d+\-\d+)"><img alt="\d+" title="Page' % RESTR_SITE,
         r.text)
     if not picpage:
-        # do we get a multipage viewer?
-        # if so, simply exit and don't set task to fail
-        # When gallery page>0, re'#page\d' will not match any result for #page starting from 21 or other number
-        # So I change it to '#page\d+'
-        # And I think set a certain error code to break loop, then try mpv immediately can make program more efficient
-        picpage = re.findall(
-            '<a href="(%s/mpv/(\d+)/[a-f0-9]{10})/#page\d+"><img alt="\d+" title="Page' % RESTR_SITE,
-            r.text)
-        if not picpage:
-            fail(ERR_NO_PAGEURL_FOUND)
-        return
+        fail(ERR_NO_PAGEURL_FOUND)
     for p in picpage:
         suc(p)
 
