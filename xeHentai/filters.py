@@ -104,8 +104,11 @@ def flt_pageurl(r, suc, fail):
     if not picpage:
         # do we get a multipage viewer?
         # if so, simply exit and don't set task to fail
+        # When gallery page>0, re'#page\d' will not match any result for #page starting from 21 or other number
+        # So I change it to '#page\d+'
+        # And I think set a certain error code to break loop, then try mpv immediately can make program more efficient
         picpage = re.findall(
-            '<a href="(%s/mpv/(\d+)/[a-f0-9]{10})/#page\d"><img alt="\d+" title="Page' % RESTR_SITE,
+            '<a href="(%s/mpv/(\d+)/[a-f0-9]{10})/#page\d+"><img alt="\d+" title="Page' % RESTR_SITE,
             r.text)
         if not picpage:
             fail(ERR_NO_PAGEURL_FOUND)
