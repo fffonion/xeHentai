@@ -43,7 +43,6 @@ def flt_metadata(r, suc, fail):
         fail(ERR_IP_BANNED)
         return re.findall("The ban expires in (.+)", r.text)[0]
     meta = {}
-    # print(r.text)
     # sample_hash = re.findall('<a href="%s/./([a-f0-9]{10})/\d+\-\d+"><img' % RESTR_SITE, r.text)
     # meta['sample_hash'] = sample_hash
     # meta['resampled'] = {}
@@ -64,9 +63,9 @@ def flt_metadata(r, suc, fail):
             '<a href="(%s/mpv/(\d+)/[a-f0-9]{10})/#page\d+"><img alt="\d+" title="Page' % RESTR_SITE,
             r.text)
     if mpv_urls:
-        meta['use_multipage_viewer'] = 1
+        meta['use_multipage_viewer'] = True
     else:
-        meta['use_multipage_viewer'] = 0
+        meta['use_multipage_viewer'] = False
 
     suc(meta)
     # _ = re.findall(
