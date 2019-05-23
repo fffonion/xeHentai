@@ -5,6 +5,7 @@
 
 import os
 import re
+import json
 from . import util
 from .const import *
 
@@ -101,9 +102,33 @@ def flt_pageurl(r, suc, fail):
         '<a href="(%s/./[a-f0-9]{10}/\d+\-\d+)"><img alt="\d+" title="Page' % RESTR_SITE,
         r.text)
     if not picpage:
-        fail(ERR_NO_PAGEURL_FOUND)
+        # do we get a multipage viewer?
+        # if so, simply exit and don't set task to fail
+        picpage = re.findall(
+            '<a href="(%s/mpv/(\d+)/[a-f0-9]{10})/#page\d"><img alt="\d+" title="Page' % RESTR_SITE,
+            r.text)
+        if not picpage:
+            fail(ERR_NO_PAGEURL_FOUND)
+        return
     for p in picpage:
         suc(p)
+
+def flt_pageurl_mpv(r, suc, fail):
+    # input mpv gallaery response
+    # add per image urls if suc; finish task if fail
+    # construct single page gallery view
+    imagelist = re.findall("imagelist\s=\s([^;]+)", r.text)
+    if not imagelist:
+        fail(ERR_NO_PAGEURL_FOUND)
+    try:
+        imagelist = json.loads(imagelist[0])
+    except:
+        fail(ERR_NO_PAGEURL_FOUND)
+    baseurl = re.findall("https?://[^/]+", r._real_url)[0]
+    gid, _ = RE_INDEX.findall(r._real_url)[0]
+    for i in range(len(imagelist)):
+        suc("%s/s/%s/%s-%d" % (baseurl, imagelist[i]['k'], gid, i+1))
+
 
 def flt_quota_check(func):
     def _(r, suc, fail):

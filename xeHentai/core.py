@@ -247,6 +247,14 @@ class xeHentai(object):
                         lambda x: task.set_fail(x))
                     if task.failcode:
                         break
+                if not task.failcode and \
+                    task.meta['finished'] < task.meta['total'] and task.page_q.empty():
+                    # try multipage viewer
+                    r = req.request("GET",
+                        task.mpv_url(),
+                        filters.flt_pageurl_mpv,
+                        lambda x: task.queue_wrapper(task.page_q.put, url = x),
+                        lambda x: task.set_fail(x))
             elif task.state == TASK_STATE_SCAN_IMG:
                 # print here so that see it after we can join former threads
                 self.logger.info(i18n.TASK_TITLE % (
