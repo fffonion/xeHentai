@@ -243,7 +243,7 @@ class Task(object):
         self._f_lock.acquire()
         try:
             try:
-                os.rename(fn_tmp, fn)
+                shutil.move(fn_tmp, fn)
             except WindowsError as ex:
                 # file is used by another process
                 # do a copy and delete, WindowsError[32]

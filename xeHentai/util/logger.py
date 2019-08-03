@@ -18,10 +18,16 @@ class tz_GMT8(datetime.tzinfo):
     def dst(self, dt):
         return datetime.timedelta(0)
 
+
 def safestr(s):
     if (PY3K and isinstance(s, bytes)) or (not PY3K and not isinstance(s, unicode)):
         s = s.decode("utf-8")
     if PY3K:
+        # python<=3.5 hack
+        if sys.version_info.minor <= 5:
+            return s \
+                .encode(locale.getdefaultlocale()[1] or 'utf-8', 'replace') \
+                .decode(locale.getdefaultlocale()[1] or 'utf-8', 'replace')
         return s
     return s.encode(locale.getdefaultlocale()[1] or 'utf-8', 'replace')
     #return _.decode('utf-8') if PY3K else _
