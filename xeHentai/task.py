@@ -15,6 +15,7 @@ from threading import RLock
 from . import util
 from .const import *
 from .const import __version__
+from .util.logger import safestr
 if PY3K:
     from queue import Queue, Empty
 else:
@@ -330,7 +331,7 @@ class Task(object):
                             os.rename(fname_to, os.path.join(tmppath, os.path.split(fname_to)[1]))
                             break
                         if _ :# if ...(1) exists, use ...(2)
-                            print(_base)
+                            print(safestr(_base))
                             _base = re.sub("\((\d+)\)$", _base, lambda x:"(%d)" % (int(x.group(1)) + 1))
                         else:
                             _base = "%s(1)" % _base
