@@ -235,7 +235,7 @@ class Task(object):
 
         if image_url in self.reload_map:
 
-            self._f_lock.acquire()
+            #self._f_lock.acquire()
             existed_image_url, existed_file_name = self.reload_map[image_url]
             folder_path = self.get_fpath()
             existed_file = os.path.join(folder_path, existed_file_name)
@@ -258,13 +258,13 @@ class Task(object):
                         with open(new_file, 'wb') as _new_file:
                             _new_file.write(_existed_file.read())
                 except Exception as ex:
-                    self._f_lock.release()
                     raise ex
                 else:
-                    self._f_lock.release()
                     self._cnt_lock.acquire()
                     self.meta['finished'] += 1
                     self._cnt_lock.release()
+                self._f_lock.release()
+
             elif file_existed and unexpected_file:
                 # self._cnt_lock.acquire()
                 # self.meta['finished'] -= 1
@@ -276,7 +276,6 @@ class Task(object):
                 if image_url not in self.filehash_map:
                     self.filehash_map[image_url] = []
                 self.filehash_map[image_url].append((this_fid, existed_file_id))
-                self._f_lock.release()
         else:
             # check file size for downloaded file
             # i would like a hash check
@@ -308,7 +307,7 @@ class Task(object):
 
 
     def get_reload_url(self, imgurl):
-        if not imgurl:
+        if not imgurl or imgurl not in self.reload_map:
             return
         return self.reload_map[imgurl][0]
 
@@ -489,23 +488,28 @@ class Task(object):
             if not int(_fid) in self.download_range:
                 return
 
-        # if same original name occurs several times
-        # this will solve it 
-        append_quote = 1
-        while True:
-            is_crashed = False
-            if _fid in self.fid_2_original_file_name_map:
-                break
+        if _fid not in self.fid_2_original_file_name_map:
+            _is_crashed = False
             for fid_in_list, file_name_in_list in self.fid_2_original_file_name_map.items():
                 if _original_file_name == file_name_in_list:
-                    _file_name, _ext = os.path.splitext(_original_file_name)
-                    _original_file_name = '%s_%d%s' % (_file_name, append_quote, _ext)
-                    is_crashed = True
-                    append_quote += 1
-            if not is_crashed:
-                break
+                    _is_crashed = True
+                    break
 
-        if _fid not in self.fid_2_original_file_name_map:
+            # if same original name occurs several times
+            # this will solve it
+            if _is_crashed:
+                _file_name, _ext = os.path.splitext(_original_file_name)
+                _append_quote = 1
+                while _is_crashed:
+                    _is_crashed = False
+                    _assume_file_name = '%s_%d%s' % (_file_name, _append_quote, _ext)
+                    for fid_in_list, file_name_in_list in self.fid_2_original_file_name_map.items():
+                        if _assume_file_name == file_name_in_list:
+                            _is_crashed = True
+                            break
+                    if _is_crashed:
+                        _append_quote += 1
+                _original_file_name = _assume_file_name
             self.fid_2_original_file_name_map.setdefault(_fid, _original_file_name)
         callback_page_url_setdefault(_fid, _page_url)
 
@@ -560,7 +564,8 @@ class Task(object):
                     if _fid == int(fid):
                         continue
                     fn_rep = os.path.join(fpath, fname)
-                    shutil.copyfile(fn, fn_rep)
+                    if not fn == fn_rep:
+                        shutil.copyfile(fn, fn_rep)
                     self._cnt_lock.acquire()
                     self.meta['finished'] += 1
                     self._cnt_lock.release()
@@ -605,9 +610,13 @@ class Task(object):
             # store json info in respective zip file
             # thus metadata can be packed with comic it self in a single file
             zipfile_target.comment = self.encode_meta()
-            for _fid, _fname in self.fid_2_file_name_map.items():
-                full_path = os.path.join(dpath, _fname)
-                zipfile_target.write(full_path, _fname, zipfile.ZIP_STORED)
+
+            for _i in range(1, len(self.fid_2_file_name_map)+1):
+                t_fid = "%d" % _i
+                _f_name = self.fid_2_file_name_map[t_fid]
+                full_path = os.path.join(dpath, _f_name)
+                zipfile_target.write(full_path, _f_name, zipfile.ZIP_STORED)
+
         if remove:
             self._f_lock.acquire()
             shutil.rmtree(dpath)

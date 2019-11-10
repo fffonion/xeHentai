@@ -48,6 +48,7 @@ class Pool(object):
             self.proxies[addr][2] += weight
             if self.disable_policy(*self.proxies[addr][1:]):
                 # add to disabled set
+                print('add to disabled proxy : %s' % addr)
                 self.disabled[addr] = expire + time.time()
         return n
 
@@ -74,6 +75,7 @@ class Pool(object):
                         self.proxies[addr][1] += weight
                 if self.disable_policy(*self.proxies[addr][1:]):
                     # add to disabled set and never expire
+                    print('add to disabled proxy : %s' % addr)
                     self.disabled[addr] = 0
                 # print(self.proxies[addr])
                 if ex:

@@ -80,14 +80,17 @@ def gen_thumbnail(fh, args):
             int(args['h']) if 'h' in args else int(args['w']))
     if not is_file_obj(fh):
         fh = StringIO(fh)
-    with Image.open(fh) as img:
-        img.thumbnail(size)
-        ret_fh = StringIO()
-        img.save(ret_fh, format=img.format)
-        ret = ret_fh.getvalue()
-        ret_fh.close()
-        fh.close()
-        return ret, False
+    if fh and Image.isImageType(fh):
+        with Image.open(fh) as img:
+            img.thumbnail(size)
+            ret_fh = StringIO()
+            img.save(ret_fh, format=img.format)
+            ret = ret_fh.getvalue()
+            ret_fh.close()
+            fh.close()
+            return ret, False
+    else:
+        return fh, False
     
 def jsonrpc_resp(request, ret = None, error_code = None, error_msg = None):
     r = {
@@ -174,16 +177,9 @@ class Handler(BaseHTTPRequestHandler):
                         code = 404
                         break
                     else:
-                        with zipfile.ZipFile(zipf,'r') as z:
+                        with zipfile.ZipFile(zipf, 'r') as z:
                             try:
-                                intfid = int(fid) - 1
-                                #pfname = f
-                                fnamelist = z.namelist()
-                                fnamelist.sort()
-                                if fnamelist.count('.xehdone') > 0:
-                                    fnamelist.remove('.xehdone')
-                                pfname = fnamelist[intfid]
-                                rt = z.read(pfname)
+                                rt = z.read(f)
                             except Exception as ex:
                                 self.xeH.logger.warning("RPC: can't find %s in zipfile: %s" % (f, ex))
                                 code = 404

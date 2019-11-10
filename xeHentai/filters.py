@@ -46,19 +46,24 @@ def flt_metadata(r, suc, fail):
     # sample_hash = re.findall('<a href="%s/./([a-f0-9]{10})/\d+\-\d+"><img' % RESTR_SITE, r.text)
     # meta['sample_hash'] = sample_hash
     # meta['resampled'] = {}
-    meta['gjname'] = util.htmlescape(re.findall('="gj">(.*?)</h1>', r.text)[0])
-    meta['gnname']= util.htmlescape(re.findall('="gn">(.*?)</h1>', r.text)[0])
-    # don't assign title now, select gj/gn based on cfg['jpn_title']
-    # meta['title'] = meta['gjname'] if meta['gjname'] else meta['gnname']
-    meta['total'] = int(re.findall('Length:</td><td class="gdt2">(\d+)\s+page', r.text)[0])
-    meta['finished'] = 0
-    meta['tags'] = re.findall("toggle_tagmenu\('([^']+)'", r.text)
 
-    # TODO: parse cookie to calc thumbnail_cnt (tr_2, ts_m)
-    _ = re.findall("Showing (\d+) \- (\d+) of ([\d,]+) images", r.text)[0]
-    meta['thumbnail_cnt'] = int(_[1]) - int(_[0]) + 1
+    try:
+        meta['gjname'] = util.htmlescape(re.findall('="gj">(.*?)</h1>', r.text)[0])
+        meta['gnname'] = util.htmlescape(re.findall('="gn">(.*?)</h1>', r.text)[0])
+        # don't assign title now, select gj/gn based on cfg['jpn_title']
+        # meta['title'] = meta['gjname'] if meta['gjname'] else meta['gnname']
+        meta['total'] = int(re.findall('Length:</td><td class="gdt2">(\d+)\s+page', r.text)[0])
+        meta['finished'] = 0
+        meta['tags'] = re.findall("toggle_tagmenu\('([^']+)'", r.text)
 
-    suc(meta)
+        # TODO: parse cookie to calc thumbnail_cnt (tr_2, ts_m)
+        _ = re.findall("Showing (\d+) \- (\d+) of ([\d,]+) images", r.text)[0]
+        meta['thumbnail_cnt'] = int(_[1]) - int(_[0]) + 1
+        suc(meta)
+    except IndexError as e:
+        print(r.text)
+        # return fail(ERR_CONNECTION_ERROR)
+
     # _ = re.findall(
     #    '%s/[^/]+/(\d+)/[^/]+/\?p=\d*" onclick="return false"(.*?)</a>' % RESTR_SITE,
     #    r.text)

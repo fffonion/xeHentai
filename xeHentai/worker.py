@@ -27,7 +27,7 @@ else:
 class _FakeResponse(object):
     def __init__(self, url):
         self.status_code = 600
-        self.content = None
+        self.text = None
         self.url = self._real_url = url
         self.headers = {}
 
@@ -67,7 +67,7 @@ class FallbackIpAdapter(HTTPAdapter):
         return requests.adapters.HTTPAdapter.cert_verify(self, conn, url, verify, cert)
 
 class HttpReq(object):
-    def __init__(self, headers = {}, proxy = None, proxy_policy = None, retry = 10, timeout = 20, logger = None, tname = "main"):
+    def __init__(self, headers = {}, proxy = None, proxy_policy = None, retry = 10, timeout = 10, logger = None, tname = "main"):
         self.session = requests.Session()
         self.session.headers = headers
         for u in ('forums.e-hentai.org', 'e-hentai.org', 'exhentai.org'):
@@ -88,7 +88,7 @@ class HttpReq(object):
             try:
                 headers = {}
                 # if proxy_policy is set and match current url, use proxy
-                if self.proxy and self.proxy_policy and self.proxy_policy.match(url):
+                if url and self.proxy and self.proxy_policy and self.proxy_policy.match(url):
                     f, __not_good = self.proxy.proxied_request(self.session)
                 else:
                     f = self.session.request
@@ -361,7 +361,9 @@ class Monitor(Thread):
                 else:
                     if time.time() - last_change > STUCK_INTERVAL:
                         self.logger.warning(i18n.TASK_STUCK % self.task.guid)
-                        break
+                        last_change = time.time()
+                        CHECK_INTERVAL *= 2
+                        # break
             time.sleep(0.5)
         if self.task.meta['finished'] == self.task.meta['total']:
             # rename is finished along with downloading process
