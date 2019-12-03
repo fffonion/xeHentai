@@ -1,20 +1,49 @@
-os:
-    - linux
 
-language: python
 sudo: required
 dist: xenial
-python:
-    - 2.7
-    - 3.4
-    - 3.5
-    - 3.6
-    - 3.7
 
 matrix:
   include:
-    - python: 3.3
-      dist: trusty 
+    - os: linux
+      language: python
+      python: "2.7"
+    - os: linux
+      language: python
+      python: "3.5"
+    - os: linux
+      language: python
+      python: "3.6"
+    - os: linux
+      language: python
+      python: "3.7"
+    # https://chocolatey.org/packages/python2
+    # - os: windows
+    #   language: sh
+    #   python: "2.7"
+    #   before_install:
+    #     - choco install python2
+    #     - export PATH="/c/Python26:/c/Python27/Scripts:$PATH"
+    #     - wget https://bootstrap.pypa.io/get-pip.py
+    #     - python ./get-pip.py
+    # https://chocolatey.org/packages/python/3.7.4
+    - os: windows
+      language: sh
+      python: "3.5"
+      before_install:
+        - choco install python --version 3.5.4
+        - export PATH="/c/Python35:/c/Python35/Scripts:$PATH"
+    - os: windows
+      language: sh
+      python: "3.6"
+      before_install:
+        - choco install python --version 3.6.8
+        - export PATH="/c/Python36:/c/Python36/Scripts:$PATH"
+    - os: windows
+      language: sh
+      python: "3.7"
+      before_install:
+        - choco install python --version 3.7.4
+        - export PATH="/c/Python37:/c/Python37/Scripts:$PATH"
 
 install:
     - python setup.py install
@@ -22,6 +51,7 @@ install:
 script:
     - xeH --help
     - xeH $TEST_URL_E --dir test1
+    # nested env currently have no effect on windows
     - LANG=zh_CN.utf-8 LC_ALL=zh_CN.utf-8 xeH $TEST_URL_E --dir test1
     - LANG=zh_TW.utf-8 LC_ALL=zh_TW.utf-8 xeH $TEST_URL_E --dir test1
     - xeH $TEST_URL_E --dir test1 --archive true 

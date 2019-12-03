@@ -5,6 +5,7 @@
 
 import os
 import re
+import json
 from . import util
 from .const import *
 
@@ -42,7 +43,6 @@ def flt_metadata(r, suc, fail):
         fail(ERR_IP_BANNED)
         return re.findall("The ban expires in (.+)", r.text)[0]
     meta = {}
-    # print(r.text)
     # sample_hash = re.findall('<a href="%s/./([a-f0-9]{10})/\d+\-\d+"><img' % RESTR_SITE, r.text)
     # meta['sample_hash'] = sample_hash
     # meta['resampled'] = {}
@@ -57,6 +57,15 @@ def flt_metadata(r, suc, fail):
     # TODO: parse cookie to calc thumbnail_cnt (tr_2, ts_m)
     _ = re.findall("Showing (\d+) \- (\d+) of ([\d,]+) images", r.text)[0]
     meta['thumbnail_cnt'] = int(_[1]) - int(_[0]) + 1
+
+    # check multi page viewer status in order to call proper flt_pageurl
+    mpv_urls = re.findall(
+            '<a href="(%s/mpv/(\d+)/[a-f0-9]{10})/#page\d+"><img alt="\d+" title="Page' % RESTR_SITE,
+            r.text)
+    if mpv_urls:
+        meta['use_multipage_viewer'] = True
+    else:
+        meta['use_multipage_viewer'] = False
 
     suc(meta)
     # _ = re.findall(
@@ -105,13 +114,31 @@ def flt_pageurl(r, suc, fail):
     for p in picpage:
         suc(p)
 
+def flt_pageurl_mpv(r, suc, fail):
+    # input mpv gallaery response
+    # add per image urls if suc; finish task if fail
+    # construct single page gallery view
+    imagelist = re.findall("imagelist\s=\s([^;]+)", r.text)
+    if not imagelist:
+        fail(ERR_NO_PAGEURL_FOUND)
+    try:
+        imagelist = json.loads(imagelist[0])
+    except:
+        fail(ERR_NO_PAGEURL_FOUND)
+    baseurl = re.findall("https?://[^/]+", r._real_url)[0]
+    gid, _ = RE_INDEX.findall(r._real_url)[0]
+    for i in range(len(imagelist)):
+        suc("%s/s/%s/%s-%d" % (baseurl, imagelist[i]['k'], gid, i+1))
+
+
 def flt_quota_check(func):
     def _(r, suc, fail):
         if r.status_code == 600:# tcp layer error
             fail((ERR_CONNECTION_ERROR, r._real_url))
         elif r.status_code == 403:
             fail((ERR_KEY_EXPIRED, r._real_url))
-        elif r.status_code == 509 or r.content_length in [925, 28658, 144, 210, 1009] or '509.gif' in r.url:
+        elif r.status_code == 509 or r.content_length in [925, 28658, 144, 210, 1009] or \
+                '509.gif' in r.url or '509.gif' in r._real_url:
             fail((ERR_QUOTA_EXCEEDED, r._real_url))
             # will not call the decorated filter
         elif r.content_length < 200 and \

@@ -15,6 +15,7 @@ from threading import RLock
 from . import util
 from .const import *
 from .const import __version__
+from .util.logger import safestr
 if PY3K:
     from queue import Queue, Empty
 else:
@@ -80,6 +81,13 @@ class Task(object):
         self.state = TASK_STATE_WAITING if self.state == TASK_STATE_FAILED else self.state
         self.failcode = 0
         return True
+
+    def mpv_url(self):
+        return re.sub(
+            "/./%s/%s" % (self.gid, self.sethash),
+            "/mpv/%s/%s" % (self.gid, self.sethash),
+            self.url
+        )
 
     def update_meta(self, meta):
         self.meta.update(meta)
@@ -235,7 +243,7 @@ class Task(object):
         self._f_lock.acquire()
         try:
             try:
-                os.rename(fn_tmp, fn)
+                shutil.move(fn_tmp, fn)
             except WindowsError as ex:
                 # file is used by another process
                 # do a copy and delete, WindowsError[32]
@@ -323,8 +331,8 @@ class Task(object):
                             os.rename(fname_to, os.path.join(tmppath, os.path.split(fname_to)[1]))
                             break
                         if _ :# if ...(1) exists, use ...(2)
-                            print(_base)
-                            _base = re.sub("\((\d+)\)$", lambda x:"(%d)" % (int(x.group(1)) + 1), _base)
+                            print(safestr(_base))
+                            _base = re.sub("\((\d+)\)$", _base, lambda x:"(%d)" % (int(x.group(1)) + 1))
                         else:
                             _base = "%s(1)" % _base
                         fname_to = "".join((_base, _ext))

@@ -71,7 +71,7 @@ def gen_thumbnail(fh, args):
     # returns a new file handler if resized
     # and a boolean indicates there'e error
     try:
-        from PIL import Image
+        import PIL.Image as Image
     except:
         return fh, True
     if 'w' not in args and 'h' not in args:
