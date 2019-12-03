@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.021
+- 支持 `multi page viewer`
+- 不再支持Python 3.3
+- 修复里站和表站CDN的IP
+- 优化509错误判断
+- 修复重命名时的编码问题
+- 修复某些Python版本下跨磁盘移动时的问题
+
 ## 2.020
 - 增加RPC帮助函数：`get_info`，`get_config`，`update_config`，`get_image`
 - 增加通过RPC看图和下载压缩包功能
