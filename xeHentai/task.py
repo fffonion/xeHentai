@@ -314,6 +314,10 @@ class Task(object):
     # scan folder or zip file before all worker start working
     # it is designed mainly to remove truncated file and extract those outdated zip files
     def prescan_downloaded(self):
+
+        # fpath requires title
+        if not 'title' in self.meta:
+            return False
         folder_path = self.get_fpath()
 
         is_fid_file_name_map_existed = True

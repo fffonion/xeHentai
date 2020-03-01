@@ -8,6 +8,8 @@ err_msg = {
     ERR_ONLY_VISIBLE_EXH: "this gallery is only visible in exhentai.org",
     ERR_MALFORMED_HATHDL: "malformed .hathdl, can't parse",
     ERR_GALLERY_REMOVED: "this gallery has been removed, may be visible in exhentai",
+    ERR_GALLERY_NOT_FOUND: "Gallery not found. If you just added this gallery, you may have to wait a short while "
+                           "before it becomes available.",
     ERR_KEY_EXPIRED: "image url is expired",
     ERR_NO_PAGEURL_FOUND: "no page url found, change of site structure?",
     ERR_CONNECTION_ERROR: "a connection problem occurs",

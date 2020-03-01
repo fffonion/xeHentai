@@ -8,6 +8,10 @@ err_msg = {
     ERR_ONLY_VISIBLE_EXH: "這個本子只有里站能看到",
     ERR_MALFORMED_HATHDL: "hathdl文件有貓餅，解析失敗",
     ERR_GALLERY_REMOVED: "這個本子被移除了，大概里站能看到",
+
+    ERR_GALLERY_NOT_FOUND: "Gallery not found. If you just added this gallery, you may have to wait a short while "
+                           "before it becomes available.",
+
     ERR_KEY_EXPIRED: "下載鏈接不太正常",
     ERR_NO_PAGEURL_FOUND: "沒有找到頁面鏈接，網站改版了嘛？",
     ERR_CONNECTION_ERROR: "連接有問題？",

@@ -8,6 +8,9 @@ err_msg = {
     ERR_ONLY_VISIBLE_EXH: "这个本子只有里站能看到",
     ERR_MALFORMED_HATHDL: "hathdl文件有猫饼，解析失败",
     ERR_GALLERY_REMOVED: "这个本子被移除了，大概里站能看到",
+
+    ERR_GALLERY_NOT_FOUND: "无法找到图集，如果是由你创建的图集，你需等待至图集可用。",
+
     ERR_KEY_EXPIRED: "下载链接不太正常",
     ERR_NO_PAGEURL_FOUND: "没有找到页面链接，网站改版了嘛？",
     ERR_CONNECTION_ERROR: "连接有问题？",

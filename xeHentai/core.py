@@ -269,6 +269,11 @@ class xeHentai(object):
 
                 # scan zip, zip file has metadata in comment
                 # if some image is truncated or outdated, download them again
+
+                if not task.meta:
+                    task.state = TASK_STATE_GET_META
+                    continue
+
                 if self.proxy:
                     self.logger.info("disabled proxies : %s" % self.proxy.disabled)
                     l = [i for i in self.proxy.proxies.keys() if i not in self.proxy.disabled]

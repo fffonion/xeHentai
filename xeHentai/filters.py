@@ -36,6 +36,8 @@ def flt_metadata(r, suc, fail):
     # TODO: catch re exceptions
     if r.status_code == 404:
         return fail(ERR_GALLERY_REMOVED)
+    if re.match("Gallery not found", r.text):
+        return fail(ERR_GALLERY_NOT_FOUND)
     if re.match("This gallery is pining for the fjords", r.text):
         return fail(ERR_ONLY_VISIBLE_EXH)
     elif re.match("Your IP address has been temporarily banned", r.text):
@@ -176,7 +178,7 @@ def flt_imgurl_wrapper(ori):
                 fullurl = util.htmlescape(fullurl[0])
             else:
                 fullurl = picurl
-            _= re.findall("return nl\('([\d\-]+)'\)", r.text)
+            _= re.findall("return nl\('([a-z\d\-]+)'\)", r.text)
             if not _:
                 break
             js_nl = _[0]
