@@ -85,11 +85,13 @@ class HttpReq(object):
         retry = 0
         url_history = [url]
         while retry < self.retry:
+            do_proxy = False
             try:
                 headers = {}
                 # if proxy_policy is set and match current url, use proxy
                 if url and self.proxy and self.proxy_policy and self.proxy_policy.match(url):
-                    f, __not_good = self.proxy.proxied_request(self.session)
+                    do_proxy = True
+                    f, __not_good, __good, __banned = self.proxy.proxied_request(self.session)
                 else:
                     f = self.session.request
                 r = f(method, url,
@@ -97,6 +99,16 @@ class HttpReq(object):
                     data=data,
                     timeout=self.timeout,
                     stream=stream_cb != None)
+            except (requests.exceptions.ProxyError, requests.exceptions.ConnectTimeout,
+                    requests.exceptions.ReadTimeout) as ex:
+                if do_proxy:
+                    _ = __not_good()
+                    if _:
+                        self.logger.info("%s-%s proxy %s is disabled for failed too often" %
+                                            (i18n.THREAD, self.tname, _))
+                else:
+                    self.logger.warning("%s-%s %s %s: %s" % (i18n.THREAD, self.tname, method, url, ex))
+                time.sleep(random.random() + 0.618)
             except requests.RequestException as ex:
                 self.logger.warning("%s-%s %s %s: %s" % (i18n.THREAD, self.tname, method, url, ex))
                 time.sleep(random.random() + 0.618)
@@ -109,7 +121,7 @@ class HttpReq(object):
                     r.content_length = 0
                 self.logger.verbose("%s-%s %s %s %d %d" % (i18n.THREAD, self.tname, method, url, r.status_code, r.content_length))
                 # if it's a redirect, 3xx
-                if r.status_code > 300 and r.status_code < 400:
+                if 300 < r.status_code < 400:
                     _new_url = r.headers.get("location")
                     if _new_url:
                         url_history.append(url)
@@ -118,15 +130,30 @@ class HttpReq(object):
                             return _filter(_FakeResponse(url_history[0]), suc, fail)
                         url = _new_url
                         continue
+
+                if r.status_code == 503: # backend fetch failed
+                    continue
+
                 # intercept some error to see if we can change IP
-                if self.proxy and r.content_length < 1024 and \
-                    re.match("Your IP address has been temporarily banned", r.text):
+                if do_proxy and r.content_length < 1024 and \
+                        re.match("Your IP address has been temporarily banned", r.text):
                     _t = util.parse_human_time(r.text)
                     self.logger.warn(i18n.PROXY_DISABLE_BANNED % _t)
                     # fail this proxy immediately and set expire time
-                    __not_good(expire = _t)
+                    _p = __banned(expire=_t)
+                    self.logger.info("%s-%s proxy %s is banned for %s" % (i18n.THREAD, self.tname, _p, _t))
                     continue
-                
+
+                if do_proxy and r.status_code == 509:
+                    _p = __banned(expire=3600*24)
+                    self.logger.info("%s-%s proxy %s has exceed band width" % (i18n.THREAD, self.tname, _p))
+                    continue
+
+                if do_proxy and r.ok:
+                    _p = __good()
+                    if _p:
+                        self.logger.info("%s-%s proxy %s is very good" % (i18n.THREAD, self.tname, _p))
+
                 r.encoding = "utf-8"
                 # r._text_bytes = r.text.encode("utf-8")
                 r._real_url = url_history[-1]

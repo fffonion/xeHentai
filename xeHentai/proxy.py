@@ -12,6 +12,7 @@ from . import util
 from .const import *
 
 MAX_FAIL = 5
+SUCCESS_THREHOLD = 30
 
 class PoolException(Exception):
     pass
@@ -21,7 +22,7 @@ class Pool(object):
         self.proxies = {}
         self.errors = {}
         if not disable_policy:
-            self.disable_policy = lambda x, y: y >= MAX_FAIL
+            self.disable_policy = lambda x1, x2: x2 > MAX_FAIL
         else:
             self.disable_policy = disable_policy
         self.disabled = {} # key: expire
@@ -31,57 +32,61 @@ class Pool(object):
             if 0 < self.disabled[d] < time.time():
                 try:
                     del self.disabled[d]
+                    break
                 except:
                     pass
-        l = [i for i in self.proxies.keys() if i not in self.disabled]
-        if not l:
+        l_of_proxy = [i for i in self.proxies.keys() if i not in self.disabled]
+        if not l_of_proxy:
             raise PoolException("try to use proxy but no proxies avaliable")
         # _ = self.proxies[random.choice(l)]
-        _ = self.proxies[l[0]]
-        return _[0](session), self.not_good(l[0])
+        t_proxy = l_of_proxy[0]
+        _ = self.proxies[t_proxy]
+        return _[0](session), self.not_good(t_proxy), self.good(t_proxy), self.banned(t_proxy)
 
     def has_available_proxies(self):
         return len([i for i in self.proxies.keys() if i not in self.disabled]) == 0
 
     def not_good(self, addr):
-        def n(weight = MAX_FAIL, expire = 0):
+        def n(weight=1):
             self.proxies[addr][2] += weight
             if self.disable_policy(*self.proxies[addr][1:]):
-                # add to disabled set
-                print('add to disabled proxy : %s' % addr)
-                self.disabled[addr] = expire + time.time()
+                self.disabled[addr] = 0
+                return addr
+            else:
+                return None
+        return n
+
+    def banned(self, addr):
+        def n(weight=MAX_FAIL, expire=0):
+            self.proxies[addr][2] = weight
+            self.disabled[addr] = expire + time.time()
+            return addr
+        return n
+
+    def good(self, addr):
+        def n(weight=1):
+            self.proxies[addr][1] += weight
+            if self.proxies[addr][1] > SUCCESS_THREHOLD:
+                self.proxies[addr][1] -= SUCCESS_THREHOLD
+                self.proxies[addr][2] -= weight
+                return addr
+            else:
+                return None
         return n
 
     def trace_proxy(self, addr, weight = 1, check_func = None, exceptions = []):
         def _(func):
             def __(*args, **kwargs):
-                ex = None
+                r = None
                 try:
                     r = func(*args, **kwargs)
                 except Exception as _ex:
-                    ex = _ex
-                    for e in [ConnectTimeout, ConnectionError, ProxyError] + exceptions:
-                        if isinstance(ex, e):
-                            # ignore BadStatusLine, this doesn't mean the proxy is bad
-                            if e == ConnectionError and 'BadStatusLine' in str(e):
-                                continue
-                            self.proxies[addr][2] += weight
-                            break
+                    raise _ex
                 else:
                     if check_func and not check_func(r):
                         self.proxies[addr][2] += weight
                     else:
-                        # suc count + 1
                         self.proxies[addr][1] += weight
-                if self.disable_policy(*self.proxies[addr][1:]):
-                    # add to disabled set and never expire
-                    print('add to disabled proxy : %s' % addr)
-                    self.disabled[addr] = 0
-                # print(self.proxies[addr])
-                if ex:
-                    # import traceback
-                    # traceback.print_exc()
-                    raise ex
                 return r
             return __
         return _

@@ -275,10 +275,6 @@ class xeHentai(object):
                     task.state = TASK_STATE_GET_META
                     continue
 
-                if self.proxy:
-                    self.logger.info("disabled proxies : %s" % self.proxy.disabled)
-                    l = [i for i in self.proxy.proxies.keys() if i not in self.proxy.disabled]
-                    self.logger.info("now using proxies : %s" % l[0])
                 if task.prescan_downloaded():
                     task.state = TASK_STATE_SCAN_IMG
                     continue
