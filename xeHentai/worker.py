@@ -372,12 +372,12 @@ class Monitor(Thread):
                         self.logger.warning(i18n.THREAD_SWEEP_OUT % k)
                     del self.thread_last_seen[k]
             if intv == CHECK_INTERVAL:
-                _ = "%s %dR/%dZ, %s %dR/%dD" % (
+                _ = "%s %dR/%dZ, %s %dR/%dD/%dA" % (
                     i18n.THREAD,
                     len(self.thread_last_seen), len(self.thread_zombie),
                     i18n.QUEUE,
                     self.task.img_q.qsize() if self.task.img_q else 0,
-                    self.task.meta['finished'])
+                    self.task.meta['finished'], self.task.meta['total'])
                 self.logger.info(_)
                 self.set_title(_)
                 intv = 0
