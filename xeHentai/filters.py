@@ -107,6 +107,7 @@ def flt_pageurl(r, suc, fail):
     #picpage = re.findall(
     #    '<a href="(%s/./[a-f0-9]{10}/\d+\-\d+)"><img alt="\d+" title="Page' % RESTR_SITE,
     #    r.text)
+
     picpage = re.findall(
         '<a href="(%s/./[a-f0-9]{10}/\d+\-\d+)"><img alt="\d+" title="Page (\d+): ([^"]*)"' % RESTR_SITE,
         r.text)
@@ -115,6 +116,7 @@ def flt_pageurl(r, suc, fail):
         fail(ERR_NO_PAGEURL_FOUND)
     for p in picpage:
         suc(p)
+
 
 def flt_quota_check(func):
     def _(r, suc, fail):
@@ -130,9 +132,12 @@ def flt_quota_check(func):
                 re.findall("exceeded your image viewing limits", r.text):
             fail((ERR_QUOTA_EXCEEDED, r._real_url))
             # will not call the decorated filter
+        elif r.status_code == 503 or r.content_length == 0:
+            fail((ERR_CONNECTION_ERROR, r._real_url))
         else:
             func(r, suc, fail)
     return _
+
 
 def flt_imgurl_wrapper(ori):
     @flt_quota_check
@@ -178,7 +183,7 @@ def flt_imgurl_wrapper(ori):
                 fullurl = util.htmlescape(fullurl[0])
             else:
                 fullurl = picurl
-            _= re.findall("return nl\('([a-z\d\-]+)'\)", r.text)
+            _ = re.findall("return nl\('([a-z\d\-]+)'\)", r.text)
             if not _:
                 break
             js_nl = _[0]
@@ -192,6 +197,7 @@ def flt_imgurl_wrapper(ori):
         return fail((ERR_SCAN_REGEX_FAILED, r._real_url))
 
     return flt_imgurl
+
 
 def download_file_wrapper(dirpath):
 

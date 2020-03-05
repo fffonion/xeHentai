@@ -225,8 +225,8 @@ class xeHentai(object):
                 try:
                     r = req.request("GET", task.url,
                         filters.flt_metadata,
-                        lambda x:task.update_meta(x),
-                        lambda x:task.set_fail(x))
+                        lambda x: task.update_meta(x),
+                        lambda x: task.set_fail(x))
                 except Exception as ex:
                     self.logger.error(i18n.TASK_ERROR % (task.guid, traceback.format_exc()))
                     task.state = TASK_STATE_FAILED
