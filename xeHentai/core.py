@@ -220,7 +220,8 @@ class xeHentai(object):
                 self._all_threads[TASK_STATE_SCAN_IMG].append(mon)
                 monitor_started = True
 
-            if task.state == TASK_STATE_GET_META: # grab meta data
+            if task.state == TASK_STATE_GET_META:  # grab meta data
+                task.failcode = 0
                 try:
                     r = req.request("GET", task.url,
                         filters.flt_metadata,
