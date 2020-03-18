@@ -96,6 +96,7 @@ TASK_START_MAKE_ARCHIVE = "task #%s start making archive"
 TASK_MAKE_ARCHIVE_FINISHED = "task #%s archive saved at: %s, use %.1fs"
 TASK_STOP_QUOTA_EXCEEDED = "task #%s quota exceeded"
 TASK_STUCK = "task #%s is stuck, there may be some bugs in xeHentai, or the connection is too slow"
+TASK_SLOW = "task #%s is slow, maybe image is too large or connection is too slow, consider use a proxy"
 
 XEH_STARTED = "xeHentai %s started."
 XEH_LOOP_FINISHED = "application task loop finished"

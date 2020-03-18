@@ -150,10 +150,11 @@ class Task(object):
         else:
             self.reload_map[imgurl] = [reload_url, fname]
 
-    def get_reload_url(self, imgurl):
+    def put_reload_url(self, imgurl):
         if not imgurl:
             return
-        return self.reload_map[imgurl][0]
+        url = self.reload_map.pop(imgurl)[0]
+        self.page_q.put(url)
 
     def scan_downloaded(self, scaled = True):
         fpath = self.get_fpath()

@@ -137,7 +137,26 @@ class HttpReq(object):
             retry += 1
         return _filter(_FakeResponse(url_history[0]), suc, fail)
 
+# speed statistics with ring buffer
+class speed_checker(object):
+    def __init__(self, cnt=5):
+        self.cnt = cnt
+        self.last_tm = time.time()
+        self.last_bytes = 0
+        self.current_bytes = 0
+        self.current_tm = 0
+        self.speed_buffer = []
 
+    def check(self, d):
+        self.current_bytes += len(d)
+        self.current_tm = time.time()
+        if self.current_tm - self.last_tm > 1:
+            self.speed_buffer.append((self.current_bytes-self.last_bytes)/(self.current_tm-self.last_tm))
+            while len(self.speed_buffer) > self.cnt:
+                self.speed_buffer.pop(0)
+            self.last_tm = self.current_tm
+            self.last_bytes = self.current_bytes
+        return sum(self.speed_buffer)/len(self.speed_buffer)
 
 class HttpWorker(Thread, HttpReq):
     def __init__(self, tname, task_queue, flt, suc, fail, headers={}, proxy=None, proxy_policy=None,
@@ -171,6 +190,7 @@ class HttpWorker(Thread, HttpReq):
         self.f_suc = suc
         self.f_fail = fail
         self.stream_mode = stream_mode
+        self.stream_speed = None
         # if we don't checkin in this zombie_threshold time, monitor will regard us as zombie
         self.zombie_threshold = timeout * (retry + 1) 
         self.run_once = False
@@ -183,7 +203,11 @@ class HttpWorker(Thread, HttpReq):
         self.logger.verbose("t-%s start" % self.name)
         _stream_cb = None
         if self.stream_mode:
-            _stream_cb = lambda x:self._keepalive(self)
+            sc = speed_checker()
+            def f(d):
+                self.stream_speed = sc.check(d)
+                self._keepalive(self)
+            _stream_cb = f
         while not self._keepalive(self) and not self._exit(self):
             try:
                 url = self.task_queue.get(False)
@@ -251,6 +275,7 @@ class Monitor(Thread):
         self.task = task
         self._exit = exit_check if exit_check else lambda x: False
         self._cleaning_up = False
+        self.speed = 0
         if os.name == "nt":
             self.set_title = lambda s:os.system("TITLE %s" % (
                 s if PY3K else s.encode(CODEPAGE, 'replace')))
@@ -335,6 +360,7 @@ class Monitor(Thread):
         while len(self.thread_last_seen) > 0:
             intv += 1
             self._check_vote()
+            total_speed = 0
             for k in list(self.thread_last_seen.keys()):
                 _zombie_threshold = self.thread_ref[k].zombie_threshold if k in self.thread_ref else 30
                 if time.time() - self.thread_last_seen[k] > _zombie_threshold:
@@ -344,13 +370,18 @@ class Monitor(Thread):
                     else:
                         self.logger.warning(i18n.THREAD_SWEEP_OUT % k)
                     del self.thread_last_seen[k]
+                # if thread is not a zombie, add to speed sum
+                elif k in self.thread_ref and self.thread_ref[k].stream_speed:
+                    total_speed += self.thread_ref[k].stream_speed
+            self.speed = total_speed
             if intv == CHECK_INTERVAL:
-                _ = "%s %dR/%dZ, %s %dR/%dD" % (
+                _ = "%s %dR/%dZ, %s %dR/%dD, %s/s" % (
                     i18n.THREAD,
                     len(self.thread_last_seen), len(self.thread_zombie),
                     i18n.QUEUE,
                     self.task.img_q.qsize(),
-                    self.task.meta['finished'])
+                    self.task.meta['finished'],
+                    util.human_size(total_speed))
                 self.logger.info(_)
                 self.set_title(_)
                 intv = 0
@@ -358,8 +389,12 @@ class Monitor(Thread):
                 if last_finished != self.task.meta['finished']:
                     last_change = time.time()
                     last_finished = self.task.meta['finished']
-                else:
-                    if time.time() - last_change > STUCK_INTERVAL:
+                elif time.time() - last_change > STUCK_INTERVAL:
+                    if total_speed > 0:
+                        # reset last_change
+                        last_change = time.time()
+                        self.logger.warning(i18n.TASK_SLOW % self.task.guid)
+                    else:
                         self.logger.warning(i18n.TASK_STUCK % self.task.guid)
                         break
             time.sleep(0.5)

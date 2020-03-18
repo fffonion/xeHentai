@@ -293,8 +293,7 @@ class xeHentai(object):
                             (self.logger.debug(i18n.XEH_FILE_DOWNLOADED.format(tid, *task.get_fname(x[1]))),
                                 mon.vote(tid, 0))),
                         lambda x, tid = tid: (
-                            task.page_q.put(task.get_reload_url(x[1])),# if x[0] != ERR_QUOTA_EXCEEDED else None,
-                            task.reload_map.pop(x[1]) if x[1] in task.reload_map else None, # delete old url in reload_map
+                            task.put_reload_url(x[1]),
                             self.logger.debug(i18n.XEH_DOWNLOAD_HAS_ERROR % (tid, i18n.c(x[0]))),
                             mon.vote(tid, x[0])),
                         mon.wrk_keepalive,

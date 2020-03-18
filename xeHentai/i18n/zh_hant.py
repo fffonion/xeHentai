@@ -95,6 +95,7 @@ TASK_START_MAKE_ARCHIVE = "任務 #%s 開始打包"
 TASK_MAKE_ARCHIVE_FINISHED = "任務 #%s 打包完成，保存在: %s, 用時%.1f秒"
 TASK_STOP_QUOTA_EXCEEDED = "任務 #%s 配額超限"
 TASK_STUCK = "任務 #%s 卡住了, 可能是腳本有bug, 或者網絡連接太慢了"
+TASK_SLOW = "任務 #%s 有點慢, 可能是圖片太大了，或者網絡連接太慢了; 可以考慮使用代理"
 
 XEH_STARTED = "xeHentai %s 已啟動"
 XEH_LOOP_FINISHED = "程序循環已完成"
