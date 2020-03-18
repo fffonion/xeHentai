@@ -63,3 +63,5 @@ save_tasks = False
 # delete files when deleting a task
 delete_task_files = False
 
+# retry a connection if speed is lower than this value, unit is bytes per second
+low_speed_threshold = 10

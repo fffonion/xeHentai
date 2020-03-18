@@ -96,6 +96,7 @@ TASK_MAKE_ARCHIVE_FINISHED = "任务 #%s 打包完成，保存在: %s, 用时%.1
 TASK_STOP_QUOTA_EXCEEDED = "任务 #%s 配额超限"
 TASK_STUCK = "任务 #%s 卡住了, 可能是脚本有bug, 或者网络连接太慢了"
 TASK_SLOW = "任务 #%s 有点慢, 可能是图片太大了，或者网络连接太慢了; 可以考虑使用代理"
+TASK_UNFINISHED = "任务 #%s 剩余以下图片未下载: %s"
 
 XEH_STARTED = "xeHentai %s 已启动"
 XEH_LOOP_FINISHED = "程序循环已完成"
@@ -111,7 +112,7 @@ XEH_CRITICAL_ERROR = "xeHentai 抽风啦:\n%s"
 XEH_DOWNLOAD_ORI_NEED_LOGIN = "下载原图需要登录"
 XEH_FILE_DOWNLOADED = "绅士-{} 已下载图片 #{} {}"
 XEH_RENAME_HAS_ERRORS = "部分图片重命名失败:\n%s"
-XEH_DOWNLOAD_HAS_ERROR = "绅士-%s 下载图片时出错: %s, 将在稍后重试"
+XEH_DOWNLOAD_HAS_ERROR = "绅士-%s 下载图片 #%s 时出错: %s, 将在稍后重试"
 
 RPC_STARTED = "RPC服务器监听在 %s:%d"
 RPC_TOO_OPEN = "RPC服务器监听在公网IP (%s)，为了安全起见应该设置rpc_secret"

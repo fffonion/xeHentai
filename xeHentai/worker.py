@@ -141,14 +141,11 @@ class HttpReq(object):
 class speed_checker(object):
     def __init__(self, cnt=5):
         self.cnt = cnt
-        self.last_tm = time.time()
-        self.last_bytes = 0
-        self.current_bytes = 0
-        self.current_tm = 0
         self.speed_buffer = []
+        self.reset()
 
-    def check(self, d):
-        self.current_bytes += len(d)
+    def check(self, l):
+        self.current_bytes += l
         self.current_tm = time.time()
         if self.current_tm - self.last_tm > 1:
             self.speed_buffer.append((self.current_bytes-self.last_bytes)/(self.current_tm-self.last_tm))
@@ -157,6 +154,19 @@ class speed_checker(object):
             self.last_tm = self.current_tm
             self.last_bytes = self.current_bytes
         return sum(self.speed_buffer)/len(self.speed_buffer)
+
+    def calc(self):
+        if len(self.speed_buffer) == 0:
+            return 0
+        return sum(self.speed_buffer)/len(self.speed_buffer)
+
+    def reset(self):
+        self.last_tm = time.time()
+        self.last_bytes = 0
+        self.current_bytes = 0
+        self.current_tm = 0
+        if self.speed_buffer:
+            self.speed_buffer = []
 
 class HttpWorker(Thread, HttpReq):
     def __init__(self, tname, task_queue, flt, suc, fail, headers={}, proxy=None, proxy_policy=None,
@@ -203,15 +213,18 @@ class HttpWorker(Thread, HttpReq):
         self.logger.verbose("t-%s start" % self.name)
         _stream_cb = None
         if self.stream_mode:
-            sc = speed_checker()
+            self.stream_speed = speed_checker()
             def f(d):
-                self.stream_speed = sc.check(d)
+                self.stream_speed.check(len(d))
                 self._keepalive(self)
             _stream_cb = f
         while not self._keepalive(self) and not self._exit(self):
             try:
                 url = self.task_queue.get(False)
             except Empty:
+                # set back to 0 when waiting
+                if self.stream_speed:
+                    self.stream_speed.reset()
                 time.sleep(1)
                 continue
             self.run_once = True
@@ -372,7 +385,7 @@ class Monitor(Thread):
                     del self.thread_last_seen[k]
                 # if thread is not a zombie, add to speed sum
                 elif k in self.thread_ref and self.thread_ref[k].stream_speed:
-                    total_speed += self.thread_ref[k].stream_speed
+                    total_speed += self.thread_ref[k].stream_speed.calc()
             self.speed = total_speed
             if intv == CHECK_INTERVAL:
                 _ = "%s %dR/%dZ, %s %dR/%dD, %s/s" % (
@@ -390,6 +403,7 @@ class Monitor(Thread):
                     last_change = time.time()
                     last_finished = self.task.meta['finished']
                 elif time.time() - last_change > STUCK_INTERVAL:
+                    self.logger.info(i18n.TASK_UNFINISHED % (self.task.guid, self.task.get_fid_unfinished()))
                     if total_speed > 0:
                         # reset last_change
                         last_change = time.time()

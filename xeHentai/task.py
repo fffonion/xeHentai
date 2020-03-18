@@ -22,7 +22,7 @@ else:
     from Queue import Queue, Empty
 
 class Task(object):
-    def __init__(self, url, cfgdict):
+    def __init__(self, url, cfgdict, logger):
         self.url = url
         if url:
             _ = RE_INDEX.findall(url)
@@ -34,16 +34,17 @@ class Task(object):
         self.config = cfgdict
         self.meta = {}
         self.has_ori = False
-        self.reload_map = {} # {url:reload_url}
-        self.filehash_map = {} # map same hash to different ids, {url:((id, fname), )}
+        self.reload_map = {} # {img_hash:reload_url}
+        self.duplicate_map = {} # map fid to duplicate file ids, {id:(id1, id2, )}
         self.renamed_map = {} # map fid to renamed file name, used in finding a file by id in RPC
         self.img_q = None
         self.page_q = None
-        self.list_q = None
         self._flist_done = set() # store id, don't save, will generate when scan
         self._monitor = None
         self._cnt_lock = RLock()
         self._f_lock = RLock()
+
+        self.logger = logger
 
     def cleanup(self, before_delete=False):
         if before_delete:
@@ -59,7 +60,6 @@ class Task(object):
         elif self.state in (TASK_STATE_FINISHED, TASK_STATE_FAILED):
             self.img_q = None
             self.page_q = None
-            self.list_q = None
             self.reload_map = {}
         
             # if 'filelist' in self.meta:
@@ -118,42 +118,44 @@ class Task(object):
     #         self.base_url(), pichash[:10], self.gid, self.meta['filelist'][pichash][0]
     #     )
 
-    def set_reload_url(self, imgurl, reload_url, fname):
+    def put_img_queue(self, imgurl, reload_url, fname):
+        img_hash = self.get_imghash(imgurl)
         # if same file occurs severl times in a gallery
-        if imgurl in self.reload_map:
+        if img_hash in self.reload_map:
             fpath = self.get_fpath()
-            old_fid = self.get_fname(imgurl)[0]
+            old_fid = self.get_fname(img_hash)[0]
             old_f = os.path.join(fpath, self.get_fidpad(old_fid))
             this_fid = int(RE_GALLERY.findall(reload_url)[0][1])
             this_f = os.path.join(fpath, self.get_fidpad(this_fid))
             self._f_lock.acquire()
+            self.logger.debug("#%s is a duplicate of #%s" % (this_fid, old_fid))
             if os.path.exists(old_f):
                 # we can just copy old file if already downloaded
                 try:
-                    with open(old_f, 'rb') as _of:
-                        with open(this_f, 'wb') as _nf:
-                            _nf.write(_of.read())
+                    shutil.copyfile(old_f, this_f)
                 except Exception as ex:
                     self._f_lock.release()
                     raise ex
                 else:
                     self._f_lock.release()
-                    self._cnt_lock.acquire()
-                    self.meta['finished'] += 1
-                    self._cnt_lock.release()
+                    self.set_fid_finished(this_fid)
+                self.logger.debug("#%s is copied from #%s" % (this_fid, old_fid))
             else:
                 # if not downloaded, we will copy them in save_file
-                if imgurl not in self.filehash_map:
-                    self.filehash_map[imgurl] = []
-                self.filehash_map[imgurl].append((this_fid, old_fid))
+                if old_fid not in self.duplicate_map:
+                    self.duplicate_map[old_fid] = set()
+                self.duplicate_map[old_fid].add(this_fid)
                 self._f_lock.release()
+                self.logger.debug("#%s is pending copy from #%s" % (this_fid, old_fid))
         else:
-            self.reload_map[imgurl] = [reload_url, fname]
+            self.reload_map[img_hash] = [reload_url, fname]
+            self.img_q.put(imgurl)
 
-    def put_reload_url(self, imgurl):
+    def put_page_queue_retry(self, imgurl):
         if not imgurl:
             return
-        url = self.reload_map.pop(imgurl)[0]
+        img_hash = self.get_imghash(imgurl)
+        url = self.reload_map.pop(img_hash)[0]
         self.page_q.put(url)
 
     def scan_downloaded(self, scaled = True):
@@ -191,7 +193,7 @@ class Task(object):
         if self.meta['finished'] == self.meta['total']:
             self.state == TASK_STATE_FINISHED
 
-    def queue_wrapper(self, callback, pichash = None, url = None):
+    def put_page_queue(self, url):
         # if url is not finished, call callback to put into queue
         # type 1: normal file; type 2: resampled url
         # if pichash:
@@ -204,7 +206,7 @@ class Task(object):
         #     self.meta['resampled'][fhash] = int(fid)
         #     self.has_ori = True]
         if int(fid) not in self._flist_done:
-            callback(url)
+            self.page_q.put(url)
 
     def save_file(self, imgurl, redirect_url, binary_iter):
         # TODO: Rlock for finished += 1
@@ -212,13 +214,13 @@ class Task(object):
         self._f_lock.acquire()
         if not os.path.exists(fpath):
             os.mkdir(fpath)
+        img_hash = self.get_imghash(imgurl)
         self._f_lock.release()
-        pageurl, fname = self.reload_map[imgurl]
+        fid, fname = self.get_fname(img_hash)
         _ = re.findall("/([^/\?]+)(?:\?|$)", redirect_url)
         if _: # change it if it's a full image
             fname = _[0]
-            self.reload_map[imgurl][1] = fname
-        _, fid = RE_GALLERY.findall(pageurl)[0]
+            self.reload_map[img_hash][1] = fname
 
         fn = os.path.join(fpath, self.get_fidpad(int(fid)))
         if os.path.exists(fn) and os.stat(fn).st_size > 0:
@@ -256,28 +258,41 @@ class Task(object):
                         pass
                 else:
                     raise ex
-            self._cnt_lock.acquire()
-            self.meta['finished'] += 1
-            self._cnt_lock.release()
-            if imgurl in self.filehash_map:
-                for _fid, _ in self.filehash_map[imgurl]:
+            self.set_fid_finished(fid)
+            if fid in self.duplicate_map:
+                for fid_rep in self.duplicate_map[fid]:
                     # if a file download is interrupted, it will appear in self.filehash_map as well
-                    if _fid == int(fid):
+                    if fid_rep == fid:
                         continue
-                    fn_rep = os.path.join(fpath, self.get_fidpad(_fid))
+                    fn_rep = os.path.join(fpath, self.get_fidpad(fid_rep))
                     shutil.copyfile(fn, fn_rep)
-                    self._cnt_lock.acquire()
-                    self.meta['finished'] += 1
-                    self._cnt_lock.release()
-                del self.filehash_map[imgurl]
+                    self.set_fid_finished(fid_rep)
+                self.logger.debug("#%s is copied from #%s in save_file" % (fid_rep, fid))
+                del self.duplicate_map[fid]
         except Exception as ex:
             self._f_lock.release()
             raise ex
         self._f_lock.release()
         return True
 
-    def get_fname(self, imgurl):
-        pageurl, fname = self.reload_map[imgurl]
+    def set_fid_finished(self, fid):
+        self._cnt_lock.acquire()
+        self._flist_done.add(fid)
+        self.meta['finished'] = len(self._flist_done)
+        self._cnt_lock.release()
+
+    def get_fid_unfinished(self):
+        unfinished = []
+        for i in range(self.meta['total']):
+            if i not in self._flist_done:
+                unfinished.append(i)
+        return unfinished
+
+    def get_imghash(self, imgurl):
+        return RE_IMGHASH.findall(imgurl)[0][0]
+
+    def get_fname(self, img_hash):
+        pageurl, fname = self.reload_map[img_hash]
         _, fid = RE_GALLERY.findall(pageurl)[0]
         return int(fid), fname
 
@@ -389,7 +404,7 @@ class Task(object):
     def to_dict(self):
         d = dict({k:v for k, v in self.__dict__.items()
             if not k.endswith('_q') and not k.startswith("_")})
-        for k in ['img_q', 'page_q', 'list_q']:
+        for k in ['img_q', 'page_q']:
             if getattr(self, k):
                 d[k] = [e for e in getattr(self, k).queue]
         return d

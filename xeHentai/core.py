@@ -107,7 +107,7 @@ class xeHentai(object):
         cfg.update(cfg_dict)
         if cfg['download_ori'] and not self.has_login:
             self.logger.warning(i18n.XEH_DOWNLOAD_ORI_NEED_LOGIN)
-        t = Task(url, cfg)
+        t = Task(url, cfg, self.logger)
         if t.guid in self._all_tasks:
             if self._all_tasks[t.guid].state in (TASK_STATE_FINISHED, TASK_STATE_FAILED):
                 self.logger.debug(i18n.TASK_PUT_INTO_WAIT % t.guid)
@@ -244,7 +244,7 @@ class xeHentai(object):
                         r = req.request("GET",
                             "%s/?p=%d" % (task.url, x),
                             filters.flt_pageurl,
-                            lambda x: task.queue_wrapper(task.page_q.put, url = x),
+                            lambda x: task.put_page_queue(x),
                             lambda x: task.set_fail(x))
                         if task.failcode:
                             break
@@ -253,7 +253,7 @@ class xeHentai(object):
                     r = req.request("GET",
                         task.mpv_url(),
                         filters.flt_pageurl_mpv,
-                        lambda x: task.queue_wrapper(task.page_q.put, url = x),
+                        lambda x: task.put_page_queue(x),
                         lambda x: task.set_fail(x))
             elif task.state == TASK_STATE_SCAN_IMG:
                 # print here so that see it after we can join former threads
@@ -267,8 +267,7 @@ class xeHentai(object):
                     tid = 'scan-%d' % (i + 1)
                     _ = self._get_httpworker(tid, task.page_q,
                         filters.flt_imgurl_wrapper(task.config['download_ori'] and self.has_login),
-                        lambda x, tid = tid: (task.set_reload_url(x[0], x[1], x[2]),
-                            task.img_q.put(x[0]),
+                        lambda x, tid = tid: (task.put_img_queue(x[0], x[1], x[2]),
                             mon.vote(tid, 0)),
                         lambda x, tid = tid: (mon.vote(tid, x[0])),
                         mon.wrk_keepalive,
@@ -290,11 +289,13 @@ class xeHentai(object):
                     _ = self._get_httpworker(tid, task.img_q,
                         filters.download_file_wrapper(task.config['dir']),
                         lambda x, tid = tid: (task.save_file(x[1], x[2], x[0]) and \
-                            (self.logger.debug(i18n.XEH_FILE_DOWNLOADED.format(tid, *task.get_fname(x[1]))),
+                            (self.logger.debug(i18n.XEH_FILE_DOWNLOADED.format(tid, *task.get_fname(task.get_imghash(x[1])))),
                                 mon.vote(tid, 0))),
                         lambda x, tid = tid: (
-                            task.put_reload_url(x[1]),
-                            self.logger.debug(i18n.XEH_DOWNLOAD_HAS_ERROR % (tid, i18n.c(x[0]))),
+                            self.logger.debug(i18n.XEH_DOWNLOAD_HAS_ERROR % (
+                                tid, task.get_fname(task.get_imghash(x[1]))[0], i18n.c(x[0]),
+                            )),
+                            task.put_page_queue_retry(x[1]),
                             mon.vote(tid, x[0])),
                         mon.wrk_keepalive,
                         util.get_proxy_policy(task.config),

@@ -138,7 +138,9 @@ def flt_quota_check(func):
         elif r.status_code == 403:
             fail((ERR_KEY_EXPIRED, r._real_url))
         elif r.status_code == 509 or r.content_length in [925, 28658, 144, 210, 1009] or \
-                '509.gif' in r.url or '509.gif' in r._real_url:
+                '/509.gif' in r.url or '/509.gif' in r._real_url:
+            # TODO: /509.gif detection is still not accturate, there might be a file
+            # that happened to be this name
             fail((ERR_QUOTA_EXCEEDED, r._real_url))
             # will not call the decorated filter
         elif r.content_length < 200 and \
@@ -190,7 +192,7 @@ def flt_imgurl_wrapper(ori):
                 fullurl = util.htmlescape(fullurl[0])
             else:
                 fullurl = picurl
-            _= re.findall("return nl\('([\d\-]+)'\)", r.text)
+            _= re.findall("return nl\('([a-z\d\-]+)'\)", r.text)
             if not _:
                 break
             js_nl = _[0]
