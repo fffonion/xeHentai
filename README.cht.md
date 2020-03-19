@@ -2,7 +2,7 @@
 
 [![Build Status](https://travis-ci.org/fffonion/xeHentai.svg?branch=dev)](https://travis-ci.org/fffonion/xeHentai)
 
-[English](README.md) [繁體中文](README.cht.md)
+[English](README.md) [简体中文](README.chs.md)
 
 [xeHentai Web界面](https://github.com/fffonion/xeHentai-webui)
 

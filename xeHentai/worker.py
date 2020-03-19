@@ -302,7 +302,7 @@ class Monitor(Thread):
         self.task = task
         self._exit = exit_check if exit_check else lambda x: False
         self._cleaning_up = False
-        self.speed = 0
+        self.download_speed = 0
         if os.name == "nt":
             self.set_title = lambda s:os.system("TITLE %s" % (
                 s if PY3K else s.encode(CODEPAGE, 'replace')))
@@ -366,12 +366,12 @@ class Monitor(Thread):
     #     print(self.task.list_q.qsize())
 
     def _check_vote(self):
-        if False and ERR_IMAGE_RESAMPLED in self.vote_result and ERR_IMAGE_RESAMPLED not in self.vote_cleared:
-            self.logger.warning(i18n.TASK_START_PAGE_RESCAN % self.task.guid)
-            self._rescan_pages()
-            self.task.meta['has_ori'] = True
-            self.vote_cleared.add(ERR_IMAGE_RESAMPLED)
-        elif ERR_QUOTA_EXCEEDED in self.vote_result and \
+        # if False and ERR_IMAGE_RESAMPLED in self.vote_result and ERR_IMAGE_RESAMPLED not in self.vote_cleared:
+        #     self.logger.warning(i18n.TASK_START_PAGE_RESCAN % self.task.guid)
+        #     self._rescan_pages()
+        #     self.task.meta['has_ori'] = True
+        #     self.vote_cleared.add(ERR_IMAGE_RESAMPLED)
+        if ERR_QUOTA_EXCEEDED in self.vote_result and \
             ERR_QUOTA_EXCEEDED not in self.vote_cleared and \
             self.vote_result[ERR_QUOTA_EXCEEDED] >= len(self.thread_last_seen):
             self.logger.error(i18n.TASK_STOP_QUOTA_EXCEEDED % self.task.guid)
@@ -400,7 +400,7 @@ class Monitor(Thread):
                 # if thread is not a zombie, add to speed sum
                 elif k in self.thread_ref and self.thread_ref[k].stream_speed:
                     total_speed += self.thread_ref[k].stream_speed.calc()
-            self.speed = total_speed
+            self.download_speed = total_speed
             if intv == CHECK_INTERVAL:
                 _ = "%s %dR/%dZ, %s %dR/%dD, %s/s" % (
                     i18n.THREAD,

@@ -319,7 +319,8 @@ class xeHentaiRPCExtended(object):
     def get_info(self):
         ret = {"version": self.verstr,
             "threads_zombie": 0, "threads_running": 0,
-            "queue_pending": 0, "queue_finished": 0
+            "queue_pending": 0, "queue_finished": 0,
+            "download_speed": 0,
         }
         if hasattr(self, '_monitor'):
             ret['threads_running'] = len(self._monitor.thread_last_seen)
@@ -327,6 +328,7 @@ class xeHentaiRPCExtended(object):
             if self._monitor.task.state > TASK_STATE_PAUSED and self._monitor.task.img_q:
                 ret['queue_pending'] = self._monitor.task.img_q.qsize()
                 ret['queue_finished'] = self._monitor.task.meta['finished']
+                ret['download_speed'] = self._monitor.download_speed
             else:
                 ret['queue_pending'] = 0
                 ret['queue_finished'] = 0

@@ -33,7 +33,6 @@ class Task(object):
         self.guid = str(uuid.uuid4())[:8]
         self.config = cfgdict
         self.meta = {}
-        self.has_ori = False
         self.reload_map = {} # {img_hash:reload_url}
         self.duplicate_map = {} # map fid to duplicate file ids, {id:(id1, id2, )}
         self.renamed_map = {} # map fid to renamed file name, used in finding a file by id in RPC
@@ -119,7 +118,11 @@ class Task(object):
     #     )
 
     def put_img_queue(self, imgurl, reload_url, fname):
-        img_hash = self.get_imghash(imgurl)
+        if self.config['download_ori']:
+            # fullimg.php doesn't have hash in imgurl
+            img_hash = RE_GALLERY.findall(reload_url)[0][0]
+        else:
+            img_hash = self.get_imghash(imgurl)
         # if same file occurs severl times in a gallery
         if img_hash in self.reload_map:
             fpath = self.get_fpath()
@@ -151,10 +154,11 @@ class Task(object):
             self.reload_map[img_hash] = [reload_url, fname]
             self.img_q.put(imgurl)
 
-    def put_page_queue_retry(self, imgurl):
-        if not imgurl:
+    def put_page_queue_retry(self, redirect_url):
+        if not redirect_url:
             return
-        img_hash = self.get_imghash(imgurl)
+        # use redirect_url, fullimg.php doen't have hash in imgurl
+        img_hash = self.get_imghash(redirect_url)
         url = self.reload_map.pop(img_hash)[0]
         self.page_q.put(url)
 
@@ -214,7 +218,8 @@ class Task(object):
         self._f_lock.acquire()
         if not os.path.exists(fpath):
             os.mkdir(fpath)
-        img_hash = self.get_imghash(imgurl)
+        # use redirect_url, fullimg.php doen't have hash in imgurl
+        img_hash = self.get_imghash(redirect_url)
         self._f_lock.release()
         fid, fname = self.get_fname(img_hash)
         _ = re.findall("/([^/\?]+)(?:\?|$)", redirect_url)
@@ -288,8 +293,11 @@ class Task(object):
                 unfinished.append(i)
         return unfinished
 
-    def get_imghash(self, imgurl):
-        return RE_IMGHASH.findall(imgurl)[0][0]
+    def get_imghash(self, imgurl_with_hash):
+        # only get first 10 bytes of hash
+        # so we can use same key in both normal image (from imgurl, full hash)
+        # and original image (from gallery url/redirect url, short hash)
+        return RE_IMGHASH.findall(imgurl_with_hash)[0][0][:10]
 
     def get_fname(self, img_hash):
         pageurl, fname = self.reload_map[img_hash]

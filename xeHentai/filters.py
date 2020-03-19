@@ -192,7 +192,7 @@ def flt_imgurl_wrapper(ori):
                 fullurl = util.htmlescape(fullurl[0])
             else:
                 fullurl = picurl
-            _= re.findall("return nl\('([a-z\d\-]+)'\)", r.text)
+            _ = re.findall("return nl\('([a-z\d\-]+)'\)", r.text)
             if not _:
                 break
             js_nl = _[0]
