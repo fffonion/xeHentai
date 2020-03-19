@@ -153,7 +153,7 @@ class speed_checker(object):
                 self.speed_buffer.pop(0)
             self.last_tm = self.current_tm
             self.last_bytes = self.current_bytes
-        return sum(self.speed_buffer)/len(self.speed_buffer)
+        return
 
     def calc(self, full=False):
         if len(self.speed_buffer) == 0:

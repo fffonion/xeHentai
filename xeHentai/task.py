@@ -124,13 +124,16 @@ class Task(object):
         else:
             img_hash = self.get_imghash(imgurl)
         # if same file occurs severl times in a gallery
-        if img_hash in self.reload_map:
+        while img_hash in self.reload_map:
             fpath = self.get_fpath()
             old_fid = self.get_fname(img_hash)[0]
             old_f = os.path.join(fpath, self.get_fidpad(old_fid))
             this_fid = int(RE_GALLERY.findall(reload_url)[0][1])
             this_f = os.path.join(fpath, self.get_fidpad(this_fid))
             self._f_lock.acquire()
+            # if we are equal to ourself, download as usual
+            if this_fid == old_fid:
+                break
             self.logger.debug("#%s is a duplicate of #%s" % (this_fid, old_fid))
             if os.path.exists(old_f):
                 # we can just copy old file if already downloaded
@@ -150,9 +153,10 @@ class Task(object):
                 self.duplicate_map[old_fid].add(this_fid)
                 self._f_lock.release()
                 self.logger.debug("#%s is pending copy from #%s" % (this_fid, old_fid))
-        else:
-            self.reload_map[img_hash] = [reload_url, fname]
-            self.img_q.put(imgurl)
+            return
+
+        self.reload_map[img_hash] = [reload_url, fname]
+        self.img_q.put(imgurl)
 
     def put_page_queue_retry(self, redirect_url):
         if not redirect_url:
