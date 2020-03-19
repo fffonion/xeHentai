@@ -372,6 +372,8 @@ class Task(object):
         return error_list
 
     def make_archive(self, remove=True):
+        # needed to lock between RPC get_img
+        self._f_lock.acquire()
         dpath = self.get_fpath()
         arc = "%s.zip" % dpath
         if os.path.exists(arc):
@@ -384,6 +386,7 @@ class Task(object):
                 zipFile.write(fullpath, f, zipfile.ZIP_STORED)
         if remove:
             shutil.rmtree(dpath)
+        self._f_lock.release()
         return arc
 
     def from_dict(self, j):

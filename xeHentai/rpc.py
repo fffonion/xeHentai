@@ -126,6 +126,9 @@ class Handler(BaseHTTPRequestHandler):
         return "xeHentai/%s" % __version__
     
     def serve_file(self, f):
+        _task = self.xeH._monitor.task
+        # needed to lock between archiver
+        _task._f_lock.acquire()
         f.seek(0, os.SEEK_END)
         size = f.tell()
         self.xeH.logger.verbose("GET %s 200 %d %s" % (self.path, size, self.client_address[0]))
@@ -137,6 +140,7 @@ class Handler(BaseHTTPRequestHandler):
             if not buf:
                 break
             self.wfile.write(buf)
+        _task._f_lock.release()
         return size
 
     def do_OPTIONS(self):
