@@ -93,16 +93,17 @@ class xeHentai(object):
     def _get_httpreq(self, proxy_policy):
         return HttpReq(self.headers, logger = self.logger, proxy = self.proxy, proxy_policy = proxy_policy)
 
-    def _get_httpworker(self, tid, task_q, flt, suc, fail, keep_alive, proxy_policy, timeout, stream_mode):
+    def _get_httpworker(self, tid, task_q, flt, suc, fail, keep_alive, proxy_policy, timeout, stream_mode, lowspeed_threshold):
         return HttpWorker(tid, task_q, flt, suc, fail,
             headers = self.headers, proxy = self.proxy, logger = self.logger,
-            keep_alive = keep_alive, proxy_policy = proxy_policy, timeout = timeout, stream_mode = stream_mode)
+            keep_alive = keep_alive, proxy_policy = proxy_policy, timeout = timeout, stream_mode = stream_mode,
+            lowspeed_threshold = lowspeed_threshold)
 
     def add_task(self, url, **cfg_dict):
         url = url.strip()
         cfg = {k:v for k, v in self.cfg.items() if k in (
             "dir", "download_ori", "download_thread_cnt", "scan_thread_cnt",
-            "proxy_image", "proxy_image_only", "ignored_errors",
+            "proxy_image", "proxy_image_only", "ignored_errors", "low_speed_threshold",
             "rename_ori", "make_archive", "delete_task_files", "jpn_title", "download_range", "download_timeout")}
         cfg.update(cfg_dict)
         if cfg['download_ori'] and not self.has_login:
@@ -273,7 +274,8 @@ class xeHentai(object):
                         mon.wrk_keepalive,
                         util.get_proxy_policy(task.config),
                         10,
-                        False)
+                        False,
+                        None)
                         # we don't need proxy_image in the scan thread
                         # we use default timeout in the scan thread
                     # _._exit = lambda t: t._finish_queue()
@@ -300,7 +302,9 @@ class xeHentai(object):
                         mon.wrk_keepalive,
                         util.get_proxy_policy(task.config),
                         task.config['download_timeout'],
-                        True)
+                        True,
+                        task.config['low_speed_threshold'] * 1024
+                        )
                     self._all_threads[TASK_STATE_DOWNLOAD].append(_)
                     _.start()
                 # spawn archiver if we need

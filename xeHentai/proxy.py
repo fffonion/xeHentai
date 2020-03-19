@@ -16,6 +16,9 @@ MAX_FAIL = 5
 class PoolException(Exception):
     pass
 
+class LowSpeedException(Exception):
+    pass
+
 class Pool(object):
     def __init__(self, disable_policy = None):
         self.proxies = {}

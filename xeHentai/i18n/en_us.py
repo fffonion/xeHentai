@@ -64,6 +64,7 @@ XEH_OPT_j = "use Japanese title, use English/Romaji title if turned off (current
 XEH_OPT_download_range = "specify ranges of images to be downloaded, in format start-end, or single index, " \
 "use comma to concat multiple ranges, e.g.: 5-10,15,20-25, default to download all images"
 XEH_OPT_timeout = "set image download timeout (current: %(default)ss)"
+XEH_OPT_low_speed = "retry download if speed is lower than specified value (current: %(default)s KB/s)"
 XEH_OPT_f = "download regardless of quota exceeded warning (current: %(current)s)"
 XEH_OPT_h = "show this help message and exit"
 XEH_OPT_version = "show program's version number and exit"
@@ -126,6 +127,7 @@ THREAD = "thread"
 THREAD_UNCAUGHT_EXCEPTION = "thread-%s uncaught exception\n%s"
 THREAD_MAY_BECOME_ZOMBIE = "thread-%s may became zombie"
 THREAD_SWEEP_OUT = "thread-%s is dead, deref it"
+THREAD_SPEED_TOO_LOW = "thread-%s retry because of low download speed: %s/s less than threshold %s/s"
 
 QUEUE = "queue"
 

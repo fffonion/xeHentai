@@ -62,6 +62,7 @@ XEH_OPT_j = "使用日语标题, 如果关闭则使用英文或罗马字标题 (
 XEH_OPT_download_range = "设置下载的图片范围, 格式为 开始位置-结束位置, 或者单张图片的位置, " \
 "使用逗号来分隔多个范围, 例如 5-10,15,20-25, 默认为下载所有"
 XEH_OPT_timeout = "设置下载图片的超时 (当前: %(default)s秒)"
+XEH_OPT_low_speed = "设置最低下载速度，低于此值将换源重新下载 (当前: %(default)s KB/s)"
 XEH_OPT_f = "忽略配额判断，继续下载 (当前: %(current)s)"
 XEH_OPT_h = "显示本帮助信息"
 XEH_OPT_version = "显示版本信息"
@@ -125,6 +126,7 @@ THREAD = "绅士"
 THREAD_UNCAUGHT_EXCEPTION = "绅士-%s 未捕获的异常\n%s"
 THREAD_MAY_BECOME_ZOMBIE = "绅士-%s 可能变成了丧尸"
 THREAD_SWEEP_OUT = "绅士-%s 挂了, 不再理它"
+THREAD_SPEED_TOO_LOW = "绅士-%s 下载速度只有 %s/s, 低于 %s/s, 将在稍后重试"
 
 QUEUE = "队列"
 

@@ -50,6 +50,7 @@ Configuration keys：
  - **scan_thread_cnt** Thread count for scanning webpages. Default to `1`.
  - **download_thread_cnt** Thread count for downloading images. Default to `5`.
  - **download_timeout** Timeout of download images. Default to `10`s.
+ - **low_speed_threshold** Retry download if speed is lower than specified value. Default to `10` KB/s.
  - **ignored_errors** Set the error codes to ignore and continue downloading. Default to *empty*. Error codes can be obtained from [const.py](xeHentai/const.py).
  - **log_path** Set log file path. Default to `eh.log`.
  - **log_verbose** Set log level with integer from 1 to 3. Bigger value means more verbose output. Default to `2`.
@@ -58,12 +59,12 @@ Configuration keys：
 
 ### Command line options
 ```
-Usage: xeH [-u USERNAME] [-k KEY] [-c COOKIE] [-i] [--daemon] [-d DIR] [-o]
+Usage: xeh [-u USERNAME] [-k KEY] [-c COOKIE] [-i] [--daemon] [-d DIR] [-o]
            [-j BOOL] [-r BOOL] [-p PROXY] [--proxy-image | --proxy-image-only]
            [--rpc-interface ADDR] [--rpc-port PORT] [--rpc-secret ...]
            [--delete-task-files BOOL] [-a BOOL] [--download-range a-b,c-d,e]
-           [-t N] [--timeout N] [-f] [-l /path/to/eh.log] [-v] [-h]
-           [--version]
+           [-t N] [--timeout N] [--low-speed-threshold N] [-f]
+           [-l /path/to/eh.log] [-v] [-h] [--version]
            [url [url ...]]
 
 xeHentai Downloader NG
@@ -115,6 +116,9 @@ optional arguments:
                         download all images
   -t N, --thread N      download threads count (default: 5)
   --timeout N           set image download timeout (default: 10s)
+  --low-speed-threshold N
+                        retry download if speed is lower than specified value
+                        (default: 10 KB/s)
   -f, --force           download regardless of quota exceeded warning
                         (default: False)
   -l /path/to/eh.log, --logpath /path/to/eh.log

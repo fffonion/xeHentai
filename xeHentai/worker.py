@@ -14,7 +14,7 @@ from threading import Thread, RLock
 from . import util
 from .const import *
 from .i18n import i18n
-from .proxy import PoolException
+from .proxy import PoolException, LowSpeedException
 if PY3K:
     from queue import Queue, Empty
     from urllib.parse import urlparse, urlunparse
@@ -155,8 +155,10 @@ class speed_checker(object):
             self.last_bytes = self.current_bytes
         return sum(self.speed_buffer)/len(self.speed_buffer)
 
-    def calc(self):
+    def calc(self, full=False):
         if len(self.speed_buffer) == 0:
+            return 0
+        elif full and len(self.speed_buffer) < self.cnt:
             return 0
         return sum(self.speed_buffer)/len(self.speed_buffer)
 
@@ -170,7 +172,7 @@ class speed_checker(object):
 
 class HttpWorker(Thread, HttpReq):
     def __init__(self, tname, task_queue, flt, suc, fail, headers={}, proxy=None, proxy_policy=None,
-            retry=3, timeout=10, logger=None, keep_alive=None, stream_mode=False):
+            retry=3, timeout=10, logger=None, keep_alive=None, stream_mode=False, lowspeed_threshold=None):
         """
         Construct a new 'HttpWorker' obkect
 
@@ -201,6 +203,7 @@ class HttpWorker(Thread, HttpReq):
         self.f_fail = fail
         self.stream_mode = stream_mode
         self.stream_speed = None
+        self.lowspeed_threshold = lowspeed_threshold
         # if we don't checkin in this zombie_threshold time, monitor will regard us as zombie
         self.zombie_threshold = timeout * (retry + 1) 
         self.run_once = False
@@ -216,6 +219,10 @@ class HttpWorker(Thread, HttpReq):
             self.stream_speed = speed_checker()
             def f(d):
                 self.stream_speed.check(len(d))
+                if self.lowspeed_threshold:
+                    speed = self.stream_speed.calc(full=True)
+                    if 0 < speed < self.lowspeed_threshold:
+                        raise LowSpeedException("")
                 self._keepalive(self)
             _stream_cb = f
         while not self._keepalive(self) and not self._exit(self):
@@ -233,6 +240,13 @@ class HttpWorker(Thread, HttpReq):
             except PoolException as ex:
                 self.logger.warning("%s-%s %s" % (i18n.THREAD, self.tname, str(ex)))
                 break
+            except LowSpeedException as ex:
+                self.logger.warning(i18n.THREAD_SPEED_TOO_LOW % (
+                    self.tname,
+                    util.human_size(self.stream_speed.calc(full=True)),
+                    util.human_size(self.lowspeed_threshold),
+                ))
+                self.flt(_FakeResponse(url), self.f_suc, self.f_fail)
             except Exception as ex:
                 self.logger.warning(i18n.THREAD_UNCAUGHT_EXCEPTION % (self.tname, traceback.format_exc()))
                 self.flt(_FakeResponse(url), self.f_suc, self.f_fail)

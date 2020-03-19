@@ -283,7 +283,7 @@ class Task(object):
 
     def get_fid_unfinished(self):
         unfinished = []
-        for i in range(self.meta['total']):
+        for i in range(1, self.meta['total']):
             if i not in self._flist_done:
                 unfinished.append(i)
         return unfinished

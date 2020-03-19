@@ -2,7 +2,7 @@
 
 [![Build Status](https://travis-ci.org/fffonion/xeHentai.svg?branch=dev)](https://travis-ci.org/fffonion/xeHentai)
 
-[English](README.md) [简体中文](README.chs.md)
+[English](README.md) [繁體中文](README.cht.md)
 
 [xeHentai Web界面](https://github.com/fffonion/xeHentai-webui)
 
@@ -52,6 +52,7 @@ xeH
  - **scan_thread_cnt** 掃描線程數，默認為`1`
  - **download_thread_cnt** 下載線程數，默認為`5`
  - **download_timeout** 設置下載圖片的超時，默認為`10`秒
+ - **low_speed_threshold** 設置最低下載速度，低於此值將換源重新下載，單位為KB/s，默認為`10`
  - **ignored_errors** 設置忽略的錯誤碼，默認為空，錯誤碼可以從`const.py`中獲得
  - **log_path** 日誌路徑，默認為`eh.log`
  - **log_verbose** 日誌等級，可選1-3，值越大輸出越詳細，默認為`2`
@@ -64,8 +65,8 @@ xeH
            [-j BOOL] [-r BOOL] [-p PROXY] [--proxy-image | --proxy-image-only]
            [--rpc-interface ADDR] [--rpc-port PORT] [--rpc-secret ...]
            [--delete-task-files BOOL] [-a BOOL] [--download-range a-b,c-d,e]
-           [-t N] [--timeout N] [-f] [-l /path/to/eh.log] [-v] [-h]
-           [--version]
+           [-t N] [--timeout N] [--low-speed-threshold N] [-f]
+           [-l /path/to/eh.log] [-v] [-h] [--version]
            [url [url ...]]
 
 紳♂士下載器
@@ -102,6 +103,8 @@ xeH
   --download-range a-b,c-d,e
                         設置下載的圖片範圍, 格式為 開始位置-結束位置, 或者單張圖片的位置, 使用逗號來分隔多個範圍, 例如
                         5-10,15,20-25, 默認為下載所有
+  --low-speed-threshold N
+                        設置最低下載速度，低於此值將換源重新下載 (默認: 10 KB/s)
   -t N, --thread N      下載線程數 (默認: 5)
   --timeout N           設置下載圖片的超時 (默認: 10秒)
   -f, --force           忽略配額判斷, 繼續下載 (默認: False)
