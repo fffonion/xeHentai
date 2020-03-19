@@ -133,11 +133,17 @@ def flt_pageurl_mpv(r, suc, fail):
 
 def flt_quota_check(func):
     def _(r, suc, fail):
+        # double compare with actual image size
+        sz = None
+        p = RE_IMGHASH.findall(r.url)
+        if p and len(p) > 0 and len(p[-1]) > 1:
+            sz = int(p[-1][1])
         if r.status_code == 600:# tcp layer error
             fail((ERR_CONNECTION_ERROR, r._real_url, r.url))
         elif r.status_code == 403:
             fail((ERR_KEY_EXPIRED, r._real_url, r.url))
-        elif r.status_code == 509 or r.content_length in [925, 28658, 144, 210, 1009] or \
+        elif r.status_code == 509 or \
+            (sz and sz != r.content_length and r.content_length in [925, 28658, 144, 210, 1009]) or \
                 '/509.gif' in r.url or '/509.gif' in r._real_url:
             # TODO: /509.gif detection is still not accturate, there might be a file
             # that happened to be this name
