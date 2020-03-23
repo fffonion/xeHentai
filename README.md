@@ -37,6 +37,7 @@ Configuration keys：
  - **download_ori** Set to download original images or not. Default to `False`.
  - **jpn_title** Set to select Japanese title or not. If set to `False`, English or Romaji title will be used. Default to `True`.
  - **rename_ori** Set to rename images to their orginal names. If set to `False`, image will be named in sequence numbers. Default to `False`.
+ - **make_archive** Set to make a ZIP archive after download and delete downloaded directory. Default to `False`.
 
  - **proxy** Proxy list. Refer to [Proxies](#proxies).
  - **proxy_image** Set to use proxy both on downloading images and scanning webpages. Default to `True`.
@@ -44,8 +45,8 @@ Configuration keys：
  - **rpc_interface** RPC server binding IP. Refer to [JSON-RPC](#json-rpc). Default to `localhost`.
  - **rpc_port** RPC server binding port. Default to `none` (not serving).
  - **rpc_secret** RPC secret key. Default to `None`.
+ - **rpc_open_browser** automatically open browser after RPC server starts. Default to `True`.
  - **delete_task_files** Set to delete downloaded files when deleting a task. Default to `False`.
- - **make_archive** Set to make a ZIP archive after download and delete downloaded directory. Default to `False`.
  - **download_range** Set image download range. Refer to [Download range](#download-range). Default to download all images.
  - **scan_thread_cnt** Thread count for scanning webpages. Default to `1`.
  - **download_thread_cnt** Thread count for downloading images. Default to `5`.
@@ -62,9 +63,10 @@ Configuration keys：
 Usage: xeh [-u USERNAME] [-k KEY] [-c COOKIE] [-i] [--daemon] [-d DIR] [-o]
            [-j BOOL] [-r BOOL] [-p PROXY] [--proxy-image | --proxy-image-only]
            [--rpc-interface ADDR] [--rpc-port PORT] [--rpc-secret ...]
-           [--delete-task-files BOOL] [-a BOOL] [--download-range a-b,c-d,e]
-           [-t N] [--timeout N] [--low-speed-threshold N] [-f]
-           [-l /path/to/eh.log] [-v] [-h] [--version]
+           [--rpc-open-browser BOOL] [--delete-task-files BOOL] [-a BOOL]
+           [--download-range a-b,c-d,e] [-t N] [--timeout N]
+           [--low-speed-threshold N] [-f] [-l /path/to/eh.log] [-v] [-h]
+           [--version]
            [url [url ...]]
 
 xeHentai Downloader NG
@@ -103,6 +105,9 @@ optional arguments:
                         localhost)
   --rpc-port PORT       bind jsonrpc server to this port (default: 8010)
   --rpc-secret ...      jsonrpc secret string (default: None)
+  --rpc-open-browser BOOL
+                        automatically open browser after RPC server starts
+                        (default: True)
   --delete-task-files BOOL
                         delete downloaded files when deleting a task (default:
                         True)

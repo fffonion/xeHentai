@@ -82,6 +82,7 @@ class xeHentai(object):
         if not self.rpc and self.cfg['rpc_port'] and self.cfg['rpc_interface']:
             self.rpc = RPCServer(self, (self.cfg['rpc_interface'], int(self.cfg['rpc_port'])),
                 secret = None if 'rpc_secret' not in self.cfg else self.cfg['rpc_secret'],
+                open_browser = False if 'rpc_open_browser' not in self.cfg else self.cfg['rpc_open_browser'],
                 logger = self.logger)
             if not RE_LOCAL_ADDR.match(self.cfg['rpc_interface']) and \
                 not self.cfg['rpc_secret']:

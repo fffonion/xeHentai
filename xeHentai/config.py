@@ -31,6 +31,8 @@ rpc_interface = 'localhost'
 rpc_port = None
 # jsonrpc secret string
 rpc_secret = None
+# auto open browser on rpc start
+rpc_open_browser = True
 
 # make an archive (.zip) after download and delete directory
 make_archive = False

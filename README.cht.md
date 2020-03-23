@@ -2,7 +2,7 @@
 
 [![Build Status](https://travis-ci.org/fffonion/xeHentai.svg?branch=dev)](https://travis-ci.org/fffonion/xeHentai)
 
-[English](README.md) [简体中文](README.chs.md)
+[English](README.md) [繁體中文](README.cht.md)
 
 [xeHentai Web界面](https://github.com/fffonion/xeHentai-webui)
 
@@ -37,6 +37,7 @@ xeH
  - **download_ori** 是否下載原圖，默認為否
  - **jpn_title** 是否使用日語標題，如果關閉則使用英文或羅馬字標題，默認為是
  - **rename_ori** 將圖片重命名為原始名稱，如果關閉則使用序號，默認為否
+ - **make_archive** 是否下載完成後生成zip壓縮包，並刪除下載目錄，默認為否
 
 高級參數: 
 
@@ -47,7 +48,6 @@ xeH
  - **rpc_port** RPC綁定的埠，默認為`None`
  - **rpc_secret** RPC密鑰，默認為`None` (不開啟RPC伺服器)
  - **delete_task_files** 是否刪除任務時同時刪除下載的文件，默認為否
- - **make_archive** 是否下載完成後生成zip壓縮包，並刪除下載目錄，默認為否
  - **download_range** 設置下載的圖片範圍，參見[下載範圍](#下載範圍)
  - **scan_thread_cnt** 掃描線程數，默認為`1`
  - **download_thread_cnt** 下載線程數，默認為`5`
@@ -64,9 +64,10 @@ xeH
 用法: xeH [-u USERNAME] [-k KEY] [-c COOKIE] [-i] [--daemon] [-d DIR] [-o]
            [-j BOOL] [-r BOOL] [-p PROXY] [--proxy-image | --proxy-image-only]
            [--rpc-interface ADDR] [--rpc-port PORT] [--rpc-secret ...]
-           [--delete-task-files BOOL] [-a BOOL] [--download-range a-b,c-d,e]
-           [-t N] [--timeout N] [--low-speed-threshold N] [-f]
-           [-l /path/to/eh.log] [-v] [-h] [--version]
+           [--rpc-open-browser BOOL] [--delete-task-files BOOL] [-a BOOL]
+           [--download-range a-b,c-d,e] [-t N] [--timeout N]
+           [--low-speed-threshold N] [-f] [-l /path/to/eh.log] [-v] [-h]
+           [--version]
            [url [url ...]]
 
 紳♂士下載器
@@ -96,6 +97,8 @@ xeH
   --rpc-interface ADDR  設置JSON-RPC監聽IP (默認: localhost)
   --rpc-port PORT       設置JSON-RPC監聽埠 (默認: None)
   --rpc-secret ...      設置JSON-RPC密鑰 (默認: None)
+  --rpc-open-browser BOOL
+                        RPC服務端啟動後自動打開瀏覽器頁面 (默認: True)
   --delete-task-files BOOL
                         刪除任務時同時刪除下載的文件 (默認: False)
   -a BOOL, --archive BOOL

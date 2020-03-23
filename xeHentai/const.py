@@ -32,6 +32,10 @@ else:
 
 DUMMY_FILENAME = "-dummy-"
 RENAME_TMPDIR = "-xeh-conflict-"
+STATIC_CACHE_FILE = os.path.join(FILEPATH, "webui.gz")
+# cache for 1 hour
+STATIC_CACHE_TTL = 3600
+STATIC_CACHE_VERSION = 1
 
 RE_INDEX = re.compile('.+/(\d+)/([^\/]+)/*')
 RE_GALLERY = re.compile('/([a-f0-9]{10})/[^\-]+\-(\d+)')
