@@ -283,7 +283,7 @@ class Handler(BaseHTTPRequestHandler):
                     break
             self.xeH.logger.verbose("RPC from: %s, cmd: %s, params: %s" % (self.client_address[0], cmd, params))
             try:
-                cmd_rt = getattr(self.xeH, cmd_r)(*params[0], **params[1])
+                cmd_rt = getattr(self.xeH, cmd_r)(*params[-2], **params[-1])
             except (ValueError, TypeError) as ex:
                 self.xeH.logger.verbose("RPC exec error:\n%s" % traceback.format_exc())
                 code = 500
