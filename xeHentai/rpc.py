@@ -270,7 +270,8 @@ class Handler(BaseHTTPRequestHandler):
                     req_start_tm = time.time()
                     r = None
                     try:
-                        r = self.http.get("http://xehentai.yooooo.us%s?_=%d" %(path, time.time()), headers=headers)
+                        r = self.http.get("http://xehentai.yooooo.us%s?_=%d" %(path, time.time()),
+                            headers=headers, timeout=10)
                     except Exception as ex:
                         self.xeH.logger.warn("error pulling %s from remote server: %s" % (path, err))
                     self.xeH.logger.verbose("%.2fs taken to pull %s from remote server %s bytes" % (
@@ -290,6 +291,7 @@ class Handler(BaseHTTPRequestHandler):
                             for k in static_cache:
                                 if k != "v":
                                     static_cache[k][2] = time.time()
+                            save_cache(static_cache)
                         rt = StringIO(cache_rt)
                     elif cache_rt:
                         self.xeH.logger.warn("serving stale cache %s" % (path))
