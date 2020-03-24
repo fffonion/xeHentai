@@ -139,8 +139,6 @@ def parse_opt():
     # the followings are passed to xeHentai
     parser.add_argument('urls', metavar = 'url', type = str, nargs = '*',
                         help = i18n.XEH_OPT_URLS)
-    # parser.add_argument('-f', '--fast-scan', action = 'store_true', default = _def.fast_scan,
-    #                     help = i18n.XEH_OPT_f)
     parser.add_argument('-d', '--dir', default = os.path.abspath(_def['dir']),
                         help = i18n.XEH_OPT_d)
     parser.add_argument('-o', '--download-ori',
