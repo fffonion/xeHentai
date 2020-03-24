@@ -57,7 +57,9 @@ FALLBACK_IP_MAP = {
     'e-hentai.org': FALLBACK_CF_IP,
     'forums.e-hentai.org': ("94.100.18.243", ),
     'exhentai.org': ("178.175.129.254", "178.175.128.252", "178.175.132.20", "178.175.129.252", "178.175.128.254", "178.175.132.22")
-} 
+}
+
+QUOTA_EXCEEDED_CONTENT_LENGTHS = (925, 28658, 144, 210, 1009)
 
 DEFAULT_MAX_REDIRECTS = 30
 

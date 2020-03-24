@@ -143,8 +143,9 @@ def flt_quota_check(func):
         elif r.status_code == 403:
             fail((ERR_KEY_EXPIRED, r._real_url, r.url))
         elif r.status_code == 509 or \
-            (sz != r.content_length and r.content_length in [925, 28658, 144, 210, 1009]) or \
-                '/509.gif' in r.url or '/509.gif' in r._real_url:
+            (sz != r.content_length and (
+                r.content_length in QUOTA_EXCEEDED_CONTENT_LENGTHS or \
+                '/509.gif' in r.url or '/509.gif' in r._real_url)):
             # TODO: /509.gif detection is still not accturate, there might be a file
             # that happened to be this name
             fail((ERR_QUOTA_EXCEEDED, r._real_url, r.url))
