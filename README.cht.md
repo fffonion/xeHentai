@@ -2,7 +2,7 @@
 
 [![Build Status](https://travis-ci.org/fffonion/xeHentai.svg?branch=master)](https://travis-ci.org/fffonion/xeHentai)
 
-[English](README.md) [简体中文](README.chs.md)
+[English](README.md) [繁體中文](README.cht.md)
 
 [xeHentai Web界面](https://github.com/fffonion/xeHentai-webui)
 
@@ -37,6 +37,7 @@ xeH
  - **download_ori** 是否下載原圖，默認為否
  - **jpn_title** 是否使用日語標題，如果關閉則使用英文或羅馬字標題，默認為是
  - **rename_ori** 將圖片重命名為原始名稱，如果關閉則使用序號，默認為否
+ - **make_archive** 是否下載完成後生成zip壓縮包，並刪除下載目錄，默認為否
 
 高級參數: 
 
@@ -47,11 +48,11 @@ xeH
  - **rpc_port** RPC綁定的埠，默認為`None`
  - **rpc_secret** RPC密鑰，默認為`None` (不開啟RPC伺服器)
  - **delete_task_files** 是否刪除任務時同時刪除下載的文件，默認為否
- - **make_archive** 是否下載完成後生成zip壓縮包，並刪除下載目錄，默認為否
  - **download_range** 設置下載的圖片範圍，參見[下載範圍](#下載範圍)
  - **scan_thread_cnt** 掃描線程數，默認為`1`
  - **download_thread_cnt** 下載線程數，默認為`5`
  - **download_timeout** 設置下載圖片的超時，默認為`10`秒
+ - **low_speed_threshold** 設置最低下載速度，低於此值將換源重新下載，單位為KB/s，默認為`10`
  - **ignored_errors** 設置忽略的錯誤碼，默認為空，錯誤碼可以從`const.py`中獲得
  - **log_path** 日誌路徑，默認為`eh.log`
  - **log_verbose** 日誌等級，可選1-3，值越大輸出越詳細，默認為`2`
@@ -63,8 +64,9 @@ xeH
 用法: xeH [-u USERNAME] [-k KEY] [-c COOKIE] [-i] [--daemon] [-d DIR] [-o]
            [-j BOOL] [-r BOOL] [-p PROXY] [--proxy-image | --proxy-image-only]
            [--rpc-interface ADDR] [--rpc-port PORT] [--rpc-secret ...]
-           [--delete-task-files BOOL] [-a BOOL] [--download-range a-b,c-d,e]
-           [-t N] [--timeout N] [-f] [-l /path/to/eh.log] [-v] [-h]
+           [--rpc-open-browser BOOL] [--delete-task-files BOOL] [-a BOOL]
+           [--download-range a-b,c-d,e] [-t N] [--timeout N]
+           [--low-speed-threshold N] [-f] [-l /path/to/eh.log] [-v] [-h]
            [--version]
            [url [url ...]]
 
@@ -95,6 +97,8 @@ xeH
   --rpc-interface ADDR  設置JSON-RPC監聽IP (默認: localhost)
   --rpc-port PORT       設置JSON-RPC監聽埠 (默認: None)
   --rpc-secret ...      設置JSON-RPC密鑰 (默認: None)
+  --rpc-open-browser BOOL
+                        RPC服務端啟動後自動打開瀏覽器頁面 (默認: True)
   --delete-task-files BOOL
                         刪除任務時同時刪除下載的文件 (默認: False)
   -a BOOL, --archive BOOL
@@ -102,6 +106,8 @@ xeH
   --download-range a-b,c-d,e
                         設置下載的圖片範圍, 格式為 開始位置-結束位置, 或者單張圖片的位置, 使用逗號來分隔多個範圍, 例如
                         5-10,15,20-25, 默認為下載所有
+  --low-speed-threshold N
+                        設置最低下載速度，低於此值將換源重新下載 (默認: 10 KB/s)
   -t N, --thread N      下載線程數 (默認: 5)
   --timeout N           設置下載圖片的超時 (默認: 10秒)
   -f, --force           忽略配額判斷, 繼續下載 (默認: False)

@@ -164,6 +164,8 @@ def parse_opt():
                         help = i18n.XEH_OPT_rpc_port)
     parser.add_argument('--rpc-secret', metavar = "...", default = _def['rpc_secret'],
                         help = i18n.XEH_OPT_rpc_secret)
+    parser.add_argument('--rpc-open-browser', type = bool, metavar = "BOOL", default = _def['rpc_open_browser'],
+                        help = i18n.XEH_OPT_rpc_open_browser)
     parser.add_argument('--delete-task-files', type = bool, metavar = "BOOL", default = _def['delete_task_files'],
                         dest = 'delete_task_files', help = i18n.XEH_OPT_delete_task_files)
     parser.add_argument('-a', '--archive', type = bool, metavar = "BOOL", default = _def['make_archive'],
@@ -175,6 +177,8 @@ def parse_opt():
                         help = i18n.XEH_OPT_t)
     parser.add_argument('--timeout', type = int, metavar = "N", default = _def['download_timeout'],
                         dest = 'download_timeout', help = i18n.XEH_OPT_timeout)
+    parser.add_argument('--low-speed-threshold', type = int, metavar = "N", default = _def['low_speed_threshold'],
+                        dest = 'low_speed_threshold', help = i18n.XEH_OPT_low_speed)
     parser.add_argument('-f', '--force', action = _AddToListAction,
                         current = ERR_QUOTA_EXCEEDED in _def['ignored_errors'],
                         add_value = ERR_QUOTA_EXCEEDED, dest='ignored_errors',

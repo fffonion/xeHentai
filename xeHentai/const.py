@@ -16,7 +16,7 @@ LOCALE = locale.getdefaultlocale()[0]
 CODEPAGE = locale.getdefaultlocale()[1] or 'ascii'
 ANDROID = 'ANDROID_ARGUMENT' in os.environ
 
-__version__ = 2.021
+__version__ = 2.022
 DEVELOPMENT = False
 
 SCRIPT_NAME = "xeHentai"
@@ -32,6 +32,10 @@ else:
 
 DUMMY_FILENAME = "-dummy-"
 RENAME_TMPDIR = "-xeh-conflict-"
+STATIC_CACHE_FILE = os.path.join(FILEPATH, "webui.gz")
+# cache for 1 hour
+STATIC_CACHE_TTL = 3600
+STATIC_CACHE_VERSION = 1
 
 RE_INDEX = re.compile('.+/(\d+)/([^\/]+)/*')
 RE_GALLERY = re.compile('/([a-f0-9]{10})/[^\-]+\-(\d+)')
@@ -53,7 +57,9 @@ FALLBACK_IP_MAP = {
     'e-hentai.org': FALLBACK_CF_IP,
     'forums.e-hentai.org': ("94.100.18.243", ),
     'exhentai.org': ("178.175.129.254", "178.175.128.252", "178.175.132.20", "178.175.129.252", "178.175.128.254", "178.175.132.22")
-} 
+}
+
+QUOTA_EXCEEDED_CONTENT_LENGTHS = (925, 28658, 144, 210, 1009)
 
 DEFAULT_MAX_REDIRECTS = 30
 
@@ -89,7 +95,7 @@ ERR_IP_BANNED = 1010
 ERR_HATH_NOT_FOUND = 1011
 ERR_IMAGE_BROKEN = 1012
 ERR_SCAN_REGEX_FAILED = 1013
-ERR_STREAM_NOT_IMPLEMENTED = 1013
+ERR_STREAM_NOT_IMPLEMENTED = 1014
 ERR_TASK_NOT_FOUND = 1101
 ERR_SAVE_SESSION_FAILED = 1103
 ERR_TASK_LEVEL_UNDEF = 1104

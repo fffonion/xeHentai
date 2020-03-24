@@ -84,3 +84,13 @@ def legalpath(s):
     if os.name == 'nt':
         sanitized = sanitized.rstrip()
     return sanitized
+
+MAXINT = 9223372036854775807
+def human_size(t):
+    if t >= MAXINT:
+        return "UNL."
+    for prefix in ("B", "KB", "MB", "GB", "TB"):
+        if t <= 1000:
+            return "%s %s" % (("%.2f" % t).rstrip("0").rstrip("."), prefix)
+        t /= 1024.0
+    return "%.2f TB" % t

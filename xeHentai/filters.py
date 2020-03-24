@@ -133,18 +133,27 @@ def flt_pageurl_mpv(r, suc, fail):
 
 def flt_quota_check(func):
     def _(r, suc, fail):
+        # double compare with actual image size
+        sz = None
+        p = RE_IMGHASH.findall(r.url)
+        if p and len(p) > 0 and len(p[-1]) > 1:
+            sz = int(p[-1][1])
         if r.status_code == 600:# tcp layer error
-            fail((ERR_CONNECTION_ERROR, r._real_url))
+            fail((ERR_CONNECTION_ERROR, r._real_url, r.url))
         elif r.status_code == 403:
-            fail((ERR_KEY_EXPIRED, r._real_url))
-        elif r.status_code == 509 or r.content_length in [925, 28658, 144, 210, 1009] or \
-                '509.gif' in r.url or '509.gif' in r._real_url:
-            fail((ERR_QUOTA_EXCEEDED, r._real_url))
+            fail((ERR_KEY_EXPIRED, r._real_url, r.url))
+        elif r.status_code == 509 or \
+            (sz != r.content_length and (
+                r.content_length in QUOTA_EXCEEDED_CONTENT_LENGTHS or \
+                '/509.gif' in r.url or '/509.gif' in r._real_url)):
+            # TODO: /509.gif detection is still not accturate, there might be a file
+            # that happened to be this name
+            fail((ERR_QUOTA_EXCEEDED, r._real_url, r.url))
             # will not call the decorated filter
         elif r.content_length < 200 and \
                 r.headers.get('content-type') and r.headers.get('content-type').startswith('text') and \
                 re.findall("exceeded your image viewing limits", r.text):
-            fail((ERR_QUOTA_EXCEEDED, r._real_url))
+            fail((ERR_QUOTA_EXCEEDED, r._real_url, r.url))
             # will not call the decorated filter
         else:
             func(r, suc, fail)
@@ -157,7 +166,7 @@ def flt_imgurl_wrapper(ori):
         # add (image url, reload url, filename) to queue if suc
         # return (errorcode, page_url) if fail
         if re.match('Invalid page', r.text):
-            return fail((ERR_IMAGE_RESAMPLED, r._real_url))
+            return fail((ERR_IMAGE_RESAMPLED, r._real_url, r.url))
         while True:
             _ = re.findall('src="([^"]+keystamp[^"]+)"', r.text)
             if not _:
@@ -190,7 +199,7 @@ def flt_imgurl_wrapper(ori):
                 fullurl = util.htmlescape(fullurl[0])
             else:
                 fullurl = picurl
-            _= re.findall("return nl\('([\d\-]+)'\)", r.text)
+            _ = re.findall("return nl\('([a-z\d\-]+)'\)", r.text)
             if not _:
                 break
             js_nl = _[0]
@@ -201,7 +210,7 @@ def flt_imgurl_wrapper(ori):
             else:
                 return suc((picurl, reload_url, filename))
 
-        return fail((ERR_SCAN_REGEX_FAILED, r._real_url))
+        return fail((ERR_SCAN_REGEX_FAILED, r._real_url, r.url))
 
     return flt_imgurl
 

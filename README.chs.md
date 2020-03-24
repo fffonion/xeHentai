@@ -37,6 +37,7 @@ xeH
  - **download_ori** 是否下载原图，默认为否
  - **jpn_title** 是否使用日语标题，如果关闭则使用英文或罗马字标题，默认为是
  - **rename_ori** 将图片重命名为原始名称，如果关闭则使用序号，默认为否
+ - **make_archive** 是否下载完成后生成zip压缩包，并删除下载目录，默认为否
 
 高级参数: 
 
@@ -47,11 +48,11 @@ xeH
  - **rpc_port** RPC绑定的端口，默认为`None`
  - **rpc_secret** RPC密钥，默认为`None` (不开启RPC服务器)
  - **delete_task_files** 是否删除任务时同时删除下载的文件，默认为否
- - **make_archive** 是否下载完成后生成zip压缩包，并删除下载目录，默认为否
  - **download_range** 设置下载的图片范围，参见[下载范围](#下载范围)
  - **scan_thread_cnt** 扫描线程数，默认为`1`
  - **download_thread_cnt** 下载线程数，默认为`5`
  - **download_timeout** 设置下载图片的超时，默认为`10`秒
+ - **low_speed_threshold** 设置最低下载速度，低于此值将换源重新下载，单位为KB/s，默认为`10`
  - **ignored_errors** 设置忽略的错误码，默认为空，错误码可以从`const.py`中获得
  - **log_path** 日志路径，默认为`eh.log`
  - **log_verbose** 日志等级，可选1-3，值越大输出越详细，默认为`2`
@@ -63,8 +64,9 @@ xeH
 用法: xeH [-u USERNAME] [-k KEY] [-c COOKIE] [-i] [--daemon] [-d DIR] [-o]
            [-j BOOL] [-r BOOL] [-p PROXY] [--proxy-image | --proxy-image-only]
            [--rpc-interface ADDR] [--rpc-port PORT] [--rpc-secret ...]
-           [--delete-task-files BOOL] [-a BOOL] [--download-range a-b,c-d,e]
-           [-t N] [--timeout N] [-f] [-l /path/to/eh.log] [-v] [-h]
+           [--rpc-open-browser BOOL] [--delete-task-files BOOL] [-a BOOL]
+           [--download-range a-b,c-d,e] [-t N] [--timeout N]
+           [--low-speed-threshold N] [-f] [-l /path/to/eh.log] [-v] [-h]
            [--version]
            [url [url ...]]
 
@@ -95,6 +97,8 @@ xeH
   --rpc-interface ADDR  设置JSON-RPC监听IP (默认: localhost)
   --rpc-port PORT       设置JSON-RPC监听端口 (默认: None)
   --rpc-secret ...      设置JSON-RPC密钥 (默认: None)
+  --rpc-open-browser BOOL
+                        RPC服务端启动后自动打开浏览器页面 (默认: True)
   --delete-task-files BOOL
                         删除任务时同时删除下载的文件 (默认: False)
   -a BOOL, --archive BOOL
@@ -102,6 +106,8 @@ xeH
   --download-range a-b,c-d,e
                         设置下载的图片范围, 格式为 开始位置-结束位置, 或者单张图片的位置, 使用逗号来分隔多个范围, 例如
                         5-10,15,20-25, 默认为下载所有
+  --low-speed-threshold N
+                        设置最低下载速度，低于此值将换源重新下载 (默认: 10 KB/s)
   -t N, --thread N      下载线程数 (默认: 5)
   --timeout N           设置下载图片的超时 (默认: 10秒)
   -f, --force           忽略配额判断, 继续下载 (默认: False)

@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.022
+- 增加下载速度显示
+- 增加低速自动重试 `low_speed_threshold`, 默认为`10KB/s`以下重试
+- 增加本地缓存WebUI, 并在打开RPC时自动开启浏览器，可通过`rpc_open_browser`关闭
+- 修复同内容文件处理, 优化重试表的键
+- 修复RPC读图和制作压缩包间的竞争问题
+- 修复flt_quota_check的返回参数为3个
+- 修复配额检查中的路径和大小匹配仅在和期望大小不同时触发
+- 修复没有开启rpc_secret但发送了token时的RPC参数列表
+
 ## 2.021
 - 支持 `multi page viewer`
 - 不再支持Python 3.3
