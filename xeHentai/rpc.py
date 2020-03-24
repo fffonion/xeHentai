@@ -288,7 +288,8 @@ class Handler(BaseHTTPRequestHandler):
                         # then all other assets should not expire
                         if path == "/":
                             for k in static_cache:
-                                static_cache[k][2] = time.time()
+                                if k != "v":
+                                    static_cache[k][2] = time.time()
                         rt = StringIO(cache_rt)
                     elif cache_rt:
                         self.xeH.logger.warn("serving stale cache %s" % (path))
