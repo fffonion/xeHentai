@@ -116,6 +116,7 @@ XEH_DOWNLOAD_ORI_NEED_LOGIN = "haven't login, so I won't download original image
 XEH_FILE_DOWNLOADED = "file downloaded by thread-{} #{} {}"
 XEH_RENAME_HAS_ERRORS = "some files are not renamed:\n%s"
 XEH_DOWNLOAD_HAS_ERROR = "thread-%s retry #%s because of error: %s"
+XEH_SCAN_FAILED = "%s scan page #%s failed: %d"
 
 RPC_STARTED = "RPC server listening on %s:%d"
 RPC_TOO_OPEN = "RPC server is listening on public interface (%s) but no rpc_secret defined, which is not safe"
