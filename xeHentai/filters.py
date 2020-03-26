@@ -179,11 +179,11 @@ def flt_imgurl_wrapper(ori):
             if not _:
                 break
             filename = _[0]
+            # XXX: is this still valid?
             if 'image.php' in filename:
                 _ = re.findall('n=(.+)', picurl)
-                if not _:
-                    break
-                filename = _[0]
+                if _:
+                    filename = _[0]
             _ = re.findall('.+\.([a-zA-Z]+)', filename)
             if not _:
                 break

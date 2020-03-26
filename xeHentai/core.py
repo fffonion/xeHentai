@@ -271,7 +271,10 @@ class xeHentai(object):
                         filters.flt_imgurl_wrapper(task.config['download_ori'] and self.has_login),
                         lambda x, tid = tid: (task.put_img_queue(*x),
                             mon.vote(tid, 0)),
-                        lambda x, tid = tid: (mon.vote(tid, x[0])),
+                        lambda x, tid = tid: (
+                            mon.vote(tid, x[0]),
+                            self.logger.warn(i18n.XEH_SCAN_FAILED % (tid, x[1], x[0])),
+                        ),
                         mon.wrk_keepalive,
                         util.get_proxy_policy(task.config),
                         10,
