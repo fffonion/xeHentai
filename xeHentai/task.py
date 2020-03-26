@@ -391,7 +391,7 @@ class Task(object):
         arc = "%s.zip" % dpath
         if os.path.exists(arc):
             return arc
-        with zipfile.ZipFile(arc, 'w')  as zipFile:
+        with zipfile.ZipFile(arc, 'w', allowZip64=True) as zipFile:
             zipFile.comment = ("xeHentai Archiver v%s\nTitle:%s\nOriginal URL:%s" % (
                 __version__, self.meta['title'], self.url)).encode('utf-8')
             for f in sorted(os.listdir(dpath)):
