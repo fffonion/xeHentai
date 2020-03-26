@@ -123,12 +123,13 @@ class Task(object):
             img_hash = RE_GALLERY.findall(reload_url)[0][0]
         else:
             img_hash = self.get_imghash(imgurl)
+        this_fid = int(RE_GALLERY.findall(reload_url)[0][1])
+        self.renamed_map[this_fid] = fname
         # if same file occurs severl times in a gallery
         while img_hash in self.reload_map:
             fpath = self.get_fpath()
             old_fid = self.get_fname(img_hash)[0]
             old_f = os.path.join(fpath, self.get_fidpad(old_fid))
-            this_fid = int(RE_GALLERY.findall(reload_url)[0][1])
             this_f = os.path.join(fpath, self.get_fidpad(this_fid))
             self._f_lock.acquire()
             # if we are equal to ourself, download as usual
@@ -325,8 +326,8 @@ class Task(object):
         # whether to rename into a temp filename or add (1)
         # only need it when rename_ori = True
         done_list = set()
-        for h in self.reload_map:
-            fid, fname = self.get_fname(h)
+        for fid in self.renamed_map.keys():
+            fname = self.renamed_map[fid]
             # if we don't need to rename to original name and file type matches
             if not self.config['rename_ori'] and os.path.splitext(fname)[1].lower() == '.jpg':
                 continue

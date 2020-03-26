@@ -462,7 +462,7 @@ class xeHentaiRPCExtended(object):
         if guid not in self._all_tasks:
             return None, None, None
         t = self._all_tasks[guid]
-        fid = str(fid)
+        fid = int(fid)
         if fid in t.renamed_map:
             f = t.renamed_map[fid]
         else:
