@@ -105,10 +105,12 @@ class HttpReq(object):
                     _ = __not_good()
                     if _:
                         self.logger.info("%s-%s proxy %s is disabled for failed too often" %
-                                            (i18n.THREAD, self.tname, _))
+                                         (i18n.THREAD, self.tname, _))
                 else:
                     self.logger.warning("%s-%s %s %s: %s" % (i18n.THREAD, self.tname, method, url, ex))
                 time.sleep(random.random() + 0.618)
+            except requests.exceptions.ReadTimeout:
+                continue
             except requests.RequestException as ex:
                 self.logger.warning("%s-%s %s %s: %s" % (i18n.THREAD, self.tname, method, url, ex))
                 time.sleep(random.random() + 0.618)
@@ -131,7 +133,7 @@ class HttpReq(object):
                         url = _new_url
                         continue
 
-                if r.status_code == 503: # backend fetch failed
+                if r.status_code == 503:  # backend fetch failed
                     continue
 
                 # intercept some error to see if we can change IP
@@ -144,7 +146,7 @@ class HttpReq(object):
                     self.logger.info("%s-%s proxy %s is banned for %s" % (i18n.THREAD, self.tname, _p, _t))
                     continue
 
-                if do_proxy and r.status_code == 509:
+                if do_proxy and '509.gif' in r.text:
                     _p = __banned(expire=3600*24)
                     self.logger.info("%s-%s proxy %s has exceed band width" % (i18n.THREAD, self.tname, _p))
                     continue
@@ -154,6 +156,11 @@ class HttpReq(object):
                     if _p:
                         self.logger.info("%s-%s proxy %s is very good" % (i18n.THREAD, self.tname, _p))
 
+                if r.status_code == 200 and r.content_length == 0:
+                    if do_proxy:
+                        __not_good()
+                    continue
+
                 r.encoding = "utf-8"
                 # r._text_bytes = r.text.encode("utf-8")
                 r._real_url = url_history[-1]
@@ -161,7 +168,8 @@ class HttpReq(object):
                 r.iter_content_cb = stream_cb
 
                 return _filter(r, suc, fail)
-            retry += 1
+            if not do_proxy:
+                retry += 1
         return _filter(_FakeResponse(url_history[0]), suc, fail)
 
 

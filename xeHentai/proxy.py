@@ -11,8 +11,8 @@ from requests.packages.urllib3.exceptions import ProxySchemeUnknown
 from . import util
 from .const import *
 
-MAX_FAIL = 5
-SUCCESS_THREHOLD = 30
+MAX_FAIL = 4
+SUCCESS_THREHOLD = 16
 
 class PoolException(Exception):
     pass
@@ -49,7 +49,7 @@ class Pool(object):
     def not_good(self, addr):
         def n(weight=1):
             self.proxies[addr][2] += weight
-            if self.disable_policy(*self.proxies[addr][1:]):
+            if self.disable_policy(*self.proxies[addr][1:]) and addr not in self.disabled:
                 self.disabled[addr] = 0
                 return addr
             else:
@@ -58,9 +58,11 @@ class Pool(object):
 
     def banned(self, addr):
         def n(weight=MAX_FAIL, expire=0):
-            self.proxies[addr][2] = weight
-            self.disabled[addr] = expire + time.time()
-            return addr
+            if addr not in self.disabled:
+                self.proxies[addr][2] = weight
+                self.disabled[addr] = expire + time.time()
+                return addr
+            return None
         return n
 
     def good(self, addr):
@@ -69,9 +71,10 @@ class Pool(object):
             if self.proxies[addr][1] > SUCCESS_THREHOLD:
                 self.proxies[addr][1] -= SUCCESS_THREHOLD
                 self.proxies[addr][2] -= weight
-                return addr
-            else:
-                return None
+                if self.proxies[addr][2] < -1:
+                    self.proxies[addr][2] = 0
+                    return addr
+            return None
         return n
 
     def trace_proxy(self, addr, weight = 1, check_func = None, exceptions = []):
