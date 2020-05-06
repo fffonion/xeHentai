@@ -83,6 +83,7 @@ class HttpReq(object):
 
     def request(self, method, url, _filter, suc, fail, data=None, stream_cb=None):
         retry = 0
+        old_url = str(url)
         url_history = [url]
         while retry < self.retry:
             do_proxy = False
@@ -203,6 +204,7 @@ class HttpWorker(Thread, HttpReq):
         self._keepalive = keep_alive
         self._exit = lambda x: False
         self.flt = flt
+        self._working = False
         self.f_suc = suc
         self.f_fail = fail
         self.stream_mode = stream_mode
@@ -214,6 +216,9 @@ class HttpWorker(Thread, HttpReq):
         # exit if current queue is finished
         return self.run_once and self.task_queue.empty()
 
+    def is_working(self):
+        return self._working
+
     def run(self):
         self.logger.verbose("t-%s start" % self.name)
         _stream_cb = None
@@ -223,10 +228,18 @@ class HttpWorker(Thread, HttpReq):
             try:
                 url = self.task_queue.get(False)
             except Empty:
+                self._working = False
                 time.sleep(1)
                 continue
+
+            if not url:
+                self._working = False
+                time.sleep(1)
+                continue
+
             self.run_once = True
             try:
+                self._working = True
                 self.request("GET", url, self.flt, self.f_suc, self.f_fail, stream_cb=_stream_cb)
             except PoolException as ex:
                 self.logger.warning("%s-%s %s" % (i18n.THREAD, self.tname, str(ex)))
@@ -286,6 +299,7 @@ class Monitor(Thread):
         self.task = task
         self._exit = exit_check if exit_check else lambda x: False
         self._cleaning_up = False
+
         if os.name == "nt":
             self.set_title = lambda s:os.system("TITLE %s" % (
                 s if PY3K else s.encode(CODEPAGE, 'replace')))
@@ -321,6 +335,7 @@ class Monitor(Thread):
             self._exit("mon") or _exit
         # self.logger.verbose("mon#%s %s ask, %s, %s" % (self.task.guid, tname, _,
         #    self.thread_last_seen))
+
         if _ or not wrk_thread.is_alive():
             self.dctlock.acquire()
             if tname in self.thread_last_seen:
@@ -369,6 +384,8 @@ class Monitor(Thread):
         last_finished = -1
         while len(self.thread_last_seen) > 0:
             intv += 1
+            thread_working = 0
+            thread_with_pages = 0
             self._check_vote()
             for k in list(self.thread_last_seen.keys()):
                 _zombie_threshold = self.thread_ref[k].zombie_threshold if k in self.thread_ref else 30
@@ -379,10 +396,15 @@ class Monitor(Thread):
                     else:
                         self.logger.warning(i18n.THREAD_SWEEP_OUT % k)
                     del self.thread_last_seen[k]
+
+            for t in self.thread_ref.values():
+                if t.is_working():
+                    thread_working += 1
+
             if intv == CHECK_INTERVAL:
-                _ = "%s %dR/%dZ, %s %dR/%dD/%dA" % (
+                _ = "%s %dW/%dR/%dZ, %s %dR/%dD/%dA" % (
                     i18n.THREAD,
-                    len(self.thread_last_seen), len(self.thread_zombie),
+                    thread_working, len(self.thread_last_seen), len(self.thread_zombie),
                     i18n.QUEUE,
                     self.task.img_q.qsize() if self.task.img_q else 0,
                     self.task.meta['finished'], self.task.meta['total'])
