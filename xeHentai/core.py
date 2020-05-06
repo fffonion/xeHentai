@@ -160,11 +160,6 @@ class xeHentai(object):
         if t._monitor:
             t._monitor._exit = lambda x: True
         t.state = TASK_STATE_PAUSED
-        # image link is changed everytime the page is reloaded
-        # so img_q need clean up
-        t.page_q = Queue()
-        t.img_q = Queue()
-        t.reload_map = {}
         return ERR_NO_ERROR, ""
 
     def resume_task(self, guid):
@@ -175,7 +170,8 @@ class xeHentai(object):
             return ERR_TASK_CANNOT_RESUME, None
         t.state = max(t.state, TASK_STATE_WAITING)
 
-        # img_q is cleaned, so we need to re scan them
+        # image link is changed everytime the page is reloaded
+        # so we need to re scan them
         if t.state > TASK_STATE_SCAN_PAGE:
             t.state = TASK_STATE_SCAN_PAGE
         self.tasks.put(guid)
@@ -267,14 +263,12 @@ class xeHentai(object):
                 # else:
                 # scan by our own, should not be here currently
                 # start backup thread
-
-                # scan zip, zip file has metadata in comment
-                # if some image is truncated or outdated, download them again
-
                 if not task.meta:
                     task.state = TASK_STATE_GET_META
                     continue
 
+                # scan zip, zip file has metadata in comment
+                # if some image is truncated or outdated, download them again
                 if task.prescan_downloaded():
                     task.state = TASK_STATE_SCAN_IMG
                     continue
@@ -333,14 +327,16 @@ class xeHentai(object):
                     tid = 'down-%d' % (i + 1)
                     _ = self._get_httpworker(tid, task.img_q,
                         filters.download_file_wrapper(task.config['dir']),
-                        lambda x, tid = tid: (task.save_file(x[1], x[2], x[0]) and \
-                            (self.logger.debug(i18n.XEH_FILE_DOWNLOADED.format(tid, *task.get_fname(x[1]))),
-                                mon.vote(tid, 0))),
-                        lambda x, tid = tid: (
-                            task.page_q.put(task.get_reload_url(x[1])) if '509.gif' not in x[1] else None,
-                            task.reload_map.pop(x[1]) if x[1] in task.reload_map else None, # delete old url in reload_map
-                            self.logger.debug(i18n.XEH_DOWNLOAD_HAS_ERROR % (tid, i18n.c(x[0]))),
-                            mon.vote(tid, x[0])),
+                        lambda _x, _tid=tid: (task.save_file(_x[1], _x[2], _x[0]) and
+                            (self.logger.debug(i18n.XEH_FILE_DOWNLOADED.format(_tid, *task.get_fname(_x[1]))),
+                            mon.vote(_tid, 0))),
+                        lambda _x, _tid=tid: (
+                            task.page_q.put(task.get_reload_url(_x[1])) if '509.gif' not in _x[1] else None,
+                            task.reload_map.pop(_x[1]) if _x[1] in task.reload_map else None, # delete old url in reload_map
+                            self.logger.debug(
+                                i18n.XEH_DOWNLOAD_HAS_ERROR % (tid,
+                                                               i18n.c(_x[0]) + ' (' + _x[1][_x[1].rfind('/')+1:] + ') ')),
+                            mon.vote(_tid, _x[0])),
                         mon.wrk_keepalive,
                         util.get_proxy_policy(task.config),
                         task.config['download_timeout'],
