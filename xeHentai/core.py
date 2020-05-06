@@ -217,6 +217,7 @@ class xeHentai(object):
                 monitor_started = True
 
             if task.state == TASK_STATE_GET_META:  # grab meta data
+                self.logger.debug("task #%s start TASK_STATE_GET_META" % task_guid)
                 task.failcode = 0
                 try:
                     r = req.request("GET", task.url,
@@ -256,6 +257,7 @@ class xeHentai(object):
             #         task_guid, task.meta['total'] - len(task._flist_done),
             #         task.meta['total']))
             elif task.state == TASK_STATE_SCAN_PAGE:
+                self.logger.debug("task #%s start TASK_STATE_SCAN_PAGE" % task_guid)
                 # if task.config['fast_scan'] and not task.has_ori:
                 #     self.logger.info(i18n.TASK_FAST_SCAN % task.guid)
                 #     for p in task.meta['filelist']:

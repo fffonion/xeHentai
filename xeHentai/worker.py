@@ -24,17 +24,19 @@ else:
 
 # pinfo = {'http':'socks5://127.0.0.1:16963', 'https':'socks5://127.0.0.1:16963'}
 
+
 class _FakeResponse(object):
     def __init__(self, url):
         self.status_code = 600
-        self.text = None
+        self.text = ''
         self.url = self._real_url = url
         self.headers = {}
+
 
 class FallbackIpAdapter(HTTPAdapter):
     def __init__(self, ip_map=FALLBACK_IP_MAP, **kwargs):
         self.ip_map = ip_map
-        kwargs.update({'max_retries': 1})
+        kwargs.update({'max_retries': 3})
         requests.adapters.HTTPAdapter.__init__(self, **kwargs)
 
     # override
@@ -46,8 +48,8 @@ class FallbackIpAdapter(HTTPAdapter):
             if _hostname in self.ip_map:
                 _parsed = list(parsed)
                 # alter the hostname
-                _hostname = '%s%s' % (random.choice(self.ip_map[_hostname]),
-                                        (":%d" % parsed.port) if parsed.port else "")
+                _hostname = '%s%s' % (self.ip_map[_hostname][0],
+                                      (":%d" % parsed.port) if parsed.port else "")
                 _scheme = 'https'
             return self.poolmanager.connection_from_host(_hostname, parsed.port, scheme=_scheme,
                                                             pool_kwargs={'assert_hostname': parsed.hostname})

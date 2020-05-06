@@ -478,7 +478,7 @@ class Task(object):
         #     if fid not in self._flist_done:
         #         callback(self.get_picpage_url(pichash))
         # elif url:
-        fhash, fid = RE_GALLERY.findall(img_tuble[0])[0]
+        # fhash, fid = RE_GALLERY.findall(img_tuble[0])[0]
 
         # if fhash not in self.meta['filelist']:
         #     self.meta['resampled'][fhash] = int(fid)
@@ -504,6 +504,7 @@ class Task(object):
             if _is_crashed:
                 _file_name, _ext = os.path.splitext(_original_file_name)
                 _append_quote = 1
+                _assume_file_name = _original_file_name
                 while _is_crashed:
                     _is_crashed = False
                     _assume_file_name = '%s_%d%s' % (_file_name, _append_quote, _ext)
@@ -515,6 +516,7 @@ class Task(object):
                         _append_quote += 1
                 _original_file_name = _assume_file_name
             self.fid_2_original_file_name_map.setdefault(_fid, _original_file_name)
+
         callback_page_url_setdefault(_fid, _page_url)
 
     def save_file(self, imgurl, redirect_url, binary_iter):
@@ -570,13 +572,14 @@ class Task(object):
                     fn_rep = os.path.join(fpath, fname)
                     if not fn == fn_rep:
                         shutil.copyfile(fn, fn_rep)
-                    self._cnt_lock.acquire()
-                    self.meta['finished'] += 1
-                    self._cnt_lock.release()
+                        self._cnt_lock.acquire()
+                        self.meta['finished'] += 1
+                        self._cnt_lock.release()
                 del self.filehash_map[imgurl]
         except Exception as ex:
             self._f_lock.release()
             raise ex
+
         self._f_lock.release()
         return True
 

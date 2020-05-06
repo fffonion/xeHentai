@@ -34,6 +34,8 @@ def flt_metadata(r, suc, fail):
     # input index response
     # add gallery meta if suc; return errorcode if fail
     # TODO: catch re exceptions
+    if r.status_code == 600:
+        return fail(ERR_CONNECTION_ERROR)
     if r.status_code == 404:
         return fail(ERR_GALLERY_REMOVED)
     if re.match("Gallery not found", r.text):
@@ -132,7 +134,7 @@ def flt_quota_check(func):
                 re.findall("exceeded your image viewing limits", r.text):
             fail((ERR_QUOTA_EXCEEDED, r._real_url))
             # will not call the decorated filter
-        elif r.status_code == 503 or r.content_length == 0:
+        elif r.status_code == 503:
             fail((ERR_CONNECTION_ERROR, r._real_url))
         else:
             func(r, suc, fail)
@@ -190,9 +192,9 @@ def flt_imgurl_wrapper(ori):
             reload_url = "%s%snl=%s" % (r._real_url, "&" if "?" in r._real_url else "?", js_nl)
             if ori:
                 # we will parse the 302 url to get original filename
-                return suc((fullurl, reload_url, filename,ori_file_size[0]))
+                return suc((fullurl, reload_url, filename, ori_file_size[0]))
             else:
-                return suc((picurl, reload_url, filename,filesize))
+                return suc((picurl, reload_url, filename, filesize))
 
         return fail((ERR_SCAN_REGEX_FAILED, r._real_url))
 
@@ -220,13 +222,14 @@ def download_file_wrapper(dirpath):
         # merge the iter_content iterator with our custom stream_cb
         def _yield(chunk_size=16384, _r=r):
             from requests.exceptions import ConnectionError
+            from ssl import SSLWantReadError
             length_read = 0
             try:
                 for _ in _r.iter_content(chunk_size):
                     length_read += len(_)
                     _r.iter_content_cb(_)
                     yield _
-            except ConnectionError: # read timeout
+            except (ConnectionError, SSLWantReadError):  # read timeout
                 fail((ERR_IMAGE_BROKEN, r._real_url, r.url))
                 raise DownloadAbortedException()
             if length_read != r.content_length:
