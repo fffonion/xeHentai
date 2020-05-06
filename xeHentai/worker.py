@@ -70,10 +70,10 @@ class HttpReq(object):
     def __init__(self, headers = {}, proxy = None, proxy_policy = None, retry = 10, timeout = 10, logger = None, tname = "main"):
         self.session = requests.Session()
         self.session.headers = headers
-        for u in ('forums.e-hentai.org', 'e-hentai.org', 'exhentai.org'):
-            self.session.mount('http://%s' % u, FallbackIpAdapter())
-            self.session.mount('https://%s' % u, FallbackIpAdapter())
-        self.session.mount('http://', HTTPAdapter(max_retries=0))
+        #for u in ('forums.e-hentai.org', 'e-hentai.org', 'exhentai.org'):
+        #    self.session.mount('http://%s' % u, FallbackIpAdapter())
+        #    self.session.mount('https://%s' % u, FallbackIpAdapter())
+        #self.session.mount('http://', requests.adapters.HTTPAdapter)
         self.retry = retry
         self.timeout = timeout
         self.proxy = proxy
