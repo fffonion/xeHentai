@@ -406,6 +406,8 @@ class Task(object):
         for k in self.__dict__:
             if k not in j:
                 continue
+            if k == "logger":
+                continue
             if k.endswith('_q') and j[k]:
                 setattr(self, k, Queue())
                 [getattr(self, k).put(e, False) for e in j[k]]
@@ -419,7 +421,7 @@ class Task(object):
 
     def to_dict(self):
         d = dict({k:v for k, v in self.__dict__.items()
-            if not k.endswith('_q') and not k.startswith("_")})
+            if not k.endswith('_q') and not k.startswith("_") and k != "logger"})
         for k in ['img_q', 'page_q']:
             if getattr(self, k):
                 d[k] = [e for e in getattr(self, k).queue]
