@@ -47,6 +47,7 @@ xeH
  - **rpc_interface** RPC綁定的IP，參見[JSON-RPC](#json-rpc)，默認為`localhost`
  - **rpc_port** RPC綁定的埠，默認為`None`
  - **rpc_secret** RPC密鑰，默認為`None` (不開啟RPC伺服器)
+ - **rpc_open_browser** RPC服務端啟動後自動打開瀏覽器頁面，默認為是
  - **delete_task_files** 是否刪除任務時同時刪除下載的文件，默認為否
  - **download_range** 設置下載的圖片範圍，參見[下載範圍](#下載範圍)
  - **scan_thread_cnt** 掃描線程數，默認為`1`

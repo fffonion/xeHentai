@@ -406,7 +406,7 @@ class xeHentai(object):
                     return ERR_SAVE_SESSION_FAILED, str(ex)
                 else:
                     for _ in j['tasks'].values():
-                        _t = Task("", {}).from_dict(_)
+                        _t = Task("", {}, self.logger).from_dict(_)
                         if 'filelist' in _t.meta:
                             _t.scan_downloaded()
                                 #_t.meta['has_ori'] and task.config['download_ori'])
