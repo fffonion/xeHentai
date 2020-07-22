@@ -18,7 +18,7 @@ ANDROID = 'ANDROID_ARGUMENT' in os.environ
 
 __version__ = 2.023
 VERSION_UPDATE = ""
-DEVELOPMENT = True
+DEVELOPMENT = False
 
 SCRIPT_NAME = "xeHentai"
 
