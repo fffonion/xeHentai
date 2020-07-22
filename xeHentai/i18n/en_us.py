@@ -70,6 +70,8 @@ XEH_OPT_f = "download regardless of quota exceeded warning (current: %(current)s
 XEH_OPT_h = "show this help message and exit"
 XEH_OPT_version = "show program's version number and exit"
 XEH_OPT_IGNORING_I = "ignoring -i option in daemon mode"
+XEH_OPT_auto_update = "check or download update automatically"
+XEH_OPT_update_beta_channel = "check update upon beta channel"
 
 PS_LOGIN = "login to exhentai (y/n)? > "
 PS_USERNAME = "Username > "
@@ -135,3 +137,13 @@ THREAD_SPEED_TOO_LOW = "thread-%s retry because of low download speed: %s/s less
 QUEUE = "queue"
 
 PROXY_DISABLE_BANNED = "disable a banned proxy, expire in about %ss"
+
+UPDATE_CHANNEL = "Update channel is: %s"
+UPDATE_DEV_CHANNEL = "dev"
+UPDATE_RELEASE_CHANNEL = "release"
+UPDATE_FAILED = "Failure when updating program: %s"
+UPDATE_COMPLETE = "Update is complete, it will take effect on next run"
+UPDATE_NO_UPDATE = "Program is up-to-date"
+UPDATE_AVAILABLE = "Update available: %s \"%s\" (%s)"
+UPDATE_DOWNLOAD_MANUALLY = "You can download update from https://dl.yooooo.us/share/xeHentai/"
+

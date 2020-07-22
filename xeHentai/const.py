@@ -16,8 +16,9 @@ LOCALE = locale.getdefaultlocale()[0]
 CODEPAGE = locale.getdefaultlocale()[1] or 'ascii'
 ANDROID = 'ANDROID_ARGUMENT' in os.environ
 
-__version__ = 2.022
-DEVELOPMENT = False
+__version__ = 2.023
+VERSION_UPDATE = ""
+DEVELOPMENT = True
 
 SCRIPT_NAME = "xeHentai"
 
@@ -29,6 +30,9 @@ else:
     # The application is not frozen
     # Change this bit to match where you store your data files:
     FILEPATH = sys.path[0]
+    # if update is being injected
+    if FILEPATH.endswith(".zip"):
+        FILEPATH = sys.path[1]
 
 DUMMY_FILENAME = "-dummy-"
 RENAME_TMPDIR = "-xeh-conflict-"
@@ -36,6 +40,9 @@ STATIC_CACHE_FILE = os.path.join(FILEPATH, "webui.gz")
 # cache for 1 hour
 STATIC_CACHE_TTL = 3600
 STATIC_CACHE_VERSION = 1
+
+SRC_UPDATE_FILE = os.path.join(FILEPATH, "src.zip")
+SRC_UPDATE_VERSION = 1
 
 RE_INDEX = re.compile('.+/(\d+)/([^\/]+)/*')
 RE_GALLERY = re.compile('/([a-f0-9]{10})/[^\-]+\-(\d+)')

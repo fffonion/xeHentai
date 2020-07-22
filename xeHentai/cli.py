@@ -26,6 +26,11 @@ sys.path.pop(1)
 def start():
     opt = parse_opt()
     xeH = xeHentai()
+    if opt.auto_update != "off":
+        check_update(xeH.logger, {
+            "auto_update": opt.auto_update,
+            "update_beta_channel": opt.update_beta_channel,
+        })
     if opt.daemon:
         if opt.interactive:
             xeH.logger.warning(i18n.XEH_OPT_IGNORING_I)
@@ -43,6 +48,13 @@ def start():
         xeH.logger.info(i18n.XEH_DAEMON_START % pid)
     else:
         main(xeH, opt)
+
+def check_update(l, cfg):
+    from .updater.updater import check_update
+    t = Thread(name="updater", target=check_update, args=(l, cfg))
+    t.setDaemon(True)
+    t.start()
+    return t
 
 def main(xeH, opt):
     xeH.update_config(**vars(opt))
@@ -181,6 +193,10 @@ def parse_opt():
                         current = ERR_QUOTA_EXCEEDED in _def['ignored_errors'],
                         add_value = ERR_QUOTA_EXCEEDED, dest='ignored_errors',
                         help = i18n.XEH_OPT_f)
+    parser.add_argument('--auto-update', default = _def['auto_update'], choices = ("check", "download", "off"),
+                        dest = 'auto_update', help = i18n.XEH_OPT_auto_update)
+    parser.add_argument('--update-beta-channel', type = bool, metavar = "BOOL", default = _def['update_beta_channel'],
+                        dest = 'update_beta_channel', help = i18n.XEH_OPT_update_beta_channel)
 
     parser.add_argument('-l', '--logpath', metavar = '/path/to/eh.log',
                         default = os.path.abspath(_def['log_path']), help = i18n.XEH_OPT_l)

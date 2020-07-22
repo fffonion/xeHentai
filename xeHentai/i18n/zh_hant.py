@@ -67,6 +67,8 @@ XEH_OPT_f = "忽略配額判斷，繼續下載 (當前: %(current)s)"
 XEH_OPT_h = "顯示本幫助信息"
 XEH_OPT_version = "顯示版本信息"
 XEH_OPT_IGNORING_I = "後台模式已忽略 -i 參數"
+XEH_OPT_auto_update = "檢查並自動下載更新"
+XEH_OPT_update_beta_channel = "是否更新到測試分支"
 
 
 PS_LOGIN = "當前沒有登陸，要登陸嗎 (y/n)? > "
@@ -133,3 +135,12 @@ THREAD_SPEED_TOO_LOW = "紳士-%s 下載速度只有 %s/s, 低於 %s/s, 將在�
 QUEUE = "隊列"
 
 PROXY_DISABLE_BANNED = "禁用了一個被ban的代理，將在約%s秒後恢復"
+
+UPDATE_CHANNEL = "更新渠道為: %s"
+UPDATE_DEV_CHANNEL = "測試版"
+UPDATE_RELEASE_CHANNEL = "正式版"
+UPDATE_FAILED = "更新時遇到錯誤: %s"
+UPDATE_COMPLETE = "更新完成，請重新啟動程序應用更新"
+UPDATE_NO_UPDATE = "沒有可用更新"
+UPDATE_AVAILABLE = "發現可用的更新: 發布於 %s \"%s\" (%s)"
+UPDATE_DOWNLOAD_MANUALLY = "可以從 https://dl.yooooo.us/share/xeHentai/ 下載更新"

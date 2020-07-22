@@ -19,7 +19,6 @@ from .i18n import i18n
 if PY3K:
     from socketserver import ThreadingMixIn
     from http.server import HTTPServer, BaseHTTPRequestHandler
-    from io import IOBase
     from io import BytesIO as StringIO
     from urllib.parse import urlparse
 else:

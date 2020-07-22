@@ -67,3 +67,8 @@ delete_task_files = False
 
 # retry a connection if per thread speed is lower than this value, unit is KB per second
 low_speed_threshold = 10
+
+# turn on auto update of program "check" for check only and "download" for download
+auto_update = "download"
+# set to true to update to dev branch
+update_beta_channel = False

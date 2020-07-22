@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.023
+- 自动更新
+- 修复保存任务时logger无法序列化的bug (感谢 @9chu)
+
 ## 2.022
 - 增加下载速度显示
 - 增加低速自动重试 `low_speed_threshold`, 默认为`10KB/s`以下重试

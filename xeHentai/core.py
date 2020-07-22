@@ -37,6 +37,8 @@ sys.path.pop(1)
 class xeHentai(object):
     def __init__(self):
         self.verstr = "%.3f%s" % (__version__, '-dev' if DEVELOPMENT else "")
+        if VERSION_UPDATE:
+            self.verstr = "%s-%s(%s)" % (self.verstr, VERSION_UPDATE[:7], VERSION_UPDATE_LOADER)
         self.logger = logger.Logger()
         self._exit = False
         self.tasks = Queue() # for queueing, stores gid only

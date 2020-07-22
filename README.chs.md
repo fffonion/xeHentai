@@ -55,6 +55,8 @@ xeH
  - **download_timeout** 设置下载图片的超时，默认为`10`秒
  - **low_speed_threshold** 设置最低下载速度，低于此值将换源重新下载，单位为KB/s，默认为`10`
  - **ignored_errors** 设置忽略的错误码，默认为空，错误码可以从`const.py`中获得
+ - **auto_update** 自动检查更新，`check` 仅检查更新，`download` 下载更新，`off` 关闭检查；默认为`download`
+ - **update_beta_channel** 设置是否更新到测试版，默认为否
  - **log_path** 日志路径，默认为`eh.log`
  - **log_verbose** 日志等级，可选1-3，值越大输出越详细，默认为`2`
  - **save_tasks** 是否保存任务到`h.json`，可用于断点续传，默认为否
@@ -67,7 +69,8 @@ xeH
            [--rpc-interface ADDR] [--rpc-port PORT] [--rpc-secret ...]
            [--rpc-open-browser BOOL] [--delete-task-files BOOL] [-a BOOL]
            [--download-range a-b,c-d,e] [-t N] [--timeout N]
-           [--low-speed-threshold N] [-f] [-l /path/to/eh.log] [-v] [-h]
+           [--low-speed-threshold N] [-f] [--auto-update {check,download,off}]
+           [--update-beta-channel BOOL] [-l /path/to/eh.log] [-v] [-h]
            [--version]
            [url [url ...]]
 
@@ -112,6 +115,10 @@ xeH
   -t N, --thread N      下载线程数 (默认: 5)
   --timeout N           设置下载图片的超时 (默认: 10秒)
   -f, --force           忽略配额判断, 继续下载 (默认: False)
+  --auto-update {check,download,off}
+                        检查并自动下载更新
+  --update-beta-channel BOOL
+                        是否更新到测试分支
   -l /path/to/eh.log, --logpath /path/to/eh.log
                         保存日志的路径 (默认: eh.log)
   -v, --verbose         设置日志装逼等级 (默认: 2)

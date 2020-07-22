@@ -53,6 +53,8 @@ Configuration keys：
  - **download_timeout** Timeout of download images. Default to `10`s.
  - **low_speed_threshold** Retry download if speed is lower than specified value. Default to `10` KB/s.
  - **ignored_errors** Set the error codes to ignore and continue downloading. Default to *empty*. Error codes can be obtained from [const.py](xeHentai/const.py).
+ - **auto_update** turn on auto update of program `check` for check only and `download` for download; `off` to turn off. Default to `download`.
+ - **update_beta_channel** set to true to update to dev branch
  - **log_path** Set log file path. Default to `eh.log`.
  - **log_verbose** Set log level with integer from 1 to 3. Bigger value means more verbose output. Default to `2`.
  - **save_tasks** Set to save uncompleted tasks in `h.json`. Default to `False`.
@@ -65,7 +67,8 @@ Usage: xeh [-u USERNAME] [-k KEY] [-c COOKIE] [-i] [--daemon] [-d DIR] [-o]
            [--rpc-interface ADDR] [--rpc-port PORT] [--rpc-secret ...]
            [--rpc-open-browser BOOL] [--delete-task-files BOOL] [-a BOOL]
            [--download-range a-b,c-d,e] [-t N] [--timeout N]
-           [--low-speed-threshold N] [-f] [-l /path/to/eh.log] [-v] [-h]
+           [--low-speed-threshold N] [-f] [--auto-update {check,download,off}]
+           [--update-beta-channel BOOL] [-l /path/to/eh.log] [-v] [-h]
            [--version]
            [url [url ...]]
 
@@ -126,9 +129,14 @@ optional arguments:
                         (default: 10 KB/s)
   -f, --force           download regardless of quota exceeded warning
                         (default: False)
+  --auto-update {check,download,off}
+                        check or download update automatically
+                        (default: download)
+  --update-beta-channel BOOL
+                        check update upon beta channel
+                        (default: True)
   -l /path/to/eh.log, --logpath /path/to/eh.log
-                        define log path (current:
-                        /Users/fffonion/Dev/Python/xeHentai/eh.log)
+                        define log path (default: eh.log)
   -v, --verbose         show more detailed log (default: 3)
   -h, --help            show this help message and exit
   --version             show program's version number and exit

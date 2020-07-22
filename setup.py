@@ -22,6 +22,7 @@ packages = [
     'xeHentai',
     'xeHentai.util',
     'xeHentai.i18n',
+    'xeHentai.updater',
 ]
 requires = ['requests']
 
