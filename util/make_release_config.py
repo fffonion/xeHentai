@@ -36,7 +36,7 @@ for k in sorted(config.__dict__):
             i18n = "XEH_OPT_download_range"
         else:
             i18n = re.findall("_def\[['\"]%s['\"]\].*?help\s*=\s*i18n.([^\)]+)\)" % k, cli, re.DOTALL)[0]
-        txt = re.findall("%s\s*=\s*['\"](.*?)\s*\(当前.+['\"]" % i18n, zh_hans, re.DOTALL)[0] 
+        txt = re.findall("%s\s*=\s*['\"](.*?)\s*\(当前.+['\"]" % i18n, zh_hans, re.DOTALL)[0]
         # multiline fix
         txt = txt.replace('"', '').replace('\\\n', '\n# ')
         txt = re.sub("\nXEH_.+", "", txt, re.DOTALL)

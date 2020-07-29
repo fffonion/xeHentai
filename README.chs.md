@@ -116,9 +116,9 @@ xeH
   --timeout N           设置下载图片的超时 (默认: 10秒)
   -f, --force           忽略配额判断, 继续下载 (默认: False)
   --auto-update {check,download,off}
-                        检查并自动下载更新
+                        检查并自动下载更新 (默认: download)
   --update-beta-channel BOOL
-                        是否更新到测试分支
+                        是否更新到测试分支 (默认: True)
   -l /path/to/eh.log, --logpath /path/to/eh.log
                         保存日志的路径 (默认: eh.log)
   -v, --verbose         设置日志装逼等级 (默认: 2)
