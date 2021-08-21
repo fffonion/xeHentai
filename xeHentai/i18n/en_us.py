@@ -13,6 +13,7 @@ err_msg = {
     ERR_CONNECTION_ERROR: "a connection problem occurs",
     ERR_IP_BANNED: "IP has been banned, retry in %s",
     ERR_IMAGE_BROKEN: "downloaded image is broken",
+    ERR_SCAN_REGEX_FAILED: "page parsing failed",
     ERR_QUOTA_EXCEEDED: "quota exceeded",
     ERR_TASK_NOT_FOUND: "no such task guid",
     ERR_TASK_LEVEL_UNDEF: "task filter level unknown",
@@ -118,7 +119,7 @@ XEH_DOWNLOAD_ORI_NEED_LOGIN = "haven't login, so I won't download original image
 XEH_FILE_DOWNLOADED = "file downloaded by thread-{} #{} {}"
 XEH_RENAME_HAS_ERRORS = "some files are not renamed:\n%s"
 XEH_DOWNLOAD_HAS_ERROR = "thread-%s retry #%s because of error: %s"
-XEH_SCAN_FAILED = "%s scan page #%s failed: %d"
+XEH_SCAN_FAILED = "%s scan page %s failed: %d"
 
 RPC_STARTED = "RPC server listening on %s:%d"
 RPC_TOO_OPEN = "RPC server is listening on public interface (%s) but no rpc_secret defined, which is not safe"

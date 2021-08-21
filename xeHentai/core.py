@@ -275,7 +275,7 @@ class xeHentai(object):
                             mon.vote(tid, 0)),
                         lambda x, tid = tid: (
                             mon.vote(tid, x[0]),
-                            self.logger.warn(i18n.XEH_SCAN_FAILED % (tid, x[1], x[0])),
+                            self.logger.warn(i18n.XEH_SCAN_FAILED % (tid, x[1], i18n.c(x[0]))),
                         ),
                         mon.wrk_keepalive,
                         util.get_proxy_policy(task.config),

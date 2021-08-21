@@ -13,6 +13,7 @@ err_msg = {
     ERR_CONNECTION_ERROR: "连接有问题？",
     ERR_IP_BANNED: "IP被ban了, 恢复时间: %s",
     ERR_IMAGE_BROKEN: "下载的图片有猫饼",
+    ERR_SCAN_REGEX_FAILED: "网页解析失败",
     ERR_QUOTA_EXCEEDED: "配额超限",
     ERR_TASK_NOT_FOUND: "没有该GUID对应的任务",
     ERR_TASK_LEVEL_UNDEF: "任务过滤等级不存在",
