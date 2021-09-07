@@ -117,7 +117,7 @@ XEH_DOWNLOAD_ORI_NEED_LOGIN = "下載原圖需要登錄"
 XEH_FILE_DOWNLOADED = "紳士-{} 已下載圖片 #{} {}"
 XEH_RENAME_HAS_ERRORS = "部分圖片重命名失敗:\n%s"
 XEH_DOWNLOAD_HAS_ERROR = "紳士-%s 下載圖片 #%s 時出錯: %s, 將在稍後重試"
-XEH_SCAN_FAILED = "%s 掃描頁面 %s 失敗: %d"
+XEH_SCAN_FAILED = "%s 掃描頁面 %s 失敗: %s"
 
 RPC_STARTED = "RPC伺服器監聽在 %s:%d"
 RPC_TOO_OPEN = "RPC伺服器監聽在公網IP (%s)，為了安全起見應該設置rpc_secret"
