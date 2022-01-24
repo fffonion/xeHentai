@@ -199,7 +199,7 @@ def parse_opt():
                         dest = 'update_beta_channel', help = i18n.XEH_OPT_update_beta_channel)
 
     parser.add_argument('-l', '--logpath', metavar = '/path/to/eh.log',
-                        default = os.path.abspath(_def['log_path']), help = i18n.XEH_OPT_l)
+                        dest = 'log_path', default = os.path.abspath(_def['log_path']), help = i18n.XEH_OPT_l)
 
     parser.add_argument('-v', '--verbose', action = 'count', default = _def['log_verbose'],
                         help = i18n.XEH_OPT_v)
