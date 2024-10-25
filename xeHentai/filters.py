@@ -107,7 +107,7 @@ def flt_pageurl(r, suc, fail):
     # input gallery response
     # add per image urls if suc; finish task if fail
     picpage = re.findall(
-        '<a href="(%s/./[a-f0-9]{10}/\d+\-\d+)"><img alt="\d+" title="Page' % RESTR_SITE,
+        '<a href="(%s/./[a-f0-9]{10}/\d+\-\d+)"><img title="Page' % RESTR_SITE,
         r.text)
     if not picpage:
         fail(ERR_NO_PAGEURL_FOUND)
