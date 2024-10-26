@@ -55,4 +55,4 @@ VSVersionInfo(
 ".".join(v), ".".join(v), version
 )
 
-open("verinfo.txt", "wb").write(tmpl)
+open("verinfo.txt", "w", encoding="utf-8").write(tmpl)

@@ -12,10 +12,10 @@ if not os.path.exists(target):
     os.mkdir(target)
 
 target = os.path.join(target, "config.py")
-cli = open(os.path.join(FILEPATH, "xeHentai", "cli.py"), "rb").read()
-zh_hans = open(os.path.join(FILEPATH, "xeHentai", "i18n", "zh_hans.py"), "rb").read()
+cli = open(os.path.join(FILEPATH, "xeHentai", "cli.py"), "r", encoding="utf-8").read()
+zh_hans = open(os.path.join(FILEPATH, "xeHentai", "i18n", "zh_hans.py"), "r", encoding="utf-8").read()
 
-f = open(target, "wb")
+f = open(target, "w", encoding="utf-8")
 f.write('''# coding:utf-8
 # --UTF8补丁-- #
 
@@ -35,11 +35,11 @@ for k in sorted(config.__dict__):
         if k == "download_range":
             i18n = "XEH_OPT_download_range"
         else:
-            i18n = re.findall("_def\[['\"]%s['\"]\].*?help\s*=\s*i18n.([^\)]+)\)" % k, cli, re.DOTALL)[0]
-        txt = re.findall("%s\s*=\s*['\"](.*?)\s*\(当前.+['\"]" % i18n, zh_hans, re.DOTALL)[0]
+            i18n = re.findall(r"_def\[['\"]%s['\"]\].*?help\s*=\s*i18n.([^\)]+)\)" % k, cli, re.DOTALL)[0]
+        txt = re.findall(r"%s\s*=\s*['\"](.*?)\s*\(当前.+['\"]" % i18n, zh_hans, re.DOTALL)[0]
         # multiline fix
         txt = txt.replace('"', '').replace('\\\n', '\n# ')
-        txt = re.sub("\nXEH_.+", "", txt, re.DOTALL)
+        txt = re.sub(r"\nXEH_.+", "", txt, re.DOTALL)
     else:
         txt = other_mappings[k]
     f.write("# %s\n" % txt)
