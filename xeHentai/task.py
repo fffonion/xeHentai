@@ -337,8 +337,11 @@ class Task(object):
         done_list = set()
         for fid in list(self.renamed_map.keys()):
             fname = self.renamed_map[fid]
+            original_ext = os.path.splitext(fname)[1]
+            if original_ext== "":
+                original_ext = os.path.splitext(fname)[0]
             # if we don't need to rename to original name and file type matches
-            if not self.config['rename_ori'] and os.path.splitext(fname)[1].lower() == '.jpg':
+            if not self.config['rename_ori'] and original_ext.lower() == '.jpg':
                 continue
             fname_ori = os.path.join(fpath, self.get_fidpad(fid)) # id   
             if self.config['rename_ori']:
@@ -353,7 +356,7 @@ class Task(object):
                 #   will have zero knowledge about file type before scanning all per page,
                 #   thus can't determine if this id is downloaded, because file type is not
                 #   necessarily .jpg
-                fname_to = os.path.join(fpath, self.get_fidpad(fid, os.path.splitext(fname)[1][1:]))
+                fname_to = os.path.join(fpath, self.get_fidpad(fid, original_ext[1:]))
             while fname_ori != fname_to:
                 if os.path.exists(fname_ori):
                     while os.path.exists(fname_to):
