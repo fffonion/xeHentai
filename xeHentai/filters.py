@@ -112,6 +112,11 @@ def flt_pageurl(r, suc, fail):
         '<a href="(%s/./[a-f0-9]{10}/\d+\-\d+)"><div title="Page' % RESTR_SITE,
         r.text)
     if not picpage:
+        try:
+            with open("debug.htm", "w") as f:
+                f.write(r.text)
+        except Exception:
+            pass
         fail(ERR_NO_PAGEURL_FOUND)
     for p in picpage:
         suc(p)
