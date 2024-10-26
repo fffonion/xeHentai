@@ -35,6 +35,8 @@ def flt_metadata(r, suc, fail):
     # input index response
     # add gallery meta if suc; return errorcode if fail
     # TODO: catch re exceptions
+    if r.status_code == 600:
+        return fail(ERR_CONNECTION_ERROR)
     if r.status_code == 404:
         return fail(ERR_GALLERY_REMOVED)
     if re.match("This gallery is pining for the fjords", r.text):
