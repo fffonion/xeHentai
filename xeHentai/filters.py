@@ -62,7 +62,7 @@ def flt_metadata(r, suc, fail):
 
     # check multi page viewer status in order to call proper flt_pageurl
     mpv_urls = re.findall(
-            '<a href="(%s/mpv/(\d+)/[a-f0-9]{10})/#page\d+"><img alt="\d+" title="Page' % RESTR_SITE,
+            '<a href="(%s/mpv/(\d+)/[a-f0-9]{10})/#page\d+"><div title="Page' % RESTR_SITE,
             r.text)
     if mpv_urls:
         meta['use_multipage_viewer'] = True
