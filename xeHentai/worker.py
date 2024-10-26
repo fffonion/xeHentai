@@ -388,9 +388,9 @@ class Monitor(Thread):
             intv += 1
             self._check_vote()
             total_speed = 0
-            for k in list(self.thread_last_seen.keys()):
+            for k, last_seen in list(self.thread_last_seen.items()):
                 _zombie_threshold = self.thread_ref[k].zombie_threshold if k in self.thread_ref else 30
-                if time.time() - self.thread_last_seen[k] > _zombie_threshold:
+                if time.time() - last_seen > _zombie_threshold:
                     if k not in self.thread_ref and self.thread_ref[k].is_alive():
                         self.logger.warning(i18n.THREAD_MAY_BECOME_ZOMBIE % k)
                         self.thread_zombie.add(k)
