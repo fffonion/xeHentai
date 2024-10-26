@@ -186,7 +186,7 @@ def flt_imgurl_wrapper(ori):
                 _ = re.findall('n=(.+)', picurl)
                 if _:
                     filename = _[0]
-            _ = re.findall('.+\.([a-zA-Z]+)', filename)
+            _ = re.findall('.*?\.([a-zA-Z]+)', filename)
             if not _:
                 break
             fmt = _[0]

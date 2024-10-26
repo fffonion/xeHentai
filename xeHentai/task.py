@@ -335,12 +335,12 @@ class Task(object):
         # whether to rename into a temp filename or add (1)
         # only need it when rename_ori = True
         done_list = set()
-        for fid in self.renamed_map.keys():
+        for fid in list(self.renamed_map.keys()):
             fname = self.renamed_map[fid]
             # if we don't need to rename to original name and file type matches
             if not self.config['rename_ori'] and os.path.splitext(fname)[1].lower() == '.jpg':
                 continue
-            fname_ori = os.path.join(fpath, self.get_fidpad(fid)) # id          
+            fname_ori = os.path.join(fpath, self.get_fidpad(fid)) # id   
             if self.config['rename_ori']:
                 if os.path.exists(os.path.join(tmppath, self.get_fidpad(fid))):
                     # if we previously put it into a temporary folder, we need to change fname_ori
