@@ -16,10 +16,10 @@ LOCALE = locale.getdefaultlocale()[0]
 CODEPAGE = locale.getdefaultlocale()[1] or 'ascii'
 ANDROID = 'ANDROID_ARGUMENT' in os.environ
 
-__version__ = 2.023
+__version__ = 2.024
 VERSION_UPDATE = ""
 VERSION_UPDATE_LOADER = __version__
-DEVELOPMENT = False
+DEVELOPMENT = True
 
 SCRIPT_NAME = "xeHentai"
 
