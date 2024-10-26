@@ -272,7 +272,7 @@ class Handler(BaseHTTPRequestHandler):
                         r = self.http.get("http://xehentai.yooooo.us%s?_=%d" %(path, time.time()),
                             headers=headers, timeout=10)
                     except Exception as ex:
-                        self.xeH.logger.warn("error pulling %s from remote server: %s" % (path, err))
+                        self.xeH.logger.warn("error pulling %s from remote server: %s" % (path, ex))
                     self.xeH.logger.verbose("%.2fs taken to pull %s from remote server %s bytes" % (
                                             time.time() - req_start_tm, path, r and len(r.content) or 0))
                     if r and r.status_code == 200:
