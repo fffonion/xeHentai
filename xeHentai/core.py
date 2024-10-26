@@ -301,7 +301,7 @@ class xeHentai(object):
                                 mon.vote(tid, 0))),
                         lambda x, tid = tid: (
                             self.logger.debug(i18n.XEH_DOWNLOAD_HAS_ERROR % (
-                                tid, task.get_fname(task.get_imghash(x[2]))[0], i18n.c(x[0]),
+                                tid, task.get_imgfid(x[2]), i18n.c(x[0]),
                             )),
                             task.put_page_queue_retry(x[2]),
                             mon.vote(tid, x[0])),

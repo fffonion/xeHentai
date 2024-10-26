@@ -207,6 +207,8 @@ def flt_imgurl_wrapper(ori):
             js_nl = _[0]
             reload_url = "%s%snl=%s" % (r._real_url, "&" if "?" in r._real_url else "?", js_nl)
             if ori:
+                fullurl = "%s%sredirect=%s" % (fullurl, "&" if "?" in fullurl else "?", r.url)
+                reload_url = "%s%sredirect=%s" % (reload_url, "&" if "?" in reload_url else "?", r.url)
                 # we will parse the 302 url to get original filename
                 return suc((fullurl, reload_url, filename))
             else:

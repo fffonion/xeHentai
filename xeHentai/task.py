@@ -162,8 +162,11 @@ class Task(object):
     def put_page_queue_retry(self, redirect_url):
         if not redirect_url:
             return
-        # use redirect_url, fullimg.php doen't have hash in imgurl
-        img_hash = self.get_imghash(redirect_url)
+        if "redirect=" in redirect_url:
+           page_url = re.findall("redirect=(.+)", redirect_url)[0]
+           img_hash = RE_GALLERY.findall(page_url)[0][0]
+        else:
+            img_hash = self.get_imghash(redirect_url)
         url = self.reload_map.pop(img_hash)[0]
         self.page_q.put(url)
 
@@ -303,6 +306,12 @@ class Task(object):
         # so we can use same key in both normal image (from imgurl, full hash)
         # and original image (from gallery url/redirect url, short hash)
         return RE_IMGHASH.findall(imgurl_with_hash)[0][0][:10]
+
+    def get_imgfid(self, imgurl):
+        if RE_IMGHASH.findall(imgurl):
+            return self.get_fname(self.get_imghash(imgurl))[0]
+        # else is fullimg url
+        return int(re.findall("fullimg/\d+/(\d+)", imgurl)[0])
 
     def get_fname(self, img_hash):
         pageurl, fname = self.reload_map[img_hash]
