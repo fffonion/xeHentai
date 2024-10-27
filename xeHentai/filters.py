@@ -61,8 +61,9 @@ def flt_metadata(r, suc, fail):
     meta['thumbnail_cnt'] = int(_[1]) - int(_[0]) + 1
 
     # check multi page viewer status in order to call proper flt_pageurl
+    # TODO: remove <img alt="\d+" once e-hentai is updated to align with exhentai
     mpv_urls = re.findall(
-            '<a href="(%s/mpv/(\d+)/[a-f0-9]{10})/#page\d+"><div title="Page' % RESTR_SITE,
+            '<a href="(%s/mpv/(\d+)/[a-f0-9]{10})/#page\d+">(?:<div|<img alt="\d+") title="Page' % RESTR_SITE,
             r.text)
     if mpv_urls:
         meta['use_multipage_viewer'] = True
@@ -109,7 +110,7 @@ def flt_pageurl(r, suc, fail):
     # input gallery response
     # add per image urls if suc; finish task if fail
     picpage = re.findall(
-        '<a href="(%s/./[a-f0-9]{10}/\d+\-\d+)">(?:<div>)?<div title="Page' % RESTR_SITE,
+        '<a href="(%s/./[a-f0-9]{10}/\d+\-\d+)">(?:<div>)?(?:<div|<img alt="\d+") title="Page' % RESTR_SITE,
         r.text)
     if not picpage:
         try:
