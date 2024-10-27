@@ -40,7 +40,7 @@ def check_update(l=None, config={}):
         with zipfile.ZipFile(StringIO(z)) as zf:
             make_src_update_file(zf, g.get_src_path_in_archive(info), info)
         l.info(i18n.UPDATE_COMPLETE)
-    except MemoryError as ex:
+    except Exception as ex:
         l.warn(i18n.UPDATE_FAILED % str(ex))
 
 

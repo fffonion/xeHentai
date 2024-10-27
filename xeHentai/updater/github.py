@@ -7,6 +7,9 @@ import time
 
 from . import Updater, UpdateInfo
 
+class GithubUpdaterException(Exception):
+    pass
+
 class GithubUpdater(Updater):
     def __init__(self, session):
         self.session = session
@@ -14,7 +17,10 @@ class GithubUpdater(Updater):
     def get_latest_release(self, dev=False):
         param = dev and "dev" or "master"
         r = self.session.get("https://api.github.com/repos/fffonion/xeHentai/commits?sha=%s" % param)
-        commit = r.json()[0]
+        commit = r.json()
+        if r.status_code != 200 or not commit:
+            raise GithubUpdaterException("Failed to get latest release info: %s" % r.text)
+        commit = commit[0]
         sha = commit["sha"]
         url = "https://github.com/fffonion/xeHentai/archive/%s.zip" % sha
 
