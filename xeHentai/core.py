@@ -39,6 +39,7 @@ class xeHentai(object):
         self.verstr = "%.3f%s" % (__version__, '-dev' if DEVELOPMENT else "")
         if VERSION_UPDATE:
             self.verstr = "%s-%s(%s)" % (self.verstr, VERSION_UPDATE[:7], VERSION_UPDATE_LOADER)
+        self.verstr = "%s-py%d%d" % (self.verstr, sys.version_info[0], sys.version_info[1])
         self.logger = logger.Logger()
         self._exit = False
         self.tasks = Queue() # for queueing, stores gid only
