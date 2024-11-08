@@ -271,13 +271,18 @@ class Task(object):
                         pass
                 else:
                     raise ex
+
+            # Store the actual downloaded file name and its extension
+            actual_ext = os.path.splitext(fname)[1] or '.jpg' # Default to .jpg if no extension
+            self.renamed_map[fid] = fname # Store the complete filename for renaming later
+
             self.set_fid_finished(fid)
             if fid in self.duplicate_map:
                 for fid_rep in self.duplicate_map[fid]:
                     # if a file download is interrupted, it will appear in self.filehash_map as well
                     if fid_rep == fid:
                         continue
-                    fn_rep = os.path.join(fpath, self.get_fidpad(fid_rep))
+                    fn_rep = os.path.join(fpath, self.get_fidpad(fid_rep, actual_ext[1:])) # Use actual_ext here
                     shutil.copyfile(fn, fn_rep)
                     self.set_fid_finished(fid_rep)
                 self.logger.debug("#%s is copied from #%s in save_file" % (fid_rep, fid))
