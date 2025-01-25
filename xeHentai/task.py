@@ -11,6 +11,7 @@ import uuid
 import shutil
 import zipfile
 import tempfile
+import fnmatch
 from threading import RLock
 from . import util
 from .const import *
@@ -170,6 +171,17 @@ class Task(object):
         url = self.reload_map.pop(img_hash)[0]
         self.page_q.put(url)
 
+    # get file name without extension in fpath
+    # to check is the image already downloaded before
+    def get_fname_ignore_extension(self, fpat, fpath):
+        regex = re.compile(fpat)
+        if os.path.exists(fpath):
+            for file in os.listdir(fpath):
+                _ = os.path.join(fpath, file)
+                if os.path.isfile(_) and regex.match(os.path.splitext(os.path.basename(file))[0]):
+                    return _
+        return os.path.join(fpath, fpat)
+
     def scan_downloaded(self, scaled = True):
         fpath = self.get_fpath()
         donefile = False
@@ -193,7 +205,9 @@ class Task(object):
                     self._flist_done.add(int(fid))
                     continue
             # can only check un-renamed files
-            fname = os.path.join(fpath, self.get_fidpad(fid)) # id
+            # fname = os.path.join(fpath, self.get_fidpad(fid))  # id
+            fpat = os.path.splitext(self.get_fidpad(fid))[0]
+            fname = self.get_fname_ignore_extension(fpat, fpath)
             if donefile:
                 self._flist_done.add(int(fid))
             elif os.path.exists(fname):
