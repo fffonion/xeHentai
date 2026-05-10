@@ -19,7 +19,7 @@ def load_update():
             with zipfile.ZipFile(SRC_UPDATE_FILE, 'r') as z:
                 try:
                    r = json.loads(z.read("info.json"))
-                except:
+                except Exception:
                     need_remove = True
                 else:
                     if 'v' not in r and r['v'] != SRC_UPDATE_VERSION:
@@ -36,7 +36,7 @@ def load_update():
             reload(xeHentai)
             xeHentai.const.VERSION_UPDATE = update_id
             xeHentai.const.VERSION_UPDATE_LOADER = v
-        except:
+        except Exception:
             if sys.path[0] == SRC_UPDATE_FILE:
                 sys.path.pop(0)
                 os.remove(SRC_UPDATE_FILE)
