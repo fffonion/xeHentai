@@ -10,11 +10,11 @@ here = os.path.abspath(os.path.dirname(__file__))
 
 try:
     README = open(os.path.join(here, 'README.md')).read()
-except:
+except Exception:
     README = ""
 try:
     CHANGELOG = open(os.path.join(here, 'CHANGELOG.md')).read()
-except:
+except Exception:
     CHANGELOG = ""
 VERSION = imp.load_source('version', os.path.join(here, '%s/const.py' % PACKAGE_NAME)).__version__
 
