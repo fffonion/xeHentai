@@ -1,0 +1,11 @@
+/target/
+/.cargo/
+/.hermes/
+*.log
+/h.json
+/.ehentai.cookie
+/src.zip
+/webui.gz
+/.env
+/evidence/
+/compat/upstream/
