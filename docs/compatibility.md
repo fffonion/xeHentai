@@ -9,7 +9,7 @@ oracle 执行的源码来自：
 - 应用：`fffonion/xeHentai`，revision `43fc55c0c662f195d048becf6276a26ce06b09d9`
 - WebUI：`fffonion/xeHentai-webui`，revision `4e3738ef463fef344e96df613de9a81b4cda4b4e`
 
-源码通过 GitHub archive API 取得，不使用 SSH clone。检出副本放在被忽略的 `compat/upstream/`，归属记录在同目录的 `PROVENANCE.txt`。
+源码通过固定提交的 Git 对象逐字节核对后才导入。检出副本放在被忽略的 `compat/upstream/`。归属记录在同目录的 `PROVENANCE.txt`，只描述已经完成的核对；未执行的 WebUI 不标为已核对。
 
 ## 清单字段
 
@@ -21,9 +21,23 @@ oracle 执行的源码来自：
 - `expected`：实测观察或未执行原因。`implementation` 固定为 `pending`
 - `target`：重写目标。当前为 `pending`
 - `tests`：对应的检查命令或测试
-- `status`：`oracle_characterized`、`oracle_failed` 或 `unverified`
+- `status`：`oracle_characterized`、`oracle_failed`、`partial` 或 `unverified`
 
 `implemented`、`accepted`、`passing` 会被检查器拒绝。`verify --all --deny-unverified` 在存在未完成项时退出非零，并打印 `fail-closed` 与 `implementation_accepted=0`。
+
+`cli.option.*` 先按 AST 枚举全部选项拼写。只有实际执行过的拼写才标为 `oracle_characterized`，未执行的保持 `unverified`。AST 中出现不等于已执行。
+
+`behavior.sec4.rpc-methods` 与 `behavior.sec4.proxy-schemes` 的计数和状态从子项派生。登录失败或未执行的协议不能把父项标成完全覆盖。
+
+## 上游字节核对
+
+导入前，oracle 用租约内的 bare Git 仓库对照固定提交 `43fc55c0c662f195d048becf6276a26ce06b09d9` 的 Git 对象与检出文件。已有检出若与固定提交不一致，捕获失败，不覆盖、不修复该目录。WebUI 修订只记录，不执行，也不标为已核对。
+
+## 易变字段
+
+归一化 golden 只替换三类运行期值：fixture 根路径、HTTP `Date` 头、以及本次捕获实际绑定并记录的本地端口。原始 `result.json` 保留这些值。业务字段的变化必须能被 `oracle compare` 检出。
+
+帮助文本使用固定 `COLUMNS=4096`，避免 argparse 把 fixture 根折成多行后逃过路径替换。任务 GUID 在导入前由本进程计数器代替 `uuid.uuid4` 生成，golden 保留具体值，不把 GUID 当作第四类易变字段删除。调用次数或顺序变化会改变 GUID，比较必须失败。
 
 ## 隔离
 
@@ -35,9 +49,12 @@ oracle 进程使用独立的 fixture 根作为 `HOME`、`USERPROFILE`、工作�
 
 ## 命令
 
+需要 `XEH_LEASE_TMP` 指向本次执行租约的临时目录。解释器由 `XEH_PYTHON` 指定；未设置时使用 `python3`，且必须能导入 `requests` 与 `socks`。
+
 ```text
 cargo run -p xeh-xtask -- oracle capture --suite all
 cargo run -p xeh-xtask -- oracle capture --suite isolation
+cargo run -p xeh-xtask -- oracle compare --left <dir> --right <dir>
 cargo run -p xeh-xtask -- manifest check
 cargo run -p xeh-xtask -- verify --all --deny-unverified
 ```

@@ -91,7 +91,7 @@
       "access-control-allow-origin": "*",
       "content-length": "89",
       "content-type": "application/json-rpc",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "json": {
@@ -105,7 +105,7 @@
     "status_line": "HTTP/1.0 200 OK"
   },
   "add_exhentai": {
-    "body": "{\"id\": \"ex\", \"jsonrpc\": \"2.0\", \"result\": \"567a26d3\"}\n",
+    "body": "{\"id\": \"ex\", \"jsonrpc\": \"2.0\", \"result\": \"0000000a\"}\n",
     "body_bytes": [
       123,
       34,
@@ -149,14 +149,14 @@
       58,
       32,
       34,
-      53,
-      54,
-      55,
+      48,
+      48,
+      48,
+      48,
+      48,
+      48,
+      48,
       97,
-      50,
-      54,
-      100,
-      51,
       34,
       125,
       10
@@ -169,18 +169,18 @@
       "access-control-allow-origin": "*",
       "content-length": "52",
       "content-type": "application/json-rpc",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "json": {
       "id": "ex",
       "jsonrpc": "2.0",
-      "result": "567a26d3"
+      "result": "0000000a"
     },
     "status_line": "HTTP/1.0 200 OK"
   },
   "add_ok": {
-    "body": "{\"id\": \"addok\", \"jsonrpc\": \"2.0\", \"result\": \"e8b05832\"}\n",
+    "body": "{\"id\": \"addok\", \"jsonrpc\": \"2.0\", \"result\": \"00000009\"}\n",
     "body_bytes": [
       123,
       34,
@@ -227,14 +227,14 @@
       58,
       32,
       34,
-      101,
-      56,
-      98,
       48,
-      53,
-      56,
-      51,
-      50,
+      48,
+      48,
+      48,
+      48,
+      48,
+      48,
+      57,
       34,
       125,
       10
@@ -247,13 +247,13 @@
       "access-control-allow-origin": "*",
       "content-length": "55",
       "content-type": "application/json-rpc",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "json": {
       "id": "addok",
       "jsonrpc": "2.0",
-      "result": "e8b05832"
+      "result": "00000009"
     },
     "status_line": "HTTP/1.0 200 OK"
   },
@@ -349,7 +349,7 @@
       "access-control-allow-origin": "*",
       "content-length": "98",
       "content-type": "application/json-rpc",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "json": {
@@ -455,7 +455,7 @@
       "access-control-allow-origin": "*",
       "content-length": "84",
       "content-type": "application/json-rpc",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "json": {
@@ -560,7 +560,7 @@
       "access-control-allow-origin": "*",
       "content-length": "88",
       "content-type": "application/json-rpc",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "json": {
@@ -665,7 +665,7 @@
       "access-control-allow-origin": "*",
       "content-length": "174",
       "content-type": "application/json-rpc",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "json": {
@@ -683,7 +683,7 @@
     "status_line": "HTTP/1.0 200 OK"
   },
   "getConfig": {
-    "body": "{\"id\": \"cfg\", \"jsonrpc\": \"2.0\", \"result\": {\"daemon\": false, \"dir\": \"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-20261029-main-13b130ba/fixtures/all-1793224787546880933\", \"download_ori\": false, \"jpn_title\": true, \"rename_ori\": false, \"proxy\": [], \"proxy_image\": true, \"proxy_image_only\": false, \"make_archive\": false, \"download_range\": null, \"scan_thread_cnt\": 1, \"download_thread_cnt\": 5, \"download_timeout\": 10, \"ignored_errors\": [], \"log_path\": \"eh.log\", \"log_verbose\": 2, \"save_tasks\": false, \"delete_task_files\": false, \"low_speed_threshold\": 10, \"auto_update\": \"download\", \"update_beta_channel\": false}}\n",
+    "body": "{\"id\": \"cfg\", \"jsonrpc\": \"2.0\", \"result\": {\"daemon\": false, \"dir\": \"<fixture-root>\", \"download_ori\": false, \"jpn_title\": true, \"rename_ori\": false, \"proxy\": [], \"proxy_image\": true, \"proxy_image_only\": false, \"make_archive\": false, \"download_range\": null, \"scan_thread_cnt\": 1, \"download_thread_cnt\": 5, \"download_timeout\": 10, \"ignored_errors\": [], \"log_path\": \"eh.log\", \"log_verbose\": 2, \"save_tasks\": false, \"delete_task_files\": false, \"low_speed_threshold\": 10, \"auto_update\": \"download\", \"update_beta_channel\": false}}\n",
     "body_bytes": [
       123,
       34,
@@ -774,7 +774,7 @@
       "access-control-allow-origin": "*",
       "content-length": "610",
       "content-type": "application/json-rpc",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "json": {
@@ -784,7 +784,7 @@
         "auto_update": "download",
         "daemon": false,
         "delete_task_files": false,
-        "dir": "/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-20261029-main-13b130ba/fixtures/all-1793224787546880933",
+        "dir": "<fixture-root>",
         "download_ori": false,
         "download_range": null,
         "download_thread_cnt": 5,
@@ -898,7 +898,7 @@
       "access-control-allow-origin": "*",
       "content-length": "175",
       "content-type": "application/json-rpc",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "json": {
@@ -1007,7 +1007,7 @@
       "access-control-allow-origin": "*",
       "content-length": "130",
       "content-type": "application/json-rpc",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "json": {
@@ -1105,7 +1105,7 @@
       "access-control-allow-origin": "*",
       "content-length": "71",
       "content-type": "application/json-rpc",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "json": {
@@ -1127,7 +1127,7 @@
       "access-control-allow-origin": "*",
       "content-length": "88",
       "content-type": "application/json-rpc",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "status_line": "HTTP/1.0 200 OK"
@@ -1225,7 +1225,7 @@
       "access-control-allow-origin": "*",
       "content-length": "173",
       "content-type": "application/json-rpc",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "json": {
@@ -1306,7 +1306,7 @@
       "access-control-allow-origin": "*",
       "content-length": "46",
       "content-type": "application/json-rpc",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "json": {
@@ -1377,7 +1377,7 @@
       "access-control-allow-origin": "*",
       "content-length": "48",
       "content-type": "application/json-rpc",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "json": {
@@ -1401,7 +1401,7 @@
       "access-control-allow-origin": "*",
       "content-length": "0",
       "content-type": "application/json-rpc",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "status_line": "HTTP/1.0 400 Bad Request"
@@ -1499,7 +1499,7 @@
       "access-control-allow-origin": "*",
       "content-length": "82",
       "content-type": "application/json-rpc",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "json": {
@@ -1525,7 +1525,7 @@
       "access-control-allow-methods": "POST, GET, OPTIONS",
       "access-control-allow-origin": "*",
       "access-control-max-age": "1728000",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "status_line": "HTTP/1.0 200 OK"
@@ -1622,7 +1622,7 @@
       "access-control-allow-origin": "*",
       "content-length": "90",
       "content-type": "application/json-rpc",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "json": {
@@ -1727,7 +1727,7 @@
       "access-control-allow-origin": "*",
       "content-length": "91",
       "content-type": "application/json-rpc",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "json": {
@@ -1832,7 +1832,7 @@
       "access-control-allow-origin": "*",
       "content-length": "91",
       "content-type": "application/json-rpc",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "json": {
@@ -1906,7 +1906,7 @@
       "access-control-allow-origin": "*",
       "content-length": "48",
       "content-type": "application/json-rpc",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "json": {
@@ -1976,7 +1976,7 @@
       "access-control-allow-origin": "*",
       "content-length": "47",
       "content-type": "application/json-rpc",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "json": {
@@ -1996,7 +1996,7 @@
       "access-control-allow-origin": "*",
       "content-length": "88",
       "content-type": "text/html",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "status_line": "HTTP/1.0 200 OK"
@@ -2093,7 +2093,7 @@
       "access-control-allow-origin": "*",
       "content-length": "90",
       "content-type": "application/json-rpc",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "json": {
@@ -2116,13 +2116,13 @@
     "extra_newline": true,
     "headers": {
       "access-control-allow-origin": "*",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "status_line": "HTTP/1.0 404 Not Found"
   },
   "update_proxy_dir": {
-    "body": "{\"id\": \"updf\", \"jsonrpc\": \"2.0\", \"result\": {\"daemon\": false, \"dir\": \"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-20261029-main-13b130ba/fixtures/all-1793224787546880933\", \"download_ori\": false, \"jpn_title\": true, \"rename_ori\": false, \"proxy\": [], \"proxy_image\": true, \"proxy_image_only\": false, \"make_archive\": false, \"download_range\": null, \"scan_thread_cnt\": 1, \"download_thread_cnt\": 5, \"download_timeout\": 10, \"ignored_errors\": [], \"log_path\": \"eh.log\", \"log_verbose\": 2, \"save_tasks\": false, \"delete_task_files\": false, \"low_speed_threshold\": 10, \"auto_update\": \"download\", \"update_beta_channel\": false}}\n",
+    "body": "{\"id\": \"updf\", \"jsonrpc\": \"2.0\", \"result\": {\"daemon\": false, \"dir\": \"<fixture-root>\", \"download_ori\": false, \"jpn_title\": true, \"rename_ori\": false, \"proxy\": [], \"proxy_image\": true, \"proxy_image_only\": false, \"make_archive\": false, \"download_range\": null, \"scan_thread_cnt\": 1, \"download_thread_cnt\": 5, \"download_timeout\": 10, \"ignored_errors\": [], \"log_path\": \"eh.log\", \"log_verbose\": 2, \"save_tasks\": false, \"delete_task_files\": false, \"low_speed_threshold\": 10, \"auto_update\": \"download\", \"update_beta_channel\": false}}\n",
     "body_bytes": [
       123,
       34,
@@ -2213,7 +2213,7 @@
       "access-control-allow-origin": "*",
       "content-length": "611",
       "content-type": "application/json-rpc",
-      "date": "Wed, 28 Oct 2026 21:59:52 GMT",
+      "date": "<http-date>",
       "server": "xeHentai/2.023"
     },
     "json": {
@@ -2223,7 +2223,7 @@
         "auto_update": "download",
         "daemon": false,
         "delete_task_files": false,
-        "dir": "/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-20261029-main-13b130ba/fixtures/all-1793224787546880933",
+        "dir": "<fixture-root>",
         "download_ori": false,
         "download_range": null,
         "download_thread_cnt": 5,

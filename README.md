@@ -9,6 +9,20 @@
 
 许可证为 GPL-3.0-or-later。原版程序的版权与许可证文本见 `LICENSE`。
 
+## Python 依赖
+
+oracle 需要一个能导入 `requests` 和 `socks` 的解释器。不要把租约路径或虚拟环境路径写进源码。在租约临时目录中创建隔离环境，再把解释器路径传给 `XEH_PYTHON`：
+
+```text
+python3 -m venv "$XEH_LEASE_TMP/py/readme-venv"
+"$XEH_LEASE_TMP/py/readme-venv/bin/python" -m pip install "requests[socks]"
+export XEH_PYTHON="$XEH_LEASE_TMP/py/readme-venv/bin/python"
+export XEH_LEASE_TMP
+cargo run -p xeh-xtask -- oracle capture --suite isolation
+```
+
+`XEH_LEASE_TMP` 必须指向当前执行租约的临时目录。`pip` 只安装到该虚拟环境，不写用户级或系统级 site-packages。
+
 ## 命令
 
 ```text

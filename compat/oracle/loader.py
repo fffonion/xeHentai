@@ -10,10 +10,31 @@ import atexit
 import json
 import os
 import socket
+import subprocess
 import sys
+import uuid
+
+import process_log
 
 OPENS = []
 FORBIDDEN = [item for item in os.environ.get("XEH_FORBIDDEN_ROOTS", "").split(":") if item]
+PROCESS_ID = os.environ.get("XEH_PROCESS_ID", "root")
+PARENT_ID = os.environ.get("XEH_PARENT_ID")
+_GUID_SEQ = {"n": 0}
+
+
+def install_deterministic_ids():
+    """Replace uuid4 with a per-process counter before upstream import.
+
+    Task ids stay concrete golden values. They are not stripped as volatile
+    fields; a change in call count or order changes the id and must fail compare.
+    """
+
+    def uuid4():
+        _GUID_SEQ["n"] += 1
+        return uuid.UUID(int=_GUID_SEQ["n"] << 96)
+
+    uuid.uuid4 = uuid4
 
 
 def _record_open(path):
@@ -58,16 +79,27 @@ def _under_forbidden(path):
 
 
 def write_audit():
-    out = os.environ.get("XEH_OUT")
-    if not out:
+    path = process_log.audit_path()
+    if not path or os.environ.get("XEH_SUPPRESS_AUDIT") == "1":
+        return
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    if os.environ.get("XEH_MALFORM_AUDIT") == "1":
+        with open(path, "w") as handle:
+            handle.write("not-json")
         return
     payload = {
+        "process_id": PROCESS_ID,
+        "parent_id": PARENT_ID,
+        "pid": os.getpid(),
         "opens": OPENS,
         "home": os.environ.get("HOME"),
         "cwd": os.getcwd(),
         "filepath": getattr(sys.modules.get("xeHentai.const"), "FILEPATH", None),
+        "env": process_log.observed_env(),
     }
-    with open(os.path.join(out, "audit.json"), "w") as handle:
+    with open(path, "w") as handle:
         json.dump(payload, handle)
 
 
@@ -75,22 +107,65 @@ def install_guards():
     sys.addaudithook(_audit_hook)
     _install_socket_guard()
     atexit.register(write_audit)
-    if os.environ.get("XEH_ISOLATION_BREAK") == "1" and FORBIDDEN:
-        sentinel = os.path.join(FORBIDDEN[0], "SECRET_SENTINEL")
-        handle = open(sentinel, "rb")
-        handle.close()
 
 
 def isolation_failed():
     fixture = os.environ.get("XEH_FIXTURE_ROOT", "")
     const = sys.modules.get("xeHentai.const")
     filepath = getattr(const, "FILEPATH", "")
-    if fixture and not (filepath == fixture or str(filepath).startswith(fixture + os.sep)):
+    if fixture and filepath and not (filepath == fixture or str(filepath).startswith(fixture + os.sep)):
         return "FILEPATH escaped the fixture: %s" % filepath
     for path in OPENS:
         if _under_forbidden(path):
             return path
     return None
+
+
+def decoy_open():
+    install_guards()
+    for root in FORBIDDEN:
+        sentinel = os.path.join(root, "SECRET_SENTINEL")
+        try:
+            handle = open(sentinel, "rb")
+            handle.close()
+        except OSError:
+            pass
+    write_audit()
+    raise SystemExit(3)
+
+
+def spawn_decoy():
+    if os.environ.get("XEH_DECOY_CHILD") != "1" or PROCESS_ID != "root":
+        return
+    out = os.environ["XEH_OUT"]
+    child_out = os.path.join(out, "processes", "decoy-child")
+    os.makedirs(child_out, exist_ok=True)
+    audit = os.path.join(child_out, "audit.json")
+    env = process_log.child_env("decoy-child", audit, child_out)
+    if os.environ.get("XEH_SUPPRESS_CHILD_AUDIT") == "1":
+        env["XEH_SUPPRESS_AUDIT"] = "1"
+    env.pop("XEH_DECOY_CHILD", None)
+    proc = subprocess.Popen(
+        [sys.executable, os.path.abspath(__file__), "--mode", "decoy-open"],
+        cwd=os.environ.get("XEH_FIXTURE_ROOT", os.getcwd()),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    stdout, stderr = proc.communicate()
+    process_log.write_required(os.path.join(child_out, "stdout.txt"), stdout)
+    process_log.write_required(os.path.join(child_out, "stderr.txt"), stderr)
+    process_log.add_child(
+        {
+            "id": "decoy-child",
+            "parent": PROCESS_ID,
+            "audit": audit,
+            "stdout": os.path.join(child_out, "stdout.txt"),
+            "stderr": os.path.join(child_out, "stderr.txt"),
+            "exit": proc.returncode,
+        }
+    )
 
 
 def main(argv):
@@ -115,7 +190,25 @@ def main(argv):
         index += 1
     if mode is None:
         raise SystemExit("loader requires --mode")
+    if mode == "decoy-open":
+        decoy_open()
     install_guards()
+    if os.environ.get("XEH_ISOLATION_BREAK") == "1" and FORBIDDEN:
+        sentinel = os.path.join(FORBIDDEN[0], "SECRET_SENTINEL")
+        try:
+            handle = open(sentinel, "rb")
+            handle.close()
+        except OSError:
+            pass
+    if PROCESS_ID == "root":
+        process_log.ensure_expected()
+        spawn_decoy()
+    install_deterministic_ids()
+    upstream = os.environ["XEH_UPSTREAM"]
+    sys.path.insert(0, upstream)
+    import xeHentai.const as const
+
+    const.FILEPATH = os.environ.get("XEH_FIXTURE_ROOT", os.getcwd())
     if mode == "suite" and suite == "isolation":
         import xeHentai.core  # noqa: F401
         reason = isolation_failed()
@@ -125,17 +218,12 @@ def main(argv):
             raise SystemExit(3)
         sys.stdout.write("isolation-ok\n")
         raise SystemExit(0)
-    if mode == "suite":
-        import harness
-        harness.run_suite(suite)
-        reason = isolation_failed()
-        write_audit()
-        if reason:
-            sys.stderr.write("isolation breach: %s\n" % reason)
-            raise SystemExit(3)
-        return
     import harness
-    harness.run_mode(mode, rest)
+
+    if mode == "suite":
+        harness.run_suite(suite)
+    else:
+        harness.run_mode(mode, rest)
     reason = isolation_failed()
     write_audit()
     if reason:
@@ -144,4 +232,10 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    try:
+        main(sys.argv[1:])
+    except SystemExit:
+        raise
+    except Exception:
+        write_audit()
+        raise

@@ -17,11 +17,20 @@ import traceback
 import zipfile
 
 import contract
+import process_log
+import re
 
 UPSTREAM = "fffonion/xeHentai@43fc55c0c662f195d048becf6276a26ce06b09d9"
 TOKEN = "oracle-token"
 AUTH = "token:" + TOKEN
 SYNTHETIC_URL = "https://e-hentai.org/g/1/aaaaaaaaaa/"
+CHILD_SEQ = {"n": 0}
+BOUND_PORTS = []
+HTTP_DATE = re.compile(
+    r"^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), [0-9]{2} "
+    r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) "
+    r"[0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT$"
+)
 
 
 def fixture_root():
@@ -51,7 +60,7 @@ def assign_names(path):
     return names
 
 
-def cli_options(path):
+def cli_option_spellings(path):
     tree = ast.parse(open(path, "rb").read())
     found = []
     for node in ast.walk(tree):
@@ -60,12 +69,32 @@ def cli_options(path):
         func = node.func
         if not isinstance(func, ast.Attribute) or func.attr != "add_argument":
             continue
-        if not node.args:
-            continue
-        first = node.args[0]
-        if isinstance(first, ast.Constant) and isinstance(first.value, str):
-            found.append(first.value)
+        for arg in node.args:
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str) and arg.value.startswith("-"):
+                found.append(arg.value)
     return found
+
+
+def mark_executed(cases, option, observed):
+    feature_id = "cli.option.%s" % option
+    if feature_id not in cases:
+        return
+    payload = dict(observed)
+    payload["ast_declared"] = True
+    payload["executed"] = True
+    cases[feature_id] = feature(
+        feature_id,
+        "xeHentai/cli.py",
+        {"option": option},
+        payload,
+        "pending",
+        ["cargo run -p xeh-xtask -- oracle capture --suite all"],
+        "oracle_characterized",
+    )
+
+
+def note_port(port):
+    BOUND_PORTS.append(int(port))
 
 
 def feature(feature_id, source, payload, observed, target, tests, status):
@@ -194,12 +223,14 @@ def start_rpc(xe):
         time.sleep(0.05)
     if server.server is None:
         raise RuntimeError("RPC server did not bind")
+    note_port(server.server.server_address[1])
     return server, stop, server.server.server_address[1]
 
 
 def local_server(handler):
     from http.server import HTTPServer
     httpd = HTTPServer(("127.0.0.1", 0), handler)
+    note_port(httpd.server_address[1])
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     return httpd, httpd.server_address[1]
@@ -261,16 +292,16 @@ def catalog_cases(cases, golden):
     golden["states"] = states
     golden["errors"] = errors
 
-    options = cli_options(source_file("xeHentai", "cli.py"))
+    options = cli_option_spellings(source_file("xeHentai", "cli.py"))
     for option in options:
         cases["cli.option.%s" % option] = feature(
             "cli.option.%s" % option,
             "xeHentai/cli.py",
             {"option": option},
-            {"present": True},
+            {"ast_declared": True, "executed": False},
             "pending",
             ["cargo run -p xeh-xtask -- oracle capture --suite all"],
-            "oracle_characterized",
+            "unverified",
         )
     cases["cli.positional.url"] = feature(
         "cli.positional.url",
@@ -336,18 +367,40 @@ def catalog_cases(cases, golden):
 
 
 def child(mode, argv=None, stdin=None, env=None):
+    CHILD_SEQ["n"] += 1
+    process_id = "child-%d-%s" % (CHILD_SEQ["n"], mode)
+    child_out = os.path.join(out_dir(), "processes", process_id)
+    os.makedirs(child_out, exist_ok=True)
+    audit = os.path.join(child_out, "audit.json")
     command = [sys.executable, os.path.join(fixture_root(), "loader.py"), "--mode", mode, "--"]
     if argv:
         command.extend(argv)
+    merged = process_log.child_env(process_id, audit, child_out)
+    if env:
+        for key in process_log.RECEIPT_KEYS + process_log.RUNTIME_KEYS:
+            if key in env:
+                merged[key] = env[key]
     proc = subprocess.Popen(
         command,
         cwd=fixture_root(),
-        env=env or os.environ.copy(),
+        env=merged,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
     out, err = proc.communicate(stdin)
+    stdout_path = os.path.join(child_out, "stdout.txt")
+    stderr_path = os.path.join(child_out, "stderr.txt")
+    process_log.write_required(stdout_path, out)
+    process_log.write_required(stderr_path, err)
+    process_log.add_child({
+        "id": process_id,
+        "parent": os.environ.get("XEH_PROCESS_ID", "root"),
+        "audit": audit,
+        "stdout": stdout_path,
+        "stderr": stderr_path,
+        "exit": proc.returncode,
+    })
     return proc.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
 
 
@@ -410,8 +463,13 @@ def config_and_cli(cases, golden):
         ["cargo run -p xeh-xtask -- oracle capture --suite all"],
         "oracle_characterized" if code == 0 else "oracle_failed",
     )
-    code, out, err = child("cli-parse", ["--download-range", "5-10，15"])
-    golden["cli_range"] = {"exit": code, "stdout": out, "stderr": err}
+    if code == 0:
+        mark_executed(cases, "--jpn-title", {"argv": ["--jpn-title", "False"], "exit": code})
+        mark_executed(cases, "--rename-ori", {"argv": ["--rename-ori", "0"], "exit": code})
+    range_code, range_out, range_err = child("cli-parse", ["--download-range", "5-10，15"])
+    golden["cli_range"] = {"exit": range_code, "stdout": range_out, "stderr": range_err}
+    if range_code == 0:
+        mark_executed(cases, "--download-range", {"argv": ["--download-range", "5-10，15"], "exit": range_code})
     cases["delta.download-range-default"] = feature(
         "delta.download-range-default", "xeHentai/cli.py:183",
         {"user_config_download_range": [[9, 9]], "argv": []},
@@ -424,8 +482,30 @@ def config_and_cli(cases, golden):
     golden["cli_range_bad"] = {"exit": code, "stdout": out, "stderr": err}
     code, out, err = child("cli-help")
     golden["cli_help"] = {"exit": code, "stdout": out, "stderr": err}
+    mark_executed(cases, "--help", {"argv": ["--help"], "exit": code})
     code, out, err = child("cli-version")
     golden["cli_version"] = {"exit": code, "stdout": out, "stderr": err}
+    mark_executed(cases, "--version", {"argv": ["--version"], "exit": code})
+    short_code, short_out, _short_err = child("cli-parse", ["-u", "synthetic-user"])
+    long_code, long_out, _long_err = child("cli-parse", ["--username", "synthetic-user"])
+
+    def parsed_user(text):
+        line = text.strip().splitlines()[-1] if text.strip() else "{}"
+        try:
+            return json.loads(line).get("username")
+        except ValueError:
+            return None
+
+    mark_executed(cases, "-u", {
+        "argv": ["-u", "synthetic-user"],
+        "exit": short_code,
+        "parsed_username": parsed_user(short_out),
+    })
+    mark_executed(cases, "--username", {
+        "argv": ["--username", "synthetic-user"],
+        "exit": long_code,
+        "parsed_username": parsed_user(long_out),
+    })
     cases["behavior.sec4.cli-options"] = feature(
         "behavior.sec4.cli-options", "xeHentai/cli.py",
         {"commands": ["--help", "--version"]},
@@ -736,12 +816,27 @@ def filters_and_proxy(cases, golden):
         golden["http_proxy"] = {"status": response.status_code, "body": response.text, "seen": seen["requests"]}
     finally:
         httpd.shutdown()
-    cases["behavior.sec4.proxy-schemes"] = feature(
-        "behavior.sec4.proxy-schemes", "xeHentai/proxy.py:114",
+    http_status = "oracle_characterized" if golden.get("http_proxy", {}).get("status") == 200 else "oracle_failed"
+    cases["behavior.sec4.proxy-schemes.http"] = feature(
+        "behavior.sec4.proxy-schemes.http", "xeHentai/proxy.py:114",
         {"proxy": "local synthetic HTTP proxy"},
         golden.get("http_proxy"), "pending",
         ["cargo run -p xeh-xtask -- oracle capture --suite all"],
-        "oracle_characterized" if golden.get("http_proxy", {}).get("status") == 200 else "oracle_failed",
+        http_status,
+    )
+    cases["behavior.sec4.proxy-schemes.https"] = feature(
+        "behavior.sec4.proxy-schemes.https", "xeHentai/proxy.py:114",
+        {"scheme": "https"},
+        {"executed": False}, "pending",
+        ["cargo run -p xeh-xtask -- oracle capture --suite all"],
+        "unverified",
+    )
+    cases["behavior.sec4.proxy-schemes.socks"] = feature(
+        "behavior.sec4.proxy-schemes.socks", "xeHentai/proxy.py:114",
+        {"scheme": "socks"},
+        {"executed": False}, "pending",
+        ["cargo run -p xeh-xtask -- oracle capture --suite all"],
+        "unverified",
     )
 
 
@@ -951,11 +1046,6 @@ def rpc_cases(cases, golden, logs):
         {"malformed": "{"}, golden["rpc"]["malformed"], "pending",
         ["cargo run -p xeh-xtask -- oracle capture --suite all"], "oracle_characterized",
     )
-    cases["behavior.sec4.rpc-methods"] = feature(
-        "behavior.sec4.rpc-methods", "xeHentai/rpc.py",
-        {"count": 13}, {"methods_executed": 13}, "pending",
-        ["cargo run -p xeh-xtask -- oracle capture --suite all"], "oracle_characterized",
-    )
     cases["behavior.sec4.gallery-routes"] = feature(
         "behavior.sec4.gallery-routes", "xeHentai/rpc.py",
         {"routes": ["/img", "/zip", "/ui/"]},
@@ -1042,10 +1132,91 @@ def deltas_markdown(cases):
     return "\n".join(lines) + "\n"
 
 
+def apply_derived_counts(cases):
+    methods = [cases[key] for key in sorted(cases) if key.startswith("rpc.method.")]
+    characterized = sum(1 for item in methods if item["status"] == "oracle_characterized")
+    failed = sum(1 for item in methods if item["status"] == "oracle_failed")
+    unverified = sum(1 for item in methods if item["status"] == "unverified")
+    if methods and characterized == len(methods):
+        rpc_status = "oracle_characterized"
+    elif characterized == 0 and failed == 0:
+        rpc_status = "unverified"
+    else:
+        rpc_status = "partial"
+    cases["behavior.sec4.rpc-methods"] = feature(
+        "behavior.sec4.rpc-methods",
+        "xeHentai/rpc.py",
+        {"methods_total": len(methods)},
+        {
+            "methods_total": len(methods),
+            "methods_characterized": characterized,
+            "methods_failed": failed,
+            "methods_unverified": unverified,
+        },
+        "pending",
+        ["cargo run -p xeh-xtask -- oracle capture --suite all"],
+        rpc_status,
+    )
+    schemes = {}
+    for scheme in ("http", "https", "socks"):
+        key = "behavior.sec4.proxy-schemes.%s" % scheme
+        if key not in cases:
+            cases[key] = feature(
+                key,
+                "xeHentai/proxy.py:114",
+                {"scheme": scheme},
+                {"executed": False},
+                "pending",
+                ["cargo run -p xeh-xtask -- oracle capture --suite all"],
+                "unverified",
+            )
+        schemes[scheme] = cases[key]["status"]
+    if all(item == "oracle_characterized" for item in schemes.values()):
+        proxy_status = "oracle_characterized"
+    elif all(item == "unverified" for item in schemes.values()):
+        proxy_status = "unverified"
+    else:
+        proxy_status = "partial"
+    cases["behavior.sec4.proxy-schemes"] = feature(
+        "behavior.sec4.proxy-schemes",
+        "xeHentai/proxy.py:114",
+        {"schemes": ["http", "https", "socks"]},
+        schemes,
+        "pending",
+        ["cargo run -p xeh-xtask -- oracle capture --suite all"],
+        proxy_status,
+    )
+
+
+def normalize_text(text, root):
+    text = text.replace(root, "<fixture-root>")
+    for port in BOUND_PORTS:
+        text = text.replace("127.0.0.1:%d" % port, "127.0.0.1:<ephemeral-port>")
+        text = text.replace("[::1]:%d" % port, "[::1]:<ephemeral-port>")
+    return text
+
+
+def normalize(value, root):
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            if key == "date" and isinstance(item, str) and HTTP_DATE.match(item):
+                out[key] = "<http-date>"
+            else:
+                out[key] = normalize(item, root)
+        return out
+    if isinstance(value, list):
+        return [normalize(item, root) for item in value]
+    if isinstance(value, str):
+        return normalize_text(value, root)
+    return value
+
+
 def build_result(cases, golden):
     templates = {item["id"]: item for item in contract.behavior_templates()}
     for feature_id, item in templates.items():
         cases.setdefault(feature_id, item)
+    apply_derived_counts(cases)
     features = [cases[key] for key in sorted(cases)]
     for item in features:
         if item["status"] in ("implemented", "accepted", "passing"):
@@ -1096,9 +1267,20 @@ def run_suite(suite):
             glype_case(cases, golden)
         if suite in ("all", "rpc"):
             rpc_cases(cases, golden, logs)
-        result = build_result(cases, golden)
+        raw = build_result(cases, golden)
+        raw["volatile_fields"] = {
+            "fields": [
+                {"name": "fixture-root", "basis": "per-capture fixture directory prefix"},
+                {"name": "headers.date", "basis": "HTTP Date header clock value"},
+                {"name": "bound-port", "basis": "OS-assigned local listening port recorded for this capture"},
+            ],
+            "bound_ports": list(BOUND_PORTS),
+        }
         with open(os.path.join(out_dir(), "result.json"), "w") as handle:
-            json.dump(result, handle)
+            json.dump(raw, handle, sort_keys=True)
+        normalized = build_result(normalize(cases, fixture_root()), normalize(golden, fixture_root()))
+        with open(os.path.join(out_dir(), "normalized-result.json"), "w") as handle:
+            json.dump(normalized, handle, sort_keys=True)
     finally:
         sys.stdout = original
 
@@ -1118,6 +1300,7 @@ def run_mode(mode, argv):
             "rename_ori": opt.rename_ori,
             "download_range": opt.download_range,
             "daemon": opt.daemon,
+            "username": opt.username,
         }) + "\n")
         return
     if mode == "cli-help":

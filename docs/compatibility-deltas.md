@@ -55,7 +55,7 @@
 - 来源：`xeHentai/cli.py`
 - 状态：oracle_characterized
 - 输入：`{"argv": ["--jpn-title", "False", "--rename-ori", "0"], "user_config": {"jpn_title": false}}`
-- 实测输出：`{"exit": 0, "stdout": "{\"exit\": 0, \"jpn_title\": true, \"rename_ori\": true, \"download_range\": null, \"daemon\": true}"}`
+- 实测输出：`{"exit": 0, "stdout": "{\"exit\": 0, \"jpn_title\": true, \"rename_ori\": true, \"download_range\": null, \"daemon\": true, \"username\": null}"}`
 - 原始记录：`compat/golden/` 中对应文件。
 - 拟定合同：待批准。应用侧不把该输出当作已实现行为。
 
@@ -64,7 +64,7 @@
 - 来源：`xeHentai/cli.py:183`
 - 状态：oracle_characterized
 - 输入：`{"user_config_download_range": [[9, 9]], "argv": []}`
-- 实测输出：`{"exit": 0, "stdout": "{\"exit\": 0, \"jpn_title\": false, \"rename_ori\": false, \"download_range\": null, \"daemon\": true}"}`
+- 实测输出：`{"exit": 0, "stdout": "{\"exit\": 0, \"jpn_title\": false, \"rename_ori\": false, \"download_range\": null, \"daemon\": true, \"username\": null}"}`
 - 原始记录：`compat/golden/` 中对应文件。
 - 拟定合同：待批准。应用侧不把该输出当作已实现行为。
 

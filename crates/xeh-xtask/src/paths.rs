@@ -10,24 +10,30 @@ pub fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-pub fn lease_tmp() -> PathBuf {
-    if let Some(value) = std::env::var_os("XEH_LEASE_TMP") {
-        return PathBuf::from(value);
+pub fn lease_tmp() -> Result<PathBuf, String> {
+    match std::env::var_os("XEH_LEASE_TMP") {
+        Some(value) if !value.is_empty() => Ok(PathBuf::from(value)),
+        _ => Err(
+            "XEH_LEASE_TMP is required; set it to the execution lease temporary directory"
+                .to_string(),
+        ),
     }
-    PathBuf::from("/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-20261029-main-13b130ba")
 }
 
-pub fn evidence_dir() -> PathBuf {
-    lease_tmp().join("evidence")
+pub fn evidence_dir() -> Result<PathBuf, String> {
+    if let Some(value) = std::env::var_os("XEH_EVIDENCE_DIR") {
+        if !value.is_empty() {
+            return Ok(PathBuf::from(value));
+        }
+    }
+    Ok(lease_tmp()?.join("evidence-address-r1"))
 }
 
 pub fn python_executable() -> PathBuf {
     if let Some(value) = std::env::var_os("XEH_PYTHON") {
-        return PathBuf::from(value);
-    }
-    let venv = lease_tmp().join("py/venv/bin/python");
-    if venv.is_file() {
-        return venv;
+        if !value.is_empty() {
+            return PathBuf::from(value);
+        }
     }
     PathBuf::from("python3")
 }
@@ -40,10 +46,6 @@ pub fn upstream_checkout(root: &Path) -> PathBuf {
     root.join("compat/upstream/xeHentai")
 }
 
-pub fn extracted_app_tree() -> PathBuf {
-    lease_tmp().join("upstream/src/fffonion-xeHentai-43fc55c")
-}
-
-pub fn extracted_webui_tree() -> PathBuf {
-    lease_tmp().join("upstream/src/fffonion-xeHentai-webui-4e3738e")
+pub fn authoritative_git(name: &str) -> Result<PathBuf, String> {
+    Ok(lease_tmp()?.join("upstream").join(format!("{name}.git")))
 }
