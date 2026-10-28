@@ -105,6 +105,8 @@ pub fn capture(suite: &str) -> Result<(), String> {
         "XEH_MALFORM_AUDIT",
         "XEH_DECOY_CHILD",
         "XEH_SUPPRESS_CHILD_AUDIT",
+        "XEH_AUDIT_SHAPE",
+        "XEH_CHILD_LIST_SHAPE",
     ] {
         if let Some(value) = std::env::var_os(key) {
             cmd.env(key, value);
@@ -136,39 +138,36 @@ pub fn capture(suite: &str) -> Result<(), String> {
     write_bytes(&out_dir.join("stderr.txt"), &stderr, "oracle stderr")?;
 
     let root_audit = load_audit(&audit_path)?;
+    validate_root_identity(&root_audit)?;
     let processes = load_children(&out_dir)?;
     let mut audits = vec![("root".to_string(), root_audit.clone())];
     for process in &processes {
         let audit = load_child_audit(process)?;
-        if let Some(exit) = process.get("exit").and_then(Value::as_i64) {
-            if let Some(path) = forbidden_hit(&audit, &forbidden) {
-                return Err(format!(
-                    "oracle isolation failed: forbidden path was opened: {path}"
-                ));
-            }
-            if exit == 3 {
-                return Err(format!(
-                    "subprocess isolation failed: {} exit={exit}",
-                    process.get("id").and_then(Value::as_str).unwrap_or("child")
-                ));
-            }
+        child_identity_matches(process, &audit)?;
+        let id = process
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "child list schema is invalid: id is not a string".to_string())?;
+        let exit = process
+            .get("exit")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| "child list schema is invalid: exit is not an integer".to_string())?;
+        if let Some(path) = forbidden_hit(&audit, &forbidden)? {
+            return Err(format!(
+                "oracle isolation failed: forbidden path was opened: {path}"
+            ));
         }
-        audits.push((
-            process
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or("child")
-                .to_string(),
-            audit,
-        ));
+        if exit == 3 {
+            return Err(format!("subprocess isolation failed: {id} exit={exit}"));
+        }
+        audits.push((id.to_string(), audit));
     }
-    if let Some(path) = audits
-        .iter()
-        .find_map(|(_, audit)| forbidden_hit(audit, &forbidden))
-    {
-        return Err(format!(
-            "oracle isolation failed: forbidden path was opened: {path}"
-        ));
+    for (_, audit) in &audits {
+        if let Some(path) = forbidden_hit(audit, &forbidden)? {
+            return Err(format!(
+                "oracle isolation failed: forbidden path was opened: {path}"
+            ));
+        }
     }
     if std::env::var_os("XEH_ISOLATION_BREAK").is_some() && code == 0 {
         return Err("oracle isolation break was not detected".to_string());
@@ -525,7 +524,148 @@ fn write_bytes(path: &Path, bytes: &[u8], label: &str) -> Result<(), String> {
 fn load_audit(path: &Path) -> Result<Value, String> {
     let text =
         fs::read_to_string(path).map_err(|_| format!("audit is missing: {}", path.display()))?;
-    serde_json::from_str(&text).map_err(|_| format!("audit is malformed: {}", path.display()))
+    let value: Value = serde_json::from_str(&text)
+        .map_err(|_| format!("audit is malformed: {}", path.display()))?;
+    validate_audit_value(&value, path)?;
+    Ok(value)
+}
+
+const AUDIT_FIELDS: &[&str] = &[
+    "process_id",
+    "parent_id",
+    "pid",
+    "opens",
+    "home",
+    "cwd",
+    "filepath",
+    "env",
+];
+
+const CHILD_FIELDS: &[&str] = &["id", "parent", "audit", "stdout", "stderr", "exit"];
+
+fn validate_audit_value(value: &Value, path: &Path) -> Result<(), String> {
+    let obj = value.as_object().ok_or_else(|| {
+        format!(
+            "audit schema is invalid: {} is not an object",
+            path.display()
+        )
+    })?;
+    for key in obj.keys() {
+        if !AUDIT_FIELDS.contains(&key.as_str()) {
+            return Err(format!(
+                "audit schema is invalid: {} has unknown field {key}",
+                path.display()
+            ));
+        }
+    }
+    for key in AUDIT_FIELDS {
+        if !obj.contains_key(*key) {
+            return Err(format!(
+                "audit schema is invalid: {} missing {key}",
+                path.display()
+            ));
+        }
+    }
+    match obj["process_id"].as_str() {
+        Some(id) if !id.is_empty() => {}
+        _ => {
+            return Err(format!(
+                "audit schema is invalid: {} process_id is not a string",
+                path.display()
+            ));
+        }
+    }
+    if !nullable_string(&obj["parent_id"]) {
+        return Err(format!(
+            "audit schema is invalid: {} parent_id is not a string or null",
+            path.display()
+        ));
+    }
+    if obj["pid"].as_u64().is_none() {
+        return Err(format!(
+            "audit schema is invalid: {} pid is not an integer",
+            path.display()
+        ));
+    }
+    validate_opens(&obj["opens"], path)?;
+    if !nullable_string(&obj["home"]) {
+        return Err(format!(
+            "audit schema is invalid: {} home is not a string or null",
+            path.display()
+        ));
+    }
+    if obj["cwd"].as_str().is_none() {
+        return Err(format!(
+            "audit schema is invalid: {} cwd is not a string",
+            path.display()
+        ));
+    }
+    if !nullable_string(&obj["filepath"]) {
+        return Err(format!(
+            "audit schema is invalid: {} filepath is not a string or null",
+            path.display()
+        ));
+    }
+    validate_env(&obj["env"], path)
+}
+
+fn nullable_string(value: &Value) -> bool {
+    value.is_null() || value.is_string()
+}
+
+fn validate_opens(opens: &Value, path: &Path) -> Result<(), String> {
+    let items = opens.as_array().ok_or_else(|| {
+        format!(
+            "audit schema is invalid: {} opens is not an array",
+            path.display()
+        )
+    })?;
+    let bad: Vec<String> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| !item.is_string())
+        .map(|(index, _)| index.to_string())
+        .collect();
+    if !bad.is_empty() {
+        return Err(format!(
+            "audit schema is invalid: {} opens has non-string entries at {}",
+            path.display(),
+            bad.join(",")
+        ));
+    }
+    Ok(())
+}
+
+fn validate_env(env: &Value, path: &Path) -> Result<(), String> {
+    let obj = env.as_object().ok_or_else(|| {
+        format!(
+            "audit schema is invalid: {} env is not an object",
+            path.display()
+        )
+    })?;
+    for (key, value) in obj {
+        if !value.is_string() {
+            return Err(format!(
+                "audit schema is invalid: {} env.{key} is not a string",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_root_identity(audit: &Value) -> Result<(), String> {
+    let id = audit
+        .get("process_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let parent_null = audit.get("parent_id").is_some_and(Value::is_null);
+    if id != "root" || !parent_null {
+        return Err(
+            "audit schema is invalid: root identity does not match this capture".to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn load_children(out_dir: &Path) -> Result<Vec<Value>, String> {
@@ -534,11 +674,126 @@ fn load_children(out_dir: &Path) -> Result<Vec<Value>, String> {
         .map_err(|_| format!("child audit is missing: {}", path.display()))?;
     let value: Value = serde_json::from_str(&text)
         .map_err(|_| format!("audit is malformed: {}", path.display()))?;
-    Ok(value
+    let obj = value.as_object().ok_or_else(|| {
+        format!(
+            "child list schema is invalid: {} is not an object",
+            path.display()
+        )
+    })?;
+    if obj.len() != 1 || !obj.contains_key("processes") {
+        return Err(format!(
+            "child list schema is invalid: {} must contain only processes",
+            path.display()
+        ));
+    }
+    let processes = obj
         .get("processes")
         .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default())
+        .ok_or_else(|| {
+            format!(
+                "child list schema is invalid: {} processes is not an array",
+                path.display()
+            )
+        })?;
+    for (index, item) in processes.iter().enumerate() {
+        validate_child_record(out_dir, index, item)?;
+    }
+    Ok(processes.clone())
+}
+
+fn validate_child_record(out_dir: &Path, index: usize, item: &Value) -> Result<(), String> {
+    let obj = item.as_object().ok_or_else(|| {
+        format!("child list schema is invalid: processes[{index}] is not an object")
+    })?;
+    for key in obj.keys() {
+        if !CHILD_FIELDS.contains(&key.as_str()) {
+            return Err(format!(
+                "child list schema is invalid: processes[{index}] has unknown field {key}"
+            ));
+        }
+    }
+    for key in CHILD_FIELDS {
+        if !obj.contains_key(*key) {
+            return Err(format!(
+                "child list schema is invalid: processes[{index}] missing {key}"
+            ));
+        }
+    }
+    for key in ["id", "parent", "audit", "stdout", "stderr"] {
+        match obj[key].as_str() {
+            Some(value) if !value.is_empty() => {}
+            _ => {
+                return Err(format!(
+                    "child list schema is invalid: processes[{index}] {key} is not a string"
+                ));
+            }
+        }
+    }
+    if obj["exit"].as_i64().is_none() {
+        return Err(format!(
+            "child list schema is invalid: processes[{index}] exit is not an integer"
+        ));
+    }
+    path_inside_output(out_dir, obj["audit"].as_str().unwrap_or(""), "audit path")?;
+    path_inside_output(out_dir, obj["stdout"].as_str().unwrap_or(""), "stdout path")?;
+    path_inside_output(out_dir, obj["stderr"].as_str().unwrap_or(""), "stderr path")?;
+    Ok(())
+}
+
+fn child_identity_matches(record: &Value, audit: &Value) -> Result<(), String> {
+    let id = record.get("id").and_then(Value::as_str).unwrap_or("");
+    let parent = record.get("parent").and_then(Value::as_str).unwrap_or("");
+    let audit_id = audit
+        .get("process_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let audit_parent = audit.get("parent_id").and_then(Value::as_str);
+    if audit_id != id || audit_parent != Some(parent) {
+        return Err(format!(
+            "child identity does not match audit: record id={id} parent={parent} audit process_id={audit_id}"
+        ));
+    }
+    Ok(())
+}
+
+fn path_inside_output(out_dir: &Path, raw: &str, label: &str) -> Result<(), String> {
+    let path = Path::new(raw);
+    if !path.is_absolute() {
+        return Err(format!("{label} is outside this capture output: {raw}"));
+    }
+    let lexical = lexical_absolute(path);
+    let out_lexical = lexical_absolute(out_dir);
+    let out_real = out_dir
+        .canonicalize()
+        .unwrap_or_else(|_| out_lexical.clone());
+    if !lexical.starts_with(&out_lexical) && !lexical.starts_with(&out_real) {
+        return Err(format!("{label} is outside this capture output: {raw}"));
+    }
+    if path.exists() {
+        let resolved = path
+            .canonicalize()
+            .map_err(|err| format!("cannot resolve {label}: {err}"))?;
+        if !resolved.starts_with(&out_real) && !resolved.starts_with(&out_lexical) {
+            return Err(format!("{label} is outside this capture output: {raw}"));
+        }
+    }
+    Ok(())
+}
+
+fn lexical_absolute(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            std::path::Component::RootDir => out.push("/"),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::Normal(part) => out.push(part),
+        }
+    }
+    out
 }
 
 fn load_child_audit(process: &Value) -> Result<Value, String> {
@@ -547,7 +802,7 @@ fn load_child_audit(process: &Value) -> Result<Value, String> {
         .and_then(Value::as_str)
         .ok_or_else(|| "child audit is missing: expected entry has no audit path".to_string())?;
     load_audit(Path::new(path)).map_err(|err| {
-        if err.contains("malformed") {
+        if err.contains("malformed") || err.contains("schema") {
             err
         } else {
             format!("child audit is missing: {path}")
@@ -762,20 +1017,25 @@ fn forbidden_roots(fixture: &Path) -> Vec<String> {
     roots
 }
 
-fn forbidden_hit(audit: &Value, forbidden: &[String]) -> Option<String> {
-    let opens = audit.get("opens").and_then(Value::as_array)?;
-    for item in opens {
-        let path = item.as_str()?;
+fn forbidden_hit(audit: &Value, forbidden: &[String]) -> Result<Option<String>, String> {
+    let opens = audit
+        .get("opens")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "audit schema is invalid: opens is not an array".to_string())?;
+    for (index, item) in opens.iter().enumerate() {
+        let path = item.as_str().ok_or_else(|| {
+            format!("audit schema is invalid: opens has non-string entries at {index}")
+        })?;
         for root in forbidden {
             if root.is_empty() {
                 continue;
             }
             if path == root || path.starts_with(&format!("{root}/")) {
-                return Some(path.to_string());
+                return Ok(Some(path.to_string()));
             }
         }
     }
-    None
+    Ok(None)
 }
 
 fn compare_dir(left: &Path, right: &Path, diffs: &mut Vec<String>) -> Result<(), String> {

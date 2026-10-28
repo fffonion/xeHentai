@@ -731,3 +731,300 @@ fn capture_splits_aliases_coverage_and_normalizes_receipts() {
     );
     assert!(equal_text.contains("normalized-equal"), "{equal_text}");
 }
+
+#[test]
+fn wrong_but_valid_audit_json_fails_closed() {
+    let _guard = test_lock();
+    let cases = [
+        (
+            "root-empty",
+            Some("empty-object"),
+            None,
+            "audit schema is invalid",
+        ),
+        ("root-array", Some("array"), None, "audit schema is invalid"),
+        (
+            "root-missing-opens",
+            Some("missing-opens"),
+            None,
+            "audit schema is invalid",
+        ),
+        (
+            "child-empty",
+            None,
+            Some("child-empty-object"),
+            "audit schema is invalid",
+        ),
+        (
+            "child-opens-string",
+            None,
+            Some("child-opens-string"),
+            "audit schema is invalid",
+        ),
+        (
+            "child-opens-mixed",
+            None,
+            Some("child-opens-mixed"),
+            "audit schema is invalid",
+        ),
+        (
+            "processes-missing",
+            None,
+            Some("empty-object"),
+            "child list schema is invalid",
+        ),
+        (
+            "processes-null",
+            None,
+            Some("processes-null"),
+            "child list schema is invalid",
+        ),
+        (
+            "bad-item",
+            None,
+            Some("bad-item"),
+            "child list schema is invalid",
+        ),
+        (
+            "identity-mismatch",
+            None,
+            Some("identity-mismatch"),
+            "child identity does not match audit",
+        ),
+        (
+            "parent-mismatch",
+            None,
+            Some("parent-mismatch"),
+            "child identity does not match audit",
+        ),
+        (
+            "foreign-audit",
+            None,
+            Some("foreign-audit"),
+            "outside this capture output",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (name, audit_shape, child_shape, needle) in cases {
+        let emit = lease_tmp().join(format!("audit-shape-{name}/emit"));
+        let _ = fs::remove_dir_all(lease_tmp().join(format!("audit-shape-{name}")));
+        fs::create_dir_all(&emit).unwrap();
+        let mut cmd = command(&xtask_bin());
+        cmd.env("HOME", "/home/wow")
+            .env("XEH_EMIT_ROOT", &emit)
+            .args(["oracle", "capture", "--suite", "isolation"]);
+        if let Some(shape) = audit_shape {
+            cmd.env("XEH_AUDIT_SHAPE", shape);
+        }
+        if let Some(shape) = child_shape {
+            cmd.env("XEH_CHILD_LIST_SHAPE", shape);
+        }
+        let out = cmd.output().expect("spawn shaped capture");
+        let text = combined(&out);
+        let published =
+            emit.join("compat/manifest.json").exists() || emit.join("compat/golden").exists();
+        if out.status.success() || published || !text.contains(needle) {
+            failures.push(format!(
+                "{name}: success={} published={published} missing `{needle}`\n{text}",
+                out.status.success()
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "wrong-but-valid audit JSON must fail closed before publish:\n{}",
+        failures.join("\n---\n")
+    );
+}
+
+#[test]
+fn normalize_keeps_unregistered_business_fields() {
+    let _guard = test_lock();
+    let root = lease_tmp().join("normalize-r5");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let script = root.join("check.py");
+    fs::write(&script, NORMALIZE_R5_CHECK).unwrap();
+    let oracle = workspace_root().join("compat/oracle");
+    let ran = Command::new(python_bin())
+        .arg(&script)
+        .arg(oracle.as_os_str())
+        .arg(root.as_os_str())
+        .env("PYTHONPATH", &oracle)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .output()
+        .expect("normalize check");
+    let text = combined(&ran);
+    assert!(ran.status.success(), "normalize check failed\n{text}");
+    let report = report_lines(&text);
+    let mut failures = Vec::new();
+    if report.get("REGISTERED_DATE").map(String::as_str) != Some("<http-date>") {
+        failures.push(format!("registered date was not normalized: {report:?}"));
+    }
+    if report.get("BUSINESS_DATE").map(String::as_str) != Some("Thu, 01 Jan 2026 00:00:00 GMT") {
+        failures.push(format!("business date was rewritten: {report:?}"));
+    }
+    if report.get("SIBLING_DATE").map(String::as_str) != Some("Thu, 01 Jan 2026 00:00:00 GMT") {
+        failures.push(format!(
+            "unregistered sibling date was rewritten: {report:?}"
+        ));
+    }
+    let url = report.get("BUSINESS_URL").map(String::as_str).unwrap_or("");
+    if !url.contains("/tmp/fixture-a") || !url.contains("127.0.0.1:18011") {
+        failures.push(format!("business URL was rewritten: {url}"));
+    }
+    if report.get("FILEPATH").map(String::as_str) != Some("<fixture-root>") {
+        failures.push(format!(
+            "registered filepath was not normalized: {report:?}"
+        ));
+    }
+    if report.get("REFERER").map(String::as_str)
+        != Some("http://127.0.0.1:<ephemeral-port>/browse.php")
+    {
+        failures.push(format!("registered referer was not normalized: {report:?}"));
+    }
+    if report.get("CASE_BUSINESS_DATE").map(String::as_str) != Some("Thu, 01 Jan 2026 00:00:00 GMT")
+    {
+        failures.push(format!("case business date was rewritten: {report:?}"));
+    }
+    let applied = report.get("APPLIED").map(String::as_str).unwrap_or("");
+    if !applied.contains("/expected/observed/headers/date")
+        || !applied.contains("rpc.method.xeH.getInfo")
+    {
+        failures.push(format!("applied rules missing registered path: {applied}"));
+    }
+    if applied.contains("business_url")
+        || applied.contains("/json/result/url")
+        || applied.contains("/body")
+    {
+        failures.push(format!("applied rules include a business path: {applied}"));
+    }
+    let pair1 = command(&xtask_bin())
+        .args([
+            "oracle",
+            "compare",
+            "--left",
+            root.join("pair1-left").to_str().unwrap(),
+            "--right",
+            root.join("pair1-right").to_str().unwrap(),
+        ])
+        .output()
+        .expect("compare business mutation");
+    let pair1_text = combined(&pair1);
+    if pair1.status.success() {
+        failures.push(format!("business mutation compared equal\n{pair1_text}"));
+    }
+    let pair2 = command(&xtask_bin())
+        .args([
+            "oracle",
+            "compare",
+            "--left",
+            root.join("pair2-left").to_str().unwrap(),
+            "--right",
+            root.join("pair2-right").to_str().unwrap(),
+        ])
+        .output()
+        .expect("compare registered volatile fields");
+    let pair2_text = combined(&pair2);
+    if !pair2.status.success() || !pair2_text.contains("normalized-equal") {
+        failures.push(format!(
+            "registered volatile fields did not compare equal\n{pair2_text}"
+        ));
+    }
+    assert!(
+        failures.is_empty(),
+        "explicit-path normalize failed:\n{}\n{text}",
+        failures.join("\n---\n")
+    );
+}
+
+fn report_lines(text: &str) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    for line in text.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            if key.chars().all(|ch| ch.is_ascii_uppercase() || ch == '_') {
+                out.insert(key.to_string(), value.to_string());
+            }
+        }
+    }
+    out
+}
+
+const NORMALIZE_R5_CHECK: &str = r#"
+import json, os, sys
+sys.path.insert(0, sys.argv[1])
+import harness
+
+root_a = "/tmp/fixture-a"
+root_b = "/tmp/fixture-b"
+port_a = 18011
+port_b = 18012
+date_a = "Tue, 29 Oct 2026 01:02:03 GMT"
+date_b = "Wed, 30 Oct 2026 04:05:06 GMT"
+business_date = "Thu, 01 Jan 2026 00:00:00 GMT"
+other_business_date = "Fri, 02 Jan 2026 00:00:00 GMT"
+
+def payload(root, port, http_date, posted, business_date, business_url):
+    observed = {
+        "headers": {"date": http_date, "server": "xeHentai/2.023"},
+        "date": business_date,
+        "business_headers": {"date": business_date},
+        "json": {"result": {"url": business_url, "posted": posted}},
+        "body": business_url,
+    }
+    cases = {
+        "rpc.method.xeH.getInfo": {
+            "id": "rpc.method.xeH.getInfo",
+            "expected": {"observed": observed},
+        },
+        "behavior.sec4.config-defaults": {
+            "id": "behavior.sec4.config-defaults",
+            "expected": {"observed": {"filepath": root, "business_url": business_url}},
+        },
+        "behavior.sec4.proxy-pool": {
+            "id": "behavior.sec4.proxy-pool",
+            "expected": {"observed": {"seen": [{"referer": "http://127.0.0.1:%d/browse.php" % port}]}},
+        },
+    }
+    golden = {
+        "rpc": {"getInfo": observed},
+        "runtime_config": {"filepath": root, "business_url": business_url},
+        "glype": {"seen": [{"referer": "http://127.0.0.1:%d/browse.php" % port}]},
+    }
+    return cases, golden
+
+def write_golden(path, golden):
+    os.makedirs(path, exist_ok=True)
+    for name, value in golden.items():
+        with open(os.path.join(path, name + ".json"), "w") as handle:
+            json.dump(value, handle, sort_keys=True)
+
+out = sys.argv[2]
+url_a = "http://127.0.0.1:%d/item?path=%s/a" % (port_a, root_a)
+url_b = "http://127.0.0.1:%d/item?path=%s/a" % (port_b, root_b)
+cases_a, golden_a = payload(root_a, port_a, date_a, business_date, business_date, url_a)
+cases_b, golden_b = payload(root_b, port_b, date_b, business_date, other_business_date, url_b)
+norm_cases, norm_golden, applied = harness.normalize_capture(cases_a, golden_a, root_a, [port_a])
+_, golden_right, _ = harness.normalize_capture(cases_b, golden_b, root_b, [port_b])
+write_golden(os.path.join(out, "pair1-left"), norm_golden)
+write_golden(os.path.join(out, "pair1-right"), golden_right)
+
+stable = "https://synthetic.invalid/gallery/1"
+cases_c, golden_c = payload(root_a, port_a, date_a, business_date, business_date, stable)
+cases_d, golden_d = payload(root_b, port_b, date_b, business_date, business_date, stable)
+_, golden_c, _ = harness.normalize_capture(cases_c, golden_c, root_a, [port_a])
+_, golden_d, _ = harness.normalize_capture(cases_d, golden_d, root_b, [port_b])
+write_golden(os.path.join(out, "pair2-left"), golden_c)
+write_golden(os.path.join(out, "pair2-right"), golden_d)
+
+info = norm_golden["rpc"]["getInfo"]
+print("REGISTERED_DATE=" + info["headers"]["date"])
+print("BUSINESS_DATE=" + info["date"])
+print("SIBLING_DATE=" + info["business_headers"]["date"])
+print("BUSINESS_URL=" + info["json"]["result"]["url"])
+print("FILEPATH=" + norm_golden["runtime_config"]["filepath"])
+print("REFERER=" + norm_golden["glype"]["seen"][0]["referer"])
+print("CASE_BUSINESS_DATE=" + norm_cases["rpc.method.xeH.getInfo"]["expected"]["observed"]["date"])
+print("CASE_REGISTERED_DATE=" + norm_cases["rpc.method.xeH.getInfo"]["expected"]["observed"]["headers"]["date"])
+print("APPLIED=" + json.dumps(applied, sort_keys=True))
+"#;

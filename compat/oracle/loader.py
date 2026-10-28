@@ -78,6 +78,119 @@ def _under_forbidden(path):
     return False
 
 
+def _write_json(path, data):
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "w") as handle:
+        json.dump(data, handle)
+
+
+def _valid_audit(process_id, parent_id, opens=None):
+    return {
+        "process_id": process_id,
+        "parent_id": parent_id,
+        "pid": os.getpid(),
+        "opens": [] if opens is None else opens,
+        "home": os.environ.get("HOME"),
+        "cwd": os.getcwd(),
+        "filepath": None,
+        "env": process_log.observed_env(),
+    }
+
+
+def _audit_body(payload, shape):
+    if shape == "array":
+        return []
+    if shape == "empty-object":
+        return {}
+    if shape == "missing-opens":
+        body = dict(payload)
+        body.pop("opens", None)
+        return body
+    return payload
+
+
+def _planted_record(out, audit_body, record_id, parent, audit_path=None):
+    if audit_path is None:
+        child_dir = os.path.join(out, "processes", "planted-child")
+        audit = os.path.join(child_dir, "audit.json")
+        stdout = os.path.join(child_dir, "stdout.txt")
+        stderr = os.path.join(child_dir, "stderr.txt")
+    else:
+        audit = audit_path
+        parent_dir = os.path.dirname(audit_path)
+        stdout = os.path.join(parent_dir, "stdout.txt")
+        stderr = os.path.join(parent_dir, "stderr.txt")
+    _write_json(audit, audit_body)
+    os.makedirs(os.path.dirname(stdout), exist_ok=True)
+    open(stdout, "wb").close()
+    open(stderr, "wb").close()
+    return {
+        "id": record_id,
+        "parent": parent,
+        "audit": audit,
+        "stdout": stdout,
+        "stderr": stderr,
+        "exit": 0,
+    }
+
+
+def apply_child_list_shape():
+    """Test injection. Unset in production captures."""
+    if PROCESS_ID != "root":
+        return
+    shape = os.environ.get("XEH_CHILD_LIST_SHAPE")
+    if not shape:
+        return
+    out = os.environ.get("XEH_OUT")
+    fixture = os.environ.get("XEH_FIXTURE_ROOT")
+    if not out or not fixture:
+        return
+    path = os.path.join(out, "expected-children.json")
+    if shape == "empty-object":
+        _write_json(path, {})
+        return
+    if shape == "processes-null":
+        _write_json(path, {"processes": None})
+        return
+    if shape == "bad-item":
+        audit = os.path.join(out, "processes", "planted-child", "audit.json")
+        _write_json(audit, _valid_audit("planted-child", "root"))
+        _write_json(path, {"processes": [{"audit": audit, "exit": 0}]})
+        return
+    forbidden = (FORBIDDEN[0] + "/SECRET_SENTINEL") if FORBIDDEN else "/home/wow/SECRET_SENTINEL"
+    if shape == "child-empty-object":
+        record = _planted_record(out, {}, "planted-child", "root")
+    elif shape == "child-opens-string":
+        record = _planted_record(
+            out, dict(_valid_audit("planted-child", "root"), opens="not-a-list"),
+            "planted-child", "root",
+        )
+    elif shape == "child-opens-mixed":
+        record = _planted_record(
+            out, dict(_valid_audit("planted-child", "root"), opens=[1, forbidden]),
+            "planted-child", "root",
+        )
+    elif shape == "identity-mismatch":
+        record = _planted_record(
+            out, _valid_audit("planted-child", "root"), "not-the-child", "root",
+        )
+    elif shape == "parent-mismatch":
+        record = _planted_record(
+            out, _valid_audit("planted-child", "root"), "planted-child", "not-root",
+        )
+    elif shape == "foreign-audit":
+        foreign = os.path.join(fixture, "other-run", "audit.json")
+        record = _planted_record(
+            out, _valid_audit("foreign-child", "root"), "foreign-child", "root",
+            audit_path=foreign,
+        )
+    else:
+        return
+    _write_json(path, {"processes": [record]})
+
+
 def write_audit():
     path = process_log.audit_path()
     if not path or os.environ.get("XEH_SUPPRESS_AUDIT") == "1":
@@ -99,8 +212,11 @@ def write_audit():
         "filepath": getattr(sys.modules.get("xeHentai.const"), "FILEPATH", None),
         "env": process_log.observed_env(),
     }
+    shape = os.environ.get("XEH_AUDIT_SHAPE") if PROCESS_ID == "root" else None
     with open(path, "w") as handle:
-        json.dump(payload, handle)
+        json.dump(_audit_body(payload, shape), handle)
+    if PROCESS_ID == "root":
+        apply_child_list_shape()
 
 
 def install_guards():

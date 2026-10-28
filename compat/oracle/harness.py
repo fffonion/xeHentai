@@ -6,6 +6,7 @@ contact accounts, proxies, or gallery sites.
 """
 
 import ast
+import copy
 import json
 import os
 import socket
@@ -24,6 +25,7 @@ UPSTREAM = "fffonion/xeHentai@43fc55c0c662f195d048becf6276a26ce06b09d9"
 TOKEN = "oracle-token"
 AUTH = "token:" + TOKEN
 SYNTHETIC_URL = "https://e-hentai.org/g/1/aaaaaaaaaa/"
+STABLE_DOWNLOAD_DIR = "synthetic-downloads"
 CHILD_SEQ = {"n": 0}
 BOUND_PORTS = []
 HTTP_DATE = re.compile(
@@ -440,7 +442,7 @@ def config_and_cli(cases, golden):
 
     def merge_errors():
         xe.cfg["ignored_errors"] = [1006]
-        code, _text = xe.update_config(proxy=[], ignored_errors=[1009], dir=fixture_root())
+        code, _text = xe.update_config(proxy=[], ignored_errors=[1009], dir=STABLE_DOWNLOAD_DIR)
         return {"code": code, "ignored_errors": list(xe.cfg["ignored_errors"]), "no_error": code == ERR_NO_ERROR}
 
     golden["ignored_errors"] = run_case(
@@ -905,7 +907,8 @@ def rpc_cases(cases, golden, logs):
     from xeHentai.task import Task
     from xeHentai.const import TASK_STATE_FINISHED
     xe = xeHentai()
-    xe.cfg["dir"] = fixture_root()
+    os.makedirs(STABLE_DOWNLOAD_DIR, exist_ok=True)
+    xe.cfg["dir"] = STABLE_DOWNLOAD_DIR
     task = Task(SYNTHETIC_URL, xe.cfg, xe.logger)
     task.guid = "g1"
     task.meta = {"total": 3, "title": "Synthetic", "finished": 0, "gjname": "", "gnname": "Synthetic"}
@@ -936,7 +939,7 @@ def rpc_cases(cases, golden, logs):
         images = rpc_post(port, {"jsonrpc": "2.0", "id": "img", "method": "xeH.getImage", "params": [[AUTH, "g1", "1,3"], {}]})
         images_all = rpc_post(port, {"jsonrpc": "2.0", "id": "imgall", "method": "xeH.getImage", "params": [[AUTH, "g1"], {}]})
         update = rpc_post(port, {"jsonrpc": "2.0", "id": "upd", "method": "xeH.updateConfig", "params": [[AUTH], {"proxy": []}]})
-        update_full = rpc_post(port, {"jsonrpc": "2.0", "id": "updf", "method": "xeH.updateConfig", "params": [[AUTH], {"proxy": [], "dir": fixture_root()}]})
+        update_full = rpc_post(port, {"jsonrpc": "2.0", "id": "updf", "method": "xeH.updateConfig", "params": [[AUTH], {"proxy": [], "dir": STABLE_DOWNLOAD_DIR}]})
         cookie = rpc_post(port, {"jsonrpc": "2.0", "id": "coo", "method": "xeH.setCookie", "params": [[AUTH, "ipb_member_id=11; ipb_pass_hash=synthetic-hash"], {}]})
         saved = rpc_post(port, {"jsonrpc": "2.0", "id": "save", "method": "xeH.saveSession", "params": [[AUTH], {}]})
         loaded = rpc_post(port, {"jsonrpc": "2.0", "id": "load", "method": "xeH.loadSession", "params": [[AUTH], {}]})
@@ -1188,28 +1191,162 @@ def apply_derived_counts(cases):
     )
 
 
-def normalize_text(text, root):
-    text = text.replace(root, "<fixture-root>")
-    for port in BOUND_PORTS:
-        text = text.replace("127.0.0.1:%d" % port, "127.0.0.1:<ephemeral-port>")
-        text = text.replace("[::1]:%d" % port, "[::1]:<ephemeral-port>")
-    return text
+# Diagnostic and transport fields produced by this harness. Business config,
+# response bodies, and unrelated date/URL keys are not in this table.
+NORMALIZE_RULES = (
+    ("golden", "cli_bool", "/stderr", "fixture-root"),
+    ("golden", "cli_bool", "/user_config_defaults/stderr", "fixture-root"),
+    ("golden", "cli_help", "/stderr", "fixture-root"),
+    ("golden", "cli_help", "/stdout", "fixture-root"),
+    ("golden", "cli_range", "/stderr", "fixture-root"),
+    ("golden", "cli_range_bad", "/stderr", "fixture-root"),
+    ("golden", "cli_version", "/stderr", "fixture-root"),
+    ("golden", "interactive", "/stderr", "fixture-root"),
+    ("golden", "interactive", "/stdout", "fixture-root"),
+    ("golden", "locale_zh_cn", "/stderr", "fixture-root"),
+    ("golden", "runtime_config", "/filepath", "fixture-root"),
+    ("golden", "glype", "/seen/0/referer", "bound-port"),
+    ("golden", "glype", "/seen/1/referer", "bound-port"),
+    ("golden", "glype", "/seen/2/referer", "bound-port"),
+    ("case", "behavior.sec4.cli-options", "/expected/observed/bad_range/stderr", "fixture-root"),
+    ("case", "behavior.sec4.cli-options", "/expected/observed/help/stderr", "fixture-root"),
+    ("case", "behavior.sec4.cli-options", "/expected/observed/help/stdout", "fixture-root"),
+    ("case", "behavior.sec4.cli-options", "/expected/observed/version/stderr", "fixture-root"),
+    ("case", "behavior.sec4.config-defaults", "/expected/observed/filepath", "fixture-root"),
+    ("case", "behavior.sec4.i18n", "/expected/observed/locale_process/stderr", "fixture-root"),
+    ("case", "behavior.sec4.interactive", "/expected/observed/stderr", "fixture-root"),
+    ("case", "behavior.sec4.interactive", "/expected/observed/stdout", "fixture-root"),
+    ("case", "delta.argparse-bool", "/expected/observed/stderr", "fixture-root"),
+    ("case", "delta.argparse-bool", "/expected/observed/user_config_defaults/stderr", "fixture-root"),
+    ("case", "delta.download-range-default", "/expected/observed/stderr", "fixture-root"),
+    ("case", "behavior.sec4.proxy-pool", "/expected/observed/seen/0/referer", "bound-port"),
+    ("case", "behavior.sec4.proxy-pool", "/expected/observed/seen/1/referer", "bound-port"),
+    ("case", "behavior.sec4.proxy-pool", "/expected/observed/seen/2/referer", "bound-port"),
+    ("golden", "rpc", "/add_bad/headers/date", "http-date"),
+    ("golden", "rpc", "/add_exhentai/headers/date", "http-date"),
+    ("golden", "rpc", "/add_ok/headers/date", "http-date"),
+    ("golden", "rpc", "/bad_level/headers/date", "http-date"),
+    ("golden", "rpc", "/bare_token/headers/date", "http-date"),
+    ("golden", "rpc", "/delete/headers/date", "http-date"),
+    ("golden", "rpc", "/embedded_token/headers/date", "http-date"),
+    ("golden", "rpc", "/getConfig/headers/date", "http-date"),
+    ("golden", "rpc", "/getInfo/headers/date", "http-date"),
+    ("golden", "rpc", "/get_image_all/headers/date", "http-date"),
+    ("golden", "rpc", "/get_image_range/headers/date", "http-date"),
+    ("golden", "rpc", "/get_jsonrpc/headers/date", "http-date"),
+    ("golden", "rpc", "/id0/headers/date", "http-date"),
+    ("golden", "rpc", "/list/headers/date", "http-date"),
+    ("golden", "rpc", "/load/headers/date", "http-date"),
+    ("golden", "rpc", "/malformed/headers/date", "http-date"),
+    ("golden", "rpc", "/missing_token/headers/date", "http-date"),
+    ("golden", "rpc", "/options/headers/date", "http-date"),
+    ("golden", "rpc", "/pause/headers/date", "http-date"),
+    ("golden", "rpc", "/private_method/headers/date", "http-date"),
+    ("golden", "rpc", "/resume/headers/date", "http-date"),
+    ("golden", "rpc", "/save/headers/date", "http-date"),
+    ("golden", "rpc", "/set_cookie/headers/date", "http-date"),
+    ("golden", "rpc", "/static/headers/date", "http-date"),
+    ("golden", "rpc", "/unknown_method/headers/date", "http-date"),
+    ("golden", "rpc", "/unmatched/headers/date", "http-date"),
+    ("golden", "rpc", "/update_proxy_dir/headers/date", "http-date"),
+    ("case", "behavior.sec4.gallery-routes", "/expected/observed/static/headers/date", "http-date"),
+    ("case", "behavior.sec4.rpc-wire", "/expected/observed/id0/headers/date", "http-date"),
+    ("case", "behavior.sec4.rpc-wire", "/expected/observed/options/headers/date", "http-date"),
+    ("case", "behavior.sec4.task-commands", "/expected/observed/add_bad/headers/date", "http-date"),
+    ("case", "behavior.sec4.task-commands", "/expected/observed/add_exhentai/headers/date", "http-date"),
+    ("case", "behavior.sec4.task-commands", "/expected/observed/add_ok/headers/date", "http-date"),
+    ("case", "behavior.sec4.task-commands", "/expected/observed/delete/headers/date", "http-date"),
+    ("case", "behavior.sec4.task-commands", "/expected/observed/pause/headers/date", "http-date"),
+    ("case", "behavior.sec4.task-commands", "/expected/observed/resume/headers/date", "http-date"),
+    ("case", "delta.content-length", "/expected/observed/headers/date", "http-date"),
+    ("case", "delta.falsy-id", "/expected/observed/headers/date", "http-date"),
+    ("case", "delta.get-extra-newline", "/expected/observed/get_jsonrpc/headers/date", "http-date"),
+    ("case", "delta.get-extra-newline", "/expected/observed/options/headers/date", "http-date"),
+    ("case", "delta.get-extra-newline", "/expected/observed/unmatched/headers/date", "http-date"),
+    ("case", "delta.get-image-range", "/expected/observed/headers/date", "http-date"),
+    ("case", "delta.malformed-json", "/expected/observed/parsed/headers/date", "http-date"),
+    ("case", "delta.token-regex-log", "/expected/observed/embedded/headers/date", "http-date"),
+    ("case", "rpc.method.xeH.addTask", "/expected/observed/headers/date", "http-date"),
+    ("case", "rpc.method.xeH.delTask", "/expected/observed/headers/date", "http-date"),
+    ("case", "rpc.method.xeH.getConfig", "/expected/observed/headers/date", "http-date"),
+    ("case", "rpc.method.xeH.getImage", "/expected/observed/headers/date", "http-date"),
+    ("case", "rpc.method.xeH.getInfo", "/expected/observed/headers/date", "http-date"),
+    ("case", "rpc.method.xeH.listTasks", "/expected/observed/headers/date", "http-date"),
+    ("case", "rpc.method.xeH.loadSession", "/expected/observed/headers/date", "http-date"),
+    ("case", "rpc.method.xeH.pauseTask", "/expected/observed/headers/date", "http-date"),
+    ("case", "rpc.method.xeH.resumeTask", "/expected/observed/headers/date", "http-date"),
+    ("case", "rpc.method.xeH.saveSession", "/expected/observed/headers/date", "http-date"),
+    ("case", "rpc.method.xeH.setCookie", "/expected/observed/headers/date", "http-date"),
+    ("case", "rpc.method.xeH.updateConfig", "/expected/observed/headers/date", "http-date"),
+)
 
 
-def normalize(value, root):
-    if isinstance(value, dict):
-        out = {}
-        for key, item in value.items():
-            if key == "date" and isinstance(item, str) and HTTP_DATE.match(item):
-                out[key] = "<http-date>"
-            else:
-                out[key] = normalize(item, root)
-        return out
-    if isinstance(value, list):
-        return [normalize(item, root) for item in value]
-    if isinstance(value, str):
-        return normalize_text(value, root)
-    return value
+def pointer_parts(pointer):
+    return [part.replace("~1", "/").replace("~0", "~") for part in pointer.split("/")[1:]]
+
+
+def get_pointer(value, pointer):
+    current = value
+    for part in pointer_parts(pointer):
+        if isinstance(current, dict) and part in current:
+            current = current[part]
+        elif isinstance(current, list) and part.isdigit() and int(part) < len(current):
+            current = current[int(part)]
+        else:
+            return None, False
+    return current, True
+
+
+def set_pointer(value, pointer, new):
+    parts = pointer_parts(pointer)
+    current = value
+    for part in parts[:-1]:
+        if isinstance(current, dict):
+            current = current[part]
+        else:
+            current = current[int(part)]
+    last = parts[-1]
+    if isinstance(current, dict):
+        current[last] = new
+    else:
+        current[int(last)] = new
+
+
+def apply_rule_text(text, kind, root, ports):
+    if kind == "http-date":
+        if HTTP_DATE.match(text):
+            return "<http-date>"
+        return text
+    if kind == "fixture-root":
+        if root and root in text:
+            return text.replace(root, "<fixture-root>")
+        return text
+    if kind == "bound-port":
+        for port in ports:
+            text = text.replace("127.0.0.1:%d" % port, "127.0.0.1:<ephemeral-port>")
+            text = text.replace("[::1]:%d" % port, "[::1]:<ephemeral-port>")
+        return text
+    raise ValueError("unknown normalize rule %s" % kind)
+
+
+def normalize_capture(cases, golden, root, ports=None):
+    cases = copy.deepcopy(cases)
+    golden = copy.deepcopy(golden)
+    bound = [int(port) for port in (ports or [])]
+    applied = []
+    for scope, ident, pointer, kind in NORMALIZE_RULES:
+        tree = cases if scope == "case" else golden
+        if ident not in tree:
+            continue
+        current, found = get_pointer(tree[ident], pointer)
+        if not found or not isinstance(current, str):
+            continue
+        updated = apply_rule_text(current, kind, root, bound)
+        if updated == current:
+            continue
+        set_pointer(tree[ident], pointer, updated)
+        applied.append({"scope": scope, "id": ident, "path": pointer, "kind": kind})
+    return cases, golden, applied
 
 
 def build_result(cases, golden):
@@ -1278,7 +1415,14 @@ def run_suite(suite):
         }
         with open(os.path.join(out_dir(), "result.json"), "w") as handle:
             json.dump(raw, handle, sort_keys=True)
-        normalized = build_result(normalize(cases, fixture_root()), normalize(golden, fixture_root()))
+        norm_cases, norm_golden, applied = normalize_capture(
+            cases, golden, fixture_root(), list(BOUND_PORTS)
+        )
+        with open(os.path.join(out_dir(), "normalization-applied.json"), "w") as handle:
+            json.dump(applied, handle, sort_keys=True)
+            handle.write("\n")
+        normalized = build_result(norm_cases, norm_golden)
+        normalized["normalization_applied"] = applied
         with open(os.path.join(out_dir(), "normalized-result.json"), "w") as handle:
             json.dump(normalized, handle, sort_keys=True)
     finally:

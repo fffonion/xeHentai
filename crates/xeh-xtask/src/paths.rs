@@ -26,7 +26,7 @@ pub fn evidence_dir() -> Result<PathBuf, String> {
             return Ok(PathBuf::from(value));
         }
     }
-    Ok(lease_tmp()?.join("evidence-address-r1"))
+    Ok(lease_tmp()?.join("evidence-address-r2"))
 }
 
 pub fn python_executable() -> PathBuf {
