@@ -1,0 +1,21 @@
+{
+  "seen": [
+    {
+      "cookie": "c[synthetic.invalid][/][ipb_member_id]=11",
+      "path": "/browse.php?u=http%3A%2F%2Fsynthetic.invalid%2Fpage&b=4&f=norefer",
+      "referer": "http://127.0.0.1:44495/browse.php"
+    },
+    {
+      "cookie": "c[synthetic.invalid][/][ipb_member_id]=11",
+      "path": "/includes/process.php?action=sslagree",
+      "referer": "http://127.0.0.1:44495/browse.php"
+    },
+    {
+      "cookie": "c[synthetic.invalid][/][ipb_member_id]=11;s=synthetic-session",
+      "path": "/browse.php?u=http%3A%2F%2Fsynthetic.invalid%2Fpage&b=4&f=norefer",
+      "referer": "http://127.0.0.1:44495/browse.php"
+    }
+  ],
+  "status": 200,
+  "text": "see http://synthetic.invalid/page"
+}

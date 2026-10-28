@@ -1,0 +1,16 @@
+{
+  "body": "synthetic-proxy-ok",
+  "seen": [
+    {
+      "headers": {
+        "Accept": "*/*",
+        "Accept-Encoding": "gzip, deflate, zstd",
+        "Connection": "keep-alive",
+        "Host": "synthetic.invalid",
+        "User-Agent": "python-requests/2.31.0"
+      },
+      "path": "http://synthetic.invalid/page"
+    }
+  ],
+  "status": 200
+}

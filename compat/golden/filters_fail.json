@@ -1,0 +1,13 @@
+{
+  "ban_return_ignored": {
+    "code": 1010
+  },
+  "pageurl": {
+    "code": 1008,
+    "debug_written": true
+  },
+  "removed": {
+    "code": 1004
+  },
+  "reset_quota": null
+}

@@ -1,0 +1,62 @@
+use std::env;
+use std::process::ExitCode;
+
+use xeh_xtask::{capture, verify_deny_unverified, workspace_root};
+
+fn main() -> ExitCode {
+    let args: Vec<String> = env::args().skip(1).collect();
+    match dispatch(&args) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("{message}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn dispatch(args: &[String]) -> Result<(), String> {
+    if args.len() >= 3 && args[0] == "oracle" && args[1] == "capture" && args[2] == "--suite" {
+        let suite = args.get(3).ok_or("oracle capture requires --suite <name>")?;
+        return capture(suite);
+    }
+    if args.len() >= 2 && args[0] == "verify" && args[1] == "--all" {
+        if !args.iter().any(|arg| arg == "--deny-unverified") {
+            return Err("verify --all requires --deny-unverified in this scope".to_string());
+        }
+        return verify_deny_unverified(&workspace_root());
+    }
+    if args.len() >= 2 && args[0] == "manifest" && args[1] == "check" {
+        return manifest_check();
+    }
+    Err("usage: xeh-xtask oracle capture --suite <name> | verify --all --deny-unverified | manifest check".to_string())
+}
+
+fn manifest_check() -> Result<(), String> {
+    let root = workspace_root();
+    let manifest = std::fs::read_to_string(root.join("compat/manifest.json"))
+        .map_err(|err| format!("manifest is absent: {err}"))?;
+    let catalog = std::fs::read_to_string(root.join("compat/catalog.json"))
+        .map_err(|err| format!("catalog is absent: {err}"))?;
+    let behaviors = std::fs::read_to_string(root.join("compat/required-behaviors.json"))
+        .map_err(|err| format!("required behaviors are absent: {err}"))?;
+    let catalog_ids = ids_from(&catalog)?;
+    let behavior_ids = ids_from(&behaviors)?;
+    let mut required = catalog_ids;
+    required.extend(behavior_ids);
+    let refs: Vec<&str> = required.iter().map(String::as_str).collect();
+    xeh_xtask::reject_unmapped(&manifest, &refs)?;
+    println!("manifest-complete features={}", refs.len());
+    Ok(())
+}
+
+fn ids_from(text: &str) -> Result<Vec<String>, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|err| format!("id list is not JSON: {err}"))?;
+    Ok(value
+        .get("ids")
+        .and_then(|item| item.as_array())
+        .ok_or("id list is missing ids")?
+        .iter()
+        .filter_map(|item| item.as_str().map(str::to_string))
+        .collect())
+}

@@ -1,0 +1,15 @@
+[
+  "xeH.updateConfig",
+  "xeH.addTask",
+  "xeH.delTask",
+  "xeH.pauseTask",
+  "xeH.resumeTask",
+  "xeH.saveSession",
+  "xeH.loadSession",
+  "xeH.loginExhentai",
+  "xeH.setCookie",
+  "xeH.getInfo",
+  "xeH.getConfig",
+  "xeH.listTasks",
+  "xeH.getImage"
+]

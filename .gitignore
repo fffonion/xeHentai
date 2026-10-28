@@ -9,3 +9,6 @@
 /.env
 /evidence/
 /compat/upstream/
+__pycache__/
+*.pyc
+

@@ -1,0 +1,6 @@
+{
+  "args": [
+    "proxy"
+  ],
+  "exception": "KeyError"
+}

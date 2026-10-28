@@ -1,0 +1,35 @@
+{
+  "cfg": {
+    "auto_update": "download",
+    "daemon": false,
+    "delete_task_files": false,
+    "dir": ".",
+    "download_ori": false,
+    "download_range": null,
+    "download_thread_cnt": 5,
+    "download_timeout": 10,
+    "ignored_errors": [],
+    "jpn_title": true,
+    "log_path": "eh.log",
+    "log_verbose": 2,
+    "low_speed_threshold": 10,
+    "make_archive": false,
+    "proxy": [],
+    "proxy_image": true,
+    "proxy_image_only": false,
+    "rename_ori": false,
+    "rpc_interface": "localhost",
+    "rpc_open_browser": true,
+    "rpc_port": null,
+    "rpc_secret": null,
+    "save_tasks": false,
+    "scan_thread_cnt": 1,
+    "update_beta_channel": false
+  },
+  "cookies": {
+    "nw": "1"
+  },
+  "filepath": "/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-20261029-main-13b130ba/fixtures/all-1793224787546880933",
+  "user_agent": null,
+  "version": "2.023-py314"
+}
