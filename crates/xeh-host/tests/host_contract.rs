@@ -13,8 +13,8 @@ use vm::{
 };
 
 use xeh_host::{
-    compile_source_with_catalog, drive_to_halt, drive_until_waiting, open_registry,
-    release_for_reuse, resource_count, stack_int, standard_catalog, EmbeddingTimer,
+    attach_timer, bind_vm, compile_source_with_catalog, drive_to_halt, drive_until_waiting,
+    open_registry, release_for_reuse, resource_count, stack_int, standard_catalog, EmbeddingTimer,
 };
 
 use support::{
@@ -109,28 +109,58 @@ async fn json_decode_error_reaches_the_caller() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn io_catalog_open_rejects_the_unstamped_handle() {
+async fn standard_catalog_file_round_trip_reuses_the_vm() {
     let root = TestRoot::create();
     let path = lease_file(&root, "round-trip.txt");
-    let _ = std::fs::remove_file(&path);
-    let opened = format!(
+    let payload = "xehentai-rss-roundtrip";
+    let source = round_trip_source(&path, payload);
+    let mut vm = prepare_catalog_vm(&source);
+    configure_io(&mut vm, root.path());
+    drive_to_halt(&mut vm)
+        .await
+        .expect("standard catalog file round trip");
+    assert_catalog_round_trip(&vm, &path);
+    assert_io_quiescent(&mut vm);
+    release_for_reuse(&mut vm)
+        .await
+        .expect("same VM can run the catalog script again");
+    assert_io_quiescent(&mut vm);
+    drive_to_halt(&mut vm)
+        .await
+        .expect("reused VM runs the same catalog script");
+    assert_catalog_round_trip(&vm, &path);
+    assert_io_quiescent(&mut vm);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn io_policy_rejects_write_when_allow_write_is_false() {
+    let root = TestRoot::create();
+    let path = lease_file(&root, "denied.txt");
+    let source = format!(
         r#"
         use io;
         io::open("{}", "w");
         "#,
         rss_path(&path),
     );
-    let (mut vm, _) = support::prepare_source(&opened, standard_catalog()).await;
-    configure_io(&mut vm, root.path());
+    let mut vm = prepare_catalog_vm(&source);
+    vm.configure_io(IoPolicy {
+        allowed_roots: vec![root.path().display().to_string()],
+        allow_write: false,
+        allow_process: false,
+        max_read_bytes: 1024,
+        max_write_bytes: 1024,
+    });
     let error = drive_to_halt(&mut vm)
         .await
-        .expect_err("catalog open must reject the unstamped handle");
+        .expect_err("allow_write=false must reject a writable open");
     let message = error.to_string();
     assert!(
-        message.contains("io.file") && message.contains("<none>"),
-        "missing resource_type_key must be visible: {message}"
+        message.contains("write capability"),
+        "write policy must name the rejection: {message}"
     );
-    drop(vm);
+    assert!(!path.exists(), "a rejected write must not create the file");
+    assert_io_quiescent(&mut vm);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -146,7 +176,7 @@ async fn io_policy_authorizes_only_the_test_root() {
         "#,
         rss_path(&outside),
     );
-    let (mut vm, _) = support::prepare_source(&opened, standard_catalog()).await;
+    let mut vm = prepare_catalog_vm(&opened);
     configure_io(&mut vm, allowed.path());
     let error = drive_to_halt(&mut vm)
         .await
@@ -156,7 +186,7 @@ async fn io_policy_authorizes_only_the_test_root() {
         message.contains("outside the allowed roots"),
         "IO policy must name the foreign path rejection: {message}"
     );
-    drop(vm);
+    assert_io_quiescent(&mut vm);
 }
 
 fn configure_io(vm: &mut vm::Vm, root: &std::path::Path) {
@@ -167,6 +197,88 @@ fn configure_io(vm: &mut vm::Vm, root: &std::path::Path) {
         max_read_bytes: 1024,
         max_write_bytes: 1024,
     });
+}
+
+fn prepare_catalog_vm(source: &str) -> vm::Vm {
+    let catalog = standard_catalog();
+    let program = compile_source_with_catalog(source, Arc::clone(&catalog))
+        .unwrap_or_else(|error| panic!("compile: {error}"));
+    let registry = open_registry(&catalog).expect("registry");
+    let mut vm = vm::Vm::try_new(program).expect("vm");
+    vm.set_default_host_fallback_enabled(false);
+    bind_vm(&mut vm, &registry).expect("bind");
+    attach_timer(&mut vm, Arc::new(EmbeddingTimer::new()));
+    assert!(
+        !vm.default_host_fallback_enabled(),
+        "catalog IO must not use the default host fallback"
+    );
+    vm
+}
+
+fn round_trip_source(path: &std::path::Path, payload: &str) -> String {
+    format!(
+        r#"
+        use io;
+        let written = io::open("{path}", "w");
+        let count = io::write(written, "{payload}");
+        let flushed = io::flush(written);
+        let closed = io::close(written);
+        let read_back = io::open("{path}", "r");
+        let contents = io::read_all(read_back);
+        let closed_again = io::close(read_back);
+        let flushed_bit = if flushed => {{ 1 }} else => {{ 0 }};
+        let closed_bit = if closed => {{ 1 }} else => {{ 0 }};
+        let closed_again_bit = if closed_again => {{ 1 }} else => {{ 0 }};
+        [count, flushed_bit, closed_bit, closed_again_bit, contents];
+        "#,
+        path = rss_path(path),
+        payload = payload,
+    )
+}
+
+fn assert_catalog_round_trip(vm: &vm::Vm, path: &std::path::Path) {
+    let Some(Value::Array(items)) = vm.stack().last() else {
+        panic!(
+            "round trip should return the RSS array, got {:?}",
+            vm.stack()
+        );
+    };
+    let disk = std::fs::read(path).expect("host reads the written file");
+    let Some(Value::Int(count)) = items.first() else {
+        panic!("write count missing: {items:?}");
+    };
+    let disk_len = i64::try_from(disk.len()).expect("disk length fits the RSS int");
+    assert_eq!(
+        *count, disk_len,
+        "io::write's return must equal the bytes read back from disk"
+    );
+    assert_eq!(items.get(1), Some(&Value::Int(1)), "flush must succeed");
+    assert_eq!(
+        items.get(2),
+        Some(&Value::Int(1)),
+        "consuming close must succeed"
+    );
+    assert_eq!(
+        items.get(3),
+        Some(&Value::Int(1)),
+        "close after read_all must succeed"
+    );
+    match items.get(4) {
+        Some(Value::String(text)) => assert_eq!(
+            text.as_bytes(),
+            disk.as_slice(),
+            "RSS read_all must match the bytes on disk"
+        ),
+        other => panic!("read_all returned {other:?}"),
+    }
+}
+
+fn assert_io_quiescent(vm: &mut vm::Vm) {
+    assert_eq!(resource_count(vm), 0, "IO resources must be released");
+    assert!(
+        vm.execution_scope().operations().is_empty(),
+        "pending IO operations must be zero"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

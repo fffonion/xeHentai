@@ -1,6 +1,6 @@
 # RustScript 嵌入与 Core host 复用
 
-锁定 revision：`d9387f98df78dd88d2d1c04eebac4415f844efaf`。依赖包名是 `pd-vm`，库名是 `vm`。默认 feature 含 JIT，本嵌入关闭默认 feature，只打开 `runtime`、`async`、`http-client`。不复制 Core 源码，不启用 SQLite 或 CLI。
+锁定 revision：`99890b68119715df9ddd19f6a6362ff8d6258ffa`。依赖包名是 `pd-vm`，库名是 `vm`。默认 feature 含 JIT，本嵌入关闭默认 feature，只打开 `runtime`、`async`、`http-client`。不复制 Core 源码，不启用 SQLite 或 CLI。
 
 编译和绑定使用同一份 catalog。`json` / `re` 没有 guest catalog，走 namespaced builtin，VM 上安装 `standard_composition()` 后才能调用。`io`、`timer`、`http` 由 `standard_host_modules()` 的 catalog surface 经 `install_from_catalog` 安装，adapter 是 Core descriptor，不是应用侧重写。
 
@@ -20,13 +20,17 @@ owner 线程 shutdown 先停止准入和后续排程。尚未开跑的 callback 
 | --- | --- | --- | --- | --- |
 | JSON 编码/解码 | `json::encode`、`json::decode`（`src/builtins/runtime/json.rs`，descriptor-only） | builtin + `standard_composition` | `runtime` | `app/main.rss` 往返；`json_decode_error_reaches_the_caller` |
 | 正则 | `re::match`（`src/builtins/runtime/regex.rs`，descriptor-only） | builtin + `standard_composition` | `runtime` | `app/main.rss` 的 `^probe$` |
-| 文件打开 | `io::open`（`src/builtins/runtime/io`，catalog surface 只有 `open` / `read_all` / `close`） | `install_from_catalog` + `IoHostExt::configure_io`；`write` / `flush` 另授 namespaced builtin | `async` | `io_catalog_open_rejects_the_unstamped_handle` |
+| 文件读写 | `io::open`、`io::read_all`、`io::write`、`io::flush`、`io::close`（`src/builtins/runtime/io`；`write` / `flush` / `read_all` 借用 `io.file`，`close` 消耗该资源） | `grant_owned_builtins` 后 `install_from_catalog`，再 `IoHostExt::configure_io` | `async` | `standard_catalog_file_round_trip_reuses_the_vm`、`io_policy_authorizes_only_the_test_root`、`io_policy_rejects_write_when_allow_write_is_false` |
 | 定时器 | `timer::at`、`timer::every`、`timer::pending_count`（`src/builtins/runtime/timer.rs`） | `install_from_catalog` + `TimerHostExt::install_timer_runtime` | `runtime` | `timer_max_running_keeps_a_due_callback_pending_while_http_waits`、`timer_shutdown_closes_an_active_http_callback`、`timer_rejects_drive_and_shutdown_from_another_thread` |
 | 缓冲 HTTP | `http::request::new`、`http::client::request`、`http::response::status`、`http::response::body` | `install_from_catalog` + `HttpHostExt::configure_http` | `http-client` | `http_policy_allow_and_deny`、`cancelled_http_request_closes_and_vm_is_reused` |
 
-`io::popen` 不调用，`IoPolicy.allow_process` 保持关闭。HTTP 策略只允许测试夹具的 `127.0.0.1` 和当次端口。
+`io` 的 catalog surface 包含 `open`、`read_all`、`write`、`flush`、`close`。`IoResource` 报告 `io.file`。应用不另写文件 host，不伪造资源键或数字句柄。`io::popen`、`io::read_line`、`io::exists` 仍走 namespaced builtin；测试不调用它们。
 
-异步 `IoResource` 没有实现 `HostResource::resource_type_key()`。`standard_host_catalog()` 要求键 `io.file`，所以 `install_from_catalog` 之后，`io::open` 的返回句柄在回到 guest 时被拒绝，实际键是 `<none>`。owned descriptor 里的 `io::write` 参数是 `int`，和 `io::open` 返回的 `resource<io.file>` 对不上，不能靠换一份 catalog 绕过。缺的公开接口是：异步 IO 资源在插入时报告 `io.file`。本嵌入不包装、不伪造这个键。
+`standard_catalog_file_round_trip_reuses_the_vm` 使用同一份 standard catalog 和 registry，关闭 default host fallback，并用只授权当次 RAII `TestRoot` 的 `IoPolicy`。RSS 执行 writable open、borrowed write、flush、consuming close、reopen、`read_all`、close。`io::write` 的返回值与宿主从磁盘读到的字节数一致，`read_all` 与这些磁盘字节一致；flush 和两次 close 成功。结束时 resource count 与 pending IO 操作为 0。`release_for_reuse` 后同一 VM 再执行该脚本，结果相同，资源再次归零。字节数来自 RSS 返回值和宿主读盘，文档不写死计数。
+
+`io_policy_authorizes_only_the_test_root` 拒绝授权根以外的路径。`io_policy_rejects_write_when_allow_write_is_false` 在 `allow_write=false` 时拒绝写，且不创建文件。两条失败路径结束后资源与 pending IO 操作为 0。
+
+`io::popen` 不调用，`IoPolicy.allow_process` 保持关闭。HTTP 策略只允许测试夹具的 `127.0.0.1` 和当次端口。
 
 测试资源 `xeh.test.probe` 只在 `crates/xeh-host/tests` 注册，用来证明句柄的 wrong-owner 和 close-once。生产 `run_app` 不注册它。
 
@@ -34,7 +38,7 @@ owner 线程 shutdown 先停止准入和后续排程。尚未开跑的 callback 
 
 ## Task 3 仍缺的原语
 
-本任务不实现这些缺口：
+本任务不实现这些缺口。上面的文件往返只覆盖标准 catalog 的夹具读写，不构成下载器。
 
 - Core HTTP 没有把响应体按块交给调用方、且不在 VM 中保留全量字节的下载流。现有 `http::client::request` 返回缓冲 body。`http::client::sse` 是事件流，不能当作图片下载流。
 - 没有 per-thread VM 池、有界进度事件、暂停与完成同时发生的通道，也没有大于 Core 默认缓冲仍能流式落盘的 host。
