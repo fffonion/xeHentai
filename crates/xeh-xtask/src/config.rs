@@ -19,6 +19,25 @@ const CONFIG_KEYS: usize = 25;
 const PUBLIC_KEYS: usize = 21;
 const TASK_KEYS: usize = 14;
 
+fn user_full_task_projection() -> Value {
+    json!({
+        "dir": "downloads",
+        "download_ori": true,
+        "download_thread_cnt": 0,
+        "scan_thread_cnt": 3,
+        "proxy_image": false,
+        "proxy_image_only": true,
+        "ignored_errors": [1006, -5, 1006],
+        "low_speed_threshold": 0.5,
+        "rename_ori": true,
+        "make_archive": true,
+        "delete_task_files": true,
+        "jpn_title": false,
+        "download_range": [[2, 4], [9, 9]],
+        "download_timeout": 2.5,
+    })
+}
+
 fn stamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -107,7 +126,12 @@ fn suite() -> Result<(), String> {
     }
     object_len(defaults.get("config"), CONFIG_KEYS, "config", &mut failures);
     object_len(defaults.get("public"), PUBLIC_KEYS, "public", &mut failures);
-    object_len(defaults.get("task"), TASK_KEYS, "task", &mut failures);
+    object_len(
+        defaults.get("task_projection"),
+        TASK_KEYS,
+        "task_projection",
+        &mut failures,
+    );
 
     // Case 2: a full user document overlays every key.
     let root = fresh_dir("suite-full")?;
@@ -134,7 +158,12 @@ fn suite() -> Result<(), String> {
         json!([1006, -5, 1006]),
         &mut failures,
     );
-    expect(&report, "/task/scan_thread_cnt", json!(3), &mut failures);
+    expect(
+        &report,
+        "/task_projection/scan_thread_cnt",
+        json!(3),
+        &mut failures,
+    );
 
     // Case 3: partial document keeps defaults, explicit empty values survive.
     let root = fresh_dir("suite-partial")?;
@@ -187,7 +216,9 @@ fn suite() -> Result<(), String> {
         failures.push(format!("type error was not rejected: {report}"));
     }
 
-    // Case 7: runtime update merges error codes and keeps the task snapshot.
+    // Case 7: runtime update merges error codes and reports the pure
+    // pre-update task projection. This is a field projection only; the real
+    // task lifecycle belongs to Task5.
     let root = fresh_dir("suite-update")?;
     let config = write_file(&root, "config.json", &fixture("user_full.json")?)?;
     let overlay = write_file(&root, "overlay.json", &fixture("overlay.json")?)?;
@@ -208,9 +239,18 @@ fn suite() -> Result<(), String> {
         json!(2),
         &mut failures,
     );
-    if report.get("task_before") != report.get("task_after") {
-        failures.push("created task snapshot changed after the global update".to_string());
-    }
+    object_len(
+        report.get("task_projection"),
+        TASK_KEYS,
+        "task_projection",
+        &mut failures,
+    );
+    expect(
+        &report,
+        "/task_projection",
+        user_full_task_projection(),
+        &mut failures,
+    );
     expect(
         &report,
         "/presence",
@@ -251,17 +291,20 @@ fn compare(
     deltas: &mut Vec<String>,
 ) -> Vec<String> {
     let mut failures = Vec::new();
-    for key in [
-        "config",
-        "public",
-        "task",
-        "task_before",
-        "task_after",
-        "presence",
+    // `task` in the upstream oracle is a real Task's configuration. The
+    // candidate only exposes `task_projection`, so the explicit mapping below
+    // verifies the 14 projected fields, not task creation or retention.
+    for (original_key, candidate_key) in [
+        ("config", "config"),
+        ("public", "public"),
+        ("task", "task_projection"),
+        ("presence", "presence"),
     ] {
-        let (Some(expected), Some(actual)) = (original.get(key), candidate.get(key)) else {
-            if original.get(key).is_some() {
-                failures.push(format!("{label}: missing {key} in the candidate"));
+        let (Some(expected), Some(actual)) =
+            (original.get(original_key), candidate.get(candidate_key))
+        else {
+            if original.get(original_key).is_some() {
+                failures.push(format!("{label}: missing {candidate_key} in the candidate"));
             }
             continue;
         };
@@ -269,34 +312,36 @@ fn compare(
             (expected.as_object(), actual.as_object())
         else {
             if expected != actual {
-                failures.push(format!("{label}: {key} differs"));
+                failures.push(format!("{label}: {candidate_key} differs"));
             }
             continue;
         };
         for (field, expected_value) in expected_fields {
             let Some(actual_value) = actual_fields.get(field) else {
-                failures.push(format!("{label}: {key}.{field} is missing"));
+                failures.push(format!("{label}: {candidate_key}.{field} is missing"));
                 continue;
             };
             if field == "ignored_errors" {
                 if multiset(expected_value) != multiset(actual_value) {
                     failures.push(format!(
-                        "{label}: {key}.ignored_errors differs: {expected_value} vs {actual_value}"
+                        "{label}: {candidate_key}.ignored_errors differs: {expected_value} vs {actual_value}"
                     ));
                 } else if expected_value != actual_value {
                     deltas.push(format!(
-                        "{label}: {key}.ignored_errors order differs (upstream {expected_value}, rss {actual_value})"
+                        "{label}: {candidate_key}.ignored_errors order differs (upstream {expected_value}, rss {actual_value})"
                     ));
                 }
             } else if expected_value != actual_value {
                 failures.push(format!(
-                    "{label}: {key}.{field} expected {expected_value}, got {actual_value}"
+                    "{label}: {candidate_key}.{field} expected {expected_value}, got {actual_value}"
                 ));
             }
         }
         for field in actual_fields.keys() {
             if !expected_fields.contains_key(field) {
-                failures.push(format!("{label}: {key}.{field} is not produced upstream"));
+                failures.push(format!(
+                    "{label}: {candidate_key}.{field} is not produced upstream"
+                ));
             }
         }
     }
@@ -448,6 +493,9 @@ fn diff() -> Result<(), String> {
         "update",
         &mut deltas,
     ));
+    deltas.push(
+        "task-projection: `task_projection` is a pure 14-key projection of the loaded configuration; comparing it with the upstream real Task configuration verifies projected fields only, not task creation or retention across a global update (Task5 first acceptance item)".to_string(),
+    );
     deltas.push(
         "dir-creation: upstream update_config creates a missing download directory; this configuration layer carries the value only, because the pinned Core io surface has no directory-creation call".to_string(),
     );

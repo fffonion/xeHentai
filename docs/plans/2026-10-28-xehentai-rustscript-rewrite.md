@@ -468,11 +468,11 @@ cargo run -p xeh-xtask -- verify --all --deny-unverified
 2. 写 25 个默认值及固定配置对象测试，包含 null/空数组区别；只加必要的键存在性表示，不建通用递归 schema/value graph。
 3. 用有效配置、空对象、部分覆盖先 RED，再实现 load → decode → 逐字段校验 → defaults overlay。覆盖 false/0/空串/空数组和合法 null，拒绝错误类型/未知键/坏 JSON/错误根类型。
 4. 在两个独立 fixture 根下分别测试默认文件缺失、显式文件缺失、有效文件和坏文件；suite 自行创建输入，不依赖先跑其他测试。目录/路径从入口传入，不写入源文件。
-5. 测配置优先级、ignored_errors 去重与代理更新效果、task 创建后 global update 的快照、getConfig 的 rpc_*/urls 过滤。业务在 RSS；不在此实现完整 RPC server、CLI argv 或 Python 容器内部算法。
-6. 路径转换仅放原版实际阶段：core 目录效果按原版验证；CLI abspath 和参数处理留 Task13，不提前把所有相对路径改绝对路径。
-7. 原版差分使用同份数据，在固定上游临时实例中注入对应配置键并执行原函数；新实现读取 JSON 文件。RPC 期望调用真实原方法，不手工构造 applied 等结果；快照先建 task、再更新同 app、再读真实对象。
+5. 测配置优先级、ignored_errors 去重、代理配置字段更新、task 允许项的纯字段投影、getConfig 的 rpc_*/urls 过滤。Task4不声称已验证真实Task对象的快照；该状态测试是Task5首项。代理池实际副作用在Task8验证。业务在RSS，不在此实现完整RPC server、CLI argv或Python容器内部算法。
+6. 路径转换仅放原版实际阶段：目录创建能力由Task10的os/fs owner承接并真实验证缺失/已存在/失败路径，完成前不开放公开配置更新；CLI abspath和参数处理留Task13，不提前把所有相对路径改绝对路径。
+7. 原版差分使用同份数据，在固定上游临时实例注入配置键并执行原函数；新实现读取JSON。Task4可将RSS纯task_projection与原版真实Task配置字段比较，但不得用同一个before值投影两次来证明状态独立。真正创建Task→更新同app→读取原Task的完整状态证据交Task5首项；RPC公开合同由Task11实际调用原方法验收。
 8. 配置源格式和 ignored_errors 顺序作明确差异单独验收，其余字段严格比较；保留原始输出，不做全局排序/去 null。更新 manifest 范围说明，不删除未完成项来让整产品通过。
-9. 提供简短 config.example.json 和字段文档；发行物无 Python 运行时或运行期 Python 脚本。
+9. 提供简短config.example.json和字段文档；发行物无Python运行时或运行期Python脚本。数组校验使用迭代而非每元素递归，并通过真实入口验证超过Core默认调用深度的合法数组与末项类型错误；不升栈上限或引通用schema。
 
 **验收：** `cargo test -p xeh-host --test config`、真实 `rss-test --suite config` / `diff --suite config`，以及相关既有测试、fmt/strict Clippy。故意改一个默认值应被差分拒绝；提交后准确 HEAD 记录命令和真实退出码。两个全新 fixture 根可分别独立执行 config suite；Task1–3 回归不变，whole-app verify 继续 fail-closed。不要求旧 AST/动态桥/CPython 布局测试，不为已删除目标增补实现。
 
@@ -483,8 +483,9 @@ cargo run -p xeh-xtask -- verify --all --deny-unverified
 **文件：** `app/domain/{task,state,queue}.rss`、`tests/rss/state/**`。
 
 **步骤：**
+- 首项先实现真正Task记录及配置快照回归：在同一控制app创建Task，随后更新global config，再读取原Task；对照固定上游实际对象，包含14个基准键、任务覆盖及额外task字段。纯字段投影测试不替代该生命周期证明。
 - 逐个 state 转换和错误码测试，覆盖 add/del/pause/resume。
-- 增加 GUID 注入、任务配置快照、未知任务、运行中禁止删除等行为。
+- 增加GUID注入、未知任务、运行中禁止删除等行为；配置快照沿用本Task首项真实对象测试。
 - 给异步命令引入 epoch；暂停与旧成功回报竞态不得重开任务。
 - 区分逻辑任务状态与在途 worker 生命周期；公开数字保持原值。
 
@@ -526,6 +527,7 @@ cargo run -p xeh-xtask -- verify --all --deny-unverified
 **文件：** `crates/xeh-host/src/net/{connectors,dns,client}.rs`、`app/proxy/{pool,policy,glype}.rss`、`tests/rss/proxy/**`、`crates/xeh-host/tests/transport.rs`。
 
 **步骤：**
+- 承接Task4仅字段对照留下的代理池副作用：原版oracle记录真实pool状态，新实现经实际pool操作比对；仅proxy配置JSON相同不能证明替换/追加/失效行为。
 - 为每种代理创建本地协议 server，断言实际经过代理及 DNS 端点；HTTP CONNECT、HTTPS 代理的 TLS 分层分别测试。
 - 默认先首个可用，再错误计分、阈值、永久失效、封禁到期、池空处理。
 - 页面/图片路由含重定向；防止隐式直连及全局环境代理影响。
@@ -556,6 +558,7 @@ cargo run -p xeh-xtask -- verify --all --deny-unverified
 **文件：** `app/domain/{naming,archive}.rss`、`crates/xeh-host/src/os/fs.rs`、`crates/xeh-host/src/media/{mod,archive}.rs`、`tests/rss/download/naming*`、`crates/xeh-host/tests/gallery.rs`。
 
 **步骤：**
+- 承接Task4目录能力：由crates/xeh-host/src/os/fs.rs owner按Core优先规则实现最小必要能力，真实覆盖目录创建、已存在目录和失败。完成前Task11不得开放配置更新；差分须观测文件系统，不能只比较路径字段。
 - 从序号临时名到原文件名/扩展名，测试千页、Unicode、冲突互换和中途退出。
 - 测目录已有零字节/非零文件、.xehdone、已有 ZIP 和跨文件系统移动。
 - ZIP64、STORE、条目排序、注释和删除目录；大文件测试用流式构造夹具，避免将全部字节放内存。
@@ -565,12 +568,13 @@ cargo run -p xeh-xtask -- verify --all --deny-unverified
 
 ### Task 11：JSON-RPC 全方法兼容
 
-**依赖：** Task 4、5、6、9。
+**依赖：** Task 4、5、6、9、10。
 
 **文件：** `crates/xeh-host/src/net/server.rs`、`app/rpc/{dispatch,codec,methods,views}.rss`、`tests/rss/rpc/**`、`compat/fixtures/rpc/**`。
 
 **步骤：**
-- 先实现真实 HTTP server → typed RPC envelope → RSS dispatch → wire result 的闭环。
+- 先实现真实HTTP server → typed RPC envelope → RSS dispatch → wire result闭环；目录能力须先由Task10完成，代理池行为须已由Task8验证，不能将Task4字段对照当副作用完成。
+- updateConfig独立对照rpc_*/urls过滤、缺proxy的no-op、含proxy但缺dir的原异常或经批准差异。内部typed helper支持部分更新不代表公开异常差异已获接受。开放可变长ignored_errors更新前，使用现成Core查找结构保序去重或明确测试域预算，避免直接暴露内部O(n²)扫描。
 - 为本计划列出的 13 个方法各写成功/错误/缺参数/鉴权用例，不能用大而化之的单个 smoke 替代。
 - 逐项比较 HTTP 状态、error/result、id、null、任务字段、state 名称和 !level。
 - 默认只实现原版支持面，batch/notification 的任何扩展单独 version；敏感日志修复显式记录。
@@ -676,7 +680,7 @@ Task 1+2+4+5 → Task 7
 Task 3+4+7 → Task 8
 Task 3+5+7+8 → Task 9
 Task 6+9 → Task 10
-Task 4+5+6+9 → Task 11
+Task 4+5+6+9+10 → Task 11
 Task 10+11 → Task 12
 Task 4+6+9+11 → Task 13
 Task 2+4+6+13 → Task 14

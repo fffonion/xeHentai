@@ -75,6 +75,44 @@ fn golden_defaults() -> Value {
     golden.get("keys").cloned().expect("golden keys")
 }
 
+fn default_task_projection() -> Value {
+    json!({
+        "dir": ".",
+        "download_ori": false,
+        "download_thread_cnt": 5,
+        "scan_thread_cnt": 1,
+        "proxy_image": true,
+        "proxy_image_only": false,
+        "ignored_errors": [],
+        "low_speed_threshold": 10,
+        "rename_ori": false,
+        "make_archive": false,
+        "delete_task_files": false,
+        "jpn_title": true,
+        "download_range": null,
+        "download_timeout": 10,
+    })
+}
+
+fn user_full_task_projection() -> Value {
+    json!({
+        "dir": "downloads",
+        "download_ori": true,
+        "download_thread_cnt": 0,
+        "scan_thread_cnt": 3,
+        "proxy_image": false,
+        "proxy_image_only": true,
+        "ignored_errors": [1006, -5, 1006],
+        "low_speed_threshold": 0.5,
+        "rename_ori": true,
+        "make_archive": true,
+        "delete_task_files": true,
+        "jpn_title": false,
+        "download_range": [[2, 4], [9, 9]],
+        "download_timeout": 2.5,
+    })
+}
+
 fn object_keys(value: &Value) -> Vec<String> {
     let mut keys: Vec<String> = value.as_object().expect("object").keys().cloned().collect();
     keys.sort();
@@ -93,7 +131,10 @@ fn assert_rejected(report: &Value, expected_error: &str) {
         "a rejected document must not publish a config: {report}"
     );
     assert!(report.get("public").is_some_and(Value::is_null), "{report}");
-    assert!(report.get("task").is_some_and(Value::is_null), "{report}");
+    assert!(
+        report.get("task_projection").is_some_and(Value::is_null),
+        "{report}"
+    );
 }
 
 #[test]
@@ -116,13 +157,13 @@ fn defaults_match_the_accepted_golden() {
         object_keys(report.get("public").unwrap()).len(),
         PUBLIC_KEYS
     );
-    assert_eq!(object_keys(report.get("task").unwrap()).len(), TASK_KEYS);
-
-    assert_eq!(report["task"]["dir"], json!("."));
-    assert_eq!(report["task"]["ignored_errors"], json!([]));
-    assert_eq!(report["task"]["download_range"], Value::Null);
-    assert_eq!(report["task"]["download_timeout"], json!(10));
-    assert_eq!(report["task"]["download_thread_cnt"], json!(5));
+    let projection = report.get("task_projection").expect("task projection");
+    assert_eq!(object_keys(projection).len(), TASK_KEYS);
+    assert_eq!(
+        projection,
+        &default_task_projection(),
+        "the projection must be the independent 14-key expectation, not a second call of the same function"
+    );
 }
 
 #[test]
@@ -194,17 +235,9 @@ fn explicit_file_overrides_defaults_without_truthiness() {
     assert_eq!(config["save_tasks"], json!(true));
     assert_eq!(config["low_speed_threshold"], json!(0.5));
 
-    let task = report.get("task").expect("task snapshot");
-    assert_eq!(task["dir"], json!("downloads"));
-    assert_eq!(task["download_ori"], json!(true));
-    assert_eq!(task["download_thread_cnt"], json!(0));
-    assert_eq!(task["scan_thread_cnt"], json!(3));
-    assert_eq!(task["proxy_image"], json!(false));
-    assert_eq!(task["proxy_image_only"], json!(true));
-    assert_eq!(task["ignored_errors"], json!([1006, -5, 1006]));
-    assert_eq!(task["low_speed_threshold"], json!(0.5));
-    assert_eq!(task["download_range"], json!([[2, 4], [9, 9]]));
-    assert_eq!(task["download_timeout"], json!(2.5));
+    let projection = report.get("task_projection").expect("task projection");
+    assert_eq!(object_keys(projection).len(), TASK_KEYS);
+    assert_eq!(projection, &user_full_task_projection());
 }
 
 #[test]
@@ -344,8 +377,181 @@ fn load_default_with_path(root: &Path, path: &Path) -> Value {
     load_explicit(root, path)
 }
 
+/// Twice the Core default script call depth (1024), so per-element recursion
+/// exhausts the 1024-frame limit.
+///
+/// The generated documents stay far below the 4 MiB configuration input
+/// limit, and these tests never perform network or directory operations.
+const LARGE_ARRAY_ITEMS: usize = 2048;
+
+fn large_proxy_document() -> Value {
+    let values: Vec<Value> = (0..LARGE_ARRAY_ITEMS)
+        .map(|index| json!(format!("socks5h://127.0.0.1:{}", 1080 + index)))
+        .collect();
+    json!({ "proxy": values })
+}
+
+fn large_ignored_errors_document() -> Value {
+    let values: Vec<Value> = (0..LARGE_ARRAY_ITEMS)
+        .map(|index| json!(index as i64 - 1024))
+        .collect();
+    json!({ "ignored_errors": values })
+}
+
+fn large_download_range_document() -> Value {
+    let values: Vec<Value> = (0..LARGE_ARRAY_ITEMS)
+        .map(|index| json!([index, index + 1]))
+        .collect();
+    json!({ "download_range": values })
+}
+
 #[test]
-fn runtime_update_merges_ignored_errors_and_keeps_the_task_snapshot() {
+fn large_proxy_array_validates_every_element_without_call_depth() {
+    let root = TestRoot::create();
+    let path = write_file(
+        root.path(),
+        "large_proxy.json",
+        &large_proxy_document().to_string(),
+    );
+    let report = load_explicit(root.path(), &path);
+    assert_eq!(
+        report.get("ok"),
+        Some(&Value::Bool(true)),
+        "a 2048-entry proxy array must load: {report}"
+    );
+    let proxy = report["config"]["proxy"]
+        .as_array()
+        .expect("proxy must stay an array");
+    assert_eq!(proxy.len(), LARGE_ARRAY_ITEMS);
+    assert_eq!(proxy[0], json!("socks5h://127.0.0.1:1080"));
+    assert_eq!(
+        proxy[LARGE_ARRAY_ITEMS - 1],
+        json!(format!(
+            "socks5h://127.0.0.1:{}",
+            1080 + LARGE_ARRAY_ITEMS - 1
+        ))
+    );
+
+    let mut invalid = large_proxy_document();
+    invalid["proxy"].as_array_mut().expect("proxy array")[LARGE_ARRAY_ITEMS - 1] = json!(2048);
+    let path = write_file(
+        root.path(),
+        "large_proxy_invalid.json",
+        &invalid.to_string(),
+    );
+    let report = load_explicit(root.path(), &path);
+    assert_rejected(&report, "type:proxy");
+}
+
+#[test]
+fn large_ignored_errors_array_validates_every_element_without_call_depth() {
+    let root = TestRoot::create();
+    let path = write_file(
+        root.path(),
+        "large_ignored_errors.json",
+        &large_ignored_errors_document().to_string(),
+    );
+    let report = load_explicit(root.path(), &path);
+    assert_eq!(
+        report.get("ok"),
+        Some(&Value::Bool(true)),
+        "a 2048-entry ignored_errors array must load: {report}"
+    );
+    let errors = report["config"]["ignored_errors"]
+        .as_array()
+        .expect("ignored_errors must stay an array");
+    assert_eq!(errors.len(), LARGE_ARRAY_ITEMS);
+    assert_eq!(errors[0], json!(-1024));
+    assert_eq!(
+        errors[LARGE_ARRAY_ITEMS - 1],
+        json!((LARGE_ARRAY_ITEMS - 1) as i64 - 1024)
+    );
+
+    let mut invalid = large_ignored_errors_document();
+    invalid["ignored_errors"]
+        .as_array_mut()
+        .expect("ignored_errors array")[LARGE_ARRAY_ITEMS - 1] = json!("1006");
+    let path = write_file(
+        root.path(),
+        "large_ignored_errors_invalid.json",
+        &invalid.to_string(),
+    );
+    let report = load_explicit(root.path(), &path);
+    assert_rejected(&report, "type:ignored_errors");
+}
+
+#[test]
+fn large_download_range_array_validates_every_element_without_call_depth() {
+    let root = TestRoot::create();
+    let path = write_file(
+        root.path(),
+        "large_download_range.json",
+        &large_download_range_document().to_string(),
+    );
+    let report = load_explicit(root.path(), &path);
+    assert_eq!(
+        report.get("ok"),
+        Some(&Value::Bool(true)),
+        "a 2048-entry download_range array must load: {report}"
+    );
+    let ranges = report["config"]["download_range"]
+        .as_array()
+        .expect("download_range must stay an array");
+    assert_eq!(ranges.len(), LARGE_ARRAY_ITEMS);
+    assert_eq!(ranges[0], json!([0, 1]));
+    assert_eq!(
+        ranges[LARGE_ARRAY_ITEMS - 1],
+        json!([LARGE_ARRAY_ITEMS - 1, LARGE_ARRAY_ITEMS])
+    );
+
+    let mut invalid = large_download_range_document();
+    invalid["download_range"]
+        .as_array_mut()
+        .expect("download_range array")[LARGE_ARRAY_ITEMS - 1] = json!([2048, "end"]);
+    let path = write_file(
+        root.path(),
+        "large_download_range_invalid.json",
+        &invalid.to_string(),
+    );
+    let report = load_explicit(root.path(), &path);
+    assert_rejected(&report, "type:download_range");
+}
+
+#[test]
+fn envelope_errors_use_the_task_projection_field() {
+    let root = TestRoot::create();
+
+    let report = scenario(
+        root.path(),
+        json!({ "op": "unknown", "base": root.path().to_str().expect("utf-8 root") }),
+    );
+    assert_eq!(report.get("ok"), Some(&Value::Bool(false)), "{report}");
+    assert_eq!(
+        report.get("error").and_then(Value::as_str),
+        Some("unknown_op:unknown"),
+        "{report}"
+    );
+    assert!(report.get("task").is_none(), "{report}");
+    assert!(
+        report.get("task_projection").is_some_and(Value::is_null),
+        "{report}"
+    );
+
+    let report = scenario(root.path(), json!({ "op": "load" }));
+    assert_eq!(
+        report.get("error").and_then(Value::as_str),
+        Some("type:base"),
+        "{report}"
+    );
+    assert!(report.get("task").is_none(), "{report}");
+    assert!(
+        report.get("task_projection").is_some_and(Value::is_null),
+        "{report}"
+    );
+}
+
+#[test]
+fn runtime_update_reports_effective_config_and_pre_update_task_projection() {
     let root = TestRoot::create();
     let config = write_file(root.path(), "config.json", &fixture_text("user_full.json"));
     let overlay = write_file(root.path(), "overlay.json", &fixture_text("overlay.json"));
@@ -360,9 +566,19 @@ fn runtime_update_merges_ignored_errors_and_keeps_the_task_snapshot() {
     );
 
     assert_eq!(report.get("ok"), Some(&Value::Bool(true)), "{report}");
-    let before = report.get("task_before").expect("task_before");
-    let after = report.get("task_after").expect("task_after");
-    assert_eq!(before, after, "a created task keeps its snapshot");
+    for legacy in ["task", "task_before", "task_after"] {
+        assert!(
+            report.get(legacy).is_none(),
+            "the self-referential {legacy} field must not be reported: {report}"
+        );
+    }
+    let projection = report.get("task_projection").expect("pure task projection");
+    assert_eq!(object_keys(projection).len(), TASK_KEYS);
+    assert_eq!(
+        projection,
+        &user_full_task_projection(),
+        "the update report projects the pre-update document; this is a field projection only, not a task lifecycle assertion"
+    );
 
     assert_eq!(
         report["config"]["proxy"],

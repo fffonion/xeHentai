@@ -9,7 +9,7 @@ use self::types;
 
 fn error_report(error: string) -> string {
     "{\"ok\":false,\"error\":" + json::encode(error)
-        + ",\"source\":\"defaults\",\"config\":null,\"public\":null,\"task\":null}"
+        + ",\"source\":\"defaults\",\"config\":null,\"public\":null,\"task_projection\":null}"
 }
 
 pub fn run(request: string) -> string {

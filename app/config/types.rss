@@ -95,19 +95,29 @@ fn default_config() -> Config {
 
 
 fn all_strings(values: array, index: int) -> bool {
-    if index >= values.length => {
-        true
-    } else => {
-        type(values[index].copy()) == "string" && all_strings(values, index + 1)
+    let mut current = index;
+    let mut ok = true;
+    while current < values.length && ok {
+        if type(values[current].copy()) == "string" {
+            current = current + 1;
+        } else {
+            ok = false;
+        }
     }
+    ok
 }
 
 fn all_ints(values: array, index: int) -> bool {
-    if index >= values.length => {
-        true
-    } else => {
-        type(values[index].copy()) == "int" && all_ints(values, index + 1)
+    let mut current = index;
+    let mut ok = true;
+    while current < values.length && ok {
+        if type(values[current].copy()) == "int" {
+            current = current + 1;
+        } else {
+            ok = false;
+        }
     }
+    ok
 }
 
 fn range_pair_ok(values: array, index: int) -> bool {
@@ -120,11 +130,16 @@ fn range_pair_ok(values: array, index: int) -> bool {
 }
 
 fn all_ranges(values: array, index: int) -> bool {
-    if index >= values.length => {
-        true
-    } else => {
-        range_pair_ok(values, index) && all_ranges(values, index + 1)
+    let mut current = index;
+    let mut ok = true;
+    while current < values.length && ok {
+        if range_pair_ok(values, current) {
+            current = current + 1;
+        } else {
+            ok = false;
+        }
     }
+    ok
 }
 
 fn ok_check(config: Config, presence: Presence) -> KeyCheck {
@@ -455,7 +470,7 @@ fn config_json(config: Config) -> string {
 
 fn error_report(error: string) -> string {
     "{\"ok\":false,\"error\":" + json::encode(error)
-        + ",\"source\":\"defaults\",\"config\":null,\"public\":null,\"task\":null}"
+        + ",\"source\":\"defaults\",\"config\":null,\"public\":null,\"task_projection\":null}"
 }
 
 fn success_report(source: string, config: Config) -> string {
@@ -463,7 +478,7 @@ fn success_report(source: string, config: Config) -> string {
     "{\"ok\":true,\"error\":\"\",\"source\":" + json::encode(source)
         + ",\"config\":" + encoded
         + ",\"public\":" + view::public_json(encoded)
-        + ",\"task\":" + snapshot::task_json(encoded)
+        + ",\"task_projection\":" + snapshot::task_projection_json(encoded)
         + "}"
 }
 
@@ -494,6 +509,11 @@ pub fn load_report(base: string, path: string, explicit: bool) -> string {
 }
 
 pub fn update_report(base: string, path: string, explicit: bool, overlay_path: string) -> string {
+    // A runtime update reports the effective configuration after the overlay.
+    // `task_projection` is the fixed 14-key projection of the document loaded
+    // before the overlay: a pure field projection, not a stored task snapshot.
+    // Creating a real task, updating the global configuration in the same app
+    // and reading the original task configuration remains Task5's first item.
     let resolved = load::resolve(base, path, explicit);
     let mut report = "";
     if resolved.exists.copy() == false && resolved.explicit.copy() {
@@ -519,14 +539,12 @@ pub fn update_report(base: string, path: string, explicit: bool, overlay_path: s
             if applied.error.copy() != "" {
                 report = error_report(applied.error.copy());
             } else {
-                let before = config_json(loaded.config.copy());
+                let projection_source = config_json(loaded.config.copy());
                 let after = config_json(applied.config);
                 report = "{\"ok\":true,\"error\":\"\",\"source\":\"file\""
                     + ",\"config\":" + after.copy()
                     + ",\"public\":" + view::public_json(after)
-                    + ",\"task\":" + snapshot::task_json(before.copy())
-                    + ",\"task_before\":" + snapshot::task_json(before.copy())
-                    + ",\"task_after\":" + snapshot::task_json(before)
+                    + ",\"task_projection\":" + snapshot::task_projection_json(projection_source)
                     + ",\"presence\":" + presence_json(applied.presence.copy())
                     + "}";
             }

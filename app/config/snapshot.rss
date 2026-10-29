@@ -1,7 +1,10 @@
-//! Task-level configuration snapshot.
+//! Pure task-level configuration projection.
 //!
-//! `xeHentai.add_task` copies this fixed subset of the global configuration
-//! when the task is created. Later global updates do not change the snapshot.
+//! `xeHentai.add_task` copies this fixed subset of the global configuration.
+//! This module only projects those 14 keys from a configuration value: it does
+//! not create, store, or read a task object, and it does not assert that a real
+//! task keeps its configuration across a global update. That lifecycle is the
+//! first acceptance item of Task5.
 use json;
 
 fn bool_json(config: map, key: string) -> string {
@@ -58,7 +61,7 @@ fn ranges_json(config: map, key: string) -> string {
     }
 }
 
-pub fn task_json(config_json: string) -> string {
+pub fn task_projection_json(config_json: string) -> string {
     let config: map = json::decode::<map>(config_json);
     let mut out = "{\"dir\":";
     out = out + string_json(config, "dir");

@@ -54,6 +54,12 @@ never uses truthiness to skip a supplied value.
 `download_range` pairs must contain exactly two integers. `ignored_errors`
 accepts any integer, including negative values.
 
+`proxy`, `ignored_errors`, and every `download_range` pair are validated by
+iteration, not by one script call per element. The entry is regression-tested
+with 2048-element arrays (a valid document and a wrong final element for each
+field) while remaining below the 4 MiB input limit. The Core call-depth limit
+and JIT configuration are unchanged.
+
 A minimal example is `config.example.json`.
 
 ## Overlays
@@ -75,12 +81,31 @@ presence is tracked for the effects that depend on it: `proxy`, `dir`, and
   current list unchanged, matching the upstream `if cfg_dict['ignored_errors']`
   behavior.
 
-## Views
+## Views and scope handoffs
 
 - `getConfig` hides the four `rpc_*` keys and `urls`. The fixed record has no
   `urls` key, so the public view has 21 keys.
-- A task snapshot copies the 14 keys used by `add_task` when the task is
-  created. Later global updates do not change that snapshot.
+- `task_projection` is a pure 14-key projection of a configuration document.
+  It contains the fixed subset that `add_task` copies, but Task4 does not
+  create, store, or read a task object, and it does not verify that a real task
+  keeps its configuration across a global update. Creating a task, updating the
+  global configuration in the same app, and then reading the original task
+  configuration is Task5's first acceptance item.
+- The runtime update operation is an internal typed helper for the fixed
+  record. Its partial-presence behavior is not an accepted public `updateConfig`
+  contract. Task11 must verify `rpc_*`/`urls` filtering, the missing-`proxy`
+  no-op, and the original exception (or an approved explicit difference) when
+  `proxy` is present without `dir`. Task11 depends on Task10 and Task8.
+- Download directory creation is owned by Task10
+  (`crates/xeh-host/src/os/fs.rs`), including missing, already-existing, and
+  failure paths. Public configuration updates must stay closed until that owner
+  completes.
+- Proxy pool side effects (replacement, append, expiry) are Task8. Task4
+  reports configuration fields only.
+- The order-preserving `ignored_errors` merge is an internal helper with an
+  O(n^2) scan. Before Task11 opens variable-length updates, it must use the
+  existing Core lookup structure or an explicitly tested domain budget. No
+  arbitrary-size performance claim is made here.
 
 ## Errors
 
@@ -96,7 +121,8 @@ stable strings:
 
 `crates/xeh-host/tests/config.rs` exercises the full path through the real
 RustScript entry, including defaults, file overlays, partial documents, error
-rejection, runtime updates, snapshots, and two independent fixture roots.
+rejection, runtime updates, pure task projections, large-array validation, and
+two independent fixture roots.
 
 ## Commands
 

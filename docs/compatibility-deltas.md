@@ -146,7 +146,7 @@
 - 来源：`xeHentai/core.py:29-51`（原版导入 `config.py`）
 - 状态：accepted（计划 §2.3 用户修订）
 - 输入：同一组配置值，原版写成 Python 模块，新实现写成 `config.json` 对象。
-- 实测输出：`diff --suite config` 中两边 25 个字段逐一相同；公开视图 21 个字段、任务快照 14 个字段逐一相同。
+- 实测输出：`diff --suite config` 中两边 25 个字段逐一相同；公开视图 21 个字段、`task_projection` 14 个字段的投影逐一相同。该比较只验证字段投影，不验证任务创建或更新后保留；真实 Task 生命周期是 Task5 首项。
 - 拟定合同：只接受纯 JSON 对象；不执行 `config.py`/`config.rss`，不做 AST 求值或 Python 桥。配置源码执行语义明确移出兼容范围。
 
 ## delta.config-strict-validation
@@ -165,22 +165,23 @@
 - 实测输出：原版 `[1009, -5, -3, 1006]`（CPython set 顺序）；新实现 `[1006, -5, 1009, -3]`（保留首次出现顺序）。
 - 原始记录：`diff --suite config` 的 `compare.json` 与原始输出。
 - 拟定合同：集合语义一致，顺序差异按确定性策略保留并单列；不模拟 CPython hash/probe/resize，也不排序伪装相等。
+- 实现约束：当前 `merge_errors` 是内部 helper，保序去重为 O(n²) 扫描；Task11 开放可变长公开更新前须使用现成 Core 查找结构或明确测试域预算。本轮不声称任意规模性能保证。
 
 ## delta.update-config-presence
 
 - 来源：`xeHentai/core.py:64-71`
-- 状态：accepted（计划 §2.2 第 2 条、§2.3）
+- 状态：open（Task11 公开合同验收；Task4 仅内部 typed helper）
 - 输入：仅含部分键的运行时更新。
-- 实测输出：原版直接索引 `cfg_dict['proxy']`/`cfg_dict['dir']`，缺键会抛 `KeyError`；新实现按存在性应用，缺失键不产生副作用。
-- 拟定合同：保留“只有 proxy 存在才更新代理、ignored_errors 非空才合并”的公开效果，不复制必填索引异常。
+- 实测输出：原版直接索引 `cfg_dict['proxy']`/`cfg_dict['dir']`，缺键会抛 `KeyError`；Task4 的内部 typed helper 按存在性应用，缺失键不产生副作用。
+- 拟定合同：Task4 只定义内部 helper 语义（`proxy`/`dir`/`ignored_errors` 的 presence），不把公开 `KeyError` 差异当作已接受。Task11 须独立对照 `rpc_*`/`urls` 过滤、缺 `proxy` 的 no-op、含 `proxy` 但缺 `dir` 的原异常或经批准的显式差异；依赖 Task10 与 Task8 完成。
 
 ## delta.config-dir-creation
 
 - 来源：`xeHentai/core.py:80-84`
-- 状态：open-gap（Core IO 能力缺口）
+- 状态：open-gap（Task10 os/fs owner）
 - 输入：`update_config` 携带一个不存在的 `dir`。
-- 实测输出：原版调用 `os.makedirs` 创建目录；新实现只更新配置值。当前 pin 的 Core `io` 仅提供 open/read/write/flush/close/exists，没有目录创建调用。
-- 拟定合同：目录创建留给后续文件 I/O 范围处理；本轮不新增 host function 绕过 Core 能力边界。`diff --suite config` 将该差异输出为 `dir-creation` delta，未计为字段不一致。
+- 实测输出：原版调用 `os.makedirs` 创建目录；Task4 只更新配置值。当前 pin 的 Core `io` 仅提供 open/read/write/flush/close/exists，没有目录创建调用。
+- 拟定合同：由 Task10 的 `crates/xeh-host/src/os/fs.rs` owner 按 Core 优先规则实现最小目录创建能力，真实验证目录不存在、已存在和失败路径；完成前不开放公开配置更新。本轮不新增 native mkdir 或 host function 扩大范围。`diff --suite config` 仍将该差异输出为 `dir-creation` delta，不视为已验证。
 
 ## delta.core-trace-jit-default
 
