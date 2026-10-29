@@ -1,0 +1,536 @@
+//! Fixed configuration record, known-key validation, overlays, and reports.
+//!
+//! The 25 configured values are a fixed named record. A JSON document is
+//! validated key by key and applied over the built-in defaults; unknown keys
+//! and type errors are rejected. Optional fields are the only nullable values.
+//! Reports are rendered here so the entry stays a thin wire adapter.
+use json;
+
+use self::defaults;
+use self::load;
+use self::merge;
+use self::snapshot;
+use self::view;
+
+struct Config {
+    daemon: bool,
+    dir: string,
+    download_ori: bool,
+    jpn_title: bool,
+    rename_ori: bool,
+    proxy: [string],
+    proxy_image: bool,
+    proxy_image_only: bool,
+    rpc_interface: string,
+    rpc_port: int?,
+    rpc_secret: string?,
+    rpc_open_browser: bool,
+    make_archive: bool,
+    download_range: [[int]]?,
+    scan_thread_cnt: int,
+    download_thread_cnt: int,
+    download_timeout: number,
+    ignored_errors: [int],
+    log_path: string,
+    log_verbose: int,
+    save_tasks: bool,
+    delete_task_files: bool,
+    low_speed_threshold: number,
+    auto_update: string,
+    update_beta_channel: bool,
+}
+
+/// Keys of a runtime update whose side effects depend on their presence.
+struct Presence {
+    proxy: bool,
+    dir: bool,
+    ignored_errors: bool,
+}
+
+struct KeyCheck {
+    ok: bool,
+    config: Config,
+    presence: Presence,
+    error: string,
+}
+
+struct MergeOutcome {
+    config: Config,
+    presence: Presence,
+    error: string,
+}
+
+fn default_config() -> Config {
+    {
+        daemon: defaults::daemon(),
+        dir: defaults::dir(),
+        download_ori: defaults::download_ori(),
+        jpn_title: defaults::jpn_title(),
+        rename_ori: defaults::rename_ori(),
+        proxy: defaults::proxy(),
+        proxy_image: defaults::proxy_image(),
+        proxy_image_only: defaults::proxy_image_only(),
+        rpc_interface: defaults::rpc_interface(),
+        rpc_port: defaults::rpc_port(),
+        rpc_secret: defaults::rpc_secret(),
+        rpc_open_browser: defaults::rpc_open_browser(),
+        make_archive: defaults::make_archive(),
+        download_range: defaults::download_range(),
+        scan_thread_cnt: defaults::scan_thread_cnt(),
+        download_thread_cnt: defaults::download_thread_cnt(),
+        download_timeout: defaults::download_timeout(),
+        ignored_errors: defaults::ignored_errors(),
+        log_path: defaults::log_path(),
+        log_verbose: defaults::log_verbose(),
+        save_tasks: defaults::save_tasks(),
+        delete_task_files: defaults::delete_task_files(),
+        low_speed_threshold: defaults::low_speed_threshold(),
+        auto_update: defaults::auto_update(),
+        update_beta_channel: defaults::update_beta_channel(),
+    }
+}
+
+
+
+
+
+fn all_strings(values: array, index: int) -> bool {
+    if index >= values.length => {
+        true
+    } else => {
+        type(values[index].copy()) == "string" && all_strings(values, index + 1)
+    }
+}
+
+fn all_ints(values: array, index: int) -> bool {
+    if index >= values.length => {
+        true
+    } else => {
+        type(values[index].copy()) == "int" && all_ints(values, index + 1)
+    }
+}
+
+fn range_pair_ok(values: array, index: int) -> bool {
+    if type(values[index].copy()) == "array" => {
+        let pair: array = values[index].copy();
+        pair.length == 2 && all_ints(pair, 0)
+    } else => {
+        false
+    }
+}
+
+fn all_ranges(values: array, index: int) -> bool {
+    if index >= values.length => {
+        true
+    } else => {
+        range_pair_ok(values, index) && all_ranges(values, index + 1)
+    }
+}
+
+fn ok_check(config: Config, presence: Presence) -> KeyCheck {
+    { ok: true, config: config, presence: presence, error: "" }
+}
+
+fn fail_check(config: Config, presence: Presence, error: string) -> KeyCheck {
+    { ok: false, config: config, presence: presence, error: error }
+}
+
+
+fn merge_error(fallback: Config, error: string) -> MergeOutcome {
+    {
+        config: fallback,
+        presence: { proxy: false, dir: false, ignored_errors: false },
+        error: error,
+    }
+}
+
+fn apply_document(base: Config, raw: map) -> MergeOutcome {
+    let document = raw;
+    let mut config = base.copy();
+    let mut presence: Presence = { proxy: false, dir: false, ignored_errors: false };
+    let mut error = "";
+    let names = (&document).keys;
+    for index in 0..names.length {
+        let key: string = names[index].copy();
+        let checked = if key == "daemon" => {
+        if type(document[key].copy()) == "bool" => {
+            let mut next = config.copy();
+            next.daemon = document[key].copy();
+            ok_check(next, presence)
+        } else => {
+            fail_check(config, presence, "type:daemon")
+        }
+    } else if key == "dir" => {
+        if type(document[key].copy()) == "string" => {
+            let mut next = config.copy();
+            next.dir = document[key].copy();
+            let mut next_presence = presence.copy();
+            next_presence.dir = true;
+            ok_check(next, next_presence)
+        } else => {
+            fail_check(config, presence, "type:dir")
+        }
+    } else if key == "download_ori" => {
+        if type(document[key].copy()) == "bool" => {
+            let mut next = config.copy();
+            next.download_ori = document[key].copy();
+            ok_check(next, presence)
+        } else => {
+            fail_check(config, presence, "type:download_ori")
+        }
+    } else if key == "jpn_title" => {
+        if type(document[key].copy()) == "bool" => {
+            let mut next = config.copy();
+            next.jpn_title = document[key].copy();
+            ok_check(next, presence)
+        } else => {
+            fail_check(config, presence, "type:jpn_title")
+        }
+    } else if key == "rename_ori" => {
+        if type(document[key].copy()) == "bool" => {
+            let mut next = config.copy();
+            next.rename_ori = document[key].copy();
+            ok_check(next, presence)
+        } else => {
+            fail_check(config, presence, "type:rename_ori")
+        }
+    } else if key == "proxy" => {
+        if type(document[key].copy()) == "array" => {
+            let values: array = document[key].copy();
+            if all_strings(values, 0) => {
+                let proxy: [string] = document[key].copy();
+                let mut next = config.copy();
+                next.proxy = proxy;
+                let mut next_presence = presence.copy();
+                next_presence.proxy = true;
+                ok_check(next, next_presence)
+            } else => {
+                fail_check(config, presence, "type:proxy")
+            }
+        } else => {
+            fail_check(config, presence, "type:proxy")
+        }
+    } else if key == "proxy_image" => {
+        if type(document[key].copy()) == "bool" => {
+            let mut next = config.copy();
+            next.proxy_image = document[key].copy();
+            ok_check(next, presence)
+        } else => {
+            fail_check(config, presence, "type:proxy_image")
+        }
+    } else if key == "proxy_image_only" => {
+        if type(document[key].copy()) == "bool" => {
+            let mut next = config.copy();
+            next.proxy_image_only = document[key].copy();
+            ok_check(next, presence)
+        } else => {
+            fail_check(config, presence, "type:proxy_image_only")
+        }
+    } else if key == "rpc_interface" => {
+        if type(document[key].copy()) == "string" => {
+            let mut next = config.copy();
+            next.rpc_interface = document[key].copy();
+            ok_check(next, presence)
+        } else => {
+            fail_check(config, presence, "type:rpc_interface")
+        }
+    } else if key == "rpc_port" => {
+        if type(document[key].copy()) == "null" => {
+            let mut next = config.copy();
+            next.rpc_port = null;
+            ok_check(next, presence)
+        } else if type(document[key].copy()) == "int" => {
+            let mut next = config.copy();
+            next.rpc_port = document[key].copy();
+            ok_check(next, presence)
+        } else => {
+            fail_check(config, presence, "type:rpc_port")
+        }
+    } else if key == "rpc_secret" => {
+        if type(document[key].copy()) == "null" => {
+            let mut next = config.copy();
+            next.rpc_secret = null;
+            ok_check(next, presence)
+        } else if type(document[key].copy()) == "string" => {
+            let mut next = config.copy();
+            next.rpc_secret = document[key].copy();
+            ok_check(next, presence)
+        } else => {
+            fail_check(config, presence, "type:rpc_secret")
+        }
+    } else if key == "rpc_open_browser" => {
+        if type(document[key].copy()) == "bool" => {
+            let mut next = config.copy();
+            next.rpc_open_browser = document[key].copy();
+            ok_check(next, presence)
+        } else => {
+            fail_check(config, presence, "type:rpc_open_browser")
+        }
+    } else if key == "make_archive" => {
+        if type(document[key].copy()) == "bool" => {
+            let mut next = config.copy();
+            next.make_archive = document[key].copy();
+            ok_check(next, presence)
+        } else => {
+            fail_check(config, presence, "type:make_archive")
+        }
+    } else if key == "download_range" => {
+        if type(document[key].copy()) == "null" => {
+            let mut next = config.copy();
+            next.download_range = null;
+            ok_check(next, presence)
+        } else if type(document[key].copy()) == "array" => {
+            let outer: array = document[key].copy();
+            if all_ranges(outer, 0) => {
+                let ranges: [[int]] = document[key].copy();
+                let mut next = config.copy();
+                next.download_range = ranges;
+                ok_check(next, presence)
+            } else => {
+                fail_check(config, presence, "type:download_range")
+            }
+        } else => {
+            fail_check(config, presence, "type:download_range")
+        }
+    } else if key == "scan_thread_cnt" => {
+        if type(document[key].copy()) == "int" => {
+            let mut next = config.copy();
+            next.scan_thread_cnt = document[key].copy();
+            ok_check(next, presence)
+        } else => {
+            fail_check(config, presence, "type:scan_thread_cnt")
+        }
+    } else if key == "download_thread_cnt" => {
+        if type(document[key].copy()) == "int" => {
+            let mut next = config.copy();
+            next.download_thread_cnt = document[key].copy();
+            ok_check(next, presence)
+        } else => {
+            fail_check(config, presence, "type:download_thread_cnt")
+        }
+    } else if key == "download_timeout" => {
+        if type(document[key].copy()) == "int" || type(document[key].copy()) == "float" => {
+            let mut next = config.copy();
+            next.download_timeout = document[key].copy();
+            ok_check(next, presence)
+        } else => {
+            fail_check(config, presence, "type:download_timeout")
+        }
+    } else if key == "ignored_errors" => {
+        if type(document[key].copy()) == "array" => {
+            let values: array = document[key].copy();
+            if all_ints(values, 0) => {
+                let errors: [int] = document[key].copy();
+                let mut next = config.copy();
+                next.ignored_errors = errors;
+                let mut next_presence = presence.copy();
+                next_presence.ignored_errors = true;
+                ok_check(next, next_presence)
+            } else => {
+                fail_check(config, presence, "type:ignored_errors")
+            }
+        } else => {
+            fail_check(config, presence, "type:ignored_errors")
+        }
+    } else if key == "log_path" => {
+        if type(document[key].copy()) == "string" => {
+            let mut next = config.copy();
+            next.log_path = document[key].copy();
+            ok_check(next, presence)
+        } else => {
+            fail_check(config, presence, "type:log_path")
+        }
+    } else if key == "log_verbose" => {
+        if type(document[key].copy()) == "int" => {
+            let mut next = config.copy();
+            next.log_verbose = document[key].copy();
+            ok_check(next, presence)
+        } else => {
+            fail_check(config, presence, "type:log_verbose")
+        }
+    } else if key == "save_tasks" => {
+        if type(document[key].copy()) == "bool" => {
+            let mut next = config.copy();
+            next.save_tasks = document[key].copy();
+            ok_check(next, presence)
+        } else => {
+            fail_check(config, presence, "type:save_tasks")
+        }
+    } else if key == "delete_task_files" => {
+        if type(document[key].copy()) == "bool" => {
+            let mut next = config.copy();
+            next.delete_task_files = document[key].copy();
+            ok_check(next, presence)
+        } else => {
+            fail_check(config, presence, "type:delete_task_files")
+        }
+    } else if key == "low_speed_threshold" => {
+        if type(document[key].copy()) == "int" || type(document[key].copy()) == "float" => {
+            let mut next = config.copy();
+            next.low_speed_threshold = document[key].copy();
+            ok_check(next, presence)
+        } else => {
+            fail_check(config, presence, "type:low_speed_threshold")
+        }
+    } else if key == "auto_update" => {
+        if type(document[key].copy()) == "string" => {
+            let mut next = config.copy();
+            next.auto_update = document[key].copy();
+            ok_check(next, presence)
+        } else => {
+            fail_check(config, presence, "type:auto_update")
+        }
+    } else if key == "update_beta_channel" => {
+        if type(document[key].copy()) == "bool" => {
+            let mut next = config.copy();
+            next.update_beta_channel = document[key].copy();
+            ok_check(next, presence)
+        } else => {
+            fail_check(config, presence, "type:update_beta_channel")
+        }
+    } else => {
+        fail_check(config, presence, "unknown_key:" + key)
+    };
+        if checked.ok == false {
+            error = checked.error;
+            break;
+        }
+        config = checked.config;
+        presence = checked.presence;
+    }
+    let mut outcome = merge_error(base, "");
+    if error.copy() != "" {
+        outcome = merge_error(base, error);
+    } else {
+        outcome = { config: config, presence: presence, error: "" };
+    }
+    outcome
+}
+
+/// Runtime update: apply present keys, then merge a non-empty error-code list.
+fn apply_update(base: Config, raw: map) -> MergeOutcome {
+    let applied = apply_document(base, raw);
+    let mut outcome = merge_error(base, "");
+    if applied.error.copy() != "" {
+        outcome = merge_error(base, applied.error.copy());
+    } else {
+        let mut config = applied.config.copy();
+        if applied.presence.copy().ignored_errors {
+            if config.ignored_errors.copy().length > 0 {
+                config.ignored_errors = merge::merge_errors(
+                    base.ignored_errors.copy(),
+                    config.ignored_errors.copy()
+                );
+            } else {
+                config.ignored_errors = base.ignored_errors.copy();
+            }
+        }
+        outcome = { config: config, presence: applied.presence.copy(), error: "" };
+    }
+    outcome
+}
+
+fn presence_json(presence: Presence) -> string {
+    json::encode(presence)
+}
+
+fn config_json(config: Config) -> string {
+    let base = json::encode(config);
+    let extras = (if type(config?.rpc_port) == "null" => {
+        ",\"rpc_port\":null"
+    } else => {
+        ""
+    }) + (if type(config?.rpc_secret) == "null" => {
+        ",\"rpc_secret\":null"
+    } else => {
+        ""
+    }) + (if type(config?.download_range) == "null" => {
+        ",\"download_range\":null"
+    } else => {
+        ""
+    });
+    let length = (&base).length;
+    (&base)[0:(length - 1)] + extras + "}"
+}
+
+fn error_report(error: string) -> string {
+    "{\"ok\":false,\"error\":" + json::encode(error)
+        + ",\"source\":\"defaults\",\"config\":null,\"public\":null,\"task\":null}"
+}
+
+fn success_report(source: string, config: Config) -> string {
+    let encoded = config_json(config);
+    "{\"ok\":true,\"error\":\"\",\"source\":" + json::encode(source)
+        + ",\"config\":" + encoded
+        + ",\"public\":" + view::public_json(encoded)
+        + ",\"task\":" + snapshot::task_json(encoded)
+        + "}"
+}
+
+pub fn from_document(raw: map) -> string {
+    let applied = apply_document(default_config(), raw);
+    let mut report = error_report(applied.error.copy());
+    if applied.error == "" {
+        report = success_report("file", applied.config);
+    }
+    report
+}
+
+pub fn load_report(base: string, path: string, explicit: bool) -> string {
+    let resolved = load::resolve(base, path, explicit);
+    let mut report = "";
+    if resolved.exists.copy() == false {
+        if resolved.explicit.copy() {
+            report = error_report("missing_file");
+        } else {
+            report = success_report("defaults", default_config());
+        }
+    } else {
+        let text = load::read_text(resolved.path.copy());
+        let raw = json::decode::<map>(text);
+        report = from_document(raw);
+    }
+    report
+}
+
+pub fn update_report(base: string, path: string, explicit: bool, overlay_path: string) -> string {
+    let resolved = load::resolve(base, path, explicit);
+    let mut report = "";
+    if resolved.exists.copy() == false && resolved.explicit.copy() {
+        report = error_report("missing_file");
+    } else if load::exists(overlay_path) == false {
+        report = error_report("missing_overlay");
+    } else {
+        let loaded = if resolved.exists.copy() => {
+            apply_document(default_config(), json::decode::<map>(load::read_text(resolved.path.copy())))
+        } else => {
+            {
+                config: default_config(),
+                presence: { proxy: false, dir: false, ignored_errors: false },
+                error: "",
+            }
+        };
+        if loaded.error.copy() != "" {
+            report = error_report(loaded.error.copy());
+        } else {
+            let overlay_text = load::read_text(overlay_path);
+            let overlay_raw = json::decode::<map>(overlay_text);
+            let applied = apply_update(loaded.config.copy(), overlay_raw);
+            if applied.error.copy() != "" {
+                report = error_report(applied.error.copy());
+            } else {
+                let before = config_json(loaded.config.copy());
+                let after = config_json(applied.config);
+                report = "{\"ok\":true,\"error\":\"\",\"source\":\"file\""
+                    + ",\"config\":" + after.copy()
+                    + ",\"public\":" + view::public_json(after)
+                    + ",\"task\":" + snapshot::task_json(before.copy())
+                    + ",\"task_before\":" + snapshot::task_json(before.copy())
+                    + ",\"task_after\":" + snapshot::task_json(before)
+                    + ",\"presence\":" + presence_json(applied.presence.copy())
+                    + "}";
+            }
+        }
+    }
+    report
+}

@@ -8,6 +8,8 @@
 
 **Tech Stack:** RustScript / pd-vm；Rust / Tokio 多线程运行时；应用自有 typed host extensions；HTTP 传输采用 reqwest/rustls 并补足 SOCKS4/4a 等连接器；ZIP64、图片缩放、Serde；Python 原版作为测试 oracle，Playwright 驱动冻结的原版 Vue WebUI。
 
+**用户修订：** 配置读取改为简单的纯数据 `config.json` parser，优先直接复用 Core JSON/文件 I/O；取消 Python 配置解析器、AST 求值、动态执行桥和可执行 `config.rss`。Python 仅供原版测试 oracle/离线资料提取使用。Task 1–3 保留，未验收 Task4 已回滚到 `cfbdbe86abb2c6fbd0ee9417613541a15d55154e` 后重做；旧 Task4 实现及 address 合同作废。
+
 ---
 
 ## 1. 调研基线与证据
@@ -104,18 +106,20 @@
 - 尚未实测：明确标为 `unverified`，不能将静态阅读推断写成测试结论。
 - 差异账本未关闭前，项目状态为“兼容迁移中”，不得标为无差异一比一。
 
-### 2.3 用户配置的完整性约束
+### 2.3 用户配置：简单数据 parser
 
-原版 `config.py` 是可执行 Python 模块，允许任意 Python 逻辑。仅写一个键值解析器无法覆盖这个合同。
+按用户最新指示，仅实现常规配置文件读取、类型检查和覆盖，不实现或模拟 Python 语言。配置输入格式变更明确记入兼容差异，取消“任意 config.py 源码兼容”的验收要求。
 
-采用以下分层方式：
-- 新版原生入口为 `config.rss`，默认业务运行无 Python 依赖。
-- 同时保留 `config.py` 发现顺序、变量和公开导入值语义；常量赋值、列表、`import const as __c` 等常见形式可静态导入。
-- 动态 Python 配置通过可选、明确标识为“可信配置执行”的 Python 兼容桥求值，将可序列化有效配置传给 RSS。该桥只处理旧配置，不承载下载逻辑；无法求值时返回具体原因，不静默退回默认值。
-- subprocess 不构成安全沙箱；不得自动运行不可信配置。实施测试只用仓库夹具，用户现有配置不进入采样、日志或差分工件。
-- 静态导入器必须使用实际 Python AST/解析器，不能用正则代替。新版二进制无 Python 环境时，常量子集和动态配置的能力边界须明确提示。
-- 存在 `config.rss` 与 `config.py` 时明确优先选择 `config.rss`，不叠加执行；未迁移用户保持原版路径发现语义。
-- 动态兼容桥及其测试缺失时，不能将“用户配置全兼容”勾选完成。
+- 文件为 `config.json`，根必须是对象。支持现有 25 项配置所需的 string、bool、number（按字段支持 int/float）、null 和数组，不引入新配置 DSL。
+- 优先复用 Core JSON decoder 和文件 I/O，先用真实 RSS compile/bind/run 证明接口。禁止自写 JSON 语法解析器、引入 rustpython-parser 或其他 Python 语法依赖。
+- RSS 只做已知字段映射/校验、defaults overlay 和业务更新。使用固定配置对象及必要的字段存在性标记；不为任意 Python 对象搭建递归值框架、typed arena 或解释器。
+- 入口可传显式路径；否则读当前目录 `config.json`。默认文件不存在时用内建默认；显式路径不存在、JSON 错误、根类型错误、未知键或字段类型错误都明确报错，不忽略坏文件。
+- 缺失键沿用默认；显式 null、false、0、空字符串、空数组依各键原有类型和含义保留，不用 truthy 判断覆盖。
+- 不加载或执行 `config.py`、`config.rss`，不引入 Python 解释器、可信执行开关、子进程管理或 const 表解释器。旧配置由用户把实际设置写成 JSON；提供字段对照与示例，不做自动执行旧代码的迁移工具。
+- 保留 25 个默认值、配置优先级、任务覆盖、公开视图及代理/ignored_errors 的业务效果；配置源码执行语义不纳入重做。
+- `ignored_errors` 按错误码集合合并，采用保留首次出现的确定性顺序；不移植 CPython hash/probe/resize 布局。与原版具体顺序的差异须记账，不靠排序比较器伪装一致。
+- 文件 parser 的已知键策略不改变 RPC 方法自身的参数/过滤/额外字段合同；后者仍在 Task11 按原版请求独立验收。
+- Python 仅作为原版 oracle/离线资源提取工具；这些测试工具沿用官方模块，发行物和新配置读取不依赖 Python。
 
 ### 2.4 规则引擎的实际范围
 
@@ -161,7 +165,7 @@ Rust host：
 - 环境/信号、终端输入、daemon spawn、浏览器启动、文件原子操作。
 - HTTP 客户端和 HTTP 服务端、连接器、TLS、DNS、流式 body。
 - 工作线程、定时、时钟、事件通道和取消原语。
-- JSON 字节边界、Python 旧配置桥、ZIP64、图片解码/缩放、平台文件替换。
+- JSON wire 字节边界、ZIP64、图片解码/缩放、平台文件替换；配置文件读取优先复用 Core I/O，不新增 Python 桥。
 - 公开 host API 均为命名类型/显式可选字段；禁止原始 `map/unknown` host 合同。RPC 任意 JSON 只存在 wire codec 层，解析后立即转 typed DTO。
 
 默认不修改 RustScript Core。只有应用侧 spike 证明公开 SDK 无法满足最小需求，才建立明确的 Core 前置项；单独定义测试、合并依赖和版本 pin。
@@ -211,7 +215,7 @@ update_beta_channel=false
 
 - 基础优先级：内建默认 < 用户配置 < CLI < 交互覆盖；任务创建时保存允许覆盖项的快照。
 - RPC 配置更新保留原有隐藏项：`rpc_*` 与 `urls` 不在公开 get/update 视图中。
-- `ignored_errors` 在 core 更新时的合并行为、用户配置覆盖行为分别测试。
+- `ignored_errors` 的错误码集合合并与用户配置覆盖分别测试；输出顺序依第2.3节确定性策略，原版顺序差异单列，不仿真 CPython 容器。
 - 原 CLI 别名：`-u/--username`、`-k/--key`、`-c/--cookie`、`-i/--interactive`、`--daemon`、`-d/--dir`、`-o/--download-ori`、`-j/--jpn-title`、`-r/--rename-ori`、`-p/--proxy`、`--proxy-image`、`--proxy-image-only`、四个 RPC 选项、`--delete-task-files`、`-a/--archive`、`--download-range`、`-t/--thread`、`--timeout`、`--low-speed-threshold`、`-f/--force`、`--auto-update`、`--update-beta-channel`、`-l/--logpath`、`-v/--verbose`、`-h/--help`、`--version` 和多个 URL。
 - 交互提示顺序、默认值、逗号多 URL、下载范围、daemon 优先于 interactive。
 - 有 URL 时处理队列后退出；无 URL 时继续驻留；POSIX daemon、信号退出、日志 flush 和会话保存。
@@ -344,13 +348,14 @@ crates/xeh-host/src/runtime.rs
 crates/xeh-host/src/catalog.rs
 crates/xeh-host/src/types.rs
 crates/xeh-host/src/net/{mod,client,connectors,dns,stream,server}.rs
-crates/xeh-host/src/os/{mod,fs,signals,daemon,browser,config_bridge}.rs
+crates/xeh-host/src/os/{mod,fs,signals,daemon,browser}.rs
 crates/xeh-host/src/worker/{mod,pool,events,cancellation}.rs
 crates/xeh-host/src/media/{mod,archive,thumbnail}.rs
 crates/xeh-host/src/update/{mod,package,launcher}.rs
 app/main.rss
 app/types.rss
-app/config/{defaults,load,merge,legacy}.rss
+app/config/{types,defaults,load,merge,view,snapshot}.rss
+config.example.json
 app/cli/{parse,interactive,lifecycle}.rss
 app/domain/{task,state,queue,session,naming,archive}.rss
 app/site/{metadata,pages,mpv,image,login}.rss
@@ -452,20 +457,24 @@ cargo run -p xeh-xtask -- verify --all --deny-unverified
 
 **验收：** `cargo test -p xeh-host --test concurrency --test transport`；并发数、队列界限、取消后资源计数有断言。关卡失败时先处理 SDK 缺口，不能开始大量 RSS 迁移掩盖问题。
 
-### Task 4：配置兼容、优先级与旧 Python 配置桥
+### Task 4：简单 JSON 配置读取、覆盖与业务视图（重做）
 
-**依赖：** Task 1、2。
+**依赖：** Task1、2。
 
-**文件：** `app/config/{defaults,load,merge,legacy}.rss`、`crates/xeh-host/src/os/config_bridge.rs`、`compat/oracle/config_runner.py`、`tests/rss/config/**`、`compat/fixtures/config/**`。
+**文件：** `app/config/{types,defaults,load,merge,view,snapshot}.rss`、`config.example.json`、`crates/xeh-host/tests/config.rs`、`compat/fixtures/config/**`、`docs/configuration.md`；按需修改既有 xtask config suite 和测试专用 `compat/oracle/config_runner.py`。不创建 config_bridge/process_bridge/config_arena/legacy_const，不改 Core 或 Task3 worker/net。
 
 **步骤：**
-- 25 个默认值逐个特征化，包含 null 与空列表区别。
-- 逐层覆盖、ignored_errors、proxy append、任务快照、路径绝对化逐项 RED/GREEN。
-- 实现 config.rss；静态旧配置导入和可信动态桥分别测试。
-- 动态桥测试导入 const、计算表达式、环境变量、辅助函数、异常、不可序列化值和无 Python 环境。
-- 定义 getConfig 暴露视图，新增内部配置不意外出现在旧 RPC 中。
+1. 在 lease TEMP 做最小 Core JSON + 文件读取 spike，真实读 fixture 并执行 RSS。仅保留有复用价值的集成测试，一次性 probe 不写入 app/src/tests。实测缺口须回报，不用另一套 parser 绕过。
+2. 写 25 个默认值及固定配置对象测试，包含 null/空数组区别；只加必要的键存在性表示，不建通用递归 schema/value graph。
+3. 用有效配置、空对象、部分覆盖先 RED，再实现 load → decode → 逐字段校验 → defaults overlay。覆盖 false/0/空串/空数组和合法 null，拒绝错误类型/未知键/坏 JSON/错误根类型。
+4. 在两个独立 fixture 根下分别测试默认文件缺失、显式文件缺失、有效文件和坏文件；suite 自行创建输入，不依赖先跑其他测试。目录/路径从入口传入，不写入源文件。
+5. 测配置优先级、ignored_errors 去重与代理更新效果、task 创建后 global update 的快照、getConfig 的 rpc_*/urls 过滤。业务在 RSS；不在此实现完整 RPC server、CLI argv 或 Python 容器内部算法。
+6. 路径转换仅放原版实际阶段：core 目录效果按原版验证；CLI abspath 和参数处理留 Task13，不提前把所有相对路径改绝对路径。
+7. 原版差分使用同份数据，在固定上游临时实例中注入对应配置键并执行原函数；新实现读取 JSON 文件。RPC 期望调用真实原方法，不手工构造 applied 等结果；快照先建 task、再更新同 app、再读真实对象。
+8. 配置源格式和 ignored_errors 顺序作明确差异单独验收，其余字段严格比较；保留原始输出，不做全局排序/去 null。更新 manifest 范围说明，不删除未完成项来让整产品通过。
+9. 提供简短 config.example.json 和字段文档；发行物无 Python 运行时或运行期 Python 脚本。
 
-**验收：** `cargo run -p xeh-xtask -- rss-test --suite config` 与 `diff --suite config`；全部默认和优先级有证据，动态兼容限制明确。
+**验收：** `cargo test -p xeh-host --test config`、真实 `rss-test --suite config` / `diff --suite config`，以及相关既有测试、fmt/strict Clippy。故意改一个默认值应被差分拒绝；提交后准确 HEAD 记录命令和真实退出码。两个全新 fixture 根可分别独立执行 config suite；Task1–3 回归不变，whole-app verify 继续 fail-closed。不要求旧 AST/动态桥/CPython 布局测试，不为已删除目标增补实现。
 
 ### Task 5：任务状态机和公开 API
 
@@ -699,7 +708,7 @@ Task 14+15 → Task 16 → Task 17
 - [ ] 原版 WebUI 的连接、任务、配置、阅读、检索和三语流程通过浏览器测试。
 - [ ] 自动更新具备真实下载、下次启动生效、平台替换和失败回退证据。
 - [ ] i18n key/占位符/错误码/locale 回退无缺项。
-- [ ] 动态旧 Python 配置桥及无 Python 环境边界已明确并验证。
+- [ ] 简单 config.json parser、25 项默认/覆盖/错误提示通过真实 RSS 测试；发行物无 Python 配置解析/执行依赖，配置格式差异已记录。
 - [ ] Linux/macOS/Windows CI、格式、严格 Clippy、全套测试通过。
 - [ ] manifest 无未映射功能、无未验证条目，差异账本已逐项关闭。
 - [ ] 应用业务主体为 RSS，原生宿主职责符合第 3 节边界。
@@ -712,11 +721,11 @@ Task 14+15 → Task 16 → Task 17
 **主要风险及应对：**
 - 旧代码异常与 README 不一致：以固定 revision 的可运行证据为依据，差异单列。
 - RustScript public SDK 能力：先做真实能力关卡；失败就处理明确前置项，不能用虚构标准库 API 继续写应用。
-- 任意 Python 配置与纯 RSS 的边界：采用原生配置 + 明确的可选可信执行桥，避免缩水承诺。
+- 配置格式迁移：简单 JSON 数据文件和字段说明承接实际设置，旧 Python 源码不执行；格式/集合顺序差异明确记录，不再为源码兼容实现解析器或运行时。
 - SOCKS4/4a 与 Glype：单独连接器和本地协议替身，不能用 SOCKS5 测试代替。
 - gallery/归档/rename 竞态：文件租约、epoch 和取消 quiescence 测试。
 - 历史 UI 主机和固定 IP 可能失效：冻结资产、本地测试、可配置来源；不把历史地址可用性当迁移前提。
 - 原版更新包与新版格式不兼容：新版独立可信更新源、明确 host ABI 和版本切换合同。
 - 仅单机 Linux 验证不足：Windows 文件占用和更新流程必须在对应平台执行。
 
-**本计划的验证范围：** 已完成固定 revision 源码及客户端合同调研、RustScript 本地接口阅读与功能枚举；尚未执行原版 oracle、能力 spike、实现测试或平台验收。这些都是实施任务，文中的预期不代表已发生的结果。
+**本计划的验证范围：** 原始版本为源码调研及实施设计。当前 Task1–3 已验收，旧 Task4 已按用户要求回滚，具体历史证据见执行检查点。本次配置修订步骤属于待实施项，计划预期和撤回候选的旧测试均不能当成新 parser 已验证的结果。

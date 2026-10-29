@@ -1,0 +1,118 @@
+//! Public configuration view (`getConfig`).
+//!
+//! The original hides every `rpc_*` key and `urls` from the public view. The
+//! fixed configuration has no `urls` key, so this projection drops exactly the
+//! four RPC keys. Null values are rendered explicitly because Core maps omit
+//! null-valued entries.
+use json;
+
+fn bool_json(config: map, key: string) -> string {
+    if config.has(key) => {
+        let typed: bool = config[key].copy();
+        json::encode(typed)
+    } else => {
+        "null"
+    }
+}
+
+fn int_json(config: map, key: string) -> string {
+    if config.has(key) => {
+        let typed: int = config[key].copy();
+        json::encode(typed)
+    } else => {
+        "null"
+    }
+}
+
+fn number_json(config: map, key: string) -> string {
+    if config.has(key) => {
+        let typed: number = config[key].copy();
+        json::encode(typed)
+    } else => {
+        "null"
+    }
+}
+
+fn string_json(config: map, key: string) -> string {
+    if config.has(key) => {
+        let typed: string = config[key].copy();
+        json::encode(typed)
+    } else => {
+        "null"
+    }
+}
+
+fn strings_json(config: map, key: string) -> string {
+    if config.has(key) => {
+        let typed: [string] = config[key].copy();
+        json::encode(typed)
+    } else => {
+        "null"
+    }
+}
+
+fn ints_json(config: map, key: string) -> string {
+    if config.has(key) => {
+        let typed: [int] = config[key].copy();
+        json::encode(typed)
+    } else => {
+        "null"
+    }
+}
+
+fn ranges_json(config: map, key: string) -> string {
+    if config.has(key) => {
+        let typed: [[int]] = config[key].copy();
+        json::encode(typed)
+    } else => {
+        "null"
+    }
+}
+
+pub fn public_json(config_json: string) -> string {
+    let config: map = json::decode::<map>(config_json);
+    let mut out = "{\"daemon\":";
+    out = out + bool_json(config, "daemon");
+    out = out + ",\"dir\":";
+    out = out + string_json(config, "dir");
+    out = out + ",\"download_ori\":";
+    out = out + bool_json(config, "download_ori");
+    out = out + ",\"jpn_title\":";
+    out = out + bool_json(config, "jpn_title");
+    out = out + ",\"rename_ori\":";
+    out = out + bool_json(config, "rename_ori");
+    out = out + ",\"proxy\":";
+    out = out + strings_json(config, "proxy");
+    out = out + ",\"proxy_image\":";
+    out = out + bool_json(config, "proxy_image");
+    out = out + ",\"proxy_image_only\":";
+    out = out + bool_json(config, "proxy_image_only");
+    out = out + ",\"make_archive\":";
+    out = out + bool_json(config, "make_archive");
+    out = out + ",\"download_range\":";
+    out = out + ranges_json(config, "download_range");
+    out = out + ",\"scan_thread_cnt\":";
+    out = out + int_json(config, "scan_thread_cnt");
+    out = out + ",\"download_thread_cnt\":";
+    out = out + int_json(config, "download_thread_cnt");
+    out = out + ",\"download_timeout\":";
+    out = out + number_json(config, "download_timeout");
+    out = out + ",\"ignored_errors\":";
+    out = out + ints_json(config, "ignored_errors");
+    out = out + ",\"log_path\":";
+    out = out + string_json(config, "log_path");
+    out = out + ",\"log_verbose\":";
+    out = out + int_json(config, "log_verbose");
+    out = out + ",\"save_tasks\":";
+    out = out + bool_json(config, "save_tasks");
+    out = out + ",\"delete_task_files\":";
+    out = out + bool_json(config, "delete_task_files");
+    out = out + ",\"low_speed_threshold\":";
+    out = out + number_json(config, "low_speed_threshold");
+    out = out + ",\"auto_update\":";
+    out = out + string_json(config, "auto_update");
+    out = out + ",\"update_beta_channel\":";
+    out = out + bool_json(config, "update_beta_channel");
+    out = out + "}";
+    out
+}

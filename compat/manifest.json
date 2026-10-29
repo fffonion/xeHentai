@@ -1,4 +1,16 @@
 {
+  "scope_notes": [
+    {
+      "task": 4,
+      "scope": "configuration",
+      "note": "Configuration input is a plain JSON object (see docs/configuration.md). Executable config.py/config.rss, AST evaluation, dynamic Python bridging and CPython container layout are outside the accepted contract. The 25 keys remain tracked individually by config.key.*; this note does not remove or reclassify any outstanding feature.",
+      "tests": [
+        "cargo test -p xeh-host --test config",
+        "cargo run -p xeh-xtask -- rss-test --suite config",
+        "cargo run -p xeh-xtask -- diff --suite config"
+      ]
+    }
+  ],
   "features": [
     {
       "expected": {

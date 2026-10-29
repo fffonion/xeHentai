@@ -1,0 +1,32 @@
+//! Error-code collection merging.
+//!
+//! The merge keeps the first occurrence order: existing entries first, then
+//! new entries in document order. It does not model CPython set layout.
+
+pub fn merge_errors(existing: [int], additions: [int]) -> [int] {
+    let mut out: [int] = [];
+    for index in 0..existing.length {
+        let value = existing[index];
+        if contains_error(out, value) == false {
+            out[out.length] = value;
+        }
+    }
+    for index in 0..additions.length {
+        let value = additions[index];
+        if contains_error(out, value) == false {
+            out[out.length] = value;
+        }
+    }
+    out
+}
+
+fn contains_error(values: [int], needle: int) -> bool {
+    let mut found = false;
+    for index in 0..values.length {
+        if values[index] == needle {
+            found = true;
+            break;
+        }
+    }
+    found
+}

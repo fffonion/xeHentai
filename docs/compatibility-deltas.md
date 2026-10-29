@@ -140,3 +140,52 @@
 - 原始记录：`compat/golden/` 中对应文件。
 - 拟定合同：待批准。应用侧不把该输出当作已实现行为。
 
+
+## delta.config-source-format
+
+- 来源：`xeHentai/core.py:29-51`（原版导入 `config.py`）
+- 状态：accepted（计划 §2.3 用户修订）
+- 输入：同一组配置值，原版写成 Python 模块，新实现写成 `config.json` 对象。
+- 实测输出：`diff --suite config` 中两边 25 个字段逐一相同；公开视图 21 个字段、任务快照 14 个字段逐一相同。
+- 拟定合同：只接受纯 JSON 对象；不执行 `config.py`/`config.rss`，不做 AST 求值或 Python 桥。配置源码执行语义明确移出兼容范围。
+
+## delta.config-strict-validation
+
+- 来源：`xeHentai/core.py:49-51`（原版直接合并任意 Python 属性）
+- 状态：accepted（计划 §2.3）
+- 输入：未知键 `urls`、错误类型（例如 `daemon` 为字符串）、非对象根。
+- 实测输出：新实现分别返回 `unknown_key:urls`、`type:daemon`，非对象根在 Core map 解码处失败；原版不会做这些检查。
+- 拟定合同：新增的显式拒绝属于有意的安全/可诊断性改进；不改变 RPC 方法自身的开放参数合同。
+
+## delta.ignored-errors-order
+
+- 来源：`xeHentai/core.py:67-68`
+- 状态：accepted（计划 §2.3、§4.1）
+- 输入：已有 `[1006, -5, 1006]`，更新 `[1009, 1006, -3]`。
+- 实测输出：原版 `[1009, -5, -3, 1006]`（CPython set 顺序）；新实现 `[1006, -5, 1009, -3]`（保留首次出现顺序）。
+- 原始记录：`diff --suite config` 的 `compare.json` 与原始输出。
+- 拟定合同：集合语义一致，顺序差异按确定性策略保留并单列；不模拟 CPython hash/probe/resize，也不排序伪装相等。
+
+## delta.update-config-presence
+
+- 来源：`xeHentai/core.py:64-71`
+- 状态：accepted（计划 §2.2 第 2 条、§2.3）
+- 输入：仅含部分键的运行时更新。
+- 实测输出：原版直接索引 `cfg_dict['proxy']`/`cfg_dict['dir']`，缺键会抛 `KeyError`；新实现按存在性应用，缺失键不产生副作用。
+- 拟定合同：保留“只有 proxy 存在才更新代理、ignored_errors 非空才合并”的公开效果，不复制必填索引异常。
+
+## delta.config-dir-creation
+
+- 来源：`xeHentai/core.py:80-84`
+- 状态：open-gap（Core IO 能力缺口）
+- 输入：`update_config` 携带一个不存在的 `dir`。
+- 实测输出：原版调用 `os.makedirs` 创建目录；新实现只更新配置值。当前 pin 的 Core `io` 仅提供 open/read/write/flush/close/exists，没有目录创建调用。
+- 拟定合同：目录创建留给后续文件 I/O 范围处理；本轮不新增 host function 绕过 Core 能力边界。`diff --suite config` 将该差异输出为 `dir-creation` delta，未计为字段不一致。
+
+## delta.core-trace-jit-default
+
+- 来源：Core pin `99890b6` 的 `JitConfig::default`
+- 状态：SDK gap（已记录，未修改 Core）
+- 输入：在未启用 `cranelift-jit` 的构建中执行超过热循环阈值的配置键循环。
+- 实测输出：`JitNative("native JIT backend is disabled (feature 'cranelift-jit' is not enabled)")`；默认 `enabled` 在 x86_64 Linux 上为 true。
+- 拟定合同：配置入口在创建 VM 后显式 `set_jit_config(enabled: false)`，保持解释器执行。该工作区不修改 Core 或依赖 pin。

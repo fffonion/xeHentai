@@ -1,11 +1,12 @@
 use std::future::poll_fn;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::task::Poll;
 
 use vm::{
     compile_source_file_with_options, compile_source_with_flavor_and_options, standard_composition,
-    CompileSourceFileOptions, HostApiCatalog, HostFunctionRegistry, Program, SourceFlavor,
-    TimerConfig, TimerHostExt, Value, Vm, VmStatus,
+    CompileSourceFileOptions, HostApiCatalog, HostFunctionRegistry, InvocationItem, InvocationPoll,
+    IoHostExt, IoPolicy, Program, SourceFlavor, TimerConfig, TimerHostExt, Value, Vm, VmStatus,
 };
 
 use crate::bridge::EmbeddingBridge;
@@ -14,9 +15,15 @@ use crate::timer::EmbeddingTimer;
 use crate::types::HostError;
 
 const DRIVE_STEP_LIMIT: usize = 10_000;
+const CONFIG_IO_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 
 pub fn app_main_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../app/main.rss")
+}
+
+/// Entry module for the JSON configuration scenarios.
+pub fn config_entry_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../app/config/entry.rss")
 }
 
 pub fn compile_source_with_catalog(
@@ -139,4 +146,82 @@ async fn run_entry_async(path: &Path) -> Result<i64, HostError> {
     attach_timer(&mut vm, Arc::new(EmbeddingTimer::new()));
     drive_to_halt(&mut vm).await?;
     stack_int(&vm)
+}
+
+/// Runs the exported `run` callable of the configuration entry against one
+/// fixture root.
+///
+/// The root is the only directory the reused Core `io` builtins may read or
+/// write. The request and the returned report are JSON text owned by the
+/// caller; the VM receives no ambient process path.
+pub fn run_config_scenario(root: &Path, request: &str) -> Result<String, HostError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| HostError::runtime(error.to_string()))?;
+    runtime.block_on(run_config_scenario_async(root, request))
+}
+
+async fn run_config_scenario_async(root: &Path, request: &str) -> Result<String, HostError> {
+    let root_text = root
+        .to_str()
+        .ok_or_else(|| HostError::runtime("fixture root is not valid UTF-8"))?;
+    let catalog = standard_catalog();
+    let entry = config_entry_path();
+    let program = compile_file_with_catalog(&entry, Arc::clone(&catalog)).map_err(|error| {
+        HostError::compile(format!("config entry {}: {error}", entry.display()))
+    })?;
+    let mut vm = Vm::try_new(program).map_err(HostError::from_vm)?;
+    // The pinned Core enables trace JIT by default on this platform even when
+    // the `cranelift-jit` feature is absent, which fails hot loops with
+    // `JitNative("native JIT backend is disabled")`. The config entry iterates
+    // over the 25 keys, so keep interpreter-only execution here.
+    vm.set_jit_config(vm::JitConfig {
+        enabled: false,
+        ..Default::default()
+    });
+    let registry = open_registry(&catalog)?;
+    bind_vm(&mut vm, &registry)?;
+    attach_timer(&mut vm, Arc::new(EmbeddingTimer::new()));
+    vm.configure_io(IoPolicy {
+        allowed_roots: vec![root_text.to_string()],
+        allow_write: true,
+        allow_process: false,
+        max_read_bytes: CONFIG_IO_LIMIT_BYTES,
+        max_write_bytes: CONFIG_IO_LIMIT_BYTES,
+    });
+    drive_to_halt(&mut vm).await?;
+    let callable = vm
+        .resolve_exported_callable("run")
+        .map_err(HostError::from_vm)?;
+    let mut invocation = vm
+        .start_invocation(callable, vec![Value::string(request.to_string())])
+        .map_err(HostError::from_vm)?;
+    let value = poll_fn(|context| loop {
+        match invocation.poll_next_with_context(context) {
+            Ok(InvocationPoll::Pending) => return Poll::Pending,
+            Ok(InvocationPoll::Ready(Some(Ok(InvocationItem::Event(_))))) => continue,
+            Ok(InvocationPoll::Ready(Some(Ok(InvocationItem::Complete(value))))) => {
+                return Poll::Ready(Ok(value));
+            }
+            Ok(InvocationPoll::Ready(Some(Err(error)))) => {
+                return Poll::Ready(Err(HostError::runtime(format!(
+                    "config invocation failed: {error:?}"
+                ))));
+            }
+            Ok(InvocationPoll::Ready(None)) => {
+                return Poll::Ready(Err(HostError::runtime(
+                    "config invocation ended without a result",
+                )));
+            }
+            Err(error) => return Poll::Ready(Err(HostError::from_vm(error))),
+        }
+    })
+    .await?;
+    match value {
+        Value::String(text) => Ok(text.as_str().to_string()),
+        other => Err(HostError::runtime(format!(
+            "config entry returned {other:?}, not a string"
+        ))),
+    }
 }

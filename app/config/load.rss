@@ -1,0 +1,51 @@
+//! Configuration path resolution and file reading.
+//!
+//! An explicit non-empty path wins; otherwise `config.json` under the
+//! entry-provided base directory is the default file. The entry supplies
+//! whether the path was explicit so a missing default can fall back to
+//! built-in defaults while a missing explicit path is an error.
+use io;
+
+struct Resolved {
+    path: string,
+    explicit: bool,
+    exists: bool,
+}
+
+pub fn join_config(base: string) -> string {
+    let length = (&base).length;
+    if length == 0 => {
+        "config.json"
+    } else => {
+        let last = (&base)[(length - 1):length];
+        if last == "/" => {
+            base + "config.json"
+        } else => {
+            base + "/config.json"
+        }
+    }
+}
+
+pub fn resolve(base: string, path: string, explicit: bool) -> Resolved {
+    let resolved_path = if explicit => {
+        path
+    } else => {
+        join_config(base)
+    };
+    {
+        path: resolved_path,
+        explicit: explicit,
+        exists: io::exists(resolved_path),
+    }
+}
+
+pub fn read_text(path: string) -> string {
+    let handle = io::open(path, "r");
+    let text = io::read_all(handle);
+    let closed = io::close(handle);
+    text
+}
+
+pub fn exists(path: string) -> bool {
+    io::exists(path)
+}

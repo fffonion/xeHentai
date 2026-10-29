@@ -1,0 +1,104 @@
+//! Built-in configuration defaults (upstream `xeHentai/config.py`).
+//!
+//! This is the single source of the 25 default values. The fixed `Config`
+//! record reads them directly; defaults are never re-stated elsewhere.
+
+pub fn daemon() -> bool {
+    false
+}
+
+pub fn dir() -> string {
+    "."
+}
+
+pub fn download_ori() -> bool {
+    false
+}
+
+pub fn jpn_title() -> bool {
+    true
+}
+
+pub fn rename_ori() -> bool {
+    false
+}
+
+pub fn proxy() -> [string] {
+    []
+}
+
+pub fn proxy_image() -> bool {
+    true
+}
+
+pub fn proxy_image_only() -> bool {
+    false
+}
+
+pub fn rpc_interface() -> string {
+    "localhost"
+}
+
+pub fn rpc_port() -> int? {
+    null
+}
+
+pub fn rpc_secret() -> string? {
+    null
+}
+
+pub fn rpc_open_browser() -> bool {
+    true
+}
+
+pub fn make_archive() -> bool {
+    false
+}
+
+pub fn download_range() -> [[int]]? {
+    null
+}
+
+pub fn scan_thread_cnt() -> int {
+    1
+}
+
+pub fn download_thread_cnt() -> int {
+    5
+}
+
+pub fn download_timeout() -> number {
+    10
+}
+
+pub fn ignored_errors() -> [int] {
+    []
+}
+
+pub fn log_path() -> string {
+    "eh.log"
+}
+
+pub fn log_verbose() -> int {
+    2
+}
+
+pub fn save_tasks() -> bool {
+    false
+}
+
+pub fn delete_task_files() -> bool {
+    false
+}
+
+pub fn low_speed_threshold() -> number {
+    10
+}
+
+pub fn auto_update() -> string {
+    "download"
+}
+
+pub fn update_beta_channel() -> bool {
+    false
+}

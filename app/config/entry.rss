@@ -1,0 +1,59 @@
+//! Scenario entry for the configuration suites and the application host.
+//!
+//! The request and the report are JSON text. The entry performs no JSON
+//! parsing of its own beyond decoding the request envelope: Core `json`
+//! decodes documents and Core `io` reads files.
+use json;
+
+use self::types;
+
+fn error_report(error: string) -> string {
+    "{\"ok\":false,\"error\":" + json::encode(error)
+        + ",\"source\":\"defaults\",\"config\":null,\"public\":null,\"task\":null}"
+}
+
+pub fn run(request: string) -> string {
+    let document: map = json::decode::<map>(request);
+    let op = if document.has("op") && type(document["op"].copy()) == "string" => {
+        let typed: string = document["op"].copy();
+        typed
+    } else => {
+        ""
+    };
+    let base = if document.has("base") && type(document["base"].copy()) == "string" => {
+        let typed: string = document["base"].copy();
+        typed
+    } else => {
+        ""
+    };
+    let path = if document.has("path") && type(document["path"].copy()) == "string" => {
+        let typed: string = document["path"].copy();
+        typed
+    } else => {
+        ""
+    };
+    let overlay = if document.has("overlay") && type(document["overlay"].copy()) == "string" => {
+        let typed: string = document["overlay"].copy();
+        typed
+    } else => {
+        ""
+    };
+    let explicit = (&path).length > 0;
+    let mut result = "";
+    if op == "" {
+        result = error_report("type:op");
+    } else if base == "" {
+        result = error_report("type:base");
+    } else if op == "load" {
+        result = types::load_report(base, path, explicit);
+    } else if op == "update" {
+        if overlay == "" {
+            result = error_report("type:overlay");
+        } else {
+            result = types::update_report(base, path, explicit, overlay);
+        }
+    } else {
+        result = error_report("unknown_op:" + op);
+    }
+    result
+}

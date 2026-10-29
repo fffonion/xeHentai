@@ -1,0 +1,9 @@
+{
+  "proxy": ["socks5h://127.0.0.1:1080", "http://127.0.0.1:8080"],
+  "dir": "updated",
+  "ignored_errors": [1009, 1006, -3],
+  "download_thread_cnt": 2,
+  "make_archive": false,
+  "log_path": "updated.log",
+  "download_timeout": 7
+}

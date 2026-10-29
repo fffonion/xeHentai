@@ -1,0 +1,93 @@
+//! Task-level configuration snapshot.
+//!
+//! `xeHentai.add_task` copies this fixed subset of the global configuration
+//! when the task is created. Later global updates do not change the snapshot.
+use json;
+
+fn bool_json(config: map, key: string) -> string {
+    if config.has(key) => {
+        let typed: bool = config[key].copy();
+        json::encode(typed)
+    } else => {
+        "null"
+    }
+}
+
+fn int_json(config: map, key: string) -> string {
+    if config.has(key) => {
+        let typed: int = config[key].copy();
+        json::encode(typed)
+    } else => {
+        "null"
+    }
+}
+
+fn number_json(config: map, key: string) -> string {
+    if config.has(key) => {
+        let typed: number = config[key].copy();
+        json::encode(typed)
+    } else => {
+        "null"
+    }
+}
+
+fn string_json(config: map, key: string) -> string {
+    if config.has(key) => {
+        let typed: string = config[key].copy();
+        json::encode(typed)
+    } else => {
+        "null"
+    }
+}
+
+fn ints_json(config: map, key: string) -> string {
+    if config.has(key) => {
+        let typed: [int] = config[key].copy();
+        json::encode(typed)
+    } else => {
+        "null"
+    }
+}
+
+fn ranges_json(config: map, key: string) -> string {
+    if config.has(key) => {
+        let typed: [[int]] = config[key].copy();
+        json::encode(typed)
+    } else => {
+        "null"
+    }
+}
+
+pub fn task_json(config_json: string) -> string {
+    let config: map = json::decode::<map>(config_json);
+    let mut out = "{\"dir\":";
+    out = out + string_json(config, "dir");
+    out = out + ",\"download_ori\":";
+    out = out + bool_json(config, "download_ori");
+    out = out + ",\"download_thread_cnt\":";
+    out = out + int_json(config, "download_thread_cnt");
+    out = out + ",\"scan_thread_cnt\":";
+    out = out + int_json(config, "scan_thread_cnt");
+    out = out + ",\"proxy_image\":";
+    out = out + bool_json(config, "proxy_image");
+    out = out + ",\"proxy_image_only\":";
+    out = out + bool_json(config, "proxy_image_only");
+    out = out + ",\"ignored_errors\":";
+    out = out + ints_json(config, "ignored_errors");
+    out = out + ",\"low_speed_threshold\":";
+    out = out + number_json(config, "low_speed_threshold");
+    out = out + ",\"rename_ori\":";
+    out = out + bool_json(config, "rename_ori");
+    out = out + ",\"make_archive\":";
+    out = out + bool_json(config, "make_archive");
+    out = out + ",\"delete_task_files\":";
+    out = out + bool_json(config, "delete_task_files");
+    out = out + ",\"jpn_title\":";
+    out = out + bool_json(config, "jpn_title");
+    out = out + ",\"download_range\":";
+    out = out + ranges_json(config, "download_range");
+    out = out + ",\"download_timeout\":";
+    out = out + number_json(config, "download_timeout");
+    out = out + "}";
+    out
+}

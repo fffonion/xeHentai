@@ -2,7 +2,9 @@ use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use xeh_xtask::{capture, compare_trees, rss_test, verify_deny_unverified, workspace_root};
+use xeh_xtask::{
+    capture, compare_trees, rss_test, run_diff, run_suite, verify_deny_unverified, workspace_root,
+};
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -30,6 +32,18 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             std::path::Path::new(&args[5]),
         );
     }
+    if args.len() == 3 && args[0] == "rss-test" && args[1] == "--suite" {
+        if args[2] != "config" {
+            return Err(format!("rss-test suite '{}' is not implemented", args[2]));
+        }
+        return run_suite();
+    }
+    if args.len() == 3 && args[0] == "diff" && args[1] == "--suite" {
+        if args[2] != "config" {
+            return Err(format!("diff suite '{}' is not implemented", args[2]));
+        }
+        return run_diff();
+    }
     if args.len() == 1 && args[0] == "rss-test" {
         return rss_test();
     }
@@ -47,7 +61,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         };
         return manifest_check(&root);
     }
-    Err("usage: xeh-xtask oracle capture --suite <name> | oracle compare --left <dir> --right <dir> | verify --all --deny-unverified | manifest check [--root <dir>] | rss-test".to_string())
+    Err("usage: xeh-xtask oracle capture --suite <name> | oracle compare --left <dir> --right <dir> | verify --all --deny-unverified | manifest check [--root <dir>] | rss-test [--suite config] | diff --suite config".to_string())
 }
 
 fn manifest_check(root: &std::path::Path) -> Result<(), String> {
