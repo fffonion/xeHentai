@@ -218,10 +218,10 @@
 ## delta.task-url-strip
 
 - 来源：`xeHentai/core.py:107`（`url.strip()`）
-- 状态：实现差异（已记录）
-- 输入：URL 首尾空白
-- 实测输出：RSS 去掉 ASCII 空白（空格、`\t`、`\r`、`\n`、`\v`、`\f`）
-- 拟定合同：Python `str.strip()` 同时去掉 Unicode 空白（如 U+3000）；RSS 当前只覆盖 ASCII 集合。gallery URL 的判定不受影响，差异保留供后续统一。
+- 状态：已对齐（原实现只覆盖 ASCII 的差异已修复）
+- 输入：URL 首尾空白（ASCII 与 Unicode）
+- 实测输出：RSS 与 Python `str.strip()` 一致，去除 29 个 Unicode 空白字符（U+0009..000D、U+001C..0020、U+0085、U+00A0、U+1680、U+2000..200A、U+2028..2029、U+202F、U+205F、U+3000）；URL 中间空白保留
+- 拟定合同：一次绝对首尾锚定的 Core `re::replace`，只删除首尾空白，不改变大小写或中间字符。RED：U+3000 包裹时原版返回 0/guid 而旧候选返回 1000/null；GREEN 由真实 add 与 task-api 差分验证，纯 ASCII 包裹原本即通过。
 
 ## delta.task-warnings
 
@@ -229,7 +229,7 @@
 - 状态：Task5 数据面差异
 - 输入：`download_ori=true` 且未登录的表站 add
 - 实测输出：任务照常创建并入队，RSS 报告 `warnings: ["download_ori_requires_login"]`；原版只记录本地化日志行
-- 拟定合同：警告以稳定 key 暴露，本地化文本/日志输出属于 Task12；差分比较返回码、任务表与 queue，不比较警告文本。
+- 拟定合同：警告以稳定 key 暴露，本地化文本/日志输出属于 Task13；差分比较返回码、任务表与 queue，不比较警告文本。
 
 ## delta.task-monitor-pause
 

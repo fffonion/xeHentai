@@ -34,22 +34,17 @@ pub fn exhentai_url(url: string) -> bool {
     re::match(exhentai_pattern(), url)
 }
 
-fn is_space(ch: string) -> bool {
-    ch == " " || ch == "\t" || ch == "\n" || ch == "\r" || ch == "\x0b" || ch == "\x0c"
+/// CPython 3.14 `str.isspace()` over the full Unicode domain: U+0009..000D,
+/// U+001C..0020, U+0085, U+00A0, U+1680, U+2000..200A, U+2028..2029,
+/// U+202F, U+205F, U+3000. `\s` would miss U+001C..U+001F.
+fn trim_pattern() -> string {
+    "\\A[\\x{9}-\\x{D}\\x{1C}-\\x{20}\\x{85}\\x{A0}\\x{1680}\\x{2000}-\\x{200A}\\x{2028}\\x{2029}\\x{202F}\\x{205F}\\x{3000}]+|[\\x{9}-\\x{D}\\x{1C}-\\x{20}\\x{85}\\x{A0}\\x{1680}\\x{2000}-\\x{200A}\\x{2028}\\x{2029}\\x{202F}\\x{205F}\\x{3000}]+\\z"
 }
 
-/// `url.strip()` for the whitespace this scope covers.
+/// `url.strip()`: one anchored replacement removes only leading and trailing
+/// Python whitespace; every inner character is preserved.
 pub fn trim(url: string) -> string {
-    let length = url.length;
-    let mut start = 0;
-    while start < length && is_space(url[start:(start + 1)]) {
-        start = start + 1;
-    }
-    let mut end = length;
-    while end > start && is_space(url[(end - 1):end]) {
-        end = end - 1;
-    }
-    url[start:end]
+    re::replace(trim_pattern(), url, "")
 }
 
 /// `RE_INDEX.findall(url)[0][0]`; `null` when the URL has no gallery ids.

@@ -153,6 +153,22 @@ fn capture_suite_all_records_original_and_stays_pending() {
     fs::create_dir_all(&decoy).unwrap();
     fs::write(decoy.join("SECRET_SENTINEL"), b"SENTINEL-DECOY-HOME").unwrap();
 
+    // This capture gets its own exclusive output root. The repository files the
+    // command used to regenerate are recorded byte-for-byte and must not move.
+    let emit = root.join("emit");
+    fs::create_dir_all(&emit).unwrap();
+    let repo_files = [
+        "compat/manifest.json",
+        "compat/golden/http_proxy.json",
+        "docs/compatibility-deltas.md",
+    ];
+    let repo_before: Vec<Vec<u8>> = repo_files
+        .iter()
+        .map(|name| {
+            fs::read(workspace_root().join(name)).unwrap_or_else(|error| panic!("{name}: {error}"))
+        })
+        .collect();
+
     let bin = xtask_bin();
     let out = Command::new(&bin)
         .current_dir(workspace_root())
@@ -163,6 +179,9 @@ fn capture_suite_all_records_original_and_stays_pending() {
         .env("XEH_PYTHON", python_bin())
         .env("CARGO_TARGET_DIR", target_dir())
         .env("RUSTUP_HOME", "/home/wow/.rustup")
+        .env("XEH_EMIT_ROOT", &emit)
+        .env("XEH_EVIDENCE_DIR", root.join("evidence"))
+        .env("XEH_CAPTURE_OUT", root.join("capture"))
         .args(["oracle", "capture", "--suite", "all"])
         .output()
         .expect("spawn capture");
@@ -175,9 +194,17 @@ fn capture_suite_all_records_original_and_stays_pending() {
     );
     assert!(!combined.contains("SENTINEL-DECOY-HOME"));
     assert!(!combined.contains("sentinel-value-not-for-receipt"));
+    let manifest_line = combined
+        .lines()
+        .find(|line| line.starts_with("manifest="))
+        .expect("capture must print the manifest path");
+    assert_eq!(
+        PathBuf::from(manifest_line.trim_start_matches("manifest=")),
+        emit.join("compat/manifest.json"),
+        "capture must publish into this test's emit root"
+    );
 
-    let manifest_text =
-        fs::read_to_string(workspace_root().join("compat/manifest.json")).expect("manifest");
+    let manifest_text = fs::read_to_string(emit.join("compat/manifest.json")).expect("manifest");
     let manifest: serde_json::Value = serde_json::from_str(&manifest_text).unwrap();
     let features = manifest["features"].as_array().expect("features");
     let ids: Vec<&str> = features
@@ -206,16 +233,15 @@ fn capture_suite_all_records_original_and_stays_pending() {
             );
         }
     }
-    let config: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(workspace_root().join("compat/golden/config.json")).unwrap(),
-    )
-    .unwrap();
+    let config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(emit.join("compat/golden/config.json")).unwrap())
+            .unwrap();
     assert_eq!(config["keys"]["daemon"], false);
     assert_eq!(config["keys"]["proxy"], serde_json::json!([]));
     assert!(config["keys"]["rpc_port"].is_null());
     assert_eq!(config["count"], 25);
 
-    let deltas = fs::read_to_string(workspace_root().join("docs/compatibility-deltas.md")).unwrap();
+    let deltas = fs::read_to_string(emit.join("docs/compatibility-deltas.md")).unwrap();
     assert!(deltas.contains("delta.scan-downloaded-comparison"));
     assert!(deltas.contains("待批准"));
     assert!(!deltas.contains("SENTINEL-DECOY-HOME"));
@@ -225,7 +251,8 @@ fn capture_suite_all_records_original_and_stays_pending() {
         .env("HOME", "/home/wow")
         .env("RUSTUP_HOME", "/home/wow/.rustup")
         .env("CARGO_TARGET_DIR", target_dir())
-        .args(["manifest", "check"])
+        .args(["manifest", "check", "--root"])
+        .arg(&emit)
         .output()
         .expect("manifest check");
     assert!(
@@ -249,6 +276,17 @@ fn capture_suite_all_records_original_and_stays_pending() {
     assert!(!verify.status.success(), "{verify_text}");
     assert!(verify_text.contains("fail-closed"));
     assert!(verify_text.contains("implementation_accepted=0"));
+
+    let repo_after: Vec<Vec<u8>> = repo_files
+        .iter()
+        .map(|name| {
+            fs::read(workspace_root().join(name)).unwrap_or_else(|error| panic!("{name}: {error}"))
+        })
+        .collect();
+    assert_eq!(
+        repo_after, repo_before,
+        "capture must leave the repository manifest, http_proxy golden, and deltas byte-identical"
+    );
 }
 
 fn target_dir() -> String {

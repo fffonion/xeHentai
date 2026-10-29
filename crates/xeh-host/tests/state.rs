@@ -613,3 +613,99 @@ fn core_has_no_uuid_source_and_the_primitive_is_scoped_to_task_control() {
     let task = xeh_host::task_catalog();
     assert!(task.function("xeh_system::uuid_v4").is_some());
 }
+
+/// CPython 3.14.7 `str.isspace()` over the full Unicode domain: 29 characters.
+const PYTHON_WHITESPACE: [char; 29] = [
+    '\u{0009}', '\u{000A}', '\u{000B}', '\u{000C}', '\u{000D}', '\u{001C}', '\u{001D}', '\u{001E}',
+    '\u{001F}', '\u{0020}', '\u{0085}', '\u{00A0}', '\u{1680}', '\u{2000}', '\u{2001}', '\u{2002}',
+    '\u{2003}', '\u{2004}', '\u{2005}', '\u{2006}', '\u{2007}', '\u{2008}', '\u{2009}', '\u{200A}',
+    '\u{2028}', '\u{2029}', '\u{202F}', '\u{205F}', '\u{3000}',
+];
+
+fn queued(report: &Value, guid: &str) -> bool {
+    report["queue"]
+        .as_array()
+        .map(|queue| queue.iter().any(|item| item == &json!(guid)))
+        .unwrap_or(false)
+}
+
+#[test]
+fn add_strips_python_unicode_whitespace_around_gallery_urls() {
+    // One owner VM for the whole matrix: every case is a real dispatch/add on
+    // the same control root, not a call to the trim helper.
+    let planned: Vec<String> = (0..256).map(|index| format!("{index:08x}")).collect();
+    let borrowed: Vec<&str> = planned.iter().map(String::as_str).collect();
+    let mut harness = Harness {
+        control: TaskControl::open(&ControlOptions::fixture(&borrowed, 0))
+            .expect("open one fixture for the whitespace matrix"),
+    };
+
+    for whitespace in PYTHON_WHITESPACE {
+        for (position, url) in [
+            ("leading", format!("{whitespace}{GALLERY_A}")),
+            ("trailing", format!("{GALLERY_A}{whitespace}")),
+            (
+                "both",
+                format!("{whitespace}{whitespace}{GALLERY_A}{whitespace}{whitespace}"),
+            ),
+        ] {
+            let label = format!("{position} U+{:04X}", whitespace as u32);
+            let report = harness.add(&url);
+            assert_eq!(report["code"], json!(0), "{label}: {report}");
+            let guid = report["value"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{label}: missing guid in {report}"));
+            let task = record(&report, guid);
+            assert_eq!(task["url"], json!(GALLERY_A), "{label}: {task}");
+            assert_eq!(task["gid"], json!("123456"), "{label}: {task}");
+            assert_eq!(task["sethash"], json!("0123456789"), "{label}: {task}");
+            assert_eq!(task["state"], json!(1), "{label}: {task}");
+            assert!(queued(&report, guid), "{label}: {report}");
+        }
+    }
+
+    // Empty and all-whitespace inputs strip to an empty URL: upstream still
+    // records the task and reports (1000, null) from the gallery check.
+    let all_whitespace: String = PYTHON_WHITESPACE.iter().collect();
+    for (label, url) in [("empty", String::new()), ("all-whitespace", all_whitespace)] {
+        let report = harness.add(&url);
+        assert_eq!(report["code"], json!(1000), "{label}: {report}");
+        assert_eq!(report["value"], Value::Null, "{label}: {report}");
+        let task = records(&report)
+            .pop()
+            .unwrap_or_else(|| panic!("{label}: task was not recorded"));
+        assert_eq!(task["url"], json!(""), "{label}: {task}");
+        assert_eq!(task["state"], json!(-1), "{label}: {task}");
+        assert_eq!(task["failcode"], json!(1000), "{label}: {task}");
+        let guid = task["guid"].as_str().expect("guid");
+        assert!(!queued(&report, guid), "{label}: {report}");
+    }
+
+    // A URL without surrounding whitespace is unchanged.
+    let plain = harness.add(GALLERY_A);
+    assert_eq!(plain["code"], json!(0), "plain: {plain}");
+    let plain_guid = plain["value"].as_str().expect("guid");
+    assert_eq!(record(&plain, plain_guid)["url"], json!(GALLERY_A));
+
+    // Inner whitespace is data, not trimming: the URL is stored byte-for-byte
+    // and the gallery regex keeps it recognized.
+    let inner = "https://e-hentai.org/g/123456/012 3456789/";
+    let inner_report = harness.add(inner);
+    assert_eq!(inner_report["code"], json!(0), "inner: {inner_report}");
+    let inner_guid = inner_report["value"].as_str().expect("guid");
+    let inner_task = record(&inner_report, inner_guid);
+    assert_eq!(inner_task["url"], json!(inner), "{inner_task}");
+    assert_eq!(inner_task["gid"], json!("123456"), "{inner_task}");
+    assert_eq!(inner_task["sethash"], json!("012 3456789"), "{inner_task}");
+
+    // The adjacent g.e-hentai host with the same Unicode wrapping (Q7).
+    let g_e_hentai = "https://g.e-hentai.org/g/123456/0123456789/";
+    let neighbor = format!("\u{3000}{g_e_hentai}\u{3000}");
+    let neighbor_report = harness.add(&neighbor);
+    assert_eq!(neighbor_report["code"], json!(0), "g.e: {neighbor_report}");
+    let neighbor_guid = neighbor_report["value"].as_str().expect("guid");
+    let neighbor_task = record(&neighbor_report, neighbor_guid);
+    assert_eq!(neighbor_task["url"], json!(g_e_hentai), "{neighbor_task}");
+    assert_eq!(neighbor_task["gid"], json!("123456"));
+    assert_eq!(neighbor_task["sethash"], json!("0123456789"));
+}

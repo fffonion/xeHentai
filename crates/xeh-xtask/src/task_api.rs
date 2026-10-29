@@ -206,7 +206,8 @@ fn script() -> Value {
     json!({
         "guids": [
             "0000000a", "0000000b", "0000000c", "0000000d", "0000000e",
-            "0000000f", "00000010", "00000011", "0000000a", "0000000a"
+            "0000000f", "00000010", "00000011", "0000000a", "0000000a",
+            "00000012", "00000013"
         ],
         "steps": [
             {"op": "add", "url": ""},
@@ -254,7 +255,9 @@ fn script() -> Value {
             {"op": "resume", "guid": "ffffffff"},
             {"op": "seed_state", "guid": "0000000c", "state": 20},
             {"op": "add", "url": GALLERY_C},
-            {"op": "add", "url": GALLERY_C}
+            {"op": "add", "url": GALLERY_C},
+            {"op": "add", "url": format!(" \t{GALLERY_A}\r\n")},
+            {"op": "add", "url": format!("\u{3000}{GALLERY_A}\u{3000}")}
         ]
     })
 }
@@ -490,7 +493,7 @@ fn diff() -> Result<(), String> {
 
     let mut deltas = vec![
         "task-control: epochs, prepared tickets, completion counts, and stale-ticket rejection are RSS-owned control data with no upstream equivalent; only returns, the task table, config, queue, and update presence are compared".to_string(),
-        "task-warnings: the upstream `download_ori` logged-out notice is a localized log line (Task12); the RSS report exposes `download_ori_requires_login` in `warnings`, which is not compared".to_string(),
+        "task-warnings: the upstream `download_ori` logged-out notice is a localized log line (Task13); the RSS report exposes `download_ori_requires_login` in `warnings`, which is not compared".to_string(),
         "task-guid-source: both sides consume the same planned 8-character prefixes; production generates a UUID v4 through the new `xeh_system::uuid_v4` seed and slices it in RSS like upstream `str(uuid4())[:8]`".to_string(),
     ];
     let mut failures = Vec::new();
