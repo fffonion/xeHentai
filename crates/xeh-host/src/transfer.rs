@@ -14,7 +14,6 @@ use crate::dto::{lock, HeaderEntry, JobKey, TransferReceipt, TransferRequest};
 use crate::net::{open_get, write_body, BodyWrite};
 use crate::observe::Metrics;
 use crate::types::HostError;
-use crate::worker::cancellation::EpochTable;
 use crate::worker::events::EventBus;
 
 /// Per-worker host state. The current job DTO is installed by the owner thread
@@ -28,7 +27,10 @@ pub struct TransferHost {
     pub stream_limit: usize,
     pub writer_fault: Option<crate::dto::WriterFault>,
     pub commit_gate: Option<Arc<crate::dto::CommitGate>>,
-    pub epochs: Arc<EpochTable>,
+    pub link_gate: Option<Arc<crate::dto::CommitGate>>,
+    pub commit_hold: Option<Arc<crate::dto::CommitGate>>,
+    pub hooks: crate::dto::TransportHooks,
+    pub admission: Arc<crate::worker::cancellation::Admission>,
     pub metrics: Arc<Metrics>,
     pub events: Arc<EventBus>,
     pub shut: Arc<AtomicBool>,
@@ -153,13 +155,16 @@ async fn execute(
             path: request.relative_path,
             error_code: None,
         },
-        Err(code) => TransferReceipt {
-            key: request.key,
-            status: code.to_string(),
-            bytes: 0,
-            path: String::new(),
-            error_code: Some(code.to_string()),
-        },
+        Err(code) => {
+            host.metrics.record_failure(code);
+            TransferReceipt {
+                key: request.key,
+                status: code.to_string(),
+                bytes: 0,
+                path: String::new(),
+                error_code: Some(code.to_string()),
+            }
+        }
     }
 }
 
@@ -171,25 +176,31 @@ async fn execute_inner(
     if cancel.is_cancelled() || host.shut.load(Ordering::Acquire) {
         return Err("cancelled");
     }
+    let started = std::time::Instant::now();
     let opened = open_get(
         &host.http,
         &request.url,
         &request.headers,
         cancel,
         &host.metrics,
+        &host.hooks,
+        started,
     )
     .await?;
-    let deadline =
-        tokio::time::Instant::now() + host.http.request_timeout.min(host.http.max_stream_duration);
+    let deadline = started + host.http.request_timeout.min(host.http.max_stream_duration);
+    let stream_limit = host.stream_limit.min(host.http.max_stream_total_bytes);
     let staged = write_body(
-        opened.response,
+        opened,
         &host.root,
         &request.relative_path,
         request.key.job_id,
         BodyWrite {
             chunk_bytes: host.chunk_bytes,
-            stream_limit: host.stream_limit,
+            stream_limit,
             writer_fault: host.writer_fault.as_ref(),
+            write_hold: host.hooks.write_hold.as_deref(),
+            buffer_hold: host.hooks.buffer_hold.as_deref(),
+            uncancellable_hold: host.hooks.uncancellable_hold.as_deref(),
             cancel,
             deadline,
             metrics: &host.metrics,
@@ -213,11 +224,20 @@ async fn execute_inner(
         let _ = std::fs::remove_file(&staged.staging);
         return Err("cancelled");
     }
-    if let Err(code) = host.epochs.publish(
+    if let Some(gate) = &host.link_gate {
+        gate.arrive();
+        if let Err(code) = gate.wait_release_only() {
+            let _ = std::fs::remove_file(&staged.staging);
+            return Err(code);
+        }
+    }
+    if let Err(code) = host.admission.publish(
         request.key.task_id,
         request.key.epoch,
+        &request.key,
         &staged.staging,
         &staged.final_path,
+        host.commit_hold.clone(),
     ) {
         let _ = std::fs::remove_file(&staged.staging);
         return Err(code);

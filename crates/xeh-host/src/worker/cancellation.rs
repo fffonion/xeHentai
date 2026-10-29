@@ -1,59 +1,204 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use crate::dto::lock;
+use tokio_util::sync::CancellationToken;
+
+use crate::dto::{lock, CommitGate, JobKey, PoolError};
 
 const EPOCH_CAP: usize = 64;
+const COMPLETIONS_PER_TASK: usize = 4;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Phase {
+    Queued,
+    Running,
+    Committing,
+    TerminalPending,
+}
+
+pub(crate) struct JobSlot {
+    pub token: CancellationToken,
+    pub cancelled: bool,
+    pub phase: Phase,
+    pub generation: u64,
+}
+
+struct TaskLease {
+    epoch: i64,
+    generation: u64,
+}
 
 struct EpochState {
-    current: HashMap<i64, i64>,
     completions: HashMap<(i64, i64), u64>,
     inflight: HashMap<i64, usize>,
     order: VecDeque<i64>,
 }
 
-/// Epoch admission for one pool. The lock is held only around the publish
-/// check and the same-directory hard link, never across a network wait.
-pub struct EpochTable {
-    inner: Mutex<EpochState>,
+struct State {
+    jobs: HashMap<JobKey, JobSlot>,
+    tasks: HashMap<i64, TaskLease>,
+    next_generation: u64,
+    epochs: EpochState,
 }
 
-impl EpochTable {
+/// One admission lock for registration, queue records, cancel, epoch advance,
+/// and the final hard link. Network waits must not hold this lock.
+pub struct Admission {
+    inner: Mutex<State>,
+}
+
+impl Admission {
     pub fn new() -> Self {
         Self {
-            inner: Mutex::new(EpochState {
-                current: HashMap::new(),
-                completions: HashMap::new(),
-                inflight: HashMap::new(),
-                order: VecDeque::new(),
+            inner: Mutex::new(State {
+                jobs: HashMap::new(),
+                tasks: HashMap::new(),
+                next_generation: 1,
+                epochs: EpochState {
+                    completions: HashMap::new(),
+                    inflight: HashMap::new(),
+                    order: VecDeque::new(),
+                },
             }),
         }
     }
 
-    pub fn advance(&self, task_id: i64, epoch: i64) {
+    pub fn tracked(&self) -> usize {
+        lock(&self.inner).jobs.len()
+    }
+
+    pub fn state_entries(&self) -> usize {
+        let state = lock(&self.inner);
+        state.jobs.len()
+            + state.tasks.len()
+            + state.epochs.completions.len()
+            + state.epochs.inflight.len()
+            + state.epochs.order.len()
+    }
+
+    pub fn register(&self, task_id: i64, epoch: i64) -> Result<(), PoolError> {
         let mut state = lock(&self.inner);
-        state.current.insert(task_id, epoch);
-        state.touch(task_id);
-        state.evict();
+        if committing(&state, task_id) {
+            return Err(PoolError::new("commit_pending"));
+        }
+        if !state.tasks.contains_key(&task_id) {
+            state.make_room()?;
+        }
+        let generation = state.next_generation;
+        state.next_generation = state.next_generation.saturating_add(1);
+        state.tasks.insert(task_id, TaskLease { epoch, generation });
+        state.epochs.touch(task_id);
+        for (key, slot) in &mut state.jobs {
+            if key.task_id == task_id && slot.phase != Phase::Committing {
+                slot.cancelled = true;
+                slot.token.cancel();
+            }
+        }
+        Ok(())
+    }
+
+    pub fn insert_queued(&self, key: JobKey, token: CancellationToken) -> Result<(), PoolError> {
+        let mut state = lock(&self.inner);
+        if state.jobs.contains_key(&key) {
+            return Err(PoolError::new("duplicate"));
+        }
+        let Some(task) = state.tasks.get(&key.task_id) else {
+            return Err(PoolError::new("unregistered"));
+        };
+        if task.epoch != key.epoch {
+            return Err(PoolError::new("stale_epoch"));
+        }
+        let generation = task.generation;
+        state.jobs.insert(
+            key,
+            JobSlot {
+                token,
+                cancelled: false,
+                phase: Phase::Queued,
+                generation,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn rollback(&self, key: &JobKey) {
+        let mut state = lock(&self.inner);
+        if let Some(slot) = state.jobs.get(key) {
+            if slot.phase == Phase::Queued {
+                state.jobs.remove(key);
+            }
+        }
+    }
+
+    /// Confirmed cancel, or `committing` when the link already owns the publish.
+    /// A missing record is `unknown` and is not reported as a confirmed cancel.
+    pub fn cancel(&self, key: &JobKey) -> Result<(), PoolError> {
+        let mut state = lock(&self.inner);
+        let Some(slot) = state.jobs.get_mut(key) else {
+            return Err(PoolError::new("unknown"));
+        };
+        if slot.phase == Phase::Committing {
+            return Err(PoolError::new("committing"));
+        }
+        if slot.cancelled {
+            return Ok(());
+        }
+        slot.cancelled = true;
+        slot.token.cancel();
+        Ok(())
+    }
+
+    pub fn advance(&self, task_id: i64, epoch: i64) -> Result<(), PoolError> {
+        let mut state = lock(&self.inner);
+        let current = {
+            let Some(task) = state.tasks.get(&task_id) else {
+                return Err(PoolError::new("unregistered"));
+            };
+            task.epoch
+        };
+        if epoch < current {
+            return Err(PoolError::new("regression"));
+        }
+        if committing(&state, task_id) {
+            return Err(PoolError::new("commit_pending"));
+        }
+        if epoch == current {
+            return Ok(());
+        }
+        if let Some(stored) = state.tasks.get_mut(&task_id) {
+            stored.epoch = epoch;
+        }
+        state.epochs.touch(task_id);
+        state.bound_completions(task_id);
+        for (key, slot) in &mut state.jobs {
+            if key.task_id == task_id && key.epoch != epoch && slot.phase != Phase::Committing {
+                slot.cancelled = true;
+                slot.token.cancel();
+            }
+        }
+        Ok(())
     }
 
     pub fn begin(&self, task_id: i64) {
         let mut state = lock(&self.inner);
-        *state.inflight.entry(task_id).or_insert(0) += 1;
-        state.touch(task_id);
+        *state.epochs.inflight.entry(task_id).or_insert(0) += 1;
+        state.epochs.touch(task_id);
     }
 
     pub fn end(&self, task_id: i64) {
         let mut state = lock(&self.inner);
-        if let Some(count) = state.inflight.get_mut(&task_id) {
+        if let Some(count) = state.epochs.inflight.get_mut(&task_id) {
             *count = count.saturating_sub(1);
+            if *count == 0 {
+                state.epochs.inflight.remove(&task_id);
+            }
         }
-        state.evict();
     }
 
     pub fn completion_count(&self, task_id: i64, epoch: i64) -> u64 {
         lock(&self.inner)
+            .epochs
             .completions
             .get(&(task_id, epoch))
             .copied()
@@ -61,44 +206,167 @@ impl EpochTable {
     }
 
     pub fn entries(&self) -> usize {
-        lock(&self.inner).current.len()
+        lock(&self.inner).tasks.len()
     }
 
     pub fn cap(&self) -> usize {
         EPOCH_CAP
     }
 
-    /// Link `staging` onto `final_path` only if this epoch is still admitted.
-    /// An existing final path is left untouched.
+    /// Take the queued token. A cancel that already won returns `None` and drops the slot.
+    pub fn take_running(&self, key: &JobKey) -> Option<CancellationToken> {
+        let mut state = lock(&self.inner);
+        let (generation, cancelled, token) = {
+            let slot = state.jobs.get(key)?;
+            (
+                slot.generation,
+                slot.cancelled || slot.token.is_cancelled(),
+                slot.token.clone(),
+            )
+        };
+        if cancelled {
+            state.jobs.remove(key);
+            return None;
+        }
+        let current = {
+            let Some(task) = state.tasks.get(&key.task_id) else {
+                state.jobs.remove(key);
+                return None;
+            };
+            (task.generation, task.epoch)
+        };
+        if current.0 != generation || current.1 != key.epoch {
+            state.jobs.remove(key);
+            return None;
+        }
+        if let Some(slot) = state.jobs.get_mut(key) {
+            slot.phase = Phase::Running;
+        }
+        Some(token)
+    }
+
+    pub fn retire(&self, key: &JobKey) {
+        lock(&self.inner).jobs.remove(key);
+    }
+
+    /// Link only if this lease still owns the publish. The check and the link
+    /// share this lock. `hold` runs after the phase is committing and after the
+    /// lock is released, so cancel observes `committing` instead of winning.
     pub fn publish(
         &self,
         task_id: i64,
         epoch: i64,
+        key: &JobKey,
         staging: &Path,
         final_path: &Path,
+        hold: Option<Arc<CommitGate>>,
     ) -> Result<(), &'static str> {
-        let mut state = lock(&self.inner);
-        if let Some(current) = state.current.get(&task_id) {
-            if *current != epoch {
+        {
+            let mut state = lock(&self.inner);
+            let admitted = match (state.jobs.get(key), state.tasks.get(&task_id)) {
+                (Some(slot), _) if slot.cancelled || slot.token.is_cancelled() => {
+                    return Err("cancelled");
+                }
+                (Some(slot), Some(task))
+                    if slot.phase != Phase::Queued
+                        && slot.generation == task.generation
+                        && task.epoch == epoch =>
+                {
+                    true
+                }
+                (None, _) => return Err("cancelled"),
+                _ => false,
+            };
+            if !admitted {
                 return Err("stale_epoch");
             }
-        } else {
-            state.current.insert(task_id, epoch);
-            state.touch(task_id);
+            if final_path.exists() {
+                return Err("target_exists");
+            }
+            if let Some(slot) = state.jobs.get_mut(key) {
+                slot.phase = Phase::Committing;
+            }
         }
-        if final_path.exists() {
-            return Err("target_exists");
+        if let Some(hold) = hold {
+            hold.arrive();
+            let _ = hold.wait_release_only();
+        }
+        let mut state = lock(&self.inner);
+        let still = state
+            .jobs
+            .get(key)
+            .is_some_and(|slot| slot.phase == Phase::Committing);
+        if !still {
+            return Err("cancelled");
         }
         match std::fs::hard_link(staging, final_path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if let Some(slot) = state.jobs.get_mut(key) {
+                    slot.phase = Phase::TerminalPending;
+                }
                 return Err("target_exists");
             }
-            Err(_) => return Err("io_error"),
+            Err(_) => {
+                if let Some(slot) = state.jobs.get_mut(key) {
+                    slot.phase = Phase::TerminalPending;
+                }
+                return Err("io_error");
+            }
         }
-        *state.completions.entry((task_id, epoch)).or_insert(0) += 1;
-        state.evict();
+        *state
+            .epochs
+            .completions
+            .entry((task_id, epoch))
+            .or_insert(0) += 1;
+        state.bound_completions(task_id);
+        if let Some(slot) = state.jobs.get_mut(key) {
+            slot.phase = Phase::TerminalPending;
+        }
         Ok(())
+    }
+}
+
+impl State {
+    fn make_room(&mut self) -> Result<(), PoolError> {
+        while self.tasks.len() >= EPOCH_CAP {
+            if !self.evict_idle() {
+                return Err(PoolError::new("epoch_budget"));
+            }
+        }
+        Ok(())
+    }
+
+    fn evict_idle(&mut self) -> bool {
+        let idle = self.epochs.order.iter().copied().find(|task| {
+            self.epochs.inflight.get(task).copied().unwrap_or(0) == 0
+                && !self.jobs.keys().any(|key| key.task_id == *task)
+        });
+        let Some(task) = idle else {
+            return false;
+        };
+        self.tasks.remove(&task);
+        self.epochs.inflight.remove(&task);
+        self.epochs
+            .completions
+            .retain(|(stored, _), _| *stored != task);
+        self.epochs.order.retain(|item| *item != task);
+        true
+    }
+
+    fn bound_completions(&mut self, task_id: i64) {
+        let mut epochs: Vec<i64> = self
+            .epochs
+            .completions
+            .keys()
+            .filter(|(stored, _)| *stored == task_id)
+            .map(|(_, epoch)| *epoch)
+            .collect();
+        epochs.sort_unstable();
+        while epochs.len() > COMPLETIONS_PER_TASK {
+            let oldest = epochs.remove(0);
+            self.epochs.completions.remove(&(task_id, oldest));
+        }
     }
 }
 
@@ -107,21 +375,11 @@ impl EpochState {
         self.order.retain(|item| *item != task_id);
         self.order.push_back(task_id);
     }
+}
 
-    fn evict(&mut self) {
-        while self.current.len() > EPOCH_CAP {
-            let idle = self
-                .order
-                .iter()
-                .copied()
-                .find(|task| self.inflight.get(task).copied().unwrap_or(0) == 0);
-            let Some(task) = idle else {
-                break;
-            };
-            self.current.remove(&task);
-            self.inflight.remove(&task);
-            self.completions.retain(|(stored, _), _| *stored != task);
-            self.order.retain(|item| *item != task);
-        }
-    }
+fn committing(state: &State, task_id: i64) -> bool {
+    state
+        .jobs
+        .iter()
+        .any(|(key, slot)| key.task_id == task_id && slot.phase == Phase::Committing)
 }

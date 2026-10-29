@@ -42,6 +42,6 @@ cargo run -p xeh-host
 cargo run -p xeh-xtask -- rss-test
 ```
 
-两条命令都编译并执行 `app/main.rss`，打印 RSS 算出的整数。`WorkerPool` 另编译 `app/worker/transfer.rss`，每个 worker 在自己的 OS 线程上持有 VM。依赖锁定为 `pd-vm` revision `99890b68119715df9ddd19f6a6362ff8d6258ffa`，feature 为 `runtime`、`async`、`http-client`，不含默认 JIT。定时器驱动固定在创建线程；其他线程要把 drive 和 shutdown 交回该线程。复用边界见 `docs/architecture.md`。
+两条命令都编译并执行 `app/main.rss`，打印 RSS 算出的整数。`WorkerPool` 另编译 `app/worker/transfer.rss`，每个 worker 在自己的 OS 线程上持有 VM。图片传输使用应用持有的 Hyper HTTP/1 driver 和 rustls 证书校验。`shutdown` 有期限；未完成时报告 `draining` 并保留所有权，完成路径才报告资源归零。依赖锁定为 `pd-vm` revision `99890b68119715df9ddd19f6a6362ff8d6258ffa`，feature 为 `runtime`、`async`、`http-client`，不含默认 JIT。定时器驱动固定在创建线程；其他线程要把 drive 和 shutdown 交回该线程。复用边界见 `docs/architecture.md`。
 
 兼容清单、差异和命令说明见 `docs/compatibility.md`。

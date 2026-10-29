@@ -13,11 +13,14 @@ pub struct Metrics {
     permits: AtomicUsize,
     pending: AtomicUsize,
     application_bytes: AtomicUsize,
+    application_capacity: AtomicUsize,
     peak_application_bytes: AtomicUsize,
     peak_application_capacity: AtomicUsize,
     guest_payload_bytes: AtomicUsize,
     threads: Mutex<ThreadObs>,
     connect_targets: Mutex<Vec<SocketAddr>>,
+    dns_candidates: Mutex<Vec<SocketAddr>>,
+    failure_ring: Mutex<Vec<String>>,
 }
 
 #[derive(Debug, Default)]
@@ -41,7 +44,23 @@ impl Metrics {
     }
 
     pub fn record_connect(&self, address: SocketAddr) {
-        lock(&self.connect_targets).push(address);
+        let mut targets = lock(&self.connect_targets);
+        if targets.len() == 32 {
+            targets.remove(0);
+        }
+        targets.push(address);
+    }
+
+    pub fn record_dns_candidates(&self, candidates: &[SocketAddr]) {
+        *lock(&self.dns_candidates) = candidates.to_vec();
+    }
+
+    pub fn record_failure(&self, code: &str) {
+        let mut ring = lock(&self.failure_ring);
+        if ring.len() == 32 {
+            ring.remove(0);
+        }
+        ring.push(code.to_string());
     }
 
     pub fn begin_flight(&self) {
@@ -69,11 +88,22 @@ impl Metrics {
         self.pending.fetch_sub(1, Ordering::AcqRel);
     }
 
-    pub fn note_application(&self, len: usize, capacity: usize) {
-        self.application_bytes.store(len, Ordering::Release);
-        self.peak_application_bytes.fetch_max(len, Ordering::AcqRel);
+    pub fn acquire_hold(&self, len: usize, capacity: usize) {
+        let held = self.application_bytes.fetch_add(len, Ordering::AcqRel) + len;
+        let caps = self
+            .application_capacity
+            .fetch_add(capacity, Ordering::AcqRel)
+            + capacity;
+        self.peak_application_bytes
+            .fetch_max(held, Ordering::AcqRel);
         self.peak_application_capacity
-            .fetch_max(capacity, Ordering::AcqRel);
+            .fetch_max(caps, Ordering::AcqRel);
+    }
+
+    pub fn release_hold(&self, len: usize, capacity: usize) {
+        self.application_bytes.fetch_sub(len, Ordering::AcqRel);
+        self.application_capacity
+            .fetch_sub(capacity, Ordering::AcqRel);
     }
 
     pub fn set_guest_payload(&self, len: usize) {
@@ -126,5 +156,13 @@ impl Metrics {
 
     pub fn connect_targets(&self) -> Vec<SocketAddr> {
         lock(&self.connect_targets).clone()
+    }
+
+    pub fn dns_candidates(&self) -> Vec<SocketAddr> {
+        lock(&self.dns_candidates).clone()
+    }
+
+    pub fn failure_codes(&self) -> usize {
+        lock(&self.failure_ring).len()
     }
 }

@@ -123,6 +123,35 @@ impl CommitGate {
         self.cv.notify_all();
     }
 
+    pub(crate) fn wait_bounded(
+        &self,
+        cancel: &tokio_util::sync::CancellationToken,
+        deadline: std::time::Instant,
+    ) -> Result<(), &'static str> {
+        let mut released = lock(&self.release);
+        while !*released {
+            if cancel.is_cancelled() {
+                return Err("cancelled");
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("deadline");
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let (next, _) = self
+                .cv
+                .wait_timeout(released, remaining)
+                .unwrap_or_else(|poison| poison.into_inner());
+            released = next;
+        }
+        if cancel.is_cancelled() {
+            return Err("cancelled");
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("deadline");
+        }
+        Ok(())
+    }
+
     pub(crate) fn kick(&self) {
         self.cv.notify_all();
     }
@@ -132,9 +161,19 @@ impl CommitGate {
         cancel: &CancellationToken,
         shut: &AtomicBool,
     ) -> Result<(), &'static str> {
+        self.wait_until_released(|| cancel.is_cancelled() || shut.load(Ordering::Acquire))
+    }
+
+    /// Waits only for [`Self::release`]. Cancellation does not end the wait, so a
+    /// later admission check is what decides the link.
+    pub(crate) fn wait_release_only(&self) -> Result<(), &'static str> {
+        self.wait_until_released(|| false)
+    }
+
+    fn wait_until_released(&self, aborted: impl Fn() -> bool) -> Result<(), &'static str> {
         let mut released = lock(&self.release);
         while !*released {
-            if cancel.is_cancelled() || shut.load(Ordering::Acquire) {
+            if aborted() {
                 return Err("cancelled");
             }
             let (next, _) = self
@@ -143,7 +182,7 @@ impl CommitGate {
                 .unwrap_or_else(|poison| poison.into_inner());
             released = next;
         }
-        if cancel.is_cancelled() || shut.load(Ordering::Acquire) {
+        if aborted() {
             return Err("cancelled");
         }
         Ok(())
@@ -161,7 +200,27 @@ pub struct PoolConfig {
     pub stream_limit: usize,
     pub writer_fault: Option<WriterFault>,
     pub commit_gate: Option<Arc<CommitGate>>,
+    /// Pauses after the pre-publish cancel check and before the link.
+    /// The wait ignores cancellation so admission must re-check under the link lock.
+    pub link_gate: Option<Arc<CommitGate>>,
+    /// Pauses inside the irreversible publish, after the phase is committing.
+    pub commit_hold: Option<Arc<CommitGate>>,
+    pub hooks: TransportHooks,
     pub fail_worker_once: bool,
+}
+
+/// Narrow test injection at the native I/O boundary. Production leaves this empty.
+#[derive(Clone, Debug, Default)]
+pub struct TransportHooks {
+    pub dns_hold: Option<Arc<CommitGate>>,
+    pub write_hold: Option<Arc<CommitGate>>,
+    pub buffer_hold: Option<Arc<CommitGate>>,
+    /// Extra DER trust anchors. Empty means the default webpki roots only.
+    pub extra_trust_der: Vec<Vec<u8>>,
+    /// A DNS candidate that must not be recorded as the connected socket peer.
+    pub dns_decoy: Option<std::net::SocketAddr>,
+    /// Stands in for an OS call this process cannot abort. Shutdown does not kick it.
+    pub uncancellable_hold: Option<Arc<CommitGate>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,6 +229,7 @@ pub struct ShutdownReport {
     pub in_flight: usize,
     pub permits: usize,
     pub tracked_jobs: usize,
+    pub draining: bool,
     pub joined: bool,
 }
 

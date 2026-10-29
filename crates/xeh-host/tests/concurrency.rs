@@ -40,6 +40,9 @@ fn two_rss_workers_enter_the_server_barrier_on_distinct_owner_threads() {
         stream_limit: HttpConfig::default().max_stream_total_bytes,
         writer_fault: None,
         commit_gate: None,
+        link_gate: None,
+        commit_hold: None,
+        hooks: xeh_host::TransportHooks::default(),
         fail_worker_once: false,
     };
     let pool = WorkerPool::start(config).expect("worker pool");
@@ -69,6 +72,7 @@ fn two_rss_workers_enter_the_server_barrier_on_distinct_owner_threads() {
     assert_eq!(pool.event_capacity(), event_capacity);
     assert!(pool.job_capacity() > 0);
     assert!(pool.event_capacity() > 0);
+    pool.register(1, 1).expect("register");
 
     pool.submit(request(1, 1, 1, address, "a.bin"))
         .expect("first job");

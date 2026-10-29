@@ -51,6 +51,12 @@ impl EventBus {
         lock(&self.state).dropped_terminal
     }
 
+    pub fn detach_consumer(&self) {
+        let mut state = lock(&self.state);
+        state.consumers = state.consumers.saturating_sub(1);
+        self.cv.notify_all();
+    }
+
     pub fn publish_progress(&self, event: TransferEvent) {
         let mut state = lock(&self.state);
         if state.closed || state.consumers == 0 {
@@ -75,17 +81,17 @@ impl EventBus {
 
     pub fn publish_terminal(&self, event: TransferEvent) -> Result<(), PoolError> {
         let mut state = lock(&self.state);
-        state
-            .items
-            .retain(|item| !(item.terminal_status.is_none() && item.key == event.key));
-        if state
-            .items
-            .iter()
-            .any(|item| item.terminal_status.is_some() && item.key == event.key)
-        {
-            return Ok(());
-        }
         loop {
+            state
+                .items
+                .retain(|item| !(item.terminal_status.is_none() && item.key == event.key));
+            if state
+                .items
+                .iter()
+                .any(|item| item.terminal_status.is_some() && item.key == event.key)
+            {
+                return Ok(());
+            }
             if state.closed || state.consumers == 0 {
                 state.dropped_terminal += 1;
                 return Ok(());
@@ -95,20 +101,10 @@ impl EventBus {
                 self.cv.notify_all();
                 return Ok(());
             }
-            if let Some(index) = state
-                .items
-                .iter()
-                .position(|item| item.terminal_status.is_none())
-            {
-                state.items.remove(index);
-                state.dropped_progress += 1;
-                continue;
-            }
-            let (next, _) = self
+            state = self
                 .cv
-                .wait_timeout(state, Duration::from_secs(30))
+                .wait(state)
                 .unwrap_or_else(|poison| poison.into_inner());
-            state = next;
         }
     }
 
@@ -132,6 +128,9 @@ impl EventBus {
                 if let Some(event) = state.items.remove(index) {
                     got.push(event);
                 }
+            }
+            if !got.is_empty() {
+                self.cv.notify_all();
             }
             if got.len() >= count {
                 return Ok(got);

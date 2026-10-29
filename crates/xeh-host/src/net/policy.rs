@@ -1,4 +1,10 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::time::Instant;
+
+use tokio_util::sync::CancellationToken;
+use url::Url;
+
+use crate::dto::{CommitGate, TransportHooks};
 
 pub fn is_restricted_ip(ip: IpAddr) -> bool {
     match ip {
@@ -46,12 +52,20 @@ fn is_restricted_v6(ip: Ipv6Addr) -> bool {
 pub struct ResolvedTarget {
     pub host: String,
     pub address: SocketAddr,
+    pub candidates: Vec<SocketAddr>,
+}
+
+pub struct ResolveLimits<'a> {
+    pub cancel: &'a CancellationToken,
+    pub connect: Instant,
+    pub dns_hold: Option<&'a CommitGate>,
+    pub decoy: Option<SocketAddr>,
 }
 
 pub async fn admit_target(
     http: &vm::HttpConfig,
-    url: &reqwest::Url,
-    cancel: &tokio_util::sync::CancellationToken,
+    url: &Url,
+    limits: ResolveLimits<'_>,
 ) -> Result<ResolvedTarget, &'static str> {
     http.validate().map_err(|_| "policy_denied")?;
     if !url.username().is_empty() || url.password().is_some() {
@@ -77,17 +91,24 @@ pub async fn admit_target(
     if !http.allowed_ports.contains(&port) {
         return Err("policy_denied");
     }
-    let addresses = if let Ok(ip) = host.parse::<IpAddr>() {
+    if let Some(hold) = limits.dns_hold {
+        hold.arrive();
+        hold.wait_bounded(limits.cancel, limits.connect)?;
+    }
+    let mut addresses = if let Ok(ip) = host.parse::<IpAddr>() {
         vec![SocketAddr::new(ip, port)]
     } else {
-        let looked = tokio::select! {
-            _ = cancel.cancelled() => return Err("cancelled"),
-            result = tokio::net::lookup_host((host, port)) => {
-                result.map_err(|_| "resolution_failed")?
-            }
-        };
+        let looked = select_deadline(limits.cancel, limits.connect, async {
+            tokio::net::lookup_host((host, port))
+                .await
+                .map_err(|_| "resolution_failed")
+        })
+        .await?;
         looked.collect::<Vec<_>>()
     };
+    if let Some(decoy) = limits.decoy {
+        addresses.insert(0, decoy);
+    }
     if addresses.is_empty() {
         return Err("resolution_failed");
     }
@@ -98,8 +119,44 @@ pub async fn admit_target(
     {
         return Err("policy_denied");
     }
+    let connectable = addresses
+        .iter()
+        .copied()
+        .find(|address| limits.decoy != Some(*address))
+        .unwrap_or(addresses[0]);
     Ok(ResolvedTarget {
         host: host.to_string(),
-        address: addresses[0],
+        address: connectable,
+        candidates: addresses,
     })
+}
+
+pub async fn select_deadline<T>(
+    cancel: &CancellationToken,
+    deadline: Instant,
+    work: impl std::future::Future<Output = Result<T, &'static str>>,
+) -> Result<T, &'static str> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err("cancelled"),
+        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => Err("deadline"),
+        result = work => result,
+    }
+}
+
+pub async fn until_deadline<T>(
+    cancel: &CancellationToken,
+    deadline: Instant,
+    work: impl std::future::Future<Output = T>,
+) -> Result<T, &'static str> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err("cancelled"),
+        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => Err("deadline"),
+        result = work => Ok(result),
+    }
+}
+
+pub fn hooks_decoy(hooks: &TransportHooks) -> Option<SocketAddr> {
+    hooks.dns_decoy
 }

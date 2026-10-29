@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,7 +25,7 @@ use crate::transfer::{register_transfer, transfer_catalog, TransferHost};
 pub(crate) mod cancellation;
 pub(crate) mod events;
 
-use cancellation::EpochTable;
+use cancellation::Admission;
 use events::EventBus;
 
 struct ReadyState {
@@ -42,8 +41,7 @@ struct Shared {
     fail_once: AtomicBool,
     metrics: Arc<Metrics>,
     events: Arc<EventBus>,
-    epochs: Arc<EpochTable>,
-    jobs: Mutex<HashMap<JobKey, CancellationToken>>,
+    admission: Arc<Admission>,
     ready: Mutex<ReadyState>,
     ready_cv: Condvar,
     cancel_root: CancellationToken,
@@ -57,6 +55,7 @@ pub struct WorkerPool {
     shared: Arc<Shared>,
     sender: Mutex<Option<SyncSender<TransferRequest>>>,
     handles: Mutex<Vec<JoinHandle<()>>>,
+    joiners: Mutex<Vec<std::sync::mpsc::Receiver<()>>>,
     joined: AtomicBool,
 }
 
@@ -74,8 +73,7 @@ impl WorkerPool {
             fail_once: AtomicBool::new(config.fail_worker_once),
             metrics: Arc::new(Metrics::default()),
             events: Arc::new(EventBus::new(config.event_capacity)),
-            epochs: Arc::new(EpochTable::new()),
-            jobs: Mutex::new(HashMap::new()),
+            admission: Arc::new(Admission::new()),
             ready: Mutex::new(ReadyState {
                 owners: 0,
                 failed: false,
@@ -99,6 +97,7 @@ impl WorkerPool {
             shared,
             sender: Mutex::new(Some(sender)),
             handles: Mutex::new(handles),
+            joiners: Mutex::new(Vec::new()),
             joined: AtomicBool::new(false),
         })
     }
@@ -136,40 +135,57 @@ impl WorkerPool {
         let Some(sender) = sender.as_ref() else {
             return Err(PoolError::new("stopped"));
         };
+        let token = self.shared.cancel_root.child_token();
+        let key = request.key.clone();
+        self.shared.admission.insert_queued(key.clone(), token)?;
         match sender.try_send(request) {
             Ok(()) => {
                 self.shared.metrics.pending_add();
                 Ok(())
             }
-            Err(TrySendError::Full(_)) => Err(PoolError::new("queue_full")),
-            Err(TrySendError::Disconnected(_)) => Err(PoolError::new("stopped")),
+            Err(error) => {
+                self.shared.admission.rollback(&key);
+                match error {
+                    TrySendError::Full(_) => Err(PoolError::new("queue_full")),
+                    TrySendError::Disconnected(_) => Err(PoolError::new("stopped")),
+                }
+            }
         }
     }
 
     pub fn cancel(&self, key: &JobKey) -> Result<(), PoolError> {
-        if let Some(token) = lock(&self.shared.jobs).get(key).cloned() {
-            token.cancel();
-        }
+        self.shared.admission.cancel(key)?;
+        self.kick_cancellable();
+        Ok(())
+    }
+
+    pub fn advance_epoch(&self, task_id: i64, epoch: i64) -> Result<(), PoolError> {
+        self.shared.admission.advance(task_id, epoch)?;
         if let Some(gate) = &self.shared.config.commit_gate {
+            gate.kick();
+        }
+        if let Some(gate) = &self.shared.config.link_gate {
+            gate.kick();
+        }
+        if let Some(gate) = &self.shared.config.commit_hold {
             gate.kick();
         }
         Ok(())
     }
 
-    pub fn advance_epoch(&self, task_id: i64, epoch: i64) -> Result<(), PoolError> {
-        self.shared.epochs.advance(task_id, epoch);
-        let stale: Vec<CancellationToken> = lock(&self.shared.jobs)
-            .iter()
-            .filter(|(key, _)| key.task_id == task_id && key.epoch != epoch)
-            .map(|(_, token)| token.clone())
-            .collect();
-        for token in stale {
-            token.cancel();
-        }
+    pub fn register(&self, task_id: i64, epoch: i64) -> Result<(), PoolError> {
+        self.shared.admission.register(task_id, epoch)?;
         if let Some(gate) = &self.shared.config.commit_gate {
             gate.kick();
         }
+        if let Some(gate) = &self.shared.config.link_gate {
+            gate.kick();
+        }
         Ok(())
+    }
+
+    pub fn state_entries(&self) -> usize {
+        self.shared.admission.state_entries()
     }
 
     pub fn wait_terminals(
@@ -185,7 +201,7 @@ impl WorkerPool {
     }
 
     pub fn completion_count(&self, task_id: i64, epoch: i64) -> u64 {
-        self.shared.epochs.completion_count(task_id, epoch)
+        self.shared.admission.completion_count(task_id, epoch)
     }
 
     pub fn owner_threads(&self) -> Vec<ThreadId> {
@@ -241,11 +257,11 @@ impl WorkerPool {
     }
 
     pub fn epoch_entries(&self) -> usize {
-        self.shared.epochs.entries()
+        self.shared.admission.entries()
     }
 
     pub fn epoch_cap(&self) -> usize {
-        self.shared.epochs.cap()
+        self.shared.admission.cap()
     }
 
     pub fn dropped_progress(&self) -> u64 {
@@ -254,6 +270,18 @@ impl WorkerPool {
 
     pub fn dropped_terminal(&self) -> u64 {
         self.shared.events.dropped_terminal()
+    }
+
+    pub fn detach_events(&self) {
+        self.shared.events.detach_consumer();
+    }
+
+    pub fn dns_candidates(&self) -> Vec<std::net::SocketAddr> {
+        self.shared.metrics.dns_candidates()
+    }
+
+    pub fn failure_codes(&self) -> usize {
+        self.shared.metrics.failure_codes()
     }
 
     pub fn permits(&self) -> usize {
@@ -265,7 +293,7 @@ impl WorkerPool {
     }
 
     pub fn tracked_jobs(&self) -> usize {
-        lock(&self.shared.jobs).len()
+        self.shared.admission.tracked()
     }
 
     pub fn shutdown(self) -> Result<ShutdownReport, PoolError> {
@@ -273,24 +301,74 @@ impl WorkerPool {
     }
 
     fn shutdown_inner(&self) -> Result<ShutdownReport, PoolError> {
-        if self.joined.swap(true, Ordering::AcqRel) {
-            return Ok(self.report(true));
-        }
+        self.shutdown_within(Duration::from_secs(5))
+    }
+
+    pub fn shutdown_within(&self, budget: Duration) -> Result<ShutdownReport, PoolError> {
         self.shared.shut.store(true, Ordering::Release);
         self.shared.cancel_root.cancel();
-        if let Some(gate) = &self.shared.config.commit_gate {
-            gate.kick();
-        }
+        self.kick_cancellable();
         self.shared.events.close();
         drop(lock(&self.sender).take());
-        let handles = std::mem::take(&mut *lock(&self.handles));
-        let mut joined = true;
-        for handle in handles {
-            if handle.join().is_err() {
-                joined = false;
+        self.spawn_joiners();
+        let finished = self.wait_joiners(budget);
+        if finished {
+            self.joined.store(true, Ordering::Release);
+        }
+        Ok(self.report(finished))
+    }
+
+    fn kick_cancellable(&self) {
+        for gate in [
+            self.shared.config.commit_gate.as_ref(),
+            self.shared.config.link_gate.as_ref(),
+            self.shared.config.commit_hold.as_ref(),
+            self.shared.config.hooks.dns_hold.as_ref(),
+            self.shared.config.hooks.write_hold.as_ref(),
+            self.shared.config.hooks.buffer_hold.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            gate.kick();
+        }
+    }
+
+    fn spawn_joiners(&self) {
+        let mut handles = lock(&self.handles);
+        let mut joiners = lock(&self.joiners);
+        for handle in handles.drain(..) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            thread::spawn(move || {
+                let _ = handle.join();
+                let _ = tx.send(());
+            });
+            joiners.push(rx);
+        }
+    }
+
+    fn wait_joiners(&self, budget: Duration) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        let mut joiners = lock(&self.joiners);
+        let mut pending = Vec::new();
+        let mut finished = true;
+        for rx in joiners.drain(..) {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                pending.push(rx);
+                finished = false;
+                continue;
+            }
+            match rx.recv_timeout(remaining) {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    pending.push(rx);
+                    finished = false;
+                }
             }
         }
-        Ok(self.report(joined))
+        *joiners = pending;
+        finished
     }
 
     fn report(&self, joined: bool) -> ShutdownReport {
@@ -298,7 +376,8 @@ impl WorkerPool {
             pending_jobs: self.shared.metrics.pending(),
             in_flight: self.shared.metrics.in_flight(),
             permits: self.shared.metrics.permits(),
-            tracked_jobs: lock(&self.shared.jobs).len(),
+            tracked_jobs: self.shared.admission.tracked(),
+            draining: self.shared.shut.load(Ordering::Acquire) && !joined,
             joined,
         }
     }
@@ -360,16 +439,20 @@ fn worker_main(shared: Arc<Shared>) {
         };
         shared.metrics.pending_sub();
         if shared.shut.load(Ordering::Acquire) {
+            shared.admission.retire(&job.key);
+            publish_terminal_status(&shared, &job, "cancelled", 0);
             continue;
         }
-        let token = shared.cancel_root.child_token();
+        let Some(token) = shared.admission.take_running(&job.key) else {
+            publish_terminal_status(&shared, &job, "cancelled", 0);
+            continue;
+        };
         let parked = token.clone();
-        lock(&shared.jobs).insert(job.key.clone(), token.clone());
         *lock(&host.current) = Some(job.clone());
         *lock(&host.active_cancel) = Some(token);
         *lock(&host.receipt) = None;
         shared.metrics.begin_permit();
-        shared.epochs.begin(job.key.task_id);
+        shared.admission.begin(job.key.task_id);
         let panicked = shared.fail_once.swap(false, Ordering::AcqRel);
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             if panicked {
@@ -382,14 +465,16 @@ fn worker_main(shared: Arc<Shared>) {
             })
         }));
         if parked.is_cancelled() {
-            runtime.block_on(flush_cancelled_connection());
+            runtime.block_on(async {
+                tokio::task::yield_now().await;
+            });
         }
         let receipt = lock(&host.receipt).clone();
         publish_terminal(&shared, &job, outcome.is_ok(), receipt);
         *lock(&host.current) = None;
         *lock(&host.active_cancel) = None;
-        lock(&shared.jobs).remove(&job.key);
-        shared.epochs.end(job.key.task_id);
+        shared.admission.retire(&job.key);
+        shared.admission.end(job.key.task_id);
         shared.metrics.end_permit();
         if outcome.is_err() {
             match build_vm(&shared, &host) {
@@ -406,12 +491,13 @@ fn worker_main(shared: Arc<Shared>) {
     }
 }
 
-async fn flush_cancelled_connection() {
-    for _ in 0..4 {
-        tokio::task::yield_now().await;
-    }
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    tokio::task::yield_now().await;
+fn publish_terminal_status(shared: &Shared, job: &TransferRequest, status: &str, bytes: i64) {
+    let _ = shared.events.publish_terminal(TransferEvent {
+        key: job.key.clone(),
+        kind: "terminal".to_string(),
+        bytes,
+        terminal_status: Some(status.to_string()),
+    });
 }
 
 fn publish_terminal(
@@ -425,12 +511,7 @@ fn publish_terminal(
         None if drive_ok => ("worker_failed".to_string(), 0),
         None => ("worker_failed".to_string(), 0),
     };
-    let _ = shared.events.publish_terminal(TransferEvent {
-        key: job.key.clone(),
-        kind: "terminal".to_string(),
-        bytes,
-        terminal_status: Some(status),
-    });
+    publish_terminal_status(shared, job, &status, bytes);
 }
 
 fn make_host(shared: &Shared) -> TransferHost {
@@ -443,7 +524,10 @@ fn make_host(shared: &Shared) -> TransferHost {
         stream_limit: shared.config.stream_limit,
         writer_fault: shared.config.writer_fault.clone(),
         commit_gate: shared.config.commit_gate.clone(),
-        epochs: Arc::clone(&shared.epochs),
+        link_gate: shared.config.link_gate.clone(),
+        commit_hold: shared.config.commit_hold.clone(),
+        hooks: shared.config.hooks.clone(),
+        admission: Arc::clone(&shared.admission),
         metrics: Arc::clone(&shared.metrics),
         events: Arc::clone(&shared.events),
         shut: Arc::clone(&shared.shut),
