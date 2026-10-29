@@ -449,23 +449,24 @@ fn presence_json(presence: Presence) -> string {
     json::encode(presence)
 }
 
+/// Append `,"key":null` when the encoder omitted a null optional. A record
+/// that came back from a JSON decode already carries the key as an explicit
+/// null, so the text is returned unchanged instead of duplicating it.
+fn with_null(text: string, key: string) -> string {
+    let decoded: map = json::decode::<map>(text.copy());
+    if decoded.has(key) => {
+        text
+    } else => {
+        let length = (&text).length;
+        (&text)[0:(length - 1)] + ",\"" + key + "\":null}"
+    }
+}
+
 fn config_json(config: Config) -> string {
     let base = json::encode(config);
-    let extras = (if type(config?.rpc_port) == "null" => {
-        ",\"rpc_port\":null"
-    } else => {
-        ""
-    }) + (if type(config?.rpc_secret) == "null" => {
-        ",\"rpc_secret\":null"
-    } else => {
-        ""
-    }) + (if type(config?.download_range) == "null" => {
-        ",\"download_range\":null"
-    } else => {
-        ""
-    });
-    let length = (&base).length;
-    (&base)[0:(length - 1)] + extras + "}"
+    let with_port = with_null(base, "rpc_port");
+    let with_secret = with_null(with_port, "rpc_secret");
+    with_null(with_secret, "download_range")
 }
 
 fn error_report(error: string) -> string {
@@ -551,4 +552,105 @@ pub fn update_report(base: string, path: string, explicit: bool, overlay_path: s
         }
     }
     report
+}
+
+/// Task-domain data entry points.
+///
+/// RustScript struct types are module-local, so a sibling module cannot name
+/// this module's `Config` record as a field or parameter type. The task store
+/// therefore carries the 25-key record as parsed Core map data: the values and
+/// their nullable entries are produced here by decoding this module's own
+/// canonical 25-key JSON encoding, and every runtime update is applied by
+/// `apply_update` before the data is handed back. No second copy of the key
+/// list or the validation rules exists outside this file.
+fn data_of(config: Config) -> map {
+    json::decode::<map>(config_json(config))
+}
+
+fn presence_map(presence: Presence) -> map {
+    {
+        proxy: presence.proxy,
+        dir: presence.dir,
+        ignored_errors: presence.ignored_errors,
+    }
+}
+
+/// The built-in 25-key record as parsed data.
+pub fn defaults_data() -> map {
+    data_of(default_config())
+}
+
+/// The 14 keys `xeHentai.add_task` copies from the global configuration, as a
+/// JSON object. `download_range` is written explicitly as `null` because the
+/// Core encoder omits an absent optional struct field.
+fn task_baseline_json(config: Config) -> string {
+    let mut out = "{\"dir\":";
+    out = out + json::encode(config.dir);
+    out = out + ",\"download_ori\":";
+    out = out + json::encode(config.download_ori);
+    out = out + ",\"download_thread_cnt\":";
+    out = out + json::encode(config.download_thread_cnt);
+    out = out + ",\"scan_thread_cnt\":";
+    out = out + json::encode(config.scan_thread_cnt);
+    out = out + ",\"proxy_image\":";
+    out = out + json::encode(config.proxy_image);
+    out = out + ",\"proxy_image_only\":";
+    out = out + json::encode(config.proxy_image_only);
+    out = out + ",\"ignored_errors\":";
+    out = out + json::encode(config.ignored_errors);
+    out = out + ",\"low_speed_threshold\":";
+    out = out + json::encode(config.low_speed_threshold);
+    out = out + ",\"rename_ori\":";
+    out = out + json::encode(config.rename_ori);
+    out = out + ",\"make_archive\":";
+    out = out + json::encode(config.make_archive);
+    out = out + ",\"delete_task_files\":";
+    out = out + json::encode(config.delete_task_files);
+    out = out + ",\"jpn_title\":";
+    out = out + json::encode(config.jpn_title);
+    out = out + ",\"download_range\":";
+    let no_ranges: [[int]] = [];
+    out = out + (if type(config?.download_range) == "null" => {
+        "null"
+    } else => {
+        // The guard above already established that the optional is present;
+        // the typed fallback only satisfies the unwrap contract.
+        let ranges: [[int]] = config?.download_range.unwrap_or(no_ranges);
+        json::encode(ranges)
+    });
+    out = out + ",\"download_timeout\":";
+    out = out + json::encode(config.download_timeout);
+    out + "}"
+}
+
+/// Task-add baseline from the stored parsed data, through the same typed
+/// record so the 14-key projection has one owner.
+pub fn baseline_from_data(base: map) -> string {
+    let config: Config = json::decode::<Config>(json::encode(base));
+    task_baseline_json(config)
+}
+
+/// Runtime configuration update over the accepted validator.
+///
+/// Result keys: `ok`, `error`, `config` (the 25-key parsed data, unchanged on
+/// error), and `presence` (the three update side-effect flags). Task records
+/// are separate data and are not touched here.
+pub fn update_data(base: map, overlay: map) -> map {
+    let config: Config = json::decode::<Config>(json::encode(base));
+    let outcome = apply_update(config, overlay);
+    if outcome.error.copy() != "" => {
+        {
+            ok: false,
+            error: outcome.error.copy(),
+            config: base,
+            presence: presence_map(outcome.presence.copy()),
+        }
+    } else => {
+        {
+            ok: true,
+            error: "",
+            config: data_of(outcome.config),
+            presence: presence_map(outcome.presence),
+        }
+    }
 }

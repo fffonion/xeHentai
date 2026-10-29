@@ -1,0 +1,955 @@
+//! RSS-owned task control: record, table, ready queue, incarnations, commands.
+//!
+//! The store is a real RustScript value. The embedding threads the returned
+//! control root into the next owner invocation, so the table, configuration,
+//! queue, epochs, and counters survive across commands without encoding the
+//! store as JSON text and without rebuilding an empty store per call.
+//!
+//! Task control and the ready queue are owned here. Prepared tickets carry an
+//! immutable guid, epoch, and kind. Pause, delete, resume, and a terminal
+//! collision all advance the task's epoch, so an old ticket or completion
+//! event can no longer change state, reopen a task, or add a completion.
+//!
+//! Two RustScript details shape this module:
+//!
+//! - Named struct types are resolved per module, so the task record, the
+//!   store, and the command steps share this module. A record declared in a
+//!   sibling module could not be used as a field or parameter type here.
+//! - Reading a non-scalar struct field moves it out of the record. Every
+//!   reader below therefore takes a copy-consuming accessor or passes
+//!   `value.copy()`, and only linear helpers move the store as a whole.
+//!
+//! The global 25-key configuration crosses as parsed Core map data from its
+//! single owner in `app/config/types.rss`.
+use json;
+
+use self::queue;
+use self::task;
+use super::config::types;
+use xeh_system;
+
+/// Largest epoch the JSON wire represents exactly. Advancing past it fails
+/// closed; epochs never wrap into a reusable value.
+fn max_epoch() -> int {
+    9007199254740991
+}
+
+// Public task states, unchanged from `const.py`: paused 0, waiting 1,
+// get_meta 2, scan_page 3, scan_img 4, scan_archive 5, download 10,
+// make_archive 19, finished 20, failed -1. Error codes keep their original
+// values: 0, 1000, 1001, 1101, 1105, 1106, 1107.
+fn state_paused() -> int {
+    0
+}
+
+fn state_waiting() -> int {
+    1
+}
+
+fn state_finished() -> int {
+    20
+}
+
+fn state_failed() -> int {
+    -1
+}
+
+fn err_no_error() -> int {
+    0
+}
+
+fn err_url_not_recognized() -> int {
+    1000
+}
+
+fn err_cant_download_exh() -> int {
+    1001
+}
+
+fn err_task_not_found() -> int {
+    1101
+}
+
+fn err_delete_running_task() -> int {
+    1105
+}
+
+fn err_task_cannot_pause() -> int {
+    1106
+}
+
+fn err_task_cannot_resume() -> int {
+    1107
+}
+
+/// The stored task record. Fields that the upstream `Task.to_dict()` omits
+/// (no gallery ids, no queues yet) stay absent through the optional fields.
+struct Task {
+    url: string,
+    gid: string?,
+    sethash: string?,
+    guid: string,
+    state: int,
+    failcode: int,
+    config: map,
+    meta: map,
+    reload_map: map,
+    duplicate_map: map,
+    renamed_map: map,
+    img_q: [string]?,
+    page_q: [string]?,
+}
+
+struct Store {
+    config: map,
+    tasks: map,
+    order: [string],
+    queue: [string],
+    epochs: map,
+    completions: map,
+    epoch_seq: int,
+    has_login: bool,
+    guid_plan: [string],
+    guid_cursor: int,
+    allow_seed: bool,
+}
+
+struct Control {
+    store: Store,
+    report: string,
+}
+
+struct EventCheck {
+    accepted: bool,
+    reason: string,
+}
+
+struct PendingEffect {
+    kind: string,
+    guid: string,
+    directory: string,
+    title: string,
+}
+
+struct Step {
+    store: Store,
+    ok: bool,
+    error: string,
+    code: int?,
+    value: string?,
+    warnings: [string],
+    event: EventCheck?,
+    pending: PendingEffect?,
+    presence: map?,
+}
+
+// ---- task record -----------------------------------------------------------
+
+/// `Task.__init__`: waiting, no failure, empty maps, no queues yet.
+fn make_task(url: string, cfg: map, guid: string) -> Task {
+    {
+        url: url.copy(),
+        gid: task::url_gid(url.copy()),
+        sethash: task::url_sethash(url),
+        guid: guid,
+        state: state_waiting(),
+        failcode: 0,
+        config: cfg,
+        meta: {},
+        reload_map: {},
+        duplicate_map: {},
+        renamed_map: {},
+        img_q: null,
+        page_q: null,
+    }
+}
+
+/// `Task.set_fail`: failed state, saved code, and only `meta` is cleared.
+fn set_fail(record: Task, code: int) -> Task {
+    let mut next = record.copy();
+    next.state = state_failed();
+    next.failcode = code;
+    next.meta = {};
+    next
+}
+
+/// `Task.cleanup`. A terminal record drops its queues and reload map. The
+/// `before_delete` branch only removes downloaded files upstream; that effect
+/// belongs to the Task10 file owner and is not performed here.
+fn cleanup(record: Task, before_delete: bool) -> Task {
+    let mut next = record.copy();
+    let state = record_state(record.copy());
+    if before_delete => {
+        // No file effect in this scope. Callers must not report a completed
+        // physical removal.
+        next
+    } else => {
+        if state == state_finished() || state == state_failed() {
+            next.img_q = null;
+            next.page_q = null;
+            next.reload_map = {};
+        }
+        next
+    }
+}
+
+fn record_state(record: Task) -> int {
+    record.state
+}
+
+fn record_title(record: Task) -> string {
+    record.meta["title"].copy()
+}
+
+fn record_directory(record: Task) -> string {
+    let cfg = record.config.copy();
+    if cfg.has("dir") => {
+        let typed: string = cfg["dir"].copy();
+        typed
+    } else => {
+        ""
+    }
+}
+
+fn delete_needs_files(record: Task) -> bool {
+    let cfg = record.config.copy();
+    task::config_flag(cfg, "delete_task_files", false) && record.meta.has("title")
+}
+
+/// `Task.to_dict()` order: insertion order, never sorted. The record's fields
+/// that are absent (null gid/sethash/queues) stay absent, exactly like the
+/// upstream dict comprehension.
+fn table_json(tasks: map, order: [string]) -> string {
+    let mut records: [Task] = [];
+    for index in 0..order.length {
+        let guid: string = order[index].copy();
+        if tasks.has(guid) {
+            let record: Task = tasks[guid].copy();
+            records[records.length] = record;
+        }
+    }
+    json::encode(records)
+}
+
+// ---- request field readers -------------------------------------------------
+
+fn field_string(document: map, name: string, fallback: string) -> string {
+    if document.has(name) && type(document[name].copy()) == "string" => {
+        let typed: string = document[name].copy();
+        typed
+    } else => {
+        fallback
+    }
+}
+
+fn field_int(document: map, name: string, fallback: int) -> int {
+    if document.has(name) && type(document[name].copy()) == "int" => {
+        let typed: int = document[name].copy();
+        typed
+    } else => {
+        fallback
+    }
+}
+
+fn field_bool(document: map, name: string, fallback: bool) -> bool {
+    if document.has(name) && type(document[name].copy()) == "bool" => {
+        let typed: bool = document[name].copy();
+        typed
+    } else => {
+        fallback
+    }
+}
+
+fn field_map(document: map, name: string) -> map {
+    if document.has(name) && type(document[name].copy()) == "map" => {
+        let typed: map = document[name].copy();
+        typed
+    } else => {
+        {}
+    }
+}
+
+fn has_int(document: map, name: string) -> bool {
+    document.has(name) && type(document[name].copy()) == "int"
+}
+
+// ---- steps -----------------------------------------------------------------
+
+fn ok_step(store: Store) -> Step {
+    {
+        store: store,
+        ok: true,
+        error: "",
+        code: null,
+        value: null,
+        warnings: [],
+        event: null,
+        pending: null,
+        presence: null,
+    }
+}
+
+fn code_step(store: Store, code: int, value: string?) -> Step {
+    {
+        store: store,
+        ok: true,
+        error: "",
+        code: code,
+        value: value,
+        warnings: [],
+        event: null,
+        pending: null,
+        presence: null,
+    }
+}
+
+fn error_step(store: Store, error: string) -> Step {
+    {
+        store: store,
+        ok: false,
+        error: error,
+        code: null,
+        value: null,
+        warnings: [],
+        event: null,
+        pending: null,
+        presence: null,
+    }
+}
+
+fn event_step(store: Store, accepted: bool, reason: string) -> Step {
+    {
+        store: store,
+        ok: true,
+        error: "",
+        code: null,
+        value: null,
+        warnings: [],
+        event: { accepted: accepted, reason: reason },
+        pending: null,
+        presence: null,
+    }
+}
+
+fn pending_step(store: Store, guid: string, directory: string, title: string) -> Step {
+    {
+        store: store,
+        ok: false,
+        error: "pending_effect",
+        code: null,
+        value: null,
+        warnings: [],
+        event: null,
+        pending: {
+            kind: "delete_task_files",
+            guid: guid,
+            directory: directory,
+            title: title,
+        },
+        presence: null,
+    }
+}
+
+// ---- store helpers ---------------------------------------------------------
+
+fn epoch_seq_of(store: Store) -> int {
+    store.epoch_seq
+}
+
+fn store_has_login(store: Store) -> bool {
+    store.has_login
+}
+
+fn store_has_task(store: Store, guid: string) -> bool {
+    store.tasks.has(guid)
+}
+
+fn store_epochs(store: Store) -> map {
+    store.epochs.copy()
+}
+
+fn store_config(store: Store) -> map {
+    store.config.copy()
+}
+
+fn task_of(store: Store, guid: string) -> Task {
+    let tasks = store.tasks.copy();
+    tasks[guid].copy()
+}
+
+fn advance_epoch(store: Store, guid: string) -> Store {
+    let mut next = store;
+    let seq = next.epoch_seq;
+    let mut epochs = next.epochs;
+    epochs[guid] = seq + 1;
+    next.epochs = epochs;
+    next.epoch_seq = seq + 1;
+    next
+}
+
+fn current_epoch(epochs: map, guid: string) -> int? {
+    if epochs.has(guid) => {
+        let value: int = epochs[guid].copy();
+        value
+    } else => {
+        null
+    }
+}
+
+fn state_of(store: Store, guid: string) -> int {
+    let record = task_of(store, guid);
+    record.state
+}
+
+fn replace_task(store: Store, record: Task) -> Store {
+    let mut next = store;
+    let guid = record.guid.copy();
+    let mut tasks = next.tasks;
+    tasks[guid] = record;
+    next.tasks = tasks;
+    next
+}
+
+fn remove_task(store: Store, guid: string) -> Store {
+    let mut next = store;
+    let mut tasks = next.tasks;
+    if tasks.has(guid) {
+        // A null assignment removes the map entry in Core.
+        tasks[guid] = null;
+    }
+    next.tasks = tasks;
+    let source_order = next.order.copy();
+    let mut order: [string] = [];
+    for index in 0..source_order.length {
+        let existing: string = source_order[index].copy();
+        if existing != guid {
+            order[order.length] = existing;
+        }
+    }
+    next.order = order;
+    let mut completions = next.completions;
+    if completions.has(guid) {
+        completions[guid] = null;
+    }
+    next.completions = completions;
+    next
+}
+
+fn note_completion(store: Store, guid: string) -> Store {
+    let mut next = store;
+    let counts = next.completions.copy();
+    let previous = if counts.has(guid) => {
+        let count: int = counts[guid].copy();
+        count
+    } else => {
+        0
+    };
+    let mut completions = next.completions;
+    completions[guid] = previous + 1;
+    next.completions = completions;
+    next
+}
+
+fn active_state(state: int) -> bool {
+    state > state_paused() && state < state_finished()
+}
+
+fn uuid_prefix() -> string {
+    let text = xeh_system::uuid_v4();
+    if (&text).length >= 8 => {
+        (&text)[0:8]
+    } else => {
+        text
+    }
+}
+
+// ---- commands --------------------------------------------------------------
+
+fn op_add(store: Store, document: map) -> Step {
+    if epoch_seq_of(store.copy()) >= max_epoch() => {
+        error_step(store, "epoch_exhausted")
+    } else => {
+        add_record(store.copy(), document)
+    }
+}
+
+fn add_record(store: Store, document: map) -> Step {
+    let raw_url = field_string(document.copy(), "url", "");
+    let url = task::trim(raw_url);
+    let overrides = field_map(document.copy(), "overrides");
+    let cfg = task::config_from(types::baseline_from_data(store_config(store.copy())), overrides);
+    let mut next = store;
+    let mut plan = next.guid_plan;
+    let mut cursor = next.guid_cursor;
+    let guid = if cursor < plan.length => {
+        let planned: string = plan[cursor].copy();
+        cursor = cursor + 1;
+        planned
+    } else => {
+        uuid_prefix()
+    };
+    next.guid_plan = plan;
+    next.guid_cursor = cursor;
+    let mut warnings: [string] = [];
+    if task::config_flag(cfg.copy(), "download_ori", false) && store_has_login(next.copy()) == false {
+        warnings[warnings.length] = "download_ori_requires_login";
+    }
+    if store_has_task(next.copy(), guid) => {
+        add_collision(next, guid, warnings)
+    } else => {
+        add_new(next, url, cfg, guid, warnings)
+    }
+}
+
+fn add_collision(store: Store, guid: string, warnings: [string]) -> Step {
+    let existing = task_of(store.copy(), guid);
+    let existing_state = record_state(existing.copy());
+    let mut next = store;
+    if existing_state == state_finished() || existing_state == state_failed() {
+        // Upstream keeps the existing record, never replaces it by URL or by
+        // guid. A terminal record becomes waiting; `cleanup` then sees the
+        // waiting state and leaves the queues alone.
+        let mut revived = existing.copy();
+        revived.state = state_waiting();
+        let revived = cleanup(revived, false);
+        next = replace_task(next, revived);
+        // A new incarnation must not honor tickets from the old one.
+        next = advance_epoch(next, guid);
+    }
+    let mut step = code_step(next, err_no_error(), guid);
+    step.warnings = warnings;
+    step
+}
+
+fn add_new(store: Store, url: string, cfg: map, guid: string, warnings: [string]) -> Step {
+    let record = make_task(url.copy(), cfg, guid.copy());
+    let mut next = store;
+    let mut tasks = next.tasks;
+    tasks[guid.copy()] = record;
+    next.tasks = tasks;
+    let mut order = next.order;
+    order[order.length] = guid.copy();
+    next.order = order;
+    // Every created incarnation receives a fresh epoch before any ticket can
+    // be prepared for it.
+    next = advance_epoch(next, guid.copy());
+    if task::url_recognized(url.copy()) == false => {
+        let tasks_now = next.tasks.copy();
+        let failed = set_fail(tasks_now[guid.copy()].copy(), err_url_not_recognized());
+        let mut step = code_step(replace_task(next, failed), err_url_not_recognized(), null);
+        step.warnings = warnings;
+        step
+    } else if store_has_login(next.copy()) == false && task::exhentai_url(url) => {
+        let tasks_now = next.tasks.copy();
+        let failed = set_fail(tasks_now[guid.copy()].copy(), err_cant_download_exh());
+        let mut step = code_step(replace_task(next, failed), err_cant_download_exh(), null);
+        step.warnings = warnings;
+        step
+    } else => {
+        next.queue = queue::push(next.queue.copy(), guid.copy());
+        let mut step = code_step(next, err_no_error(), guid);
+        step.warnings = warnings;
+        step
+    }
+}
+
+fn op_del(store: Store, document: map) -> Step {
+    let guid = field_string(document, "guid", "");
+    if store_has_task(store.copy(), guid) == false => {
+        code_step(store, err_task_not_found(), null)
+    } else => {
+        delete_record(store.copy(), guid)
+    }
+}
+
+fn delete_record(store: Store, guid: string) -> Step {
+    let record = task_of(store.copy(), guid);
+    let record_state_value = record_state(record.copy());
+    if active_state(record_state_value) => {
+        code_step(store, err_delete_running_task(), null)
+    } else if delete_needs_files(record.copy()) => {
+        // The physical removal belongs to the Task10 file owner. Until it is
+        // wired, the request is reported and the record stays in the table:
+        // no completed removal is claimed.
+        pending_step(
+            store,
+            guid,
+            record_directory(record.copy()),
+            record_title(record.copy())
+        )
+    } else if epoch_seq_of(store.copy()) >= max_epoch() => {
+        // Retiring the record requires a fresh epoch. Fail closed before any
+        // mutation instead of reusing an authorization value.
+        error_step(store, "epoch_exhausted")
+    } else => {
+        cleanup(record, true);
+        let mut next = remove_task(store, guid);
+        next = advance_epoch(next, guid);
+        code_step(next, err_no_error(), "")
+    }
+}
+
+fn op_pause(store: Store, document: map) -> Step {
+    let guid = field_string(document, "guid", "");
+    if store_has_task(store.copy(), guid) == false => {
+        code_step(store, err_task_not_found(), null)
+    } else => {
+        pause_record(store.copy(), guid)
+    }
+}
+
+fn pause_record(store: Store, guid: string) -> Step {
+    let state = state_of(store.copy(), guid);
+    if state == state_paused() || state == state_finished() || state == state_failed() => {
+        code_step(store, err_task_cannot_pause(), null)
+    } else if epoch_seq_of(store.copy()) >= max_epoch() => {
+        error_step(store, "epoch_exhausted")
+    } else => {
+        let record = task_of(store.copy(), guid);
+        let mut paused = record.copy();
+        paused.state = state_paused();
+        let mut next = replace_task(store, paused);
+        // Pausing invalidates in-flight tickets. The native monitor exit hook
+        // is Task9 wiring; this layer only owns the control state.
+        next = advance_epoch(next, guid);
+        code_step(next, err_no_error(), "")
+    }
+}
+
+fn op_resume(store: Store, document: map) -> Step {
+    let guid = field_string(document, "guid", "");
+    if store_has_task(store.copy(), guid) == false => {
+        code_step(store, err_task_not_found(), null)
+    } else => {
+        resume_record(store.copy(), guid)
+    }
+}
+
+fn resume_record(store: Store, guid: string) -> Step {
+    let state = state_of(store.copy(), guid);
+    if active_state(state) => {
+        code_step(store, err_task_cannot_resume(), null)
+    } else if epoch_seq_of(store.copy()) >= max_epoch() => {
+        error_step(store, "epoch_exhausted")
+    } else => {
+        let record = task_of(store.copy(), guid);
+        let mut resumed = record.copy();
+        // Upstream `max(state, waiting)`: finished stays 20, paused and failed
+        // become waiting. Every accepted resume is enqueued, including
+        // finished.
+        let target_state = if state < state_waiting() => {
+            state_waiting()
+        } else => {
+            state
+        };
+        resumed.state = target_state;
+        let mut next = replace_task(store, resumed);
+        next.queue = queue::push(next.queue.copy(), guid.copy());
+        next = advance_epoch(next, guid);
+        code_step(next, err_no_error(), "")
+    }
+}
+
+fn op_update(store: Store, document: map) -> Step {
+    let overlay = field_map(document, "overlay");
+    let result = types::update_data(store_config(store.copy()), overlay);
+    let error: string = result["error"].copy();
+    let presence: map = result["presence"].copy();
+    if error != "" => {
+        let mut step = error_step(store, "config:" + error);
+        step.presence = presence;
+        step
+    } else => {
+        let mut next = store;
+        next.config = result["config"].copy();
+        let mut step = code_step(next, err_no_error(), "");
+        step.presence = presence;
+        step
+    }
+}
+
+fn op_prepare(store: Store, document: map) -> Step {
+    let guid = field_string(document, "guid", "");
+    if store_has_task(store.copy(), guid) == false => {
+        error_step(store, "unknown_task")
+    } else => {
+        prepare_record(store.copy(), guid)
+    }
+}
+
+fn prepare_record(store: Store, guid: string) -> Step {
+    let state = state_of(store.copy(), guid);
+    if active_state(state) == false => {
+        error_step(store, "not_running")
+    } else if epoch_seq_of(store.copy()) >= max_epoch() => {
+        error_step(store, "epoch_exhausted")
+    } else => {
+        let epoch = current_epoch(store_epochs(store.copy()), guid);
+        if epoch == null => {
+            error_step(store, "missing_epoch")
+        } else => {
+            let ticket = json::encode({ guid: guid, epoch: epoch, kind: "run" });
+            let mut step = ok_step(store);
+            step.value = ticket;
+            step
+        }
+    }
+}
+
+fn op_event(store: Store, document: map) -> Step {
+    let ticket = field_map(document.copy(), "ticket");
+    let guid = field_string(ticket.copy(), "guid", "");
+    let epoch = field_int(ticket.copy(), "epoch", -1);
+    let kind = field_string(ticket.copy(), "kind", "");
+    if guid == "" || epoch < 0 || kind == "" => {
+        event_step(store, false, "malformed_ticket")
+    } else => {
+        apply_event(store, document, guid, epoch, kind)
+    }
+}
+
+fn apply_event(store: Store, document: map, guid: string, epoch: int, kind: string) -> Step {
+    if store_has_task(store.copy(), guid) == false => {
+        event_step(store, false, "unknown_task")
+    } else if kind != "run" => {
+        event_step(store, false, "unknown_ticket_kind")
+    } else if current_epoch(store_epochs(store.copy()), guid).unwrap_or(-1) != epoch => {
+        event_step(store, false, "stale_epoch")
+    } else => {
+        let record = task_of(store.copy(), guid);
+        let record_state_value = record_state(record.copy());
+        if active_state(record_state_value) == false => {
+            event_step(store, false, "not_running")
+        } else => {
+            finish_event(store, document, record, guid)
+        }
+    }
+}
+
+fn finish_event(store: Store, document: map, record: Task, guid: string) -> Step {
+    let event_kind = field_string(document.copy(), "kind", "");
+    if event_kind == "finished" => {
+        let mut finished = record.copy();
+        finished.state = state_finished();
+        finished.failcode = 0;
+        let mut next = replace_task(store, finished);
+        next = note_completion(next, guid);
+        event_step(next, true, "")
+    } else if event_kind == "failed" => {
+        if has_int(document.copy(), "code") == false => {
+            event_step(store, false, "malformed_code")
+        } else => {
+            let code = field_int(document, "code", 0);
+            let failed = set_fail(record, code);
+            event_step(replace_task(store, failed), true, "")
+        }
+    } else => {
+        event_step(store, false, "unknown_kind")
+    }
+}
+
+fn op_seed_state(store: Store, document: map) -> Step {
+    if store.allow_seed == false => {
+        error_step(store, "seed_not_allowed")
+    } else => {
+        let guid = field_string(document.copy(), "guid", "");
+        if store_has_task(store.copy(), guid) == false => {
+            error_step(store, "unknown_task")
+        } else => {
+            let state = field_int(document, "state", state_waiting());
+            let record = task_of(store.copy(), guid);
+            let mut seeded = record.copy();
+            seeded.state = state;
+            ok_step(replace_task(store, seeded))
+        }
+    }
+}
+
+fn op_seed_meta(store: Store, document: map) -> Step {
+    if store.allow_seed == false => {
+        error_step(store, "seed_not_allowed")
+    } else => {
+        let guid = field_string(document.copy(), "guid", "");
+        if store_has_task(store.copy(), guid) == false => {
+            error_step(store, "unknown_task")
+        } else => {
+            let meta = field_map(document, "meta");
+            let record = task_of(store.copy(), guid);
+            let mut seeded = record.copy();
+            seeded.meta = meta;
+            ok_step(replace_task(store, seeded))
+        }
+    }
+}
+
+fn op_set_login(store: Store, document: map) -> Step {
+    let mut next = store;
+    next.has_login = field_bool(document, "value", false);
+    ok_step(next)
+}
+
+// ---- report ----------------------------------------------------------------
+
+fn int_or_null(value: int?) -> string {
+    if type(value) == "null" => {
+        "null"
+    } else => {
+        json::encode(value.unwrap_or(0))
+    }
+}
+
+fn string_or_null(value: string?) -> string {
+    if type(value) == "null" => {
+        "null"
+    } else => {
+        json::encode(value.unwrap_or(""))
+    }
+}
+
+fn event_text(event: EventCheck?) -> string {
+    if type(event) == "null" => {
+        "null"
+    } else => {
+        let typed: EventCheck = event.unwrap_or({ accepted: false, reason: "" });
+        "{\"accepted\":" + json::encode(typed.accepted)
+            + ",\"reason\":" + json::encode(typed.reason) + "}"
+    }
+}
+
+fn pending_text(pending: PendingEffect?) -> string {
+    if type(pending) == "null" => {
+        "null"
+    } else => {
+        let typed: PendingEffect = pending.unwrap_or({
+            kind: "",
+            guid: "",
+            directory: "",
+            title: "",
+        });
+        "{\"kind\":" + json::encode(typed.kind)
+            + ",\"guid\":" + json::encode(typed.guid)
+            + ",\"directory\":" + json::encode(typed.directory)
+            + ",\"title\":" + json::encode(typed.title) + "}"
+    }
+}
+
+fn presence_text(presence: map?) -> string {
+    if type(presence) == "null" => {
+        "null"
+    } else => {
+        let typed: map = presence.unwrap_or({});
+        let proxy: bool = typed["proxy"].copy();
+        let dir: bool = typed["dir"].copy();
+        let ignored: bool = typed["ignored_errors"].copy();
+        "{\"proxy\":" + json::encode(proxy)
+            + ",\"dir\":" + json::encode(dir)
+            + ",\"ignored_errors\":" + json::encode(ignored) + "}"
+    }
+}
+
+fn build_report(
+    store: Store,
+    ok: bool,
+    error: string,
+    code: int?,
+    value: string?,
+    warnings: [string],
+    event: EventCheck?,
+    pending: PendingEffect?,
+    presence: map?
+) -> string {
+    let head = "{\"ok\":" + json::encode(ok)
+        + ",\"error\":" + json::encode(error)
+        + ",\"code\":" + int_or_null(code)
+        + ",\"value\":" + string_or_null(value)
+        + ",\"warnings\":" + json::encode(warnings)
+        + ",\"event\":" + event_text(event)
+        + ",\"pending\":" + pending_text(pending)
+        + ",\"presence\":" + presence_text(presence);
+    let config_text = json::encode(store.config);
+    let tasks_text = table_json(store.tasks, store.order);
+    let queue_text = json::encode(store.queue);
+    let epochs_text = json::encode(store.epochs);
+    let completions_text = json::encode(store.completions);
+    head + ",\"config\":" + config_text
+        + ",\"tasks\":" + tasks_text
+        + ",\"queue\":" + queue_text
+        + ",\"epochs\":" + epochs_text
+        + ",\"completions\":" + completions_text
+        + "}"
+}
+
+fn finish(step: Step) -> Control {
+    let store = step.store;
+    let report = build_report(
+        store.copy(),
+        step.ok,
+        step.error,
+        step?.code,
+        step?.value,
+        step.warnings,
+        step?.event,
+        step?.pending,
+        step?.presence
+    );
+    { store: store, report: report }
+}
+
+pub fn create(guids: [string], epoch_start: int, allow_seed: bool) -> Control {
+    let mut start = epoch_start;
+    if start < 0 {
+        start = 0;
+    }
+    {
+        store: {
+            config: types::defaults_data(),
+            tasks: {},
+            order: [],
+            queue: [],
+            epochs: {},
+            completions: {},
+            epoch_seq: start,
+            has_login: false,
+            guid_plan: guids,
+            guid_cursor: 0,
+            allow_seed: allow_seed,
+        },
+        report: "",
+    }
+}
+
+pub fn report(control: Control) -> string {
+    control.report
+}
+
+pub fn dispatch(control: Control, request: string) -> Control {
+    let document: map = json::decode::<map>(request);
+    let op = field_string(document.copy(), "op", "");
+    let store = control.store;
+    let step = if op == "add" => {
+        op_add(store.copy(), document)
+    } else if op == "del" => {
+        op_del(store.copy(), document)
+    } else if op == "pause" => {
+        op_pause(store.copy(), document)
+    } else if op == "resume" => {
+        op_resume(store.copy(), document)
+    } else if op == "update" => {
+        op_update(store.copy(), document)
+    } else if op == "prepare" => {
+        op_prepare(store.copy(), document)
+    } else if op == "event" => {
+        op_event(store.copy(), document)
+    } else if op == "snapshot" => {
+        ok_step(store.copy())
+    } else if op == "set_login" => {
+        op_set_login(store.copy(), document)
+    } else if op == "seed_state" => {
+        op_seed_state(store.copy(), document)
+    } else if op == "seed_meta" => {
+        op_seed_meta(store.copy(), document)
+    } else => {
+        error_step(store.copy(), "unknown_op:" + op)
+    };
+    finish(step)
+}

@@ -190,3 +190,51 @@
 - 输入：在未启用 `cranelift-jit` 的构建中执行超过热循环阈值的配置键循环。
 - 实测输出：`JitNative("native JIT backend is disabled (feature 'cranelift-jit' is not enabled)")`；默认 `enabled` 在 x86_64 Linux 上为 true。
 - 拟定合同：配置入口在创建 VM 后显式 `set_jit_config(enabled: false)`，保持解释器执行。该工作区不修改 Core 或依赖 pin。
+
+## delta.task-control-epoch
+
+- 来源：`xeHentai/core.py:142-162`（原版无 epoch）
+- 状态：Task5 新增控制语义
+- 输入：同 app 的 add/pause/resume/delete、`prepare` 票据、完成/失败事件
+- 实测输出：RSS 报告中的 `epochs`、`completions`、`event.{accepted,reason}`
+- 拟定合同：RSS 唯一拥有 task state、ready queue 与 epoch。pause/delete/resume、终态记录的 GUID 复活都会推进该 GUID 的 incarnation epoch；旧票据/旧完成事件返回 `stale_epoch`/`unknown_task`/`not_running`，不改变状态、不重开任务、不增加完成计数。epoch 单调递增，达到 `9007199254740991` 后 fail-closed 为 `epoch_exhausted`，不回绕、不重用。原版没有票据/epoch，故该段不参与原版差分；差分只比较返回码、任务表、config、queue 和 update presence。
+
+## delta.task-delete-files-pending
+
+- 来源：`xeHentai/task.py:48-58`、`core.py:133-140`
+- 状态：Task5 明确待接线
+- 输入：`delete_task_files=true`、`meta.title` 非空、状态为 paused/failed/finished 的 delete
+- 实测输出：`{"ok": false, "error": "pending_effect", "pending": {"kind": "delete_task_files", "guid": ..., "directory": ..., "title": ...}}`，任务仍在表中
+- 拟定合同：物理删除属于 Task10 文件 owner。当前只产生明确的待执行请求，不报告删除成功、不提前移表；默认无文件效果的删除完整可用并返回 `(0, "")`。Task10 接线并验证真实文件效果前，Task11 不得对外宣称文件已删除。
+
+## delta.task-guid-source
+
+- 来源：`xeHentai/task.py:33`（`str(uuid.uuid4())[:8]`）
+- 状态：Task5 新增宿主原语
+- 输入：pinned Core 99890b6 无 UUID/随机 builtin（实测无同名函数）
+- 实测输出：`xeh_system::uuid_v4` 返回规范 UUID v4 文本；RSS 取前 8 字符作为 GUID；测试通过 `ControlOptions::fixture` 注入与 oracle 相同的 8 位十六进制前缀
+- 拟定合同：host 只提供系统随机原语，GUID 形状/切片留在 RSS；生产入口不接受任意 GUID 参数，也不只用测试 ID。差分用同一组计划前缀，生产路径由真实 UUID 生成。
+
+## delta.task-url-strip
+
+- 来源：`xeHentai/core.py:107`（`url.strip()`）
+- 状态：实现差异（已记录）
+- 输入：URL 首尾空白
+- 实测输出：RSS 去掉 ASCII 空白（空格、`\t`、`\r`、`\n`、`\v`、`\f`）
+- 拟定合同：Python `str.strip()` 同时去掉 Unicode 空白（如 U+3000）；RSS 当前只覆盖 ASCII 集合。gallery URL 的判定不受影响，差异保留供后续统一。
+
+## delta.task-warnings
+
+- 来源：`xeHentai/core.py:113-114`
+- 状态：Task5 数据面差异
+- 输入：`download_ori=true` 且未登录的表站 add
+- 实测输出：任务照常创建并入队，RSS 报告 `warnings: ["download_ori_requires_login"]`；原版只记录本地化日志行
+- 拟定合同：警告以稳定 key 暴露，本地化文本/日志输出属于 Task12；差分比较返回码、任务表与 queue，不比较警告文本。
+
+## delta.task-monitor-pause
+
+- 来源：`xeHentai/core.py:148-149`
+- 状态：Task5 明确未接线
+- 输入：pause
+- 实测输出：RSS 只把控制状态置 paused 并推进 epoch；不发网络/文件取消
+- 拟定合同：native monitor/worker 的取消由 Task9 经 Task3 opaque registration 接线；当前不声称已实现网络或文件取消，也不以 Rust DTO 断言替代。

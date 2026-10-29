@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use xeh_xtask::{
-    capture, compare_trees, rss_test, run_diff, run_suite, verify_deny_unverified, workspace_root,
+    capture, compare_trees, rss_test, run_diff, run_state_suite, run_suite, run_task_diff,
+    verify_deny_unverified, workspace_root,
 };
 
 fn main() -> ExitCode {
@@ -33,16 +34,18 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         );
     }
     if args.len() == 3 && args[0] == "rss-test" && args[1] == "--suite" {
-        if args[2] != "config" {
-            return Err(format!("rss-test suite '{}' is not implemented", args[2]));
-        }
-        return run_suite();
+        return match args[2].as_str() {
+            "config" => run_suite(),
+            "state" => run_state_suite(),
+            other => Err(format!("rss-test suite '{other}' is not implemented")),
+        };
     }
     if args.len() == 3 && args[0] == "diff" && args[1] == "--suite" {
-        if args[2] != "config" {
-            return Err(format!("diff suite '{}' is not implemented", args[2]));
-        }
-        return run_diff();
+        return match args[2].as_str() {
+            "config" => run_diff(),
+            "task-api" => run_task_diff(),
+            other => Err(format!("diff suite '{other}' is not implemented")),
+        };
     }
     if args.len() == 1 && args[0] == "rss-test" {
         return rss_test();
@@ -61,7 +64,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         };
         return manifest_check(&root);
     }
-    Err("usage: xeh-xtask oracle capture --suite <name> | oracle compare --left <dir> --right <dir> | verify --all --deny-unverified | manifest check [--root <dir>] | rss-test [--suite config] | diff --suite config".to_string())
+    Err("usage: xeh-xtask oracle capture --suite <name> | oracle compare --left <dir> --right <dir> | verify --all --deny-unverified | manifest check [--root <dir>] | rss-test [--suite config|state] | diff --suite config|task-api".to_string())
 }
 
 fn manifest_check(root: &std::path::Path) -> Result<(), String> {

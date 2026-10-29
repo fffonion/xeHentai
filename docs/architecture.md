@@ -23,6 +23,7 @@ owner 线程 shutdown 先停止准入和后续排程。尚未开跑的 callback 
 | 文件读写 | `io::open`、`io::read_all`、`io::write`、`io::flush`、`io::close`（`src/builtins/runtime/io`；`write` / `flush` / `read_all` 借用 `io.file`，`close` 消耗该资源） | `grant_owned_builtins` 后 `install_from_catalog`，再 `IoHostExt::configure_io` | `async` | `standard_catalog_file_round_trip_reuses_the_vm`、`io_policy_authorizes_only_the_test_root`、`io_policy_rejects_write_when_allow_write_is_false` |
 | 定时器 | `timer::at`、`timer::every`、`timer::pending_count`（`src/builtins/runtime/timer.rs`） | `install_from_catalog` + `TimerHostExt::install_timer_runtime` | `runtime` | `timer_max_running_keeps_a_due_callback_pending_while_http_waits`、`timer_shutdown_closes_an_active_http_callback`、`timer_rejects_drive_and_shutdown_from_another_thread` |
 | 缓冲 HTTP | `http::request::new`、`http::client::request`、`http::response::status`、`http::response::body` | `install_from_catalog` + `HttpHostExt::configure_http` | `http-client` | `http_policy_allow_and_deny`、`cancelled_http_request_closes_and_vm_is_reused` |
+| UUID v4 文本 | `xeh_system::uuid_v4`（应用侧 named typed host，OS entropy） | `register_catalog_function` | `async` | `production_guids_and_seed_boundary` |
 
 `io` 的 catalog surface 包含 `open`、`read_all`、`write`、`flush`、`close`。`IoResource` 报告 `io.file`。应用不另写文件 host，不伪造资源键或数字句柄。`io::popen`、`io::read_line`、`io::exists` 仍走 namespaced builtin；测试不调用它们。
 
@@ -45,3 +46,22 @@ owner 线程 shutdown 先停止准入和后续排程。尚未开跑的 callback 
 响应体按 chunk 写入同一文件系统的独占 staging 文件。EOF、flush、close 之后，epoch 锁只包住准入检查和同目录 hard link。既有目标文件不覆盖。代次前进或取消先于发布时，staging 删除，当前代次完成计数不变。进度事件按 job 合并；consumer 还在时终态不丢。队列、事件和 epoch 表都有上限。
 
 `two_rss_workers_enter_the_server_barrier_on_distinct_owner_threads` 用真实 TCP 门闩证明两个 owner 线程同时进入请求。`worker_streams_png_larger_than_core_body_cap` 先记录 Core body-limit 拒绝，再由 worker 流式写盘，并按块比较原文件和下载文件。取消、写失败、worker panic、队列满和路径拒绝由 `tests/transport.rs` 覆盖。站点、cookie、下载调度、RPC 和更新器仍不在本嵌入里。
+
+## Task 5 任务控制
+
+控制入口是 `app/domain/state.rss`。`crates/xeh-host/src/task_control.rs` 的 `TaskControl` 编译一次并绑定一个 VM，`create` 返回真实 RSS 根值；此后每个命令都是一次 `dispatch(root, request)` 调用，返回的新根值进入下一次调用。Rust 只做 JSON 请求/报告的字符串运输，不保存 Task 表、不决定状态转换。测试 `first_task_keeps_its_configuration_across_a_global_update` 与 `task-api` 差分都是在同一 owner 上连续调用，没有什么地方重建空 store，也没有把 store 编码成 JSON 字符串。
+
+RustScript 的几项语言事实决定了这个布局，实测记录在 `crates/xeh-host/tests/state.rs`：
+
+- 命名 struct 类型按模块解析，`app/domain/task.rss` 声明的记录无法作为 sibling module 的字段/参数类型；Task 记录、Store、Step 因此同处 `state.rss`，`task.rss` 只保留 URL 识别、空白裁剪和 14 键 task config 合并，`queue.rss` 只保留 FIFO 操作。
+- 读取非标量 struct 字段会把它移出记录；所有读取都经 copy-consuming accessor 或 `value.copy()`，线性 helper 才整体 move store。把同一个 struct 在多个 if 分支里 move 会在后续 copy 时得到缺字段的 store（表现为 `map key not found`），控制入口因此统一传 `store.copy()`。
+- struct 参数是副本：对参数的修改不会回传给调用者，所以根值必须显式往返。probe 中两次 bump 后第二次读到第一次的计数，证明同一 owner 的根值跨调用连续。
+- `json::encode` 不接受 optional 值；`set` 写入 null 会删除 map 键，因此带 null 的已解析 JSON（25 键配置数据、task overrides）用一次 Core JSON decode 构造/合并，而不是逐键 set。
+
+配置仍由 `app/config/types.rss` 唯一拥有：`defaults_data`、`baseline_from_data`、`update_data` 把 25 键记录以已解析 Core map 数据交给 task 域，校验/更新仍走 `apply_update`。`data_of` 用本模块自己的 25 键 JSON 编码解码出数据，`with_null` 只在键确实缺失时补 `null`，避免重复键。
+
+GUID：pinned Core 99890b6 没有 UUID/随机 builtin。新增唯一宿主原语 `xeh_system::uuid_v4`（named typed，返回规范 UUID v4 文本），RSS 取前 8 字符；测试通过 `ControlOptions::fixture` 注入与 oracle 相同的计划前缀，生产 `open` 不暴露任意 GUID 参数。
+
+epoch/queue：RSS 唯一拥有 task 表、ready queue、每 GUID incarnation epoch 和完成计数。pause/delete/resume、终态记录被同 GUID add 复活都会推进 epoch；pause/delete/resume 之前准备的票据在之后返回 `stale_epoch`、`unknown_task` 或 `not_running`，不改状态、不重开、不重复计数。epoch 达到 2^53-1 后 fail-closed。队列保留已删除任务的旧 guid（与原版 `Queue` 一致），resume 一律入队，finished resume 保持 20。
+
+Task5 不实现 session、站点扫描、代理、下载器、文件归档或 RPC server；`delete_task_files` 需要物理效果时只返回 `pending_effect` 待执行请求并保留任务。native worker/monitor 的取消与真实扫描/下载接线属于 Task9，当前没有声称网络或文件取消已验证。

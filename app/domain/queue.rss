@@ -1,0 +1,27 @@
+//! Ready queue for task guids.
+//!
+//! The queue is FIFO and only the RSS control owns it. Entries are guids; a
+//! paused or deleted task keeps its earlier entry, exactly like the upstream
+//! `Queue` (the dispatcher skips non-active states). Popping and worker
+//! dispatch belong to the Task9 native wiring.
+
+pub fn push(ready: [string], guid: string) -> [string] {
+    let mut next = ready.copy();
+    next[next.length] = guid;
+    next
+}
+
+pub fn contains(ready: [string], guid: string) -> bool {
+    let mut found = false;
+    for index in 0..ready.length {
+        if ready[index] == guid {
+            found = true;
+            break;
+        }
+    }
+    found
+}
+
+pub fn depth(ready: [string]) -> int {
+    ready.length
+}

@@ -1,0 +1,108 @@
+//! Task URL recognition, whitespace stripping, and task-configuration merge.
+//!
+//! This module is pure data work over strings and Core maps: the task record
+//! itself lives with the store, because RustScript struct types are resolved
+//! per module (a named struct declared here cannot be used as a field or
+//! parameter type in a sibling module). Configuration validation stays in
+//! `app/config/types.rss`; this module only merges the 14-key baseline that
+//! module exports with the caller's task overrides.
+use json;
+use re;
+
+/// Upstream `RE_INDEX`: `.+/(\d+)/([^\/]+)/*`, first match.
+fn index_pattern() -> string {
+    ".+/(\\d+)/([^/]+)/*"
+}
+
+/// Upstream `RESTR_SITE` plus the `add_task` gallery path suffix.
+fn gallery_pattern() -> string {
+    "^https*://(?:[g\\.]*e\\-|ex)hentai\\.org/[^/]+/\\d+/[^/]+/*#*$"
+}
+
+/// Upstream `add_task`'s logged-out exhentai check.
+fn exhentai_pattern() -> string {
+    "^https*://exhentai\\.org"
+}
+
+/// `add_task`'s gallery URL check.
+pub fn url_recognized(url: string) -> bool {
+    re::match(gallery_pattern(), url)
+}
+
+/// `add_task`'s logged-out exhentai check.
+pub fn exhentai_url(url: string) -> bool {
+    re::match(exhentai_pattern(), url)
+}
+
+fn is_space(ch: string) -> bool {
+    ch == " " || ch == "\t" || ch == "\n" || ch == "\r" || ch == "\x0b" || ch == "\x0c"
+}
+
+/// `url.strip()` for the whitespace this scope covers.
+pub fn trim(url: string) -> string {
+    let length = url.length;
+    let mut start = 0;
+    while start < length && is_space(url[start:(start + 1)]) {
+        start = start + 1;
+    }
+    let mut end = length;
+    while end > start && is_space(url[(end - 1):end]) {
+        end = end - 1;
+    }
+    url[start:end]
+}
+
+/// `RE_INDEX.findall(url)[0][0]`; `null` when the URL has no gallery ids.
+pub fn url_gid(url: string) -> string? {
+    let groups = re::captures(index_pattern(), url);
+    if groups.length >= 2 => {
+        let gid: string? = groups[1].copy();
+        gid
+    } else => {
+        null
+    }
+}
+
+/// `RE_INDEX.findall(url)[0][1]`; `null` when the URL has no gallery ids.
+pub fn url_sethash(url: string) -> string? {
+    let groups = re::captures(index_pattern(), url);
+    if groups.length >= 3 => {
+        let sethash: string? = groups[2].copy();
+        sethash
+    } else => {
+        null
+    }
+}
+
+/// `add_task`'s `cfg.update(task_overrides)`: the 14-key baseline is parsed
+/// JSON data and every override key wins, including keys outside the 14 and
+/// explicit nulls. Nulls survive because the merge goes through one Core JSON
+/// decode instead of `set` (which removes a null entry).
+pub fn config_from(baseline_json: string, overrides: map) -> map {
+    let mut base: map = json::decode::<map>(baseline_json);
+    let names = (&overrides).keys;
+    for index in 0..names.length {
+        let key: string = names[index].copy();
+        base[key] = null;
+    }
+    let base_text = json::encode(base);
+    let over_text = json::encode(overrides);
+    if (&over_text).length == 2 => {
+        json::decode::<map>(base_text)
+    } else => {
+        let base_length = (&base_text).length;
+        let over_length = (&over_text).length;
+        let joined = (&base_text)[0:(base_length - 1)]
+            + "," + (&over_text)[1:(over_length - 1)] + "}";
+        json::decode::<map>(joined)
+    }
+}
+
+pub fn config_flag(config: map, key: string, fallback: bool) -> bool {
+    if config.has(key) && type(config[key].copy()) == "bool" => {
+        let typed: bool = config[key].copy();
+        typed
+    } else => {
+        fallback
+    }
+}
