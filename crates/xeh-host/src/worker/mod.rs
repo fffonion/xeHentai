@@ -1,6 +1,6 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle, ThreadId};
@@ -15,6 +15,7 @@ use crate::dto::{
     lock, JobKey, PoolConfig, PoolError, ShutdownReport, TransferEvent, TransferReceipt,
     TransferRequest,
 };
+use crate::net::DriverOwner;
 use crate::observe::Metrics;
 use crate::runtime::{
     attach_timer, bind_vm, compile_source_with_catalog, drive_to_halt, release_for_reuse,
@@ -46,6 +47,8 @@ struct Shared {
     ready_cv: Condvar,
     cancel_root: CancellationToken,
     queue: Mutex<Receiver<TransferRequest>>,
+    vm_active: AtomicUsize,
+    drivers: Mutex<Vec<Arc<DriverOwner>>>,
 }
 
 /// Fixed OS-thread workers. Each thread owns one current-thread runtime, VM,
@@ -82,8 +85,11 @@ impl WorkerPool {
             ready_cv: Condvar::new(),
             cancel_root: CancellationToken::new(),
             queue: Mutex::new(receiver),
+            vm_active: AtomicUsize::new(0),
+            drivers: Mutex::new(Vec::new()),
             config,
         });
+        shared.metrics.set_worker_cap(shared.config.workers);
         let mut handles = Vec::new();
         for index in 0..shared.config.workers {
             let shared = Arc::clone(&shared);
@@ -131,19 +137,24 @@ impl WorkerPool {
         if self.shared.shut.load(Ordering::Acquire) {
             return Err(PoolError::new("stopped"));
         }
-        let sender = lock(&self.sender);
-        let Some(sender) = sender.as_ref() else {
-            return Err(PoolError::new("stopped"));
-        };
         let token = self.shared.cancel_root.child_token();
         let key = request.key.clone();
         self.shared.admission.insert_queued(key.clone(), token)?;
+        self.shared.metrics.pending_add();
+        if let Some(hold) = &self.shared.config.submit_hold {
+            hold.arrive();
+            let _ = hold.wait_release_only();
+        }
+        let sender = lock(&self.sender);
+        let Some(sender) = sender.as_ref() else {
+            self.shared.metrics.pending_sub();
+            self.shared.admission.rollback(&key);
+            return Err(PoolError::new("stopped"));
+        };
         match sender.try_send(request) {
-            Ok(()) => {
-                self.shared.metrics.pending_add();
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err(error) => {
+                self.shared.metrics.pending_sub();
                 self.shared.admission.rollback(&key);
                 match error {
                     TrySendError::Full(_) => Err(PoolError::new("queue_full")),
@@ -248,6 +259,10 @@ impl WorkerPool {
         self.shared.metrics.peak_application_capacity()
     }
 
+    pub fn application_capacity(&self) -> usize {
+        self.shared.metrics.application_capacity()
+    }
+
     pub fn application_bytes(&self) -> usize {
         self.shared.metrics.application_bytes()
     }
@@ -296,11 +311,31 @@ impl WorkerPool {
         self.shared.admission.tracked()
     }
 
-    pub fn shutdown(self) -> Result<ShutdownReport, PoolError> {
-        self.shutdown_inner()
+    pub fn execution_count(&self) -> u64 {
+        self.shared.metrics.execution_count()
     }
 
-    fn shutdown_inner(&self) -> Result<ShutdownReport, PoolError> {
+    pub fn build_count(&self) -> u64 {
+        self.shared.metrics.build_count()
+    }
+
+    pub fn terminal_waiters(&self) -> usize {
+        self.shared.events.terminal_waiters()
+    }
+
+    pub fn vm_active(&self) -> usize {
+        self.shared.vm_active.load(Ordering::Acquire)
+    }
+
+    pub fn active_drivers(&self) -> usize {
+        lock(&self.shared.drivers)
+            .iter()
+            .map(|owner| owner.active())
+            .sum()
+    }
+
+    /// Borrowed drain. A `draining` report keeps this pool so the caller can retry.
+    pub fn shutdown(&self) -> Result<ShutdownReport, PoolError> {
         self.shutdown_within(Duration::from_secs(5))
     }
 
@@ -372,20 +407,22 @@ impl WorkerPool {
     }
 
     fn report(&self, joined: bool) -> ShutdownReport {
+        let drivers = self.active_drivers();
+        let finished = joined && drivers == 0;
         ShutdownReport {
             pending_jobs: self.shared.metrics.pending(),
             in_flight: self.shared.metrics.in_flight(),
             permits: self.shared.metrics.permits(),
             tracked_jobs: self.shared.admission.tracked(),
-            draining: self.shared.shut.load(Ordering::Acquire) && !joined,
-            joined,
+            draining: self.shared.shut.load(Ordering::Acquire) && !finished,
+            joined: finished,
         }
     }
 }
 
 impl Drop for WorkerPool {
     fn drop(&mut self) {
-        let _ = self.shutdown_inner();
+        let _ = self.shutdown();
     }
 }
 
@@ -416,6 +453,7 @@ fn worker_main(shared: Arc<Shared>) {
     let id = thread::current().id();
     shared.metrics.record_owner(id);
     let host = Arc::new(make_host(&shared));
+    lock(&shared.drivers).push(Arc::clone(&host.drivers));
     let built = build_vm(&shared, &host);
     let (mut runtime, mut vm) = match built {
         Ok(pair) => pair,
@@ -435,12 +473,14 @@ fn worker_main(shared: Arc<Shared>) {
             receiver.recv()
         };
         let Ok(job) = job else {
+            reap_remaining(&runtime, &host);
             break;
         };
         shared.metrics.pending_sub();
         if shared.shut.load(Ordering::Acquire) {
-            shared.admission.retire(&job.key);
+            shared.admission.seal_terminal(&job.key, false);
             publish_terminal_status(&shared, &job, "cancelled", 0);
+            shared.admission.retire(&job.key);
             continue;
         }
         let Some(token) = shared.admission.take_running(&job.key) else {
@@ -451,7 +491,9 @@ fn worker_main(shared: Arc<Shared>) {
         *lock(&host.current) = Some(job.clone());
         *lock(&host.active_cancel) = Some(token);
         *lock(&host.receipt) = None;
+        shared.vm_active.fetch_add(1, Ordering::AcqRel);
         shared.metrics.begin_permit();
+        shared.metrics.record_execution(thread::current().id());
         shared.admission.begin(job.key.task_id);
         let panicked = shared.fail_once.swap(false, Ordering::AcqRel);
         let outcome = catch_unwind(AssertUnwindSafe(|| {
@@ -469,13 +511,20 @@ fn worker_main(shared: Arc<Shared>) {
                 tokio::task::yield_now().await;
             });
         }
-        let receipt = lock(&host.receipt).clone();
-        publish_terminal(&shared, &job, outcome.is_ok(), receipt);
+        let receipt = lock(&host.receipt).take();
         *lock(&host.current) = None;
         *lock(&host.active_cancel) = None;
-        shared.admission.retire(&job.key);
+        let previous = shared.vm_active.fetch_sub(1, Ordering::AcqRel);
+        assert!(previous > 0, "vm activity underflow");
+        let committed = receipt
+            .as_ref()
+            .is_some_and(|item| item.status == "completed");
+        shared.admission.seal_terminal(&job.key, committed);
         shared.admission.end(job.key.task_id);
         shared.metrics.end_permit();
+        reap_remaining(&runtime, &host);
+        publish_terminal(&shared, &job, outcome.is_ok(), receipt);
+        shared.admission.retire(&job.key);
         if outcome.is_err() {
             match build_vm(&shared, &host) {
                 Ok(rebuilt) => {
@@ -488,6 +537,15 @@ fn worker_main(shared: Arc<Shared>) {
                 }
             }
         }
+    }
+}
+
+fn reap_remaining(runtime: &tokio::runtime::Runtime, host: &TransferHost) {
+    while host.drivers.active() > 0 || host.drivers.retired_len() > 0 {
+        let _ = runtime.block_on(
+            host.drivers
+                .reap(std::time::Instant::now() + Duration::from_millis(200)),
+        );
     }
 }
 
@@ -532,6 +590,7 @@ fn make_host(shared: &Shared) -> TransferHost {
         events: Arc::clone(&shared.events),
         shut: Arc::clone(&shared.shut),
         active_cancel: Mutex::new(None),
+        drivers: Arc::new(DriverOwner::new()),
     }
 }
 

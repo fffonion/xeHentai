@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use http_body_util::Empty;
@@ -13,7 +14,7 @@ use tokio_rustls::TlsConnector;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::dto::{HeaderEntry, TransportHooks};
+use crate::dto::{lock, HeaderEntry, TransportHooks};
 use crate::net::policy::{admit_target, hooks_decoy, ResolveLimits, ResolvedTarget};
 use crate::observe::Metrics;
 
@@ -28,6 +29,91 @@ pub struct OpenedResponse {
 pub struct Connection {
     driver: Option<JoinHandle<()>>,
     sender: Option<hyper::client::conn::http1::SendRequest<Empty<Bytes>>>,
+    owner: Option<Arc<DriverOwner>>,
+}
+
+/// Per-worker queue for drivers that could not be joined before a sync drop.
+/// Abort is not an exit confirmation. The worker awaits this queue before reuse
+/// and before it reports quiescence.
+pub struct DriverOwner {
+    retired: Mutex<Vec<JoinHandle<()>>>,
+    cap: usize,
+    active: AtomicUsize,
+}
+
+impl DriverOwner {
+    pub fn new() -> Self {
+        Self {
+            retired: Mutex::new(Vec::new()),
+            cap: 8,
+            active: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn active(&self) -> usize {
+        self.active.load(Ordering::Acquire)
+    }
+
+    pub fn retired_len(&self) -> usize {
+        lock(&self.retired).len()
+    }
+
+    fn note_spawn(&self) {
+        self.active.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn note_joined(&self) {
+        let previous = self.active.fetch_sub(1, Ordering::AcqRel);
+        assert!(previous > 0, "driver active underflow");
+    }
+
+    fn retain(&self, handle: JoinHandle<()>) {
+        let mut retired = lock(&self.retired);
+        retired.retain(|item| !item.is_finished());
+        assert!(
+            retired.len() < self.cap,
+            "driver retirement queue exceeded {}",
+            self.cap
+        );
+        retired.push(handle);
+    }
+
+    pub async fn reap(&self, deadline: Instant) -> bool {
+        let handles = std::mem::take(&mut *lock(&self.retired));
+        let mut pending = Vec::new();
+        for mut handle in handles {
+            if handle.is_finished() {
+                let _ = handle.await;
+                self.note_joined();
+                continue;
+            }
+            tokio::select! {
+                biased;
+                _ = &mut handle => self.note_joined(),
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                    pending.push(handle);
+                }
+            }
+        }
+        let done = pending.is_empty();
+        lock(&self.retired).extend(pending);
+        done && self.retired_len() == 0
+    }
+}
+
+impl Default for DriverOwner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub fn cleanup_deadline(overall: Instant) -> Instant {
+    let window = Instant::now() + Duration::from_secs(2);
+    if overall > Instant::now() {
+        window.min(overall)
+    } else {
+        window
+    }
 }
 
 impl Connection {
@@ -39,7 +125,7 @@ impl Connection {
     }
 
     /// Abort the owner driver and wait for that task to finish.
-    /// A `false` result means the driver was still running at `deadline`.
+    /// `false` parks the handle on the worker owner. It is not dropped.
     pub async fn shutdown(&mut self, deadline: Instant) -> bool {
         self.abort();
         let Some(mut driver) = self.driver.take() else {
@@ -47,9 +133,18 @@ impl Connection {
         };
         tokio::select! {
             biased;
-            _ = &mut driver => true,
+            _ = &mut driver => {
+                if let Some(owner) = &self.owner {
+                    owner.note_joined();
+                }
+                true
+            }
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
-                self.driver = Some(driver);
+                if let Some(owner) = &self.owner {
+                    owner.retain(driver);
+                } else {
+                    self.driver = Some(driver);
+                }
                 false
             }
         }
@@ -59,9 +154,15 @@ impl Connection {
 impl Drop for Connection {
     fn drop(&mut self) {
         self.abort();
+        if let Some(driver) = self.driver.take() {
+            if let Some(owner) = &self.owner {
+                owner.retain(driver);
+            }
+        }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn open_get(
     http: &vm::HttpConfig,
     url: &str,
@@ -69,10 +170,12 @@ pub async fn open_get(
     cancel: &CancellationToken,
     metrics: &Metrics,
     hooks: &TransportHooks,
+    owner: &Arc<DriverOwner>,
     started: Instant,
 ) -> Result<OpenedResponse, &'static str> {
     let parsed = Url::parse(url).map_err(|_| "policy_denied")?;
     reject_headers(http, headers)?;
+    let request = build_request(&parsed, headers)?;
     let overall = started + http.request_timeout.min(http.max_stream_duration);
     let connect_deadline = started + http.connect_timeout;
     let connect_deadline = connect_deadline.min(overall);
@@ -92,27 +195,27 @@ pub async fn open_get(
     if https {
         let (peer, io) = connect_tls(&target, cancel, connect_deadline, hooks).await?;
         finish_request(
-            parsed,
-            headers,
+            request,
             cancel,
             metrics,
             peer,
             io,
             overall,
             connect_deadline,
+            owner,
         )
         .await
     } else {
         let (peer, io) = connect_plain(&target, cancel, connect_deadline).await?;
         finish_request(
-            parsed,
-            headers,
+            request,
             cancel,
             metrics,
             peer,
             io,
             overall,
             connect_deadline,
+            owner,
         )
         .await
     }
@@ -120,21 +223,21 @@ pub async fn open_get(
 
 #[allow(clippy::too_many_arguments)]
 async fn finish_request<I>(
-    parsed: Url,
-    headers: &[HeaderEntry],
+    request: http::Request<Empty<Bytes>>,
     cancel: &CancellationToken,
     metrics: &Metrics,
     peer: SocketAddr,
     io: I,
     overall: Instant,
     connect_deadline: Instant,
+    owner: &Arc<DriverOwner>,
 ) -> Result<OpenedResponse, &'static str>
 where
     I: hyper::rt::Read + hyper::rt::Write + Send + Unpin + 'static,
 {
     metrics.record_connect(peer);
     let handshake = hyper::client::conn::http1::handshake(io);
-    let (mut sender, connection) =
+    let (sender, connection) =
         crate::net::policy::select_deadline(cancel, connect_deadline, async {
             handshake.await.map_err(|_| "connect_failed")
         })
@@ -142,42 +245,34 @@ where
     let driver = tokio::spawn(async move {
         let _ = connection.await;
     });
-    let mut request = http::Request::builder()
-        .method(http::Method::GET)
-        .uri(origin_form(&parsed))
-        .header(http::header::HOST, host_header(&parsed))
-        .header(http::header::CONNECTION, "close")
-        .header(http::header::USER_AGENT, "xeh-host");
-    for header in headers {
-        let name = http::HeaderName::from_bytes(&header.name).map_err(|_| "header_rejected")?;
-        let value = http::HeaderValue::from_bytes(&header.value).map_err(|_| "header_rejected")?;
-        request = request.header(name, value);
-    }
-    let request = request
-        .body(Empty::<Bytes>::new())
-        .map_err(|_| "transport_failed")?;
-    let response = crate::net::policy::select_deadline(cancel, overall, async {
+    owner.note_spawn();
+    let mut owned = Connection {
+        driver: Some(driver),
+        sender: Some(sender),
+        owner: Some(Arc::clone(owner)),
+    };
+    let response = match crate::net::policy::select_deadline(cancel, overall, async {
+        let sender = owned.sender.as_mut().ok_or("transport_failed")?;
         sender
             .send_request(request)
             .await
             .map_err(|_| "transport_failed")
     })
-    .await?;
+    .await
+    {
+        Ok(response) => response,
+        Err(code) => {
+            let _ = owned.shutdown(cleanup_deadline(overall)).await;
+            return Err(code);
+        }
+    };
     let status = response.status();
     if status.is_redirection() {
-        let mut connection = Connection {
-            driver: Some(driver),
-            sender: Some(sender),
-        };
-        let _ = connection.shutdown(overall).await;
+        let _ = owned.shutdown(cleanup_deadline(overall)).await;
         return Err("redirect_unsupported");
     }
     if !status.is_success() {
-        let mut connection = Connection {
-            driver: Some(driver),
-            sender: Some(sender),
-        };
-        let _ = connection.shutdown(overall).await;
+        let _ = owned.shutdown(cleanup_deadline(overall)).await;
         return Err("http_status");
     }
     let length = response
@@ -189,10 +284,7 @@ where
         body: response.into_body(),
         content_length: length,
         peer,
-        connection: Connection {
-            driver: Some(driver),
-            sender: Some(sender),
-        },
+        connection: owned,
     })
 }
 
@@ -261,6 +353,26 @@ fn rustls_config(hooks: &TransportHooks) -> Result<rustls::ClientConfig, &'stati
         .with_root_certificates(roots)
         .with_no_client_auth(),
     )
+}
+
+fn build_request(
+    url: &Url,
+    headers: &[HeaderEntry],
+) -> Result<http::Request<Empty<Bytes>>, &'static str> {
+    let mut request = http::Request::builder()
+        .method(http::Method::GET)
+        .uri(origin_form(url))
+        .header(http::header::HOST, host_header(url))
+        .header(http::header::CONNECTION, "close")
+        .header(http::header::USER_AGENT, "xeh-host");
+    for header in headers {
+        let name = http::HeaderName::from_bytes(&header.name).map_err(|_| "header_rejected")?;
+        let value = http::HeaderValue::from_bytes(&header.value).map_err(|_| "header_rejected")?;
+        request = request.header(name, value);
+    }
+    request
+        .body(Empty::<Bytes>::new())
+        .map_err(|_| "header_rejected")
 }
 
 fn origin_form(url: &Url) -> String {

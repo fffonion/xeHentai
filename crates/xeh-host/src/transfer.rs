@@ -11,7 +11,7 @@ use vm::{
 
 use crate::catalog::standard_catalog;
 use crate::dto::{lock, HeaderEntry, JobKey, TransferReceipt, TransferRequest};
-use crate::net::{open_get, write_body, BodyWrite};
+use crate::net::{open_get, write_body, BodyWrite, DriverOwner};
 use crate::observe::Metrics;
 use crate::types::HostError;
 use crate::worker::events::EventBus;
@@ -35,6 +35,7 @@ pub struct TransferHost {
     pub events: Arc<EventBus>,
     pub shut: Arc<AtomicBool>,
     pub active_cancel: Mutex<Option<CancellationToken>>,
+    pub drivers: Arc<DriverOwner>,
 }
 
 pub fn transfer_catalog() -> Arc<HostApiCatalog> {
@@ -140,7 +141,6 @@ async fn execute(
     request: TransferRequest,
     cancel: CancellationToken,
 ) -> TransferReceipt {
-    host.metrics.record_execution(std::thread::current().id());
     host.metrics.begin_flight();
     let flight = FlightGuard {
         metrics: &host.metrics,
@@ -184,6 +184,7 @@ async fn execute_inner(
         cancel,
         &host.metrics,
         &host.hooks,
+        &host.drivers,
         started,
     )
     .await?;
@@ -203,6 +204,7 @@ async fn execute_inner(
             uncancellable_hold: host.hooks.uncancellable_hold.as_deref(),
             cancel,
             deadline,
+            idle: host.http.stream_idle_timeout,
             metrics: &host.metrics,
         },
     )
@@ -238,6 +240,7 @@ async fn execute_inner(
         &staged.staging,
         &staged.final_path,
         host.commit_hold.clone(),
+        deadline,
     ) {
         let _ = std::fs::remove_file(&staged.staging);
         return Err(code);

@@ -207,6 +207,8 @@ pub struct PoolConfig {
     pub commit_hold: Option<Arc<CommitGate>>,
     pub hooks: TransportHooks,
     pub fail_worker_once: bool,
+    /// Pauses after the pending count is visible and before the job is sent.
+    pub submit_hold: Option<Arc<CommitGate>>,
 }
 
 /// Narrow test injection at the native I/O boundary. Production leaves this empty.

@@ -21,6 +21,7 @@ pub struct Metrics {
     connect_targets: Mutex<Vec<SocketAddr>>,
     dns_candidates: Mutex<Vec<SocketAddr>>,
     failure_ring: Mutex<Vec<String>>,
+    worker_cap: AtomicUsize,
 }
 
 #[derive(Debug, Default)]
@@ -28,19 +29,34 @@ struct ThreadObs {
     owners: Vec<ThreadId>,
     builds: Vec<ThreadId>,
     executing: Vec<ThreadId>,
+    build_count: u64,
+    execution_count: u64,
 }
 
 impl Metrics {
+    pub fn set_worker_cap(&self, workers: usize) {
+        self.worker_cap.store(workers, Ordering::Release);
+    }
+
     pub fn record_owner(&self, id: ThreadId) {
-        lock(&self.threads).owners.push(id);
+        let mut threads = lock(&self.threads);
+        remember(&mut threads.owners, id, self.worker_cap());
     }
 
     pub fn record_build(&self, id: ThreadId) {
-        lock(&self.threads).builds.push(id);
+        let mut threads = lock(&self.threads);
+        threads.build_count = threads.build_count.saturating_add(1);
+        remember(&mut threads.builds, id, self.worker_cap());
     }
 
     pub fn record_execution(&self, id: ThreadId) {
-        lock(&self.threads).executing.push(id);
+        let mut threads = lock(&self.threads);
+        threads.execution_count = threads.execution_count.saturating_add(1);
+        remember(&mut threads.executing, id, self.worker_cap());
+    }
+
+    fn worker_cap(&self) -> usize {
+        self.worker_cap.load(Ordering::Acquire)
     }
 
     pub fn record_connect(&self, address: SocketAddr) {
@@ -85,7 +101,19 @@ impl Metrics {
     }
 
     pub fn pending_sub(&self) {
-        self.pending.fetch_sub(1, Ordering::AcqRel);
+        let mut current = self.pending.load(Ordering::Acquire);
+        loop {
+            assert!(current > 0, "pending underflow");
+            match self.pending.compare_exchange(
+                current,
+                current - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     pub fn acquire_hold(&self, len: usize, capacity: usize) {
@@ -138,6 +166,10 @@ impl Metrics {
         self.peak_application_capacity.load(Ordering::Acquire)
     }
 
+    pub fn application_capacity(&self) -> usize {
+        self.application_capacity.load(Ordering::Acquire)
+    }
+
     pub fn guest_payload_bytes(&self) -> usize {
         self.guest_payload_bytes.load(Ordering::Acquire)
     }
@@ -154,6 +186,15 @@ impl Metrics {
         lock(&self.threads).executing.clone()
     }
 
+    /// Unique owner/build/execution identities, not a full history.
+    pub fn build_count(&self) -> u64 {
+        lock(&self.threads).build_count
+    }
+
+    pub fn execution_count(&self) -> u64 {
+        lock(&self.threads).execution_count
+    }
+
     pub fn connect_targets(&self) -> Vec<SocketAddr> {
         lock(&self.connect_targets).clone()
     }
@@ -165,4 +206,14 @@ impl Metrics {
     pub fn failure_codes(&self) -> usize {
         lock(&self.failure_ring).len()
     }
+}
+
+fn remember(samples: &mut Vec<ThreadId>, id: ThreadId, cap: usize) {
+    if samples.contains(&id) {
+        return;
+    }
+    if cap > 0 && samples.len() >= cap {
+        samples.remove(0);
+    }
+    samples.push(id);
 }

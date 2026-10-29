@@ -40,7 +40,7 @@ owner 线程 shutdown 先停止准入和后续排程。尚未开跑的 callback 
 
 固定数量的 OS 线程组成 `WorkerPool`。每条线程自建 current-thread Tokio runtime、VM、registry、async bridge 和 `EmbeddingTimer`，编译同一份只读 `app/worker/transfer.rss`。跨线程只复制 `JobKey` 和 typed DTO。不发送 `Vm`、`Value` 或 VM 资源句柄。
 
-`json`、`re`、`io`、`timer` 和缓冲 HTTP 仍走上面的 Core catalog。公开 SDK 没有通用 binary reader，`http::client::request` 继续返回缓冲 body，`http::client::sse` 不是图片流。图片下载是最小 typed extension：`xeh_transfer::job` / `xeh_transfer::run`。传输持有 Hyper HTTP/1 connection driver 的 `JoinHandle`，取消或结束时 abort 并等待该 driver 退出；TLS 用 rustls 校验证书，不跳过校验。DNS、连接、读、写、flush、sync、close 和准入等待共用请求开始前的绝对 deadline，连接还有更早的 `connect_timeout`。进程不能强制终止不可中断的 OS 调用。`shutdown_within` 到期仍未 join 时报告 `draining` 并保留所有权，可再次 drain；完成路径才报告资源归零。不读环境代理，不跟随重定向。
+`json`、`re`、`io`、`timer` 和缓冲 HTTP 仍走上面的 Core catalog。公开 SDK 没有通用 binary reader，`http::client::request` 继续返回缓冲 body，`http::client::sse` 不是图片流。图片下载是最小 typed extension：`xeh_transfer::job` / `xeh_transfer::run`。传输持有 Hyper HTTP/1 connection driver 的 `JoinHandle`。spawn 之后立刻记入该 worker 的 owner。取消、状态错误、header 失败和 body 早退都 abort 并等待 driver 退出；超时未退出的 handle 进入有界 retirement queue，不在 `Drop` 里丢掉。worker 在复用和下一次 quiescence 前 await 这些 handle。`shutdown(&self)` 借用 pool，到期报告 `draining` 并保留 pool，可再次 drain；只有线程已 join 且 driver 计数为 0 才报告资源归零。TLS 用 rustls 校验证书，不跳过校验。进程不能强制终止不可中断的 OS 调用。不读环境代理，不跟随重定向。owner、build、executing 样本按 worker 唯一身份有界，重建和执行次数用 scalar 累加。body 空闲超过 `stream_idle_timeout` 即关闭，不等整体 deadline。成功 link 后的终态不可再 cancel；permit 和 flight 在等待终态事件之前归还。
 
 响应体按 chunk 写入同一文件系统的独占 staging 文件。EOF、flush、close 之后，epoch 锁只包住准入检查和同目录 hard link。既有目标文件不覆盖。代次前进或取消先于发布时，staging 删除，当前代次完成计数不变。进度事件按 job 合并；consumer 还在时终态不丢。队列、事件和 epoch 表都有上限。
 

@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,7 @@ pub struct EventBus {
     capacity: usize,
     state: Mutex<EventState>,
     cv: Condvar,
+    terminal_waiters: AtomicUsize,
 }
 
 impl EventBus {
@@ -33,7 +35,12 @@ impl EventBus {
                 dropped_terminal: 0,
             }),
             cv: Condvar::new(),
+            terminal_waiters: AtomicUsize::new(0),
         }
+    }
+
+    pub fn terminal_waiters(&self) -> usize {
+        self.terminal_waiters.load(Ordering::Acquire)
     }
 
     pub fn close(&self) {
@@ -101,10 +108,12 @@ impl EventBus {
                 self.cv.notify_all();
                 return Ok(());
             }
+            self.terminal_waiters.fetch_add(1, Ordering::AcqRel);
             state = self
                 .cv
                 .wait(state)
                 .unwrap_or_else(|poison| poison.into_inner());
+            self.terminal_waiters.fetch_sub(1, Ordering::AcqRel);
         }
     }
 

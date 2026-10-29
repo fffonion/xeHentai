@@ -1,11 +1,12 @@
 use std::path::{Component, Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use http_body_util::BodyExt;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::dto::{CommitGate, WriterFault};
+use crate::net::cleanup_deadline;
 use crate::net::client::OpenedResponse;
 use crate::net::policy::until_deadline;
 use crate::observe::Metrics;
@@ -25,6 +26,7 @@ pub struct BodyWrite<'a> {
     pub uncancellable_hold: Option<&'a CommitGate>,
     pub cancel: &'a CancellationToken,
     pub deadline: Instant,
+    pub idle: Duration,
     pub metrics: &'a Metrics,
 }
 
@@ -44,17 +46,18 @@ pub async fn write_body(
         uncancellable_hold,
         cancel,
         deadline,
+        idle,
         metrics,
     } = write;
     if let Some(length) = opened.content_length {
         if length > stream_limit as u64 {
-            let _ = opened.connection.shutdown(deadline).await;
+            let _ = opened.connection.shutdown(cleanup_deadline(deadline)).await;
             return Err("stream_limit");
         }
     }
     let final_path = resolve_inside(root, relative)?;
     if std::fs::symlink_metadata(&final_path).is_ok() {
-        let _ = opened.connection.shutdown(deadline).await;
+        let _ = opened.connection.shutdown(cleanup_deadline(deadline)).await;
         return Err("target_exists");
     }
     let (staging, file) = create_staging(&final_path, job_id)?;
@@ -64,24 +67,36 @@ pub async fn write_body(
         keep: false,
     };
     let mut total = 0u64;
+    let mut progress_at = Instant::now();
     loop {
-        if cancel.is_cancelled() || Instant::now() >= deadline {
-            let _ = opened.connection.shutdown(deadline).await;
-            return Err(if cancel.is_cancelled() {
-                "cancelled"
-            } else {
-                "deadline"
-            });
+        if cancel.is_cancelled() {
+            let _ = opened.connection.shutdown(cleanup_deadline(deadline)).await;
+            return Err("cancelled");
         }
-        let next = match until_deadline(cancel, deadline, opened.body.frame()).await {
+        let now = Instant::now();
+        if now >= deadline {
+            let _ = opened.connection.shutdown(cleanup_deadline(deadline)).await;
+            return Err("deadline");
+        }
+        let idle_at = progress_at.checked_add(idle).unwrap_or(deadline);
+        if now >= idle_at {
+            let _ = opened.connection.shutdown(cleanup_deadline(deadline)).await;
+            return Err("deadline");
+        }
+        let limit = if idle_at < deadline {
+            idle_at
+        } else {
+            deadline
+        };
+        let next = match until_deadline(cancel, limit, opened.body.frame()).await {
             Ok(Some(Ok(frame))) => Some(frame),
             Ok(None) => None,
             Ok(Some(Err(_))) => {
-                let _ = opened.connection.shutdown(deadline).await;
+                let _ = opened.connection.shutdown(cleanup_deadline(deadline)).await;
                 return Err("transport_failed");
             }
             Err(code) => {
-                let _ = opened.connection.shutdown(deadline).await;
+                let _ = opened.connection.shutdown(cleanup_deadline(deadline)).await;
                 return Err(code);
             }
         };
@@ -91,6 +106,10 @@ pub async fn write_body(
         let Ok(chunk) = frame.into_data() else {
             continue;
         };
+        if chunk.is_empty() {
+            continue;
+        }
+        progress_at = Instant::now();
         let bytes_hold = Hold::acquire(metrics, chunk.len(), 0);
         let mut offset = 0;
         while offset < chunk.len() {
@@ -98,7 +117,7 @@ pub async fn write_body(
                 if fault.is_armed() && total >= fault.fail_after_bytes {
                     fault.disarm();
                     drop(bytes_hold);
-                    let _ = opened.connection.shutdown(deadline).await;
+                    let _ = opened.connection.shutdown(cleanup_deadline(deadline)).await;
                     return Err("io_error");
                 }
             }
@@ -109,10 +128,10 @@ pub async fn write_body(
             let n = (chunk.len() - offset).min(chunk_bytes).min(room);
             if total.saturating_add(n as u64) > stream_limit as u64 {
                 drop(bytes_hold);
-                let _ = opened.connection.shutdown(deadline).await;
+                let _ = opened.connection.shutdown(cleanup_deadline(deadline)).await;
                 return Err("stream_limit");
             }
-            let mut owned = Vec::new();
+            let mut owned = Vec::with_capacity(n);
             owned.extend_from_slice(&chunk[offset..offset + n]);
             let vec_hold = Hold::acquire(metrics, owned.len(), owned.capacity());
             if let Some(hold) = buffer_hold {
@@ -129,12 +148,12 @@ pub async fn write_body(
             match written {
                 Err(code) => {
                     drop(bytes_hold);
-                    let _ = opened.connection.shutdown(deadline).await;
+                    let _ = opened.connection.shutdown(cleanup_deadline(deadline)).await;
                     return Err(code);
                 }
                 Ok(Err(_)) => {
                     drop(bytes_hold);
-                    let _ = opened.connection.shutdown(deadline).await;
+                    let _ = opened.connection.shutdown(cleanup_deadline(deadline)).await;
                     return Err("io_error");
                 }
                 Ok(Ok(())) => {}
@@ -153,7 +172,7 @@ pub async fn write_body(
         .await?
         .map_err(|_| "io_error")?;
     drop(guard.file.take());
-    let joined = opened.connection.shutdown(deadline).await;
+    let joined = opened.connection.shutdown(cleanup_deadline(deadline)).await;
     if !joined {
         return Err("driver_pending");
     }

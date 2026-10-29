@@ -44,6 +44,7 @@ fn two_rss_workers_enter_the_server_barrier_on_distinct_owner_threads() {
         commit_hold: None,
         hooks: xeh_host::TransportHooks::default(),
         fail_worker_once: false,
+        submit_hold: None,
     };
     let pool = WorkerPool::start(config).expect("worker pool");
     pool.wait_ready(Duration::from_secs(5))
