@@ -18,7 +18,8 @@ use xeh_host::{
 };
 
 use support::{
-    probe_catalog, register_arm_http, register_fail, register_record, register_reenter, TestRoot,
+    probe_catalog, register_arm_http, register_fail, register_hold, register_record,
+    register_reenter, SyncCallbackGate, TestRoot,
 };
 
 #[test]
@@ -241,6 +242,326 @@ async fn timer_rejects_drive_and_shutdown_from_another_thread() {
     assert_eq!(timer.pending_count(), 0);
     assert_eq!(timer.running_count(), 0);
     timer.shutdown().expect("owner shutdown is idempotent");
+}
+
+#[test]
+fn timer_wrong_owner_drive_and_shutdown_reject_while_sync_callback_runs() {
+    let gate = Arc::new(SyncCallbackGate::new());
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let (started_tx, started_rx) = mpsc::channel();
+    let (report_tx, report_rx) = mpsc::channel();
+    let owner_gate = Arc::clone(&gate);
+    let owner_log = Arc::clone(&log);
+    let owner_join = JoinOnDrop(Some(std::thread::spawn(move || {
+        let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_overlap_owner(owner_gate, owner_log, started_tx)
+        }));
+        let report = match report {
+            Ok(report) => report,
+            Err(payload) => OwnerReport::Failed(panic_payload(payload.as_ref())),
+        };
+        let _ = report_tx.send(report);
+    })));
+    let mut intruder_join = JoinOnDrop(None);
+    let _gate_lease = ReleaseGate(Arc::clone(&gate));
+
+    let started = started_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("owner thread should publish its timer handle");
+    let callback_thread = gate
+        .wait_entered(Duration::from_secs(20))
+        .unwrap_or_else(|error| {
+            panic!(
+                "{error}; log={:?} pending={} running={}",
+                log.lock().expect("log"),
+                started.timer.pending_count(),
+                started.timer.running_count()
+            );
+        });
+    assert_eq!(
+        callback_thread, started.thread_id,
+        "the synchronous callback must be executing on the owner thread"
+    );
+    assert!(
+        !gate.is_released(),
+        "the overlap probe starts only while the callback is still held"
+    );
+    let pending_before = started.timer.pending_count();
+    let running_before = started.timer.running_count();
+    let peak_before = started.timer.peak_running();
+    let log_before = log.lock().expect("log").clone();
+    assert_eq!(
+        pending_before, 2,
+        "the subsequent due callback and the late callback stay pending"
+    );
+    assert_eq!(
+        running_before, 1,
+        "the gated callback must occupy the running slot before the probe"
+    );
+    assert_eq!(peak_before, 1, "running must not exceed max_running");
+    assert_eq!(
+        log_before.as_slice(),
+        ["entered"],
+        "only the held callback may have started"
+    );
+    assert!(
+        started.timer.errors().is_empty(),
+        "callback errors before the probe: {:?}",
+        started.timer.errors()
+    );
+
+    let (intruder_tx, intruder_rx) = mpsc::channel();
+    let probed = Arc::clone(&started.timer);
+    intruder_join.0 = Some(std::thread::spawn(move || {
+        let thread_id = std::thread::current().id();
+        let drive_due = api_text(probed.drive_due());
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        let drive_with = api_text(probed.drive_with(&mut cx));
+        let shutdown = api_text(probed.shutdown());
+        let _ = intruder_tx.send(IntruderReport {
+            thread_id,
+            drive_due,
+            drive_with,
+            shutdown,
+        });
+    }));
+    let intruder = match intruder_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(report) => report,
+        Err(error) => panic!(
+            "cross-thread drive/shutdown did not return while the callback was inside the gate: {error}; pending={} running={} released={} log={:?}",
+            started.timer.pending_count(),
+            started.timer.running_count(),
+            gate.is_released(),
+            log.lock().expect("log")
+        ),
+    };
+    intruder_join.join();
+    assert_ne!(
+        intruder.thread_id, started.thread_id,
+        "the rejection probe must run on a different thread from the owner"
+    );
+    assert_owner_rejection("drive_due", &intruder.drive_due);
+    assert_owner_rejection("drive_with", &intruder.drive_with);
+    assert_owner_rejection("shutdown", &intruder.shutdown);
+    assert!(
+        !gate.is_released(),
+        "wrong-owner results arrived only after the callback had been released"
+    );
+    assert_eq!(
+        started.timer.pending_count(),
+        pending_before,
+        "a rejected shutdown must not clear pending"
+    );
+    assert_eq!(
+        started.timer.running_count(),
+        running_before,
+        "a rejected shutdown must not clear the running slot"
+    );
+    assert_eq!(started.timer.peak_running(), peak_before);
+    assert_eq!(
+        log.lock().expect("log").as_slice(),
+        log_before.as_slice(),
+        "premature and subsequent callbacks must not run on the rejecting thread"
+    );
+    assert!(
+        started.timer.errors().is_empty(),
+        "a rejected cross-thread call must not record a callback error: {:?}",
+        started.timer.errors()
+    );
+
+    gate.release();
+    let report = report_rx
+        .recv_timeout(Duration::from_secs(15))
+        .unwrap_or_else(|error| {
+            panic!("owner did not finish after the gate release: {error}");
+        });
+    let finished = match report {
+        OwnerReport::Finished(finished) => finished,
+        OwnerReport::Failed(error) => panic!("owner failed after release: {error}"),
+    };
+    assert_eq!(
+        finished.drive_completed, 2,
+        "owner drive must finish the held callback and the next due callback"
+    );
+    assert_eq!(finished.post_shutdown_drive, 0);
+    assert_eq!(finished.pending, 0);
+    assert_eq!(finished.running, 0);
+    assert!(
+        finished.errors.is_empty(),
+        "owner cleanup errors: {:?}",
+        finished.errors
+    );
+    assert_eq!(
+        finished.log,
+        vec![
+            "entered".to_string(),
+            "finished".to_string(),
+            "next".to_string(),
+            "premature-late".to_string(),
+        ]
+    );
+    owner_join.join();
+}
+
+struct OwnerStarted {
+    timer: Arc<EmbeddingTimer>,
+    thread_id: std::thread::ThreadId,
+}
+
+struct OwnerFinished {
+    drive_completed: usize,
+    post_shutdown_drive: usize,
+    pending: usize,
+    running: usize,
+    errors: Vec<String>,
+    log: Vec<String>,
+}
+
+enum OwnerReport {
+    Failed(String),
+    Finished(OwnerFinished),
+}
+
+struct IntruderReport {
+    thread_id: std::thread::ThreadId,
+    drive_due: String,
+    drive_with: String,
+    shutdown: String,
+}
+
+struct JoinOnDrop(Option<std::thread::JoinHandle<()>>);
+
+impl JoinOnDrop {
+    fn join(mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.join().expect("worker thread");
+        }
+    }
+}
+
+impl Drop for JoinOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+struct ReleaseGate(Arc<SyncCallbackGate>);
+
+impl Drop for ReleaseGate {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+fn api_text<T: std::fmt::Debug, E: std::fmt::Display>(result: Result<T, E>) -> String {
+    match result {
+        Ok(value) => format!("ok:{value:?}"),
+        Err(error) => error.to_string(),
+    }
+}
+
+fn assert_owner_rejection(label: &str, text: &str) {
+    assert!(
+        text.contains("owner thread") && !text.contains("re-enter") && !text.starts_with("ok:"),
+        "{label} must be a typed wrong-owner rejection, got {text}"
+    );
+}
+
+fn panic_payload(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "owner thread panicked".to_string()
+}
+
+fn run_overlap_owner(
+    gate: Arc<SyncCallbackGate>,
+    log: Arc<Mutex<Vec<String>>>,
+    started_tx: mpsc::Sender<OwnerStarted>,
+) -> OwnerReport {
+    let timer = Arc::new(EmbeddingTimer::new());
+    let thread_id = std::thread::current().id();
+    if started_tx
+        .send(OwnerStarted {
+            timer: Arc::clone(&timer),
+            thread_id,
+        })
+        .is_err()
+    {
+        return OwnerReport::Failed("coordinator dropped the timer handle".to_string());
+    }
+    let catalog = probe_catalog();
+    let source = r#"
+        use timer;
+        use xeh_test;
+        timer::at(0, |premature| if premature => { xeh_test::record("premature-active"); null } else => { xeh_test::hold(); xeh_test::record("finished"); null });
+        timer::at(0, |premature| if premature => { xeh_test::record("premature-next"); null } else => { xeh_test::record("next"); null });
+        timer::at(60000, |premature| if premature => { xeh_test::record("premature-late"); null } else => { xeh_test::record("late"); null });
+        timer::pending_count();
+    "#;
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => return OwnerReport::Failed(error.to_string()),
+    };
+    let registered = runtime.block_on(async {
+        let program = compile_source_with_catalog(source, Arc::clone(&catalog))
+            .map_err(|error| error.to_string())?;
+        let mut registry = open_registry(&catalog).map_err(|error| error.to_string())?;
+        register_record(&mut registry, &catalog, Arc::clone(&log));
+        register_hold(&mut registry, &catalog, Arc::clone(&gate), Arc::clone(&log));
+        let mut vm = vm::Vm::try_new(program).map_err(|error| error.to_string())?;
+        xeh_host::bind_vm(&mut vm, &registry).map_err(|error| error.to_string())?;
+        let backend = Arc::clone(&timer) as Arc<dyn TimerBackend>;
+        vm.install_timer_runtime(
+            backend,
+            TimerConfig {
+                max_pending: 8,
+                max_running: 1,
+            },
+        );
+        drive_to_halt(&mut vm)
+            .await
+            .map_err(|error| error.to_string())?;
+        let pending = stack_int(&vm).map_err(|error| error.to_string())?;
+        if pending != 3 {
+            return Err(format!("expected 3 pending registrations, got {pending}"));
+        }
+        Ok(())
+    });
+    if let Err(error) = registered {
+        return OwnerReport::Failed(error);
+    }
+    let drive_completed = match timer.drive_due() {
+        Ok(count) => count,
+        Err(error) => return OwnerReport::Failed(format!("owner drive_due: {error}")),
+    };
+    if let Err(error) = timer.shutdown() {
+        return OwnerReport::Failed(format!("owner shutdown: {error}"));
+    }
+    let post_shutdown_drive = match timer.drive_due() {
+        Ok(count) => count,
+        Err(error) => return OwnerReport::Failed(format!("drive after shutdown: {error}")),
+    };
+    if let Err(error) = timer.shutdown() {
+        return OwnerReport::Failed(format!("idempotent shutdown: {error}"));
+    }
+    OwnerReport::Finished(OwnerFinished {
+        drive_completed,
+        post_shutdown_drive,
+        pending: timer.pending_count(),
+        running: timer.running_count(),
+        errors: timer.errors(),
+        log: log.lock().expect("log").clone(),
+    })
 }
 
 #[tokio::test(flavor = "current_thread")]

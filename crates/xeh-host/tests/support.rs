@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::thread::ThreadId;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use vm::resource::HostResource;
 use vm::{
@@ -276,6 +277,12 @@ pub fn probe_catalog() -> Arc<HostApiCatalog> {
         HostTypeSchema::Int,
         "Attempt to drive the owner timer from inside a callback",
     ));
+    builder.function(host_fn(
+        "xeh_test::hold",
+        vec![],
+        HostTypeSchema::Int,
+        "Block a synchronous timer callback until the overlap test releases it",
+    ));
     Arc::new(
         builder
             .build()
@@ -350,6 +357,151 @@ pub fn register_arm_http(
         },
     )
     .expect("arm_http host should register");
+}
+
+/// Test-only barrier for a synchronous callback that is actually running.
+///
+/// `wait_entered` returns only after the callback has published its thread and
+/// is waiting. `release` is idempotent and safe after a poisoned lock so a
+/// failed test can unblock the owner thread.
+pub struct SyncCallbackGate {
+    state: Mutex<SyncCallbackGateState>,
+    cv: Condvar,
+}
+
+struct SyncCallbackGateState {
+    entered: bool,
+    release: bool,
+    thread_id: Option<ThreadId>,
+}
+
+impl SyncCallbackGate {
+    pub fn new() -> Self {
+        Self {
+            state: Mutex::new(SyncCallbackGateState {
+                entered: false,
+                release: false,
+                thread_id: None,
+            }),
+            cv: Condvar::new(),
+        }
+    }
+
+    pub fn release(&self) {
+        let mut state = self.lock();
+        state.release = true;
+        self.cv.notify_all();
+    }
+
+    pub fn is_released(&self) -> bool {
+        self.lock().release
+    }
+
+    pub fn wait_entered(&self, timeout: Duration) -> Result<ThreadId, String> {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.lock();
+        while !state.entered {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("synchronous callback did not enter the gate".to_string());
+            }
+            let (next, wait) = self.wait(state, remaining);
+            state = next;
+            if wait.timed_out() && !state.entered {
+                return Err(
+                    "synchronous callback did not enter the gate before timeout".to_string()
+                );
+            }
+        }
+        state
+            .thread_id
+            .ok_or_else(|| "callback entered the gate without a thread id".to_string())
+    }
+
+    fn lock(&self) -> MutexGuard<'_, SyncCallbackGateState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    fn wait<'guard>(
+        &self,
+        state: MutexGuard<'guard, SyncCallbackGateState>,
+        timeout: Duration,
+    ) -> (
+        MutexGuard<'guard, SyncCallbackGateState>,
+        std::sync::WaitTimeoutResult,
+    ) {
+        match self.cv.wait_timeout(state, timeout) {
+            Ok(pair) => pair,
+            Err(poison) => poison.into_inner(),
+        }
+    }
+}
+
+impl Default for SyncCallbackGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+struct HoldFn {
+    gate: Arc<SyncCallbackGate>,
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+impl HostFunction for HoldFn {
+    fn call(&mut self, _vm: &mut Vm, _args: &[Value]) -> VmResult<CallOutcome> {
+        self.log
+            .lock()
+            .expect("hold log")
+            .push("entered".to_string());
+        let mut state = self.gate.lock();
+        state.entered = true;
+        state.thread_id = Some(std::thread::current().id());
+        self.gate.cv.notify_all();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !state.release {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(VmError::HostError(
+                    "synchronous callback gate was not released before timeout".to_string(),
+                ));
+            }
+            let (next, wait) = self.gate.wait(state, remaining);
+            state = next;
+            if wait.timed_out() && !state.release {
+                return Err(VmError::HostError(
+                    "synchronous callback gate was not released before timeout".to_string(),
+                ));
+            }
+        }
+        Ok(CallOutcome::Return(CallReturn::one(Value::Int(1))))
+    }
+}
+
+pub fn register_hold(
+    registry: &mut HostFunctionRegistry,
+    catalog: &HostApiCatalog,
+    gate: Arc<SyncCallbackGate>,
+    log: Arc<Mutex<Vec<String>>>,
+) {
+    register_catalog_function(
+        registry,
+        catalog,
+        "xeh_test::hold",
+        catalog
+            .function("xeh_test::hold")
+            .expect("hold schema")
+            .clone(),
+        move || {
+            Box::new(HoldFn {
+                gate: Arc::clone(&gate),
+                log: Arc::clone(&log),
+            })
+        },
+    )
+    .expect("hold host should register");
 }
 
 pub fn register_reenter(
