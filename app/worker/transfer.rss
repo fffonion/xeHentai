@@ -1,0 +1,5 @@
+use xeh_transfer;
+
+let job = xeh_transfer::job();
+let receipt = xeh_transfer::run(job);
+receipt.bytes;

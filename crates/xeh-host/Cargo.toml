@@ -8,7 +8,10 @@ description = "xeHentai RustScript embedding host"
 
 [dependencies]
 pd-vm = { git = "https://github.com/rustscript-lang/rustscript.git", rev = "99890b68119715df9ddd19f6a6362ff8d6258ffa", default-features = false, features = ["async", "runtime", "http-client"] }
-tokio = { version = "1", default-features = false, features = ["rt", "macros", "time", "sync", "net", "io-util"] }
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "time", "sync", "net", "io-util", "fs"] }
+tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "stream"] }
 
 [dev-dependencies]
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "time", "sync", "net", "io-util"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
