@@ -119,7 +119,7 @@ async fn standard_catalog_file_round_trip_reuses_the_vm() {
     drive_to_halt(&mut vm)
         .await
         .expect("standard catalog file round trip");
-    assert_catalog_round_trip(&vm, &path);
+    assert_catalog_round_trip(&vm, &path, payload);
     assert_io_quiescent(&mut vm);
     release_for_reuse(&mut vm)
         .await
@@ -128,7 +128,7 @@ async fn standard_catalog_file_round_trip_reuses_the_vm() {
     drive_to_halt(&mut vm)
         .await
         .expect("reused VM runs the same catalog script");
-    assert_catalog_round_trip(&vm, &path);
+    assert_catalog_round_trip(&vm, &path, payload);
     assert_io_quiescent(&mut vm);
 }
 
@@ -236,7 +236,7 @@ fn round_trip_source(path: &std::path::Path, payload: &str) -> String {
     )
 }
 
-fn assert_catalog_round_trip(vm: &vm::Vm, path: &std::path::Path) {
+fn assert_catalog_round_trip(vm: &vm::Vm, path: &std::path::Path, expected_payload: &str) {
     let Some(Value::Array(items)) = vm.stack().last() else {
         panic!(
             "round trip should return the RSS array, got {:?}",
@@ -244,13 +244,19 @@ fn assert_catalog_round_trip(vm: &vm::Vm, path: &std::path::Path) {
         );
     };
     let disk = std::fs::read(path).expect("host reads the written file");
+    assert_eq!(
+        disk.as_slice(),
+        expected_payload.as_bytes(),
+        "disk bytes must equal the expected payload"
+    );
     let Some(Value::Int(count)) = items.first() else {
         panic!("write count missing: {items:?}");
     };
-    let disk_len = i64::try_from(disk.len()).expect("disk length fits the RSS int");
+    let expected_len =
+        i64::try_from(expected_payload.len()).expect("expected payload length fits the RSS int");
     assert_eq!(
-        *count, disk_len,
-        "io::write's return must equal the bytes read back from disk"
+        *count, expected_len,
+        "io::write's return must equal the expected payload length"
     );
     assert_eq!(items.get(1), Some(&Value::Int(1)), "flush must succeed");
     assert_eq!(
@@ -264,11 +270,18 @@ fn assert_catalog_round_trip(vm: &vm::Vm, path: &std::path::Path) {
         "close after read_all must succeed"
     );
     match items.get(4) {
-        Some(Value::String(text)) => assert_eq!(
-            text.as_bytes(),
-            disk.as_slice(),
-            "RSS read_all must match the bytes on disk"
-        ),
+        Some(Value::String(text)) => {
+            assert_eq!(
+                text.as_bytes(),
+                expected_payload.as_bytes(),
+                "RSS read_all must equal the expected payload"
+            );
+            assert_eq!(
+                text.as_bytes(),
+                disk.as_slice(),
+                "RSS read_all must match the bytes on disk"
+            );
+        }
         other => panic!("read_all returned {other:?}"),
     }
 }
