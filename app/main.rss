@@ -1,0 +1,7 @@
+use re;
+use self::types;
+
+let note = types::decoded_note();
+let matched = re::match("^probe$", note);
+let match_bonus = if matched => { 1 } else => { 0 };
+types::decoded_score() + types::absent_score() + match_bonus;

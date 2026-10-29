@@ -33,4 +33,15 @@ cargo run -p xeh-xtask -- verify --all --deny-unverified
 
 `verify --all --deny-unverified` 在应用行为完成前必须失败。oracle 记录的是原版程序的实测输出，不表示重写已经实现。
 
+## RustScript 嵌入
+
+下载器尚未实现。当前可执行的是嵌入入口，不是站点客户端。
+
+```text
+cargo run -p xeh-host
+cargo run -p xeh-xtask -- rss-test
+```
+
+两条命令都编译并执行 `app/main.rss`，打印 RSS 算出的整数。依赖锁定为 `pd-vm` revision `d9387f98df78dd88d2d1c04eebac4415f844efaf`，feature 为 `runtime`、`async`、`http-client`，不含默认 JIT。复用边界见 `docs/architecture.md`。
+
 兼容清单、差异和命令说明见 `docs/compatibility.md`。

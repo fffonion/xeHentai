@@ -2,7 +2,7 @@ use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use xeh_xtask::{capture, compare_trees, verify_deny_unverified, workspace_root};
+use xeh_xtask::{capture, compare_trees, rss_test, verify_deny_unverified, workspace_root};
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -30,6 +30,9 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             std::path::Path::new(&args[5]),
         );
     }
+    if args.len() == 1 && args[0] == "rss-test" {
+        return rss_test();
+    }
     if args.len() >= 2 && args[0] == "verify" && args[1] == "--all" {
         if !args.iter().any(|arg| arg == "--deny-unverified") {
             return Err("verify --all requires --deny-unverified in this scope".to_string());
@@ -44,7 +47,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         };
         return manifest_check(&root);
     }
-    Err("usage: xeh-xtask oracle capture --suite <name> | oracle compare --left <dir> --right <dir> | verify --all --deny-unverified | manifest check [--root <dir>]".to_string())
+    Err("usage: xeh-xtask oracle capture --suite <name> | oracle compare --left <dir> --right <dir> | verify --all --deny-unverified | manifest check [--root <dir>] | rss-test".to_string())
 }
 
 fn manifest_check(root: &std::path::Path) -> Result<(), String> {

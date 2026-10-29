@@ -1,0 +1,14 @@
+[package]
+name = "xeh-host"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+description = "xeHentai RustScript embedding host"
+
+[dependencies]
+pd-vm = { git = "https://github.com/rustscript-lang/rustscript.git", rev = "d9387f98df78dd88d2d1c04eebac4415f844efaf", default-features = false, features = ["async", "runtime", "http-client"] }
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "time", "sync", "net", "io-util"] }
+
+[dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "time", "sync", "net", "io-util"] }

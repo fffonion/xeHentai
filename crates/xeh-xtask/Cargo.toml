@@ -8,6 +8,7 @@ description = "xeHentai compatibility oracle and verification commands"
 
 [dependencies]
 serde_json = "1"
+xeh-host = { path = "../xeh-host" }
 
 [lib]
 path = "src/lib.rs"

@@ -1,0 +1,33 @@
+use json;
+
+struct Probe {
+    score: int,
+    note: string?,
+}
+
+pub fn score_of(probe: Probe) -> int {
+    let score = probe.score;
+    let absent = if probe?.note == null => {
+        1
+    } else => {
+        0
+    };
+    score + absent
+}
+
+pub fn absent_score() -> int {
+    score_of({ score: 0, note: null })
+}
+
+pub fn decoded_score() -> int {
+    let encoded = json::encode({ score: 20, note: "probe" });
+    let decoded: Probe = json::decode::<Probe>(encoded);
+    score_of(decoded)
+}
+
+pub fn decoded_note() -> string {
+    let encoded = json::encode({ score: 20, note: "probe" });
+    let decoded: Probe = json::decode::<Probe>(encoded);
+    let note: string = decoded.note;
+    note
+}

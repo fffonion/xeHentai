@@ -12,3 +12,9 @@ pub use manifest::{check_coverage_claims, feature_ids, reject_unmapped, Manifest
 pub use oracle::{capture, compare_trees};
 pub use paths::{evidence_dir, lease_tmp, workspace_root};
 pub use verify::{verify_deny_unverified, VerifyReport};
+
+pub fn rss_test() -> Result<(), String> {
+    let value = xeh_host::run_app().map_err(|error| error.to_string())?;
+    println!("{value}");
+    Ok(())
+}
