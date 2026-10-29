@@ -502,6 +502,7 @@ fn output_write_failure_fails_closed() {
     let capture_out = root.join("capture-out");
     fs::create_dir_all(&capture_out).unwrap();
     fs::create_dir_all(capture_out.join("stdout.txt")).unwrap();
+    fs::write(capture_out.join("keep.txt"), b"OLD-KEEP\n").unwrap();
     let emit = root.join("emit");
     fs::create_dir_all(&emit).unwrap();
     let out = command(&xtask_bin())
@@ -514,9 +515,14 @@ fn output_write_failure_fails_closed() {
     let text = combined(&out);
     assert!(!out.status.success(), "{text}");
     assert!(
-        text.contains("cannot write oracle stdout"),
-        "stdout write failure must fail closed, got:\n{text}"
+        text.contains("refusing to reuse capture output"),
+        "reused capture output must fail closed without changes, got:\\n{text}"
     );
+    assert_eq!(
+        fs::read(capture_out.join("keep.txt")).unwrap(),
+        b"OLD-KEEP\n"
+    );
+    assert!(capture_out.join("stdout.txt").is_dir());
     assert!(!emit.join("compat/manifest.json").exists());
 }
 
@@ -1026,5 +1032,366 @@ print("FILEPATH=" + norm_golden["runtime_config"]["filepath"])
 print("REFERER=" + norm_golden["glype"]["seen"][0]["referer"])
 print("CASE_BUSINESS_DATE=" + norm_cases["rpc.method.xeH.getInfo"]["expected"]["observed"]["date"])
 print("CASE_REGISTERED_DATE=" + norm_cases["rpc.method.xeH.getInfo"]["expected"]["observed"]["headers"]["date"])
-print("APPLIED=" + json.dumps(applied, sort_keys=True))
-"#;
+print("APPLIED=" + json.dumps(applied, sort_keys=True))"#;
+
+fn evidence_round() -> PathBuf {
+    lease_tmp().join("evidence-address-r3")
+}
+
+fn snapshot_tree(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    if !dir.exists() {
+        return out;
+    }
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        for entry in fs::read_dir(&current).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.is_file() {
+                let rel = path
+                    .strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.push((rel, fs::read(&path).unwrap()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+fn plant_emit_sentinels(emit: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    fs::create_dir_all(emit.join("compat/golden")).unwrap();
+    fs::write(emit.join("compat/manifest.json"), b"SENTINEL-MANIFEST-R3\n").unwrap();
+    fs::write(
+        emit.join("compat/golden/sentinel.json"),
+        b"SENTINEL-GOLDEN-R3\n",
+    )
+    .unwrap();
+    snapshot_tree(emit)
+}
+
+fn read_json(path: &std::path::Path) -> serde_json::Value {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(serde_json::json!({}))
+}
+
+fn disk_child_audits(capture: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let processes = capture.join("processes");
+    let mut out = Vec::new();
+    if !processes.is_dir() {
+        return out;
+    }
+    for entry in fs::read_dir(&processes).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_name() == "root" {
+            continue;
+        }
+        let audit = entry.path().join("audit.json");
+        if audit.is_file() {
+            out.push(audit);
+        }
+    }
+    out.sort();
+    out
+}
+
+fn is_real_child_audit(path: &std::path::Path) -> bool {
+    let name = path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    name.contains("cli-") || name.contains("locale")
+}
+
+fn spawn_records(capture: &std::path::Path) -> Vec<serde_json::Value> {
+    let audit = read_json(&capture.join("processes/root/audit.json"));
+    audit
+        .get("spawns")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[test]
+fn all_suite_process_set_must_match_before_publish() {
+    let _guard = test_lock();
+    let cases = [
+        ("all-empty", "all-empty", "process set is incomplete"),
+        ("all-drop-one", "all-drop-one", "process set is incomplete"),
+        (
+            "all-bogus-parent",
+            "all-bogus-parent",
+            "process graph is invalid",
+        ),
+        (
+            "all-stale-run",
+            "all-stale-run",
+            "run_id does not match this capture",
+        ),
+        (
+            "all-duplicate-id",
+            "all-duplicate-id",
+            "process set is incomplete",
+        ),
+        (
+            "all-foreign-audit",
+            "all-foreign-audit",
+            "outside this capture output",
+        ),
+        (
+            "all-extra-audit",
+            "all-extra-audit",
+            "process set is incomplete",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (name, shape, needle) in cases {
+        let root = lease_tmp().join(format!("r3-{name}"));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let capture = root.join("capture");
+        let emit = root.join("emit");
+        let before = plant_emit_sentinels(&emit);
+        let out = command(&xtask_bin())
+            .env_remove("XEH_EMIT_ROOT")
+            .env_remove("XEH_CAPTURE_OUT")
+            .env_remove("XEH_EVIDENCE_DIR")
+            .env("XEH_EVIDENCE_DIR", evidence_round())
+            .env("XEH_EMIT_ROOT", &emit)
+            .env("XEH_CAPTURE_OUT", &capture)
+            .env("XEH_CHILD_LIST_SHAPE", shape)
+            .env("XEH_SECRET_SENTINEL", "sentinel-value-not-for-receipt")
+            .env("HOME", "/home/wow")
+            .args(["oracle", "capture", "--suite", "all"])
+            .output()
+            .expect("spawn all-suite capture");
+        let text = combined(&out);
+        let audits = disk_child_audits(&capture);
+        let real: Vec<_> = audits
+            .iter()
+            .filter(|path| is_real_child_audit(path))
+            .cloned()
+            .collect();
+        let list = read_json(&capture.join("expected-children.json"));
+        let listed = list
+            .get("processes")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let spawns = spawn_records(&capture);
+        let after = snapshot_tree(&emit);
+        eprintln!(
+            "case={name} xtask_success={} xtask_code={:?} list={} spawns={} disk={} real_cli_locale={} needle={needle}",
+            out.status.success(),
+            out.status.code(),
+            listed.len(),
+            spawns.len(),
+            audits.len(),
+            real.len()
+        );
+        let mut case_failures = Vec::new();
+        if real.is_empty() {
+            case_failures.push("setup error: no real cli/locale child audit".to_string());
+        }
+        if shape == "all-empty" && !listed.is_empty() {
+            case_failures.push("setup error: expected list was not emptied".to_string());
+        }
+        if shape == "all-drop-one" {
+            let listed_ids: Vec<_> = listed
+                .iter()
+                .filter_map(|item| item.get("id").and_then(|id| id.as_str()))
+                .collect();
+            let dropped = real.iter().any(|path| {
+                let id = path
+                    .parent()
+                    .and_then(|parent| parent.file_name())
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("");
+                !listed_ids.contains(&id)
+            });
+            if !dropped {
+                case_failures
+                    .push("setup error: no real child was removed from the list".to_string());
+            } else if !spawns.is_empty() {
+                let spawn_ids: Vec<_> = spawns
+                    .iter()
+                    .filter_map(|item| item.get("child_id").and_then(|value| value.as_str()))
+                    .collect();
+                let unlisted_spawn = real.iter().any(|path| {
+                    let id = path
+                        .parent()
+                        .and_then(|parent| parent.file_name())
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("");
+                    !listed_ids.contains(&id) && spawn_ids.contains(&id)
+                });
+                if !unlisted_spawn {
+                    case_failures.push("dropped child has no remaining spawn record".to_string());
+                }
+            }
+        }
+        if shape == "all-bogus-parent" {
+            let matched = listed.iter().any(|item| {
+                let parent = item.get("parent").and_then(|value| value.as_str());
+                let audit = item
+                    .get("audit")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let audit_parent = read_json(std::path::Path::new(audit))
+                    .get("parent_id")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string);
+                parent == Some("missing-parent")
+                    && audit_parent.as_deref() == Some("missing-parent")
+            });
+            if !matched {
+                case_failures.push(
+                    "setup error: record and audit were not both rewritten to a missing parent"
+                        .to_string(),
+                );
+            }
+        }
+        if shape == "all-stale-run"
+            && list.get("run_id").and_then(|value| value.as_str()) != Some("stale-run-id")
+        {
+            case_failures.push("setup error: list run_id was not rewritten".to_string());
+        }
+        if shape == "all-foreign-audit" {
+            let foreign = listed.iter().any(|item| {
+                item.get("audit")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .contains("other-run")
+            });
+            if !foreign {
+                case_failures
+                    .push("setup error: audit path was not moved outside this capture".to_string());
+            }
+        }
+        if shape == "all-duplicate-id" {
+            let mut ids = Vec::new();
+            for item in &listed {
+                if let Some(id) = item.get("id").and_then(|value| value.as_str()) {
+                    ids.push(id);
+                }
+            }
+            ids.sort_unstable();
+            let duplicate = ids.windows(2).any(|pair| pair[0] == pair[1]);
+            if !duplicate {
+                case_failures.push("setup error: list has no duplicate id".to_string());
+            }
+        }
+        if shape == "all-extra-audit" && !capture.join("processes/stale-child/audit.json").is_file()
+        {
+            case_failures.push("setup error: unlisted audit was not planted".to_string());
+        }
+        if out.status.success() || !text.contains(needle) {
+            case_failures.push(format!(
+                "capture did not reject before publish: success={} missing `{needle}`",
+                out.status.success()
+            ));
+        }
+        if after != before {
+            case_failures.push("trusted emit bytes changed".to_string());
+        }
+        if spawns.is_empty() {
+            case_failures.push("independent spawn fact is missing".to_string());
+        } else {
+            for spawn in &spawns {
+                let keys: Vec<_> = spawn
+                    .as_object()
+                    .map(|obj| obj.keys().cloned().collect())
+                    .unwrap_or_default();
+                let mut keys = keys;
+                keys.sort();
+                let allowed = ["audit", "child_id", "output", "parent_id", "run_id"];
+                if keys != allowed {
+                    case_failures.push(format!(
+                        "spawn record fields are not the nonsecret set: {keys:?}"
+                    ));
+                }
+            }
+            let root_audit =
+                fs::read_to_string(capture.join("processes/root/audit.json")).unwrap_or_default();
+            if root_audit.contains("sentinel-value-not-for-receipt") {
+                case_failures.push("audit serialized an unlisted secret".to_string());
+            }
+        }
+        if !case_failures.is_empty() {
+            failures.push(format!(
+                "{name}: {}\nlist={} spawns={} disk={} real={}\n{text}",
+                case_failures.join("; "),
+                listed.len(),
+                spawns.len(),
+                audits.len(),
+                real.len()
+            ));
+        }
+    }
+
+    let reuse_root = lease_tmp().join("r3-reuse-output");
+    let _ = fs::remove_dir_all(&reuse_root);
+    fs::create_dir_all(&reuse_root).unwrap();
+    let old = reuse_root.join("old-capture");
+    fs::create_dir_all(&old).unwrap();
+    let old_stdout = b"OLD-STDOUT-SENTINEL\n";
+    let old_keep = b"OLD-KEEP-SENTINEL\n";
+    fs::write(old.join("stdout.txt"), old_stdout).unwrap();
+    fs::write(old.join("keep.txt"), old_keep).unwrap();
+    let emit = reuse_root.join("emit");
+    let before = plant_emit_sentinels(&emit);
+    let out = command(&xtask_bin())
+        .env_remove("XEH_EMIT_ROOT")
+        .env_remove("XEH_CAPTURE_OUT")
+        .env_remove("XEH_EVIDENCE_DIR")
+        .env("XEH_EVIDENCE_DIR", evidence_round())
+        .env("XEH_EMIT_ROOT", &emit)
+        .env("XEH_CAPTURE_OUT", &old)
+        .env("HOME", "/home/wow")
+        .args(["oracle", "capture", "--suite", "all"])
+        .output()
+        .expect("spawn reused capture");
+    let text = combined(&out);
+    let after_stdout = fs::read(old.join("stdout.txt")).unwrap_or_default();
+    let after_keep = fs::read(old.join("keep.txt")).unwrap_or_default();
+    eprintln!(
+        "case=reuse-output xtask_success={} xtask_code={:?} stdout_unchanged={} keep_unchanged={}",
+        out.status.success(),
+        out.status.code(),
+        after_stdout == old_stdout,
+        after_keep == old_keep
+    );
+    let mut reuse_failures = Vec::new();
+    if out.status.success() || !text.contains("refusing to reuse capture output") {
+        reuse_failures.push(format!(
+            "reused output was not refused: success={}",
+            out.status.success()
+        ));
+    }
+    if after_stdout != old_stdout || after_keep != old_keep {
+        reuse_failures.push("old capture bytes changed".to_string());
+    }
+    if snapshot_tree(&emit) != before {
+        reuse_failures.push("trusted emit bytes changed".to_string());
+    }
+    if !reuse_failures.is_empty() {
+        failures.push(format!(
+            "reuse-output: {}\n{text}",
+            reuse_failures.join("; ")
+        ));
+    }
+
+    assert!(
+        failures.is_empty(),
+        "all-suite process set must fail closed before publish:\n{}",
+        failures.join("\n---\n")
+    );
+}

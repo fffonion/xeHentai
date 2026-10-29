@@ -45,6 +45,12 @@ oracle 进程使用独立的 fixture 根作为 `HOME`、`USERPROFILE`、工作�
 
 子进程环境只保留固定的非秘密名单。收据写入租约临时目录，不记录完整环境。
 
+每次 capture 独占创建新的输出目录。显式 `XEH_CAPTURE_OUT` 已存在时直接拒绝，不清理、不沿用、不覆盖其中的旧文件。Rust 生成本次 `run_id`，写入父子进程环境和收据。每份 audit 与 `expected-children.json` 必须携带同一个 `run_id`。
+
+Python audit hook 在所属进程的 audit 中记录 `subprocess.Popen` 派生事实，只保留子进程 ID、父进程 ID、预期 audit 路径、预期 output 路径和 `run_id`。这是夹具协作记录，不能当作操作系统级沙箱。
+
+发布前核对三方集合：父进程派生记录、预期子进程清单、`processes/` 下的 audit 文件。三者必须严格一致。身份图以 root 为根，父节点必须存在且与派生者一致，不允许重复 ID、重复路径、环或指向本次捕获之外的文件。空清单只在没有派生记录、也没有其他 audit 文件时成立。校验失败时保留原始诊断，不写入可信 manifest 或 golden。
+
 网络连接只允许 `127.0.0.1`、`::1` 和 `localhost`。代理、Glype 和 HTTP 夹具都是本地合成服务，不访问真实账号、站点或代理。
 
 ## 命令

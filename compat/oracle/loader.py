@@ -17,6 +17,7 @@ import uuid
 import process_log
 
 OPENS = []
+SPAWNS = []
 FORBIDDEN = [item for item in os.environ.get("XEH_FORBIDDEN_ROOTS", "").split(":") if item]
 PROCESS_ID = os.environ.get("XEH_PROCESS_ID", "root")
 PARENT_ID = os.environ.get("XEH_PARENT_ID")
@@ -47,6 +48,29 @@ def _record_open(path):
 def _audit_hook(event, args):
     if event == "open" and args:
         _record_open(args[0])
+    elif event == "subprocess.Popen":
+        _record_spawn(args)
+
+
+def _spawn_field(env, key):
+    if not isinstance(env, dict):
+        return None
+    value = env.get(key)
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _record_spawn(args):
+    """Record one Popen attempt from the passed env. Never store args or the env."""
+    env = args[3] if len(args) > 3 else None
+    SPAWNS.append({
+        "child_id": _spawn_field(env, "XEH_PROCESS_ID"),
+        "parent_id": _spawn_field(env, "XEH_PARENT_ID"),
+        "audit": _spawn_field(env, "XEH_AUDIT_PATH"),
+        "output": _spawn_field(env, "XEH_OUT"),
+        "run_id": _spawn_field(env, "XEH_RUN_ID"),
+    })
 
 
 def _install_socket_guard():
@@ -87,6 +111,9 @@ def _write_json(path, data):
 
 
 def _valid_audit(process_id, parent_id, opens=None):
+    run_id = os.environ.get("XEH_RUN_ID")
+    if not run_id:
+        raise SystemExit("capture run_id is missing")
     return {
         "process_id": process_id,
         "parent_id": parent_id,
@@ -96,6 +123,8 @@ def _valid_audit(process_id, parent_id, opens=None):
         "cwd": os.getcwd(),
         "filepath": None,
         "env": process_log.observed_env(),
+        "run_id": run_id,
+        "spawns": [],
     }
 
 
@@ -136,6 +165,136 @@ def _planted_record(out, audit_body, record_id, parent, audit_path=None):
     }
 
 
+_PROCESS_SET_INJECTION = {"done": False}
+
+
+def _real_process_audits(out):
+    root = os.path.join(out, "processes")
+    found = []
+    if not os.path.isdir(root):
+        return found
+    for name in os.listdir(root):
+        if name == "root":
+            continue
+        audit = os.path.join(root, name, "audit.json")
+        if os.path.isfile(audit) and ("cli-" in name or "locale" in name):
+            found.append(audit)
+    return found
+
+
+def _load_child_list(path):
+    if not os.path.isfile(path):
+        return {"processes": []}
+    with open(path) as handle:
+        return json.load(handle)
+
+
+def _write_child_list(path, current, processes):
+    body = {"processes": processes}
+    run_id = current.get("run_id") if isinstance(current, dict) else None
+    if not run_id:
+        run_id = os.environ.get("XEH_RUN_ID")
+    if run_id:
+        body["run_id"] = run_id
+    _write_json(path, body)
+
+
+def apply_process_set_injection(shape, out, path, fixture):
+    """Mutate capture files after real CLI/locale children exist.
+
+    Unset in production captures. This does not alter the fixed upstream tree.
+    """
+    if shape not in (
+        "all-empty",
+        "all-drop-one",
+        "all-bogus-parent",
+        "all-duplicate-id",
+        "all-extra-audit",
+        "all-stale-run",
+        "all-foreign-audit",
+    ):
+        return False
+    if _PROCESS_SET_INJECTION["done"]:
+        return True
+    real = _real_process_audits(out)
+    if not real:
+        return True
+    _PROCESS_SET_INJECTION["done"] = True
+    current = _load_child_list(path)
+    processes = list(current.get("processes") or [])
+    if shape == "all-empty":
+        _write_child_list(path, current, [])
+        return True
+    if shape == "all-drop-one":
+        kept = []
+        dropped = False
+        for item in processes:
+            ident = item.get("id") if isinstance(item, dict) else ""
+            audit = item.get("audit") if isinstance(item, dict) else ""
+            if (
+                not dropped
+                and isinstance(ident, str)
+                and isinstance(audit, str)
+                and os.path.isfile(audit)
+                and ("cli-" in ident or "locale" in ident)
+            ):
+                dropped = True
+                continue
+            kept.append(item)
+        _write_child_list(path, current, kept)
+        return True
+    if shape == "all-bogus-parent":
+        for item in processes:
+            audit = item.get("audit") if isinstance(item, dict) else ""
+            if isinstance(audit, str) and os.path.isfile(audit):
+                item["parent"] = "missing-parent"
+                with open(audit) as handle:
+                    body = json.load(handle)
+                body["parent_id"] = "missing-parent"
+                _write_json(audit, body)
+                break
+        _write_child_list(path, current, processes)
+        return True
+    if shape == "all-duplicate-id":
+        if processes:
+            processes.append(dict(processes[0]))
+        _write_child_list(path, current, processes)
+        return True
+    if shape == "all-extra-audit":
+        extra = os.path.join(out, "processes", "stale-child", "audit.json")
+        _write_json(extra, _valid_audit("stale-child", "root"))
+        return True
+    if shape == "all-stale-run":
+        stale = "stale-run-id"
+        _write_json(path, {"processes": processes, "run_id": stale})
+        audit_root = os.path.join(out, "processes")
+        for dirpath, _dirnames, filenames in os.walk(audit_root):
+            if "audit.json" not in filenames:
+                continue
+            audit_path = os.path.join(dirpath, "audit.json")
+            with open(audit_path) as handle:
+                body = json.load(handle)
+            body["run_id"] = stale
+            for spawn in body.get("spawns") or []:
+                if isinstance(spawn, dict):
+                    spawn["run_id"] = stale
+            _write_json(audit_path, body)
+        return True
+    if shape == "all-foreign-audit":
+        foreign = os.path.join(fixture, "other-run", "audit.json")
+        for item in processes:
+            audit = item.get("audit") if isinstance(item, dict) else ""
+            if isinstance(audit, str) and os.path.isfile(audit):
+                with open(audit) as handle:
+                    body = json.load(handle)
+                _write_json(foreign, body)
+                item["audit"] = foreign
+                break
+        _write_child_list(path, current, processes)
+        return True
+    return False
+
+
 def apply_child_list_shape():
     """Test injection. Unset in production captures."""
     if PROCESS_ID != "root":
@@ -148,6 +307,8 @@ def apply_child_list_shape():
     if not out or not fixture:
         return
     path = os.path.join(out, "expected-children.json")
+    if apply_process_set_injection(shape, out, path, fixture):
+        return
     if shape == "empty-object":
         _write_json(path, {})
         return
@@ -188,7 +349,7 @@ def apply_child_list_shape():
         )
     else:
         return
-    _write_json(path, {"processes": [record]})
+    _write_child_list(path, _load_child_list(path), [record])
 
 
 def write_audit():
@@ -202,6 +363,9 @@ def write_audit():
         with open(path, "w") as handle:
             handle.write("not-json")
         return
+    run_id = os.environ.get("XEH_RUN_ID")
+    if not run_id:
+        raise SystemExit("capture run_id is missing")
     payload = {
         "process_id": PROCESS_ID,
         "parent_id": PARENT_ID,
@@ -211,6 +375,8 @@ def write_audit():
         "cwd": os.getcwd(),
         "filepath": getattr(sys.modules.get("xeHentai.const"), "FILEPATH", None),
         "env": process_log.observed_env(),
+        "run_id": run_id,
+        "spawns": SPAWNS,
     }
     shape = os.environ.get("XEH_AUDIT_SHAPE") if PROCESS_ID == "root" else None
     with open(path, "w") as handle:

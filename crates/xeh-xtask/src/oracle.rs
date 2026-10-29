@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -42,14 +43,14 @@ pub fn capture(suite: &str) -> Result<(), String> {
     let root = workspace_root();
     let (candidate, _report) = prepare_verified_upstream(&root)?;
     let stamp = unix_stamp();
+    let run_id = format!("run-{stamp}");
     let fixture = tmp.join(format!("fixtures/{suite}-{stamp}"));
     fs::create_dir_all(&fixture).map_err(|err| format!("cannot create fixture: {err}"))?;
     fs::create_dir_all(evidence_dir()?)
         .map_err(|err| format!("cannot create evidence dir: {err}"))?;
 
     let forbidden = forbidden_roots(&fixture);
-    let out_dir = capture_out_dir(suite, stamp)?;
-    fs::create_dir_all(&out_dir).map_err(|err| format!("cannot create capture dir: {err}"))?;
+    let out_dir = prepare_capture_out(suite, stamp)?;
     let runtime = fixture.join("pkg");
     copy_tree(&candidate, &runtime)?;
     let import_report = verify_tree(&runtime, &authoritative_git("xeHentai")?, UPSTREAM_APP_REV)?;
@@ -86,6 +87,7 @@ pub fn capture(suite: &str) -> Result<(), String> {
         .env("XEH_FIXTURE_ROOT", &fixture)
         .env("XEH_UPSTREAM", &runtime)
         .env("XEH_SUITE", suite)
+        .env("XEH_RUN_ID", &run_id)
         .env("XEH_LEASE_TMP", &tmp)
         .env("XEH_OUT", &out_dir)
         .env("XEH_PROCESS_ID", "root")
@@ -139,7 +141,7 @@ pub fn capture(suite: &str) -> Result<(), String> {
 
     let root_audit = load_audit(&audit_path)?;
     validate_root_identity(&root_audit)?;
-    let processes = load_children(&out_dir)?;
+    let processes = load_children(&out_dir, &run_id)?;
     let mut audits = vec![("root".to_string(), root_audit.clone())];
     for process in &processes {
         let audit = load_child_audit(process)?;
@@ -169,6 +171,7 @@ pub fn capture(suite: &str) -> Result<(), String> {
             ));
         }
     }
+    validate_process_closure(&out_dir, &run_id, &processes)?;
     if std::env::var_os("XEH_ISOLATION_BREAK").is_some() && code == 0 {
         return Err("oracle isolation break was not detected".to_string());
     }
@@ -194,6 +197,7 @@ pub fn capture(suite: &str) -> Result<(), String> {
             processes: &processes,
             report: &import_report,
             counts: json!({}),
+            run_id: &run_id,
         })?;
         println!("suite=isolation");
         println!("exit=0");
@@ -221,6 +225,7 @@ pub fn capture(suite: &str) -> Result<(), String> {
         processes: &processes,
         report: &import_report,
         counts: Value::Object(counts),
+        run_id: &run_id,
     })?;
     println!("suite={suite}");
     println!("exit=0");
@@ -247,13 +252,31 @@ fn emit_root(workspace: &Path) -> PathBuf {
     }
 }
 
-fn capture_out_dir(suite: &str, stamp: u64) -> Result<PathBuf, String> {
-    if let Some(value) = std::env::var_os("XEH_CAPTURE_OUT") {
-        if !value.is_empty() {
-            return Ok(PathBuf::from(value));
+fn prepare_capture_out(suite: &str, stamp: u64) -> Result<PathBuf, String> {
+    let path = match std::env::var_os("XEH_CAPTURE_OUT") {
+        Some(value) if !value.is_empty() => PathBuf::from(value),
+        _ => evidence_dir()?.join(format!("capture-{suite}-{stamp}")),
+    };
+    if path.exists() {
+        return Err(format!(
+            "refusing to reuse capture output: {}",
+            path.display()
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("cannot create capture parent: {err}"))?;
         }
     }
-    Ok(evidence_dir()?.join(format!("capture-{suite}-{stamp}")))
+    match fs::create_dir(&path) {
+        Ok(()) => Ok(path),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Err(format!(
+            "refusing to reuse capture output: {}",
+            path.display()
+        )),
+        Err(err) => Err(format!("cannot create capture dir: {err}")),
+    }
 }
 
 fn ensure_python(python: &Path) -> Result<(), String> {
@@ -539,6 +562,8 @@ const AUDIT_FIELDS: &[&str] = &[
     "cwd",
     "filepath",
     "env",
+    "run_id",
+    "spawns",
 ];
 
 const CHILD_FIELDS: &[&str] = &["id", "parent", "audit", "stdout", "stderr", "exit"];
@@ -606,7 +631,54 @@ fn validate_audit_value(value: &Value, path: &Path) -> Result<(), String> {
             path.display()
         ));
     }
-    validate_env(&obj["env"], path)
+    validate_env(&obj["env"], path)?;
+    match obj["run_id"].as_str() {
+        Some(id) if !id.is_empty() => {}
+        _ => {
+            return Err(format!(
+                "audit schema is invalid: {} run_id is not a string",
+                path.display()
+            ));
+        }
+    }
+    validate_spawns(&obj["spawns"], path)
+}
+
+fn validate_spawns(spawns: &Value, path: &Path) -> Result<(), String> {
+    let items = spawns.as_array().ok_or_else(|| {
+        format!(
+            "audit schema is invalid: {} spawns is not an array",
+            path.display()
+        )
+    })?;
+    for (index, item) in items.iter().enumerate() {
+        let obj = item.as_object().ok_or_else(|| {
+            format!(
+                "audit schema is invalid: {} spawns[{index}] is not an object",
+                path.display()
+            )
+        })?;
+        for key in obj.keys() {
+            if !SPAWN_FIELDS.contains(&key.as_str()) {
+                return Err(format!(
+                    "audit schema is invalid: {} spawns[{index}] has unknown field {key}",
+                    path.display()
+                ));
+            }
+        }
+        for key in SPAWN_FIELDS {
+            match obj.get(*key).and_then(Value::as_str) {
+                Some(value) if !value.is_empty() => {}
+                _ => {
+                    return Err(format!(
+                        "audit schema is invalid: {} spawns[{index}] {key} is not a string",
+                        path.display()
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn nullable_string(value: &Value) -> bool {
@@ -668,7 +740,7 @@ fn validate_root_identity(audit: &Value) -> Result<(), String> {
     Ok(())
 }
 
-fn load_children(out_dir: &Path) -> Result<Vec<Value>, String> {
+fn load_children(out_dir: &Path, expected_run_id: &str) -> Result<Vec<Value>, String> {
     let path = out_dir.join("expected-children.json");
     let text = fs::read_to_string(&path)
         .map_err(|_| format!("child audit is missing: {}", path.display()))?;
@@ -680,11 +752,23 @@ fn load_children(out_dir: &Path) -> Result<Vec<Value>, String> {
             path.display()
         )
     })?;
-    if obj.len() != 1 || !obj.contains_key("processes") {
+    if obj.len() != 2 || !obj.contains_key("processes") || !obj.contains_key("run_id") {
         return Err(format!(
-            "child list schema is invalid: {} must contain only processes",
+            "child list schema is invalid: {} must contain run_id and processes",
             path.display()
         ));
+    }
+    let run_id = match obj["run_id"].as_str() {
+        Some(value) if !value.is_empty() => value,
+        _ => {
+            return Err(format!(
+                "child list schema is invalid: {} run_id is not a string",
+                path.display()
+            ));
+        }
+    };
+    if run_id != expected_run_id {
+        return Err("run_id does not match this capture".to_string());
     }
     let processes = obj
         .get("processes")
@@ -752,6 +836,310 @@ fn child_identity_matches(record: &Value, audit: &Value) -> Result<(), String> {
         return Err(format!(
             "child identity does not match audit: record id={id} parent={parent} audit process_id={audit_id}"
         ));
+    }
+    Ok(())
+}
+
+struct DiskAudit {
+    id: String,
+    value: Value,
+}
+
+struct SpawnFact {
+    audit: String,
+    output: String,
+    run_id: String,
+}
+
+const SPAWN_FIELDS: &[&str] = &["child_id", "parent_id", "audit", "output", "run_id"];
+
+fn validate_process_closure(
+    out_dir: &Path,
+    run_id: &str,
+    processes: &[Value],
+) -> Result<(), String> {
+    let disk = collect_disk_audits(out_dir)?;
+    if !disk.iter().any(|item| item.id == "root") {
+        return Err(format!(
+            "audit is missing: {}",
+            out_dir.join("processes/root/audit.json").display()
+        ));
+    }
+    let mut spawn_owners: BTreeMap<String, String> = BTreeMap::new();
+    let mut spawn_facts: BTreeMap<String, SpawnFact> = BTreeMap::new();
+    for node in &disk {
+        if audit_run_id(&node.value)? != run_id {
+            return Err("run_id does not match this capture".to_string());
+        }
+        collect_spawn_facts(&node.id, &node.value, &mut spawn_owners, &mut spawn_facts)?;
+    }
+    let mut expected = BTreeSet::new();
+    let mut claimed = BTreeMap::new();
+    for process in processes {
+        let id = process.get("id").and_then(Value::as_str).unwrap_or("");
+        if !expected.insert(id.to_string()) {
+            return Err(format!(
+                "process set is incomplete: duplicate process id {id}"
+            ));
+        }
+        claim_process_files(out_dir, process, &mut claimed)?;
+    }
+    let spawned: BTreeSet<String> = spawn_facts.keys().cloned().collect();
+    let disk_ids: BTreeSet<String> = disk
+        .iter()
+        .filter(|item| item.id != "root")
+        .map(|item| item.id.clone())
+        .collect();
+    if expected != spawned || expected != disk_ids {
+        return Err(format!(
+            "process set is incomplete: expected={} spawns={} disk_audits={}",
+            expected.len(),
+            spawned.len(),
+            disk_ids.len()
+        ));
+    }
+    for id in &expected {
+        let fact = spawn_facts
+            .get(id)
+            .ok_or_else(|| format!("process set is incomplete: {id} has no spawn record"))?;
+        if fact.run_id != run_id {
+            return Err("run_id does not match this capture".to_string());
+        }
+        let expected_audit = out_dir.join("processes").join(id).join("audit.json");
+        let expected_out = out_dir.join("processes").join(id);
+        if lexical_absolute(Path::new(&fact.audit)) != lexical_absolute(&expected_audit) {
+            return Err(format!(
+                "audit path is not the expected file for {id}: {}",
+                fact.audit
+            ));
+        }
+        if lexical_absolute(Path::new(&fact.output)) != lexical_absolute(&expected_out) {
+            return Err(format!(
+                "process path is not the expected file for {id}: {}",
+                fact.output
+            ));
+        }
+    }
+    validate_graph(processes, &spawn_owners)
+}
+
+fn audit_run_id(audit: &Value) -> Result<&str, String> {
+    match audit.get("run_id").and_then(Value::as_str) {
+        Some(value) if !value.is_empty() => Ok(value),
+        _ => Err("audit schema is invalid: run_id is not a string".to_string()),
+    }
+}
+
+fn collect_disk_audits(out_dir: &Path) -> Result<Vec<DiskAudit>, String> {
+    let processes = out_dir.join("processes");
+    let meta = fs::symlink_metadata(&processes)
+        .map_err(|err| format!("cannot stat processes directory: {err}"))?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(format!(
+            "process path is not an ordinary directory: {}",
+            processes.display()
+        ));
+    }
+    let mut found = Vec::new();
+    walk_audits(&processes, out_dir, &mut found)?;
+    Ok(found)
+}
+
+fn walk_audits(dir: &Path, out_dir: &Path, found: &mut Vec<DiskAudit>) -> Result<(), String> {
+    for entry in
+        fs::read_dir(dir).map_err(|err| format!("cannot read processes directory: {err}"))?
+    {
+        let entry = entry.map_err(|err| format!("cannot read processes directory: {err}"))?;
+        let path = entry.path();
+        let meta = fs::symlink_metadata(&path)
+            .map_err(|err| format!("cannot stat process path: {err}"))?;
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "process path is not an ordinary file: {}",
+                path.display()
+            ));
+        }
+        if meta.is_dir() {
+            walk_audits(&path, out_dir, found)?;
+            continue;
+        }
+        if !meta.is_file() || path.file_name().and_then(|name| name.to_str()) != Some("audit.json")
+        {
+            continue;
+        }
+        let id = path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        let expected = out_dir.join("processes").join(id).join("audit.json");
+        if lexical_absolute(&path) != lexical_absolute(&expected) {
+            return Err(format!(
+                "audit path is not the expected file for {id}: {}",
+                path.display()
+            ));
+        }
+        require_ordinary_file(&path, "audit path")?;
+        let value = load_audit(&path)?;
+        let process_id = value
+            .get("process_id")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if process_id != id {
+            return Err(format!(
+                "process graph is invalid: audit process_id {process_id} does not match directory {id}"
+            ));
+        }
+        found.push(DiskAudit {
+            id: id.to_string(),
+            value,
+        });
+    }
+    Ok(())
+}
+
+fn collect_spawn_facts(
+    owner_id: &str,
+    audit: &Value,
+    spawn_owners: &mut BTreeMap<String, String>,
+    spawn_facts: &mut BTreeMap<String, SpawnFact>,
+) -> Result<(), String> {
+    let spawns = audit
+        .get("spawns")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "audit schema is invalid: spawns is not an array".to_string())?;
+    for spawn in spawns {
+        let child_id = spawn_field(spawn, "child_id")?;
+        let parent_id = spawn_field(spawn, "parent_id")?;
+        if parent_id != owner_id {
+            return Err(format!(
+                "process graph is invalid: spawn parent {parent_id} does not match owner {owner_id}"
+            ));
+        }
+        if spawn_owners
+            .insert(child_id.clone(), owner_id.to_string())
+            .is_some()
+        {
+            return Err(format!(
+                "process set is incomplete: duplicate process id {child_id}"
+            ));
+        }
+        spawn_facts.insert(
+            child_id,
+            SpawnFact {
+                audit: spawn_field(spawn, "audit")?,
+                output: spawn_field(spawn, "output")?,
+                run_id: spawn_field(spawn, "run_id")?,
+            },
+        );
+    }
+    Ok(())
+}
+
+fn spawn_field(spawn: &Value, key: &str) -> Result<String, String> {
+    match spawn.get(key).and_then(Value::as_str) {
+        Some(value) if !value.is_empty() => Ok(value.to_string()),
+        _ => Err(format!(
+            "audit schema is invalid: spawn {key} is not a string"
+        )),
+    }
+}
+
+fn claim_process_files(
+    out_dir: &Path,
+    process: &Value,
+    claimed: &mut BTreeMap<PathBuf, String>,
+) -> Result<(), String> {
+    let id = process.get("id").and_then(Value::as_str).unwrap_or("");
+    for (label, key, name) in [
+        ("audit path", "audit", "audit.json"),
+        ("stdout path", "stdout", "stdout.txt"),
+        ("stderr path", "stderr", "stderr.txt"),
+    ] {
+        let raw = process.get(key).and_then(Value::as_str).unwrap_or("");
+        let path = Path::new(raw);
+        let expected = out_dir.join("processes").join(id).join(name);
+        if lexical_absolute(path) != lexical_absolute(&expected) {
+            return Err(format!(
+                "{label} is not the expected file for {id}: {}",
+                path.display()
+            ));
+        }
+        require_ordinary_file(path, label)?;
+        let resolved = path
+            .canonicalize()
+            .map_err(|err| format!("cannot resolve {label}: {err}"))?;
+        let out_real = out_dir
+            .canonicalize()
+            .map_err(|err| format!("cannot resolve capture output: {err}"))?;
+        if !resolved.starts_with(&out_real) {
+            return Err(format!("{label} is outside this capture output: {raw}"));
+        }
+        if let Some(other) = claimed.insert(resolved, id.to_string()) {
+            if other != id {
+                return Err(format!(
+                    "process set is incomplete: duplicate process path {label}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn require_ordinary_file(path: &Path, label: &str) -> Result<(), String> {
+    let meta = fs::symlink_metadata(path).map_err(|err| format!("cannot stat {label}: {err}"))?;
+    if !meta.file_type().is_file() {
+        return Err(format!(
+            "{label} is not an ordinary file: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_graph(
+    processes: &[Value],
+    spawn_owners: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let mut parents = BTreeMap::new();
+    for process in processes {
+        let id = process.get("id").and_then(Value::as_str).unwrap_or("");
+        let parent = process.get("parent").and_then(Value::as_str).unwrap_or("");
+        parents.insert(id.to_string(), parent.to_string());
+    }
+    for (id, parent) in &parents {
+        if parent == id {
+            return Err(format!("process graph is invalid: {id} parents itself"));
+        }
+        if parent != "root" && !parents.contains_key(parent) {
+            return Err(format!(
+                "process graph is invalid: parent {parent} is not in this capture"
+            ));
+        }
+        let owner = spawn_owners
+            .get(id)
+            .ok_or_else(|| format!("process set is incomplete: {id} has no spawn record"))?;
+        if owner != parent {
+            return Err(format!(
+                "process graph is invalid: {id} was spawned by {owner}, not {parent}"
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        let mut cursor = id.as_str();
+        loop {
+            if !seen.insert(cursor.to_string()) {
+                return Err(format!("process graph is invalid: cycle at {cursor}"));
+            }
+            if cursor == "root" {
+                break;
+            }
+            cursor = parents.get(cursor).map(String::as_str).unwrap_or("");
+            if cursor.is_empty() {
+                return Err(format!(
+                    "process graph is invalid: {id} has no parent in this capture"
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -888,6 +1276,7 @@ struct ReceiptInput<'a> {
     processes: &'a [Value],
     report: &'a VerifyReport,
     counts: Value,
+    run_id: &'a str,
 }
 
 fn write_receipt(input: ReceiptInput<'_>) -> Result<PathBuf, String> {
@@ -902,6 +1291,7 @@ fn write_receipt(input: ReceiptInput<'_>) -> Result<PathBuf, String> {
         processes,
         report,
         counts,
+        run_id,
     } = input;
     let candidate = git_head(root);
     let env = root_audit.get("env").cloned().unwrap_or_else(|| json!({}));
@@ -968,6 +1358,7 @@ fn write_receipt(input: ReceiptInput<'_>) -> Result<PathBuf, String> {
         "forbidden_roots": forbidden,
         "env": root_audit.get("env").cloned().unwrap_or(json!({})),
         "processes": recorded,
+        "run_id": run_id,
         "stdout": out_dir.join("stdout.txt"),
         "stderr": out_dir.join("stderr.txt"),
         "audit": out_dir.join("processes/root/audit.json"),
