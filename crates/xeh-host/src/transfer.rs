@@ -10,7 +10,7 @@ use vm::{
 };
 
 use crate::catalog::standard_catalog;
-use crate::dto::{lock, HeaderEntry, JobKey, TransferReceipt, TransferRequest};
+use crate::dto::{lock, HeaderEntry, JobKey, NativeSubmission, TransferReceipt, TransferRequest};
 use crate::net::{open_get, write_body, BodyWrite, DriverOwner};
 use crate::observe::Metrics;
 use crate::types::HostError;
@@ -19,7 +19,7 @@ use crate::worker::events::EventBus;
 /// Per-worker host state. The current job DTO is installed by the owner thread
 /// before `drive_to_halt` and is never sent to another thread as a `Value`.
 pub struct TransferHost {
-    pub current: Mutex<Option<TransferRequest>>,
+    pub installed: Mutex<Option<NativeSubmission>>,
     pub receipt: Mutex<Option<TransferReceipt>>,
     pub http: vm::HttpConfig,
     pub root: PathBuf,
@@ -103,8 +103,9 @@ struct JobFn {
 
 impl HostFunction for JobFn {
     fn call(&mut self, _vm: &mut Vm, _args: &[Value]) -> VmResult<CallOutcome> {
-        let request = lock(&self.host.current)
-            .clone()
+        let request = lock(&self.host.installed)
+            .as_ref()
+            .map(|submission| submission.request().clone())
             .ok_or_else(|| vm::VmError::HostError("transfer job is not installed".to_string()))?;
         let value = request_to_value(&request);
         self.host.metrics.set_guest_payload(payload_len(&value));
@@ -118,12 +119,18 @@ struct RunFn {
 
 impl HostFunction for RunFn {
     fn call(&mut self, vm: &mut Vm, args: &[Value]) -> VmResult<CallOutcome> {
-        let request = parse_request(args.first())
+        let guest = parse_request(args.first())
             .map_err(|error| vm::VmError::HostError(error.kind().to_string()))?;
+        let installed = lock(&self.host.installed)
+            .clone()
+            .ok_or_else(|| vm::VmError::HostError("transfer job is not installed".to_string()))?;
+        if guest.key != *installed.key() {
+            return Err(vm::VmError::HostError("stale_epoch".to_string()));
+        }
         let cancel = lock(&self.host.active_cancel).clone().unwrap_or_default();
         let host = Arc::clone(&self.host);
         let future = async move {
-            let receipt = execute(&host, request, cancel).await;
+            let receipt = execute(&host, &installed, cancel).await;
             *lock(&host.receipt) = Some(receipt.clone());
             let metrics = Arc::clone(&host.metrics);
             Ok(HostFutureOutput::complete(move |_vm| {
@@ -138,27 +145,28 @@ impl HostFunction for RunFn {
 
 async fn execute(
     host: &TransferHost,
-    request: TransferRequest,
+    submission: &NativeSubmission,
     cancel: CancellationToken,
 ) -> TransferReceipt {
     host.metrics.begin_flight();
     let flight = FlightGuard {
         metrics: &host.metrics,
     };
-    let result = execute_inner(host, &request, &cancel).await;
+    let request = submission.request();
+    let result = execute_inner(host, submission, &cancel).await;
     drop(flight);
     match result {
         Ok(bytes) => TransferReceipt {
-            key: request.key,
+            key: request.key.clone(),
             status: "completed".to_string(),
             bytes,
-            path: request.relative_path,
+            path: request.relative_path.clone(),
             error_code: None,
         },
         Err(code) => {
             host.metrics.record_failure(code);
             TransferReceipt {
-                key: request.key,
+                key: request.key.clone(),
                 status: code.to_string(),
                 bytes: 0,
                 path: String::new(),
@@ -170,9 +178,10 @@ async fn execute(
 
 async fn execute_inner(
     host: &TransferHost,
-    request: &TransferRequest,
+    submission: &NativeSubmission,
     cancel: &CancellationToken,
 ) -> Result<i64, &'static str> {
+    let request = submission.request();
     if cancel.is_cancelled() || host.shut.load(Ordering::Acquire) {
         return Err("cancelled");
     }
@@ -214,6 +223,7 @@ async fn execute_inner(
         kind: "progress".to_string(),
         bytes: i64::try_from(staged.bytes).unwrap_or(i64::MAX),
         terminal_status: None,
+        identity: std::sync::Arc::clone(submission.identity()),
     });
     if let Some(gate) = &host.commit_gate {
         gate.arrive();
@@ -234,9 +244,7 @@ async fn execute_inner(
         }
     }
     if let Err(code) = host.admission.publish(
-        request.key.task_id,
-        request.key.epoch,
-        &request.key,
+        submission,
         &staged.staging,
         &staged.final_path,
         host.commit_hold.clone(),

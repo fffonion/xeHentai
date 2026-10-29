@@ -11,8 +11,8 @@ mod worker;
 
 pub use catalog::{install_reused_hosts, open_registry, standard_catalog, REUSED_CATALOG_MODULES};
 pub use dto::{
-    CommitGate, HeaderEntry, JobKey, PoolConfig, PoolError, ShutdownReport, TransferEvent,
-    TransferReceipt, TransferRequest, TransportHooks, WriterFault,
+    CommitGate, HeaderEntry, JobKey, NativeSubmission, PoolConfig, PoolError, ShutdownReport,
+    TaskRegistration, TransferEvent, TransferReceipt, TransferRequest, TransportHooks, WriterFault,
 };
 pub use runtime::{
     app_main_path, attach_timer, bind_vm, compile_file_with_catalog, compile_source_with_catalog,

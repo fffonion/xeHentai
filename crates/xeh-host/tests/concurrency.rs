@@ -73,11 +73,11 @@ fn two_rss_workers_enter_the_server_barrier_on_distinct_owner_threads() {
     assert_eq!(pool.event_capacity(), event_capacity);
     assert!(pool.job_capacity() > 0);
     assert!(pool.event_capacity() > 0);
-    pool.register(1, 1).expect("register");
+    let lease = pool.register(1, 1).expect("register");
 
-    pool.submit(request(1, 1, 1, address, "a.bin"))
+    pool.submit(lease.submission(request(1, 1, 1, address, "a.bin")))
         .expect("first job");
-    pool.submit(request(1, 1, 2, address, "b.bin"))
+    pool.submit(lease.submission(request(1, 1, 2, address, "b.bin")))
         .expect("second job");
     barrier
         .wait_entered(2, Duration::from_secs(5))

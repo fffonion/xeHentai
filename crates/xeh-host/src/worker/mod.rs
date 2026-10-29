@@ -12,8 +12,8 @@ use vm::Vm;
 
 use crate::catalog::open_registry;
 use crate::dto::{
-    lock, JobKey, PoolConfig, PoolError, ShutdownReport, TransferEvent, TransferReceipt,
-    TransferRequest,
+    lock, JobKey, NativeSubmission, PoolConfig, PoolError, ShutdownReport, TaskRegistration,
+    TransferEvent, TransferReceipt,
 };
 use crate::net::DriverOwner;
 use crate::observe::Metrics;
@@ -46,7 +46,7 @@ struct Shared {
     ready: Mutex<ReadyState>,
     ready_cv: Condvar,
     cancel_root: CancellationToken,
-    queue: Mutex<Receiver<TransferRequest>>,
+    queue: Mutex<Receiver<NativeSubmission>>,
     vm_active: AtomicUsize,
     drivers: Mutex<Vec<Arc<DriverOwner>>>,
 }
@@ -56,7 +56,7 @@ struct Shared {
 /// table, and this pool's synchronization primitives.
 pub struct WorkerPool {
     shared: Arc<Shared>,
-    sender: Mutex<Option<SyncSender<TransferRequest>>>,
+    sender: Mutex<Option<SyncSender<NativeSubmission>>>,
     handles: Mutex<Vec<JoinHandle<()>>>,
     joiners: Mutex<Vec<std::sync::mpsc::Receiver<()>>>,
     joined: AtomicBool,
@@ -133,13 +133,13 @@ impl WorkerPool {
         Ok(())
     }
 
-    pub fn submit(&self, request: TransferRequest) -> Result<(), PoolError> {
+    pub fn submit(&self, submission: NativeSubmission) -> Result<(), PoolError> {
         if self.shared.shut.load(Ordering::Acquire) {
             return Err(PoolError::new("stopped"));
         }
-        let token = self.shared.cancel_root.child_token();
-        let key = request.key.clone();
-        self.shared.admission.insert_queued(key.clone(), token)?;
+        self.shared
+            .admission
+            .insert_queued(&submission, &self.shared.cancel_root)?;
         self.shared.metrics.pending_add();
         if let Some(hold) = &self.shared.config.submit_hold {
             hold.arrive();
@@ -148,30 +148,35 @@ impl WorkerPool {
         let sender = lock(&self.sender);
         let Some(sender) = sender.as_ref() else {
             self.shared.metrics.pending_sub();
-            self.shared.admission.rollback(&key);
+            self.shared.admission.rollback(&submission);
             return Err(PoolError::new("stopped"));
         };
-        match sender.try_send(request) {
+        match sender.try_send(submission) {
             Ok(()) => Ok(()),
             Err(error) => {
                 self.shared.metrics.pending_sub();
-                self.shared.admission.rollback(&key);
-                match error {
-                    TrySendError::Full(_) => Err(PoolError::new("queue_full")),
-                    TrySendError::Disconnected(_) => Err(PoolError::new("stopped")),
-                }
+                let (submission, code) = match error {
+                    TrySendError::Full(submission) => (submission, "queue_full"),
+                    TrySendError::Disconnected(submission) => (submission, "stopped"),
+                };
+                self.shared.admission.rollback(&submission);
+                Err(PoolError::new(code))
             }
         }
     }
 
-    pub fn cancel(&self, key: &JobKey) -> Result<(), PoolError> {
-        self.shared.admission.cancel(key)?;
+    pub fn cancel(&self, registration: &TaskRegistration, key: &JobKey) -> Result<(), PoolError> {
+        self.shared.admission.cancel(registration, key)?;
         self.kick_cancellable();
         Ok(())
     }
 
-    pub fn advance_epoch(&self, task_id: i64, epoch: i64) -> Result<(), PoolError> {
-        self.shared.admission.advance(task_id, epoch)?;
+    pub fn advance_epoch(
+        &self,
+        registration: &TaskRegistration,
+        epoch: i64,
+    ) -> Result<(), PoolError> {
+        self.shared.admission.advance(registration, epoch)?;
         if let Some(gate) = &self.shared.config.commit_gate {
             gate.kick();
         }
@@ -184,15 +189,15 @@ impl WorkerPool {
         Ok(())
     }
 
-    pub fn register(&self, task_id: i64, epoch: i64) -> Result<(), PoolError> {
-        self.shared.admission.register(task_id, epoch)?;
+    pub fn register(&self, task_id: i64, epoch: i64) -> Result<TaskRegistration, PoolError> {
+        let registration = self.shared.admission.register(task_id, epoch)?;
         if let Some(gate) = &self.shared.config.commit_gate {
             gate.kick();
         }
         if let Some(gate) = &self.shared.config.link_gate {
             gate.kick();
         }
-        Ok(())
+        Ok(registration)
     }
 
     pub fn state_entries(&self) -> usize {
@@ -321,6 +326,10 @@ impl WorkerPool {
 
     pub fn terminal_waiters(&self) -> usize {
         self.shared.events.terminal_waiters()
+    }
+
+    pub fn wait_terminal_waiter(&self, blocked: bool, timeout: Duration) -> Result<(), PoolError> {
+        self.shared.events.wait_terminal_waiter(blocked, timeout)
     }
 
     pub fn vm_active(&self) -> usize {
@@ -478,23 +487,23 @@ fn worker_main(shared: Arc<Shared>) {
         };
         shared.metrics.pending_sub();
         if shared.shut.load(Ordering::Acquire) {
-            shared.admission.seal_terminal(&job.key, false);
+            shared.admission.seal_terminal(&job, false);
             publish_terminal_status(&shared, &job, "cancelled", 0);
-            shared.admission.retire(&job.key);
+            shared.admission.retire(&job);
             continue;
         }
-        let Some(token) = shared.admission.take_running(&job.key) else {
+        let Some(token) = shared.admission.take_running(&job) else {
             publish_terminal_status(&shared, &job, "cancelled", 0);
             continue;
         };
         let parked = token.clone();
-        *lock(&host.current) = Some(job.clone());
+        *lock(&host.installed) = Some(job.clone());
         *lock(&host.active_cancel) = Some(token);
         *lock(&host.receipt) = None;
         shared.vm_active.fetch_add(1, Ordering::AcqRel);
         shared.metrics.begin_permit();
         shared.metrics.record_execution(thread::current().id());
-        shared.admission.begin(job.key.task_id);
+        shared.admission.begin(job.task_id());
         let panicked = shared.fail_once.swap(false, Ordering::AcqRel);
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             if panicked {
@@ -512,19 +521,19 @@ fn worker_main(shared: Arc<Shared>) {
             });
         }
         let receipt = lock(&host.receipt).take();
-        *lock(&host.current) = None;
+        *lock(&host.installed) = None;
         *lock(&host.active_cancel) = None;
         let previous = shared.vm_active.fetch_sub(1, Ordering::AcqRel);
         assert!(previous > 0, "vm activity underflow");
         let committed = receipt
             .as_ref()
             .is_some_and(|item| item.status == "completed");
-        shared.admission.seal_terminal(&job.key, committed);
-        shared.admission.end(job.key.task_id);
+        shared.admission.seal_terminal(&job, committed);
+        shared.admission.end(job.task_id());
         shared.metrics.end_permit();
         reap_remaining(&runtime, &host);
         publish_terminal(&shared, &job, outcome.is_ok(), receipt);
-        shared.admission.retire(&job.key);
+        shared.admission.retire(&job);
         if outcome.is_err() {
             match build_vm(&shared, &host) {
                 Ok(rebuilt) => {
@@ -549,18 +558,19 @@ fn reap_remaining(runtime: &tokio::runtime::Runtime, host: &TransferHost) {
     }
 }
 
-fn publish_terminal_status(shared: &Shared, job: &TransferRequest, status: &str, bytes: i64) {
+fn publish_terminal_status(shared: &Shared, job: &NativeSubmission, status: &str, bytes: i64) {
     let _ = shared.events.publish_terminal(TransferEvent {
-        key: job.key.clone(),
+        key: job.key().clone(),
         kind: "terminal".to_string(),
         bytes,
         terminal_status: Some(status.to_string()),
+        identity: std::sync::Arc::clone(job.identity()),
     });
 }
 
 fn publish_terminal(
     shared: &Shared,
-    job: &TransferRequest,
+    job: &NativeSubmission,
     drive_ok: bool,
     receipt: Option<TransferReceipt>,
 ) {
@@ -574,7 +584,7 @@ fn publish_terminal(
 
 fn make_host(shared: &Shared) -> TransferHost {
     TransferHost {
-        current: Mutex::new(None),
+        installed: Mutex::new(None),
         receipt: Mutex::new(None),
         http: shared.config.http.clone(),
         root: shared.config.root.clone(),

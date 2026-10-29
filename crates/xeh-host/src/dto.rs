@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use vm::HttpConfig;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 /// Cross-thread job identity. Values are copied; no VM handle is included.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -31,6 +31,117 @@ pub struct TransferRequest {
     pub relative_path: String,
 }
 
+/// Pool binding minted with the admission table. Callers cannot construct one.
+#[derive(Debug)]
+pub(crate) struct PoolToken;
+
+/// One registration incarnation. Authorization is this allocation, not a caller-supplied number.
+#[derive(Debug)]
+pub(crate) struct RegistrationIdentity {
+    epoch: AtomicI64,
+}
+
+impl RegistrationIdentity {
+    pub(crate) fn new(epoch: i64) -> Self {
+        Self {
+            epoch: AtomicI64::new(epoch),
+        }
+    }
+
+    pub(crate) fn epoch(&self) -> i64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_epoch(&self, epoch: i64) {
+        self.epoch.store(epoch, Ordering::Release);
+    }
+}
+
+/// Opaque lease returned by `WorkerPool::register`. Identity fields are private.
+#[derive(Clone, Debug)]
+pub struct TaskRegistration {
+    pool: Arc<PoolToken>,
+    task_id: i64,
+    identity: Arc<RegistrationIdentity>,
+}
+
+impl TaskRegistration {
+    pub(crate) fn mint(pool: Arc<PoolToken>, task_id: i64, epoch: i64) -> Self {
+        Self {
+            pool,
+            task_id,
+            identity: Arc::new(RegistrationIdentity::new(epoch)),
+        }
+    }
+
+    pub fn task_id(&self) -> i64 {
+        self.task_id
+    }
+
+    pub fn epoch(&self) -> i64 {
+        self.identity.epoch()
+    }
+
+    /// Package `request` with this lease. The envelope snapshots identity and epoch now.
+    pub fn submission(&self, request: TransferRequest) -> NativeSubmission {
+        NativeSubmission {
+            request,
+            pool: Arc::clone(&self.pool),
+            task_id: self.task_id,
+            epoch: self.epoch(),
+            identity: Arc::clone(&self.identity),
+        }
+    }
+
+    pub(crate) fn pool(&self) -> &Arc<PoolToken> {
+        &self.pool
+    }
+
+    pub(crate) fn identity(&self) -> &Arc<RegistrationIdentity> {
+        &self.identity
+    }
+
+    pub(crate) fn set_epoch(&self, epoch: i64) {
+        self.identity.set_epoch(epoch);
+    }
+}
+
+/// Immutable native enqueue envelope. Authorization is fixed at [`TaskRegistration::submission`].
+#[derive(Clone, Debug)]
+pub struct NativeSubmission {
+    request: TransferRequest,
+    pool: Arc<PoolToken>,
+    task_id: i64,
+    epoch: i64,
+    identity: Arc<RegistrationIdentity>,
+}
+
+impl NativeSubmission {
+    pub(crate) fn request(&self) -> &TransferRequest {
+        &self.request
+    }
+
+    pub(crate) fn key(&self) -> &JobKey {
+        &self.request.key
+    }
+
+    pub(crate) fn pool(&self) -> &Arc<PoolToken> {
+        &self.pool
+    }
+
+    pub(crate) fn task_id(&self) -> i64 {
+        self.task_id
+    }
+
+    pub(crate) fn epoch(&self) -> i64 {
+        self.epoch
+    }
+
+    pub(crate) fn identity(&self) -> &Arc<RegistrationIdentity> {
+        &self.identity
+    }
+}
+
 /// Typed result returned to the guest and copied to the worker as a DTO.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransferReceipt {
@@ -41,12 +152,19 @@ pub struct TransferReceipt {
     pub error_code: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct TransferEvent {
     pub key: JobKey,
     pub kind: String,
     pub bytes: i64,
     pub terminal_status: Option<String>,
+    pub(crate) identity: Arc<RegistrationIdentity>,
+}
+
+impl TransferEvent {
+    pub(crate) fn same_registration(&self, other: &Self) -> bool {
+        self.key == other.key && Arc::ptr_eq(&self.identity, &other.identity)
+    }
 }
 
 #[derive(Debug, Clone)]

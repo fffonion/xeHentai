@@ -1,5 +1,4 @@
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -11,6 +10,7 @@ struct EventState {
     consumers: usize,
     dropped_progress: u64,
     dropped_terminal: u64,
+    terminal_waiters: usize,
 }
 
 /// Bounded event bus. Progress for one job is replaced in place. A terminal
@@ -20,7 +20,6 @@ pub struct EventBus {
     capacity: usize,
     state: Mutex<EventState>,
     cv: Condvar,
-    terminal_waiters: AtomicUsize,
 }
 
 impl EventBus {
@@ -33,14 +32,51 @@ impl EventBus {
                 consumers: 1,
                 dropped_progress: 0,
                 dropped_terminal: 0,
+                terminal_waiters: 0,
             }),
             cv: Condvar::new(),
-            terminal_waiters: AtomicUsize::new(0),
         }
     }
 
     pub fn terminal_waiters(&self) -> usize {
-        self.terminal_waiters.load(Ordering::Acquire)
+        lock(&self.state).terminal_waiters
+    }
+
+    /// Block until a terminal publisher is inside `publish_terminal`'s wait, or
+    /// until one has already blocked. The count and the notify share `state`.
+    pub fn wait_terminal_waiter(&self, blocked: bool, timeout: Duration) -> Result<(), PoolError> {
+        let deadline = Instant::now() + timeout;
+        let mut state = lock(&self.state);
+        loop {
+            let ready = if blocked {
+                state.terminal_waiters > 0
+            } else {
+                state.terminal_waiters == 0
+            };
+            if ready {
+                return Ok(());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(PoolError::new("timeout"));
+            }
+            let (next, wait) = self
+                .cv
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(|poison| poison.into_inner());
+            state = next;
+            if wait.timed_out() {
+                let ready = if blocked {
+                    state.terminal_waiters > 0
+                } else {
+                    state.terminal_waiters == 0
+                };
+                if ready {
+                    return Ok(());
+                }
+                return Err(PoolError::new("timeout"));
+            }
+        }
     }
 
     pub fn close(&self) {
@@ -73,7 +109,7 @@ impl EventBus {
         if let Some(existing) = state
             .items
             .iter_mut()
-            .find(|item| item.terminal_status.is_none() && item.key == event.key)
+            .find(|item| item.terminal_status.is_none() && item.same_registration(&event))
         {
             existing.bytes = event.bytes;
             return;
@@ -91,11 +127,11 @@ impl EventBus {
         loop {
             state
                 .items
-                .retain(|item| !(item.terminal_status.is_none() && item.key == event.key));
+                .retain(|item| !(item.terminal_status.is_none() && item.same_registration(&event)));
             if state
                 .items
                 .iter()
-                .any(|item| item.terminal_status.is_some() && item.key == event.key)
+                .any(|item| item.terminal_status.is_some() && item.same_registration(&event))
             {
                 return Ok(());
             }
@@ -108,12 +144,14 @@ impl EventBus {
                 self.cv.notify_all();
                 return Ok(());
             }
-            self.terminal_waiters.fetch_add(1, Ordering::AcqRel);
+            state.terminal_waiters += 1;
+            self.cv.notify_all();
             state = self
                 .cv
                 .wait(state)
                 .unwrap_or_else(|poison| poison.into_inner());
-            self.terminal_waiters.fetch_sub(1, Ordering::AcqRel);
+            state.terminal_waiters = state.terminal_waiters.saturating_sub(1);
+            self.cv.notify_all();
         }
     }
 

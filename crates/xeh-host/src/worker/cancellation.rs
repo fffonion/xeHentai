@@ -4,7 +4,9 @@ use std::sync::{Arc, Mutex};
 
 use tokio_util::sync::CancellationToken;
 
-use crate::dto::{lock, CommitGate, JobKey, PoolError};
+use crate::dto::{
+    lock, CommitGate, JobKey, NativeSubmission, PoolError, PoolToken, TaskRegistration,
+};
 
 const EPOCH_CAP: usize = 64;
 const COMPLETIONS_PER_TASK: usize = 4;
@@ -30,12 +32,12 @@ pub(crate) struct JobSlot {
     pub cancelled: bool,
     pub phase: Phase,
     pub outcome: Outcome,
-    pub generation: u64,
+    pub identity: Arc<crate::dto::RegistrationIdentity>,
 }
 
 struct TaskLease {
     epoch: i64,
-    generation: u64,
+    identity: Arc<crate::dto::RegistrationIdentity>,
 }
 
 struct EpochState {
@@ -47,23 +49,23 @@ struct EpochState {
 struct State {
     jobs: HashMap<JobKey, JobSlot>,
     tasks: HashMap<i64, TaskLease>,
-    next_generation: u64,
     epochs: EpochState,
 }
 
 /// One admission lock for registration, queue records, cancel, epoch advance,
 /// and the final hard link. Network waits must not hold this lock.
 pub struct Admission {
+    pool: Arc<PoolToken>,
     inner: Mutex<State>,
 }
 
 impl Admission {
     pub fn new() -> Self {
         Self {
+            pool: Arc::new(PoolToken),
             inner: Mutex::new(State {
                 jobs: HashMap::new(),
                 tasks: HashMap::new(),
-                next_generation: 1,
                 epochs: EpochState {
                     completions: HashMap::new(),
                     inflight: HashMap::new(),
@@ -87,32 +89,39 @@ impl Admission {
     }
 
     /// Initial lease only. A later epoch uses [`Self::advance`]. Duplicate
-    /// registration does not replace the lease, bump generation, or cancel jobs.
-    pub fn register(&self, task_id: i64, epoch: i64) -> Result<(), PoolError> {
+    /// registration does not replace the lease or cancel jobs.
+    pub fn register(&self, task_id: i64, epoch: i64) -> Result<TaskRegistration, PoolError> {
         let mut state = lock(&self.inner);
         if state.tasks.contains_key(&task_id) {
             return Err(PoolError::new("task_exists"));
         }
         state.make_room()?;
-        let generation = state.next_generation;
-        state.next_generation = state.next_generation.saturating_add(1);
-        state.tasks.insert(task_id, TaskLease { epoch, generation });
+        let registration = TaskRegistration::mint(Arc::clone(&self.pool), task_id, epoch);
+        state.tasks.insert(
+            task_id,
+            TaskLease {
+                epoch,
+                identity: Arc::clone(registration.identity()),
+            },
+        );
         state.epochs.touch(task_id);
-        Ok(())
+        Ok(registration)
     }
 
-    pub fn insert_queued(&self, key: JobKey, token: CancellationToken) -> Result<(), PoolError> {
+    /// Admit the envelope captured at bind time. Does not read the current lease
+    /// to authorize a request that arrived without that identity.
+    pub fn insert_queued(
+        &self,
+        submission: &NativeSubmission,
+        parent: &CancellationToken,
+    ) -> Result<(), PoolError> {
         let mut state = lock(&self.inner);
-        if state.jobs.contains_key(&key) {
+        self.authorize(&state, submission)?;
+        if state.jobs.contains_key(submission.key()) {
             return Err(PoolError::new("duplicate"));
         }
-        let Some(task) = state.tasks.get(&key.task_id) else {
-            return Err(PoolError::new("unregistered"));
-        };
-        if task.epoch != key.epoch {
-            return Err(PoolError::new("stale_epoch"));
-        }
-        let generation = task.generation;
+        let token = parent.child_token();
+        let key = submission.key().clone();
         state.jobs.insert(
             key,
             JobSlot {
@@ -120,29 +129,39 @@ impl Admission {
                 cancelled: false,
                 phase: Phase::Queued,
                 outcome: Outcome::Open,
-                generation,
+                identity: Arc::clone(submission.identity()),
             },
         );
         Ok(())
     }
 
-    pub fn rollback(&self, key: &JobKey) {
+    pub fn rollback(&self, submission: &NativeSubmission) {
         let mut state = lock(&self.inner);
-        if let Some(slot) = state.jobs.get(key) {
-            if slot.phase == Phase::Queued {
-                state.jobs.remove(key);
-            }
+        let matches = state.jobs.get(submission.key()).is_some_and(|slot| {
+            slot.phase == Phase::Queued && Arc::ptr_eq(&slot.identity, submission.identity())
+        });
+        if matches {
+            state.jobs.remove(submission.key());
         }
     }
 
     /// Queued and Running confirm a cancel. Committing is too late. A linked
     /// terminal is `already_complete`; a failed terminal is `already_failed`.
-    /// A cancel that already won stays `Ok`.
-    pub fn cancel(&self, key: &JobKey) -> Result<(), PoolError> {
+    /// A cancel that already won stays `Ok`. The lease must own the slot.
+    pub fn cancel(&self, registration: &TaskRegistration, key: &JobKey) -> Result<(), PoolError> {
+        if !Arc::ptr_eq(registration.pool(), &self.pool) {
+            return Err(PoolError::new("wrong_pool"));
+        }
+        if key.task_id != registration.task_id() {
+            return Err(PoolError::new("stale_registration"));
+        }
         let mut state = lock(&self.inner);
         let Some(slot) = state.jobs.get_mut(key) else {
             return Err(PoolError::new("unknown"));
         };
+        if !Arc::ptr_eq(&slot.identity, registration.identity()) {
+            return Err(PoolError::new("stale_registration"));
+        }
         match slot.phase {
             Phase::Committing => Err(PoolError::new("committing")),
             Phase::TerminalPending => match slot.outcome {
@@ -162,30 +181,40 @@ impl Admission {
         }
     }
 
-    pub fn advance(&self, task_id: i64, epoch: i64) -> Result<(), PoolError> {
+    pub fn advance(&self, registration: &TaskRegistration, epoch: i64) -> Result<(), PoolError> {
+        if !Arc::ptr_eq(registration.pool(), &self.pool) {
+            return Err(PoolError::new("wrong_pool"));
+        }
         let mut state = lock(&self.inner);
         let current = {
-            let Some(task) = state.tasks.get(&task_id) else {
+            let Some(task) = state.tasks.get(&registration.task_id()) else {
                 return Err(PoolError::new("unregistered"));
             };
+            if !Arc::ptr_eq(&task.identity, registration.identity()) {
+                return Err(PoolError::new("stale_registration"));
+            }
             task.epoch
         };
         if epoch < current {
             return Err(PoolError::new("regression"));
         }
-        if committing(&state, task_id) {
+        if committing(&state, registration.task_id()) {
             return Err(PoolError::new("commit_pending"));
         }
         if epoch == current {
             return Ok(());
         }
-        if let Some(stored) = state.tasks.get_mut(&task_id) {
-            stored.epoch = epoch;
+        if let Some(stored) = state.tasks.get_mut(&registration.task_id()) {
+            if Arc::ptr_eq(&stored.identity, registration.identity()) {
+                stored.epoch = epoch;
+            }
         }
-        state.epochs.touch(task_id);
-        state.bound_completions(task_id);
+        registration.set_epoch(epoch);
+        state.epochs.touch(registration.task_id());
+        state.bound_completions(registration.task_id());
         for (key, slot) in &mut state.jobs {
-            if key.task_id == task_id
+            if key.task_id == registration.task_id()
+                && Arc::ptr_eq(&slot.identity, registration.identity())
                 && key.epoch != epoch
                 && slot.phase != Phase::Committing
                 && slot.phase != Phase::TerminalPending
@@ -231,49 +260,61 @@ impl Admission {
         EPOCH_CAP
     }
 
-    /// Take the queued token. A cancel that already won returns `None` and drops the slot.
-    pub fn take_running(&self, key: &JobKey) -> Option<CancellationToken> {
+    /// Take the queued token for this envelope. A cancel that already won returns
+    /// `None` and drops only the matching slot.
+    pub fn take_running(&self, submission: &NativeSubmission) -> Option<CancellationToken> {
         let mut state = lock(&self.inner);
-        let (generation, cancelled, token) = {
-            let slot = state.jobs.get(key)?;
+        let key = submission.key().clone();
+        let (cancelled, token, owned) = {
+            let slot = state.jobs.get(&key)?;
             (
-                slot.generation,
                 slot.cancelled || slot.token.is_cancelled(),
                 slot.token.clone(),
+                Arc::ptr_eq(&slot.identity, submission.identity()),
             )
         };
+        if !owned {
+            return None;
+        }
         if cancelled {
-            state.jobs.remove(key);
+            state.jobs.remove(&key);
             return None;
         }
-        let current = {
-            let Some(task) = state.tasks.get(&key.task_id) else {
-                state.jobs.remove(key);
-                return None;
-            };
-            (task.generation, task.epoch)
-        };
-        if current.0 != generation || current.1 != key.epoch {
-            state.jobs.remove(key);
+        let current_matches = state.tasks.get(&submission.task_id()).is_some_and(|task| {
+            Arc::ptr_eq(&task.identity, submission.identity()) && task.epoch == submission.epoch()
+        });
+        if !current_matches {
+            state.jobs.remove(&key);
             return None;
         }
-        if let Some(slot) = state.jobs.get_mut(key) {
+        if let Some(slot) = state.jobs.get_mut(&key) {
             slot.phase = Phase::Running;
         }
         Some(token)
     }
 
-    pub fn retire(&self, key: &JobKey) {
-        lock(&self.inner).jobs.remove(key);
+    pub fn retire(&self, submission: &NativeSubmission) {
+        let mut state = lock(&self.inner);
+        let owned = state
+            .jobs
+            .get(submission.key())
+            .is_some_and(|slot| Arc::ptr_eq(&slot.identity, submission.identity()));
+        if owned {
+            state.jobs.remove(submission.key());
+        }
     }
 
     /// Keep a lightweight terminal record so cancel can tell linked from failed
-    /// while the event is still unpublished. Does not replace a committed link.
-    pub fn seal_terminal(&self, key: &JobKey, committed: bool) {
+    /// while the event is still unpublished. Does not replace a committed link
+    /// or a slot that belongs to a different registration.
+    pub fn seal_terminal(&self, submission: &NativeSubmission, committed: bool) {
         let mut state = lock(&self.inner);
-        let Some(slot) = state.jobs.get_mut(key) else {
+        let Some(slot) = state.jobs.get_mut(submission.key()) else {
             return;
         };
+        if !Arc::ptr_eq(&slot.identity, submission.identity()) {
+            return;
+        }
         if slot.outcome == Outcome::Committed {
             slot.phase = Phase::TerminalPending;
             return;
@@ -294,33 +335,36 @@ impl Admission {
         slot.phase = Phase::TerminalPending;
     }
 
-    /// Link only if this lease still owns the publish. The check and the link
+    /// Link only if this envelope still owns the publish. The check and the link
     /// share this lock. `hold` runs after the phase is committing and after the
     /// lock is released, so cancel observes `committing` instead of winning.
-    #[allow(clippy::too_many_arguments)]
     pub fn publish(
         &self,
-        task_id: i64,
-        epoch: i64,
-        key: &JobKey,
+        submission: &NativeSubmission,
         staging: &Path,
         final_path: &Path,
         hold: Option<Arc<CommitGate>>,
         deadline: std::time::Instant,
     ) -> Result<(), &'static str> {
+        let key = submission.key();
         {
             let mut state = lock(&self.inner);
             if std::time::Instant::now() >= deadline {
                 return Err("deadline");
             }
-            let admitted = match (state.jobs.get(key), state.tasks.get(&task_id)) {
+            if !Arc::ptr_eq(submission.pool(), &self.pool) {
+                return Err("stale_epoch");
+            }
+            let admitted = match (state.jobs.get(key), state.tasks.get(&submission.task_id())) {
                 (Some(slot), _) if slot.cancelled || slot.token.is_cancelled() => {
                     return Err("cancelled");
                 }
                 (Some(slot), Some(task))
                     if slot.phase == Phase::Running
-                        && slot.generation == task.generation
-                        && task.epoch == epoch =>
+                        && Arc::ptr_eq(&slot.identity, submission.identity())
+                        && Arc::ptr_eq(&task.identity, submission.identity())
+                        && task.epoch == submission.epoch()
+                        && submission.epoch() == key.epoch =>
                 {
                     true
                 }
@@ -342,16 +386,17 @@ impl Admission {
             let _ = hold.wait_release_only();
         }
         let mut state = lock(&self.inner);
-        let still = state
-            .jobs
-            .get(key)
-            .is_some_and(|slot| slot.phase == Phase::Committing);
+        let still = state.jobs.get(key).is_some_and(|slot| {
+            slot.phase == Phase::Committing && Arc::ptr_eq(&slot.identity, submission.identity())
+        });
         if !still {
             return Err("cancelled");
         }
         if std::time::Instant::now() >= deadline {
             if let Some(slot) = state.jobs.get_mut(key) {
-                if slot.phase == Phase::Committing {
+                if slot.phase == Phase::Committing
+                    && Arc::ptr_eq(&slot.identity, submission.identity())
+                {
                     slot.phase = Phase::Running;
                 }
             }
@@ -361,15 +406,19 @@ impl Admission {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 if let Some(slot) = state.jobs.get_mut(key) {
-                    slot.phase = Phase::TerminalPending;
-                    slot.outcome = Outcome::Failed;
+                    if Arc::ptr_eq(&slot.identity, submission.identity()) {
+                        slot.phase = Phase::TerminalPending;
+                        slot.outcome = Outcome::Failed;
+                    }
                 }
                 return Err("target_exists");
             }
             Err(_) => {
                 if let Some(slot) = state.jobs.get_mut(key) {
-                    slot.phase = Phase::TerminalPending;
-                    slot.outcome = Outcome::Failed;
+                    if Arc::ptr_eq(&slot.identity, submission.identity()) {
+                        slot.phase = Phase::TerminalPending;
+                        slot.outcome = Outcome::Failed;
+                    }
                 }
                 return Err("io_error");
             }
@@ -377,12 +426,35 @@ impl Admission {
         *state
             .epochs
             .completions
-            .entry((task_id, epoch))
+            .entry((submission.task_id(), submission.epoch()))
             .or_insert(0) += 1;
-        state.bound_completions(task_id);
+        state.bound_completions(submission.task_id());
         if let Some(slot) = state.jobs.get_mut(key) {
-            slot.phase = Phase::TerminalPending;
-            slot.outcome = Outcome::Committed;
+            if Arc::ptr_eq(&slot.identity, submission.identity()) {
+                slot.phase = Phase::TerminalPending;
+                slot.outcome = Outcome::Committed;
+            }
+        }
+        Ok(())
+    }
+
+    fn authorize(&self, state: &State, submission: &NativeSubmission) -> Result<(), PoolError> {
+        if !Arc::ptr_eq(submission.pool(), &self.pool) {
+            return Err(PoolError::new("wrong_pool"));
+        }
+        if submission.task_id() != submission.key().task_id
+            || submission.epoch() != submission.key().epoch
+        {
+            return Err(PoolError::new("stale_epoch"));
+        }
+        let Some(task) = state.tasks.get(&submission.task_id()) else {
+            return Err(PoolError::new("unregistered"));
+        };
+        if task.epoch != submission.epoch() {
+            return Err(PoolError::new("stale_epoch"));
+        }
+        if !Arc::ptr_eq(&task.identity, submission.identity()) {
+            return Err(PoolError::new("stale_registration"));
         }
         Ok(())
     }

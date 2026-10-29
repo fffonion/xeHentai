@@ -50,8 +50,8 @@ fn worker_streams_png_larger_than_core_body_cap() {
     let config = pool_config(&root, port, 1, 1, 4, chunk_bytes);
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(1, 1).expect("register");
-    pool.submit(request(1, 1, 1, port, "image.png"))
+    let lease = pool.register(1, 1).expect("register");
+    pool.submit(lease.submission(request(1, 1, 1, port, "image.png")))
         .expect("submit");
     let events = pool
         .wait_terminals(1, Duration::from_secs(30))
@@ -91,14 +91,14 @@ fn advance_before_release_does_not_publish() {
     config.commit_gate = Some(Arc::clone(&gate));
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(7, 1).expect("register");
-    pool.submit(request(7, 1, 1, port, "late.bin"))
+    let lease = pool.register(7, 1).expect("register");
+    pool.submit(lease.submission(request(7, 1, 1, port, "late.bin")))
         .expect("submit");
     gate.wait_arrived(1, Duration::from_secs(5))
         .expect("file closed");
     let saved = root.path().join("late.bin");
     assert!(!saved.exists(), "publish happened before release");
-    pool.advance_epoch(7, 2).expect("advance");
+    pool.advance_epoch(&lease, 2).expect("advance");
     let events = pool
         .wait_terminals(1, Duration::from_secs(5))
         .expect("terminal");
@@ -119,8 +119,8 @@ fn release_before_advance_publishes_the_old_epoch_once() {
     config.commit_gate = Some(Arc::clone(&gate));
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(8, 3).expect("register");
-    pool.submit(request(8, 3, 1, port, "kept.bin"))
+    let lease = pool.register(8, 3).expect("register");
+    pool.submit(lease.submission(request(8, 3, 1, port, "kept.bin")))
         .expect("submit");
     gate.wait_arrived(1, Duration::from_secs(5))
         .expect("file closed");
@@ -132,7 +132,7 @@ fn release_before_advance_publishes_the_old_epoch_once() {
     let saved = root.path().join("kept.bin");
     assert_files_equal(&saved, b"ok");
     assert_eq!(pool.completion_count(8, 3), 1);
-    pool.advance_epoch(8, 4).expect("advance");
+    pool.advance_epoch(&lease, 4).expect("advance");
     assert_eq!(pool.completion_count(8, 3), 1);
     assert_eq!(pool.completion_count(8, 4), 0);
     assert_files_equal(&saved, b"ok");
@@ -154,17 +154,17 @@ fn full_job_queue_rejects_without_starting_another_transfer() {
     let config = pool_config(&root, port, 1, 1, 4, 64);
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(1, 1).expect("register");
-    pool.submit(request(1, 1, 1, port, "a.bin"))
+    let lease = pool.register(1, 1).expect("register");
+    pool.submit(lease.submission(request(1, 1, 1, port, "a.bin")))
         .expect("running");
     entered
         .wait_count(1, Duration::from_secs(5))
         .expect("entered");
-    pool.submit(request(1, 1, 2, port, "b.bin"))
+    pool.submit(lease.submission(request(1, 1, 2, port, "b.bin")))
         .expect("queued");
     assert_eq!(pool.pending_jobs(), 1);
     let rejected = pool
-        .submit(request(1, 1, 3, port, "c.bin"))
+        .submit(lease.submission(request(1, 1, 3, port, "c.bin")))
         .expect_err("queue must reject");
     assert_eq!(rejected.code(), "queue_full");
     assert_eq!(
@@ -200,18 +200,18 @@ fn cancel_during_stalled_body_closes_the_socket_and_the_pool_accepts_another_job
     let config = pool_config(&root, port, 1, 2, 4, 64);
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(1, 1).expect("register");
+    let lease = pool.register(1, 1).expect("register");
     let stalled_key = JobKey {
         task_id: 1,
         epoch: 1,
         job_id: 1,
     };
-    pool.submit(request(1, 1, 1, port, "stall.bin"))
+    pool.submit(lease.submission(request(1, 1, 1, port, "stall.bin")))
         .expect("stall job");
     stalled
         .wait_count(1, Duration::from_secs(5))
         .expect("stalled");
-    pool.cancel(&stalled_key).expect("cancel");
+    pool.cancel(&lease, &stalled_key).expect("cancel");
     closed
         .wait_count(1, Duration::from_secs(5))
         .expect("socket closed");
@@ -221,7 +221,7 @@ fn cancel_during_stalled_body_closes_the_socket_and_the_pool_accepts_another_job
     assert_eq!(cancelled[0].terminal_status.as_deref(), Some("cancelled"));
     assert!(!root.path().join("stall.bin").exists());
     assert_no_staging(root.path());
-    pool.submit(request(1, 1, 2, port, "next.bin"))
+    pool.submit(lease.submission(request(1, 1, 2, port, "next.bin")))
         .expect("reuse");
     let done = pool
         .wait_terminals(1, Duration::from_secs(5))
@@ -243,8 +243,8 @@ fn writer_fault_removes_staging_and_the_same_pool_completes_the_next_job() {
     config.writer_fault = Some(WriterFault::once(0));
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(1, 1).expect("register");
-    pool.submit(request(1, 1, 1, port, "fault.bin"))
+    let lease = pool.register(1, 1).expect("register");
+    pool.submit(lease.submission(request(1, 1, 1, port, "fault.bin")))
         .expect("fault job");
     let faulted = pool
         .wait_terminals(1, Duration::from_secs(5))
@@ -252,7 +252,7 @@ fn writer_fault_removes_staging_and_the_same_pool_completes_the_next_job() {
     assert_eq!(faulted[0].terminal_status.as_deref(), Some("io_error"));
     assert!(!root.path().join("fault.bin").exists());
     assert_no_staging(root.path());
-    pool.submit(request(1, 1, 2, port, "after.bin"))
+    pool.submit(lease.submission(request(1, 1, 2, port, "after.bin")))
         .expect("reuse");
     let done = pool
         .wait_terminals(1, Duration::from_secs(5))
@@ -272,15 +272,15 @@ fn injected_worker_failure_rebuilds_and_the_same_pool_completes_a_job() {
     config.fail_worker_once = true;
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(1, 1).expect("register");
-    pool.submit(request(1, 1, 1, port, "panic.bin"))
+    let lease = pool.register(1, 1).expect("register");
+    pool.submit(lease.submission(request(1, 1, 1, port, "panic.bin")))
         .expect("panic job");
     let failed = pool
         .wait_terminals(1, Duration::from_secs(5))
         .expect("failure terminal");
     assert_eq!(failed[0].terminal_status.as_deref(), Some("worker_failed"));
     assert_eq!(pool.permits(), 0);
-    pool.submit(request(1, 1, 2, port, "rebuilt.bin"))
+    pool.submit(lease.submission(request(1, 1, 2, port, "rebuilt.bin")))
         .expect("reuse");
     let done = pool
         .wait_terminals(1, Duration::from_secs(5))
@@ -299,14 +299,14 @@ fn path_escape_and_existing_target_do_not_overwrite() {
     let port = serve_ok_in_background(4);
     let pool = WorkerPool::start(pool_config(&root, port, 1, 4, 8, 64)).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(1, 1).expect("register");
-    pool.submit(request(1, 1, 1, port, "../outside.bin"))
+    let lease = pool.register(1, 1).expect("register");
+    pool.submit(lease.submission(request(1, 1, 1, port, "../outside.bin")))
         .expect("parent");
-    pool.submit(request(1, 1, 2, port, "escape/file.bin"))
+    pool.submit(lease.submission(request(1, 1, 2, port, "escape/file.bin")))
         .expect("symlink");
-    pool.submit(request(1, 1, 3, port, "/tmp/absolute.bin"))
+    pool.submit(lease.submission(request(1, 1, 3, port, "/tmp/absolute.bin")))
         .expect("absolute");
-    pool.submit(request(1, 1, 4, port, "kept.bin"))
+    pool.submit(lease.submission(request(1, 1, 4, port, "kept.bin")))
         .expect("existing");
     let events = pool
         .wait_terminals(4, Duration::from_secs(5))
@@ -344,17 +344,17 @@ fn policy_redirect_and_hop_header_fail_before_a_file_exists() {
     };
     let pool = WorkerPool::start(pool_config(&root, port, 1, 3, 4, 64)).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(1, 1).expect("register");
+    let lease = pool.register(1, 1).expect("register");
     let mut denied = request(1, 1, 1, port, "denied.bin");
     denied.url = "http://denied.invalid/".to_string();
-    pool.submit(denied).expect("denied");
+    pool.submit(lease.submission(denied)).expect("denied");
     let mut hop = request(1, 1, 2, port, "hop.bin");
     hop.headers.push(HeaderEntry {
         name: b"connection".to_vec(),
         value: b"close".to_vec(),
     });
-    pool.submit(hop).expect("hop");
-    pool.submit(request(1, 1, 3, port, "redirect.bin"))
+    pool.submit(lease.submission(hop)).expect("hop");
+    pool.submit(lease.submission(request(1, 1, 3, port, "redirect.bin")))
         .expect("redirect");
     let events = pool
         .wait_terminals(3, Duration::from_secs(5))
@@ -385,11 +385,11 @@ fn epoch_table_stays_within_its_cap_after_many_tasks() {
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
     let mut finished = 0usize;
     for id in 1..=tasks {
-        let mut admitted = false;
+        let mut admitted = None;
         loop {
-            if !admitted {
+            if admitted.is_none() {
                 match pool.register(id as i64, 1) {
-                    Ok(()) => admitted = true,
+                    Ok(registration) => admitted = Some(registration),
                     Err(error) if error.code() == "epoch_budget" => {
                         finished += pool
                             .wait_terminals(1, Duration::from_secs(5))
@@ -400,7 +400,14 @@ fn epoch_table_stays_within_its_cap_after_many_tasks() {
                     Err(error) => panic!("register {id}: {error:?}"),
                 }
             }
-            match pool.submit(request(id as i64, 1, 1, port, &format!("t{id}.bin"))) {
+            let registration = admitted.as_ref().expect("lease");
+            match pool.submit(registration.submission(request(
+                id as i64,
+                1,
+                1,
+                port,
+                &format!("t{id}.bin"),
+            ))) {
                 Ok(()) => break,
                 Err(error) if error.code() == "queue_full" => {
                     finished += pool
@@ -462,18 +469,18 @@ fn cancel_confirmed_before_link_does_not_publish() {
     config.link_gate = Some(Arc::clone(&link));
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(9, 1).expect("register");
+    let lease = pool.register(9, 1).expect("register");
     let key = JobKey {
         task_id: 9,
         epoch: 1,
         job_id: 1,
     };
-    pool.submit(request(9, 1, 1, port, "race.bin"))
+    pool.submit(lease.submission(request(9, 1, 1, port, "race.bin")))
         .expect("submit");
     link.wait_arrived(1, Duration::from_secs(5))
         .expect("before link");
     assert!(!root.path().join("race.bin").exists());
-    pool.cancel(&key).expect("cancel wins admission");
+    pool.cancel(&lease, &key).expect("cancel wins admission");
     link.release();
     let events = pool
         .wait_terminals(1, Duration::from_secs(5))
@@ -494,17 +501,17 @@ fn cancel_during_commit_reports_committing_and_keeps_the_file() {
     config.commit_hold = Some(Arc::clone(&hold));
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(11, 1).expect("register");
+    let lease = pool.register(11, 1).expect("register");
     let key = JobKey {
         task_id: 11,
         epoch: 1,
         job_id: 1,
     };
-    pool.submit(request(11, 1, 1, port, "held.bin"))
+    pool.submit(lease.submission(request(11, 1, 1, port, "held.bin")))
         .expect("submit");
     hold.wait_arrived(1, Duration::from_secs(5))
         .expect("inside commit");
-    let error = pool.cancel(&key).expect_err("too late");
+    let error = pool.cancel(&lease, &key).expect_err("too late");
     assert_eq!(error.code(), "committing");
     hold.release();
     let events = pool
@@ -519,14 +526,17 @@ fn cancel_during_commit_reports_committing_and_keeps_the_file() {
 #[test]
 fn unregistered_epoch_is_not_self_authorized() {
     let root = TestRoot::create();
-    let port = serve_ok_in_background(1);
-    let pool = WorkerPool::start(pool_config(&root, port, 1, 1, 4, 64)).expect("pool");
+    let pool = WorkerPool::start(pool_config(&root, 9, 1, 1, 4, 64)).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    let error = pool
-        .submit(request(21, 1, 1, port, "ghost.bin"))
-        .expect_err("unregistered");
+    let gone = pool.register(21, 1).expect("register");
+    let envelope = gone.submission(request(21, 1, 1, 9, "ghost.bin"));
+    for id in 22..=86 {
+        pool.register(id, 1).expect("fill");
+    }
+    let error = pool.submit(envelope).expect_err("unregistered");
     assert_eq!(error.code(), "unregistered");
     assert!(!root.path().join("ghost.bin").exists());
+    assert_eq!(pool.tracked_jobs(), 0);
     pool.shutdown().expect("shutdown");
 }
 
@@ -536,9 +546,9 @@ fn epoch_regression_is_rejected() {
     let port = serve_ok_in_background(1);
     let pool = WorkerPool::start(pool_config(&root, port, 1, 1, 4, 64)).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(21, 3).expect("register");
-    pool.advance_epoch(21, 3).expect("same epoch");
-    let error = pool.advance_epoch(21, 2).expect_err("regression");
+    let lease = pool.register(21, 3).expect("register");
+    pool.advance_epoch(&lease, 3).expect("same epoch");
+    let error = pool.advance_epoch(&lease, 2).expect_err("regression");
     assert_eq!(error.code(), "regression");
     pool.shutdown().expect("shutdown");
 }
@@ -791,20 +801,20 @@ fn queued_cancel_before_dequeue_makes_no_request_and_no_file() {
     let config = pool_config(&root, port, 1, 2, 4, 64);
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(3, 1).expect("register");
+    let lease = pool.register(3, 1).expect("register");
     let queued = JobKey {
         task_id: 3,
         epoch: 1,
         job_id: 2,
     };
-    pool.submit(request(3, 1, 1, port, "running.bin"))
+    pool.submit(lease.submission(request(3, 1, 1, port, "running.bin")))
         .expect("running");
     entered
         .wait_count(1, Duration::from_secs(5))
         .expect("first request accepted");
-    pool.submit(request(3, 1, 2, port, "queued.bin"))
+    pool.submit(lease.submission(request(3, 1, 2, port, "queued.bin")))
         .expect("queued");
-    pool.cancel(&queued).expect("cancel queued");
+    pool.cancel(&lease, &queued).expect("cancel queued");
     release.signal();
     let events = pool
         .wait_terminals(2, Duration::from_secs(5))
@@ -861,22 +871,22 @@ fn duplicate_live_key_is_rejected_without_a_second_entry() {
     let config = pool_config(&root, port, 1, 1, 4, 64);
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(4, 1).expect("register");
-    pool.submit(request(4, 1, 1, port, "live.bin"))
+    let lease = pool.register(4, 1).expect("register");
+    pool.submit(lease.submission(request(4, 1, 1, port, "live.bin")))
         .expect("live");
     entered
         .wait_count(1, Duration::from_secs(5))
         .expect("accepted");
     let duplicate = pool
-        .submit(request(4, 1, 1, port, "live.bin"))
+        .submit(lease.submission(request(4, 1, 1, port, "live.bin")))
         .expect_err("duplicate key");
     assert_eq!(duplicate.code(), "duplicate");
     assert_eq!(pool.tracked_jobs(), 1);
-    pool.submit(request(4, 1, 2, port, "queued.bin"))
+    pool.submit(lease.submission(request(4, 1, 2, port, "queued.bin")))
         .expect("queued");
     let before = pool.tracked_jobs();
     let full = pool
-        .submit(request(4, 1, 3, port, "overflow.bin"))
+        .submit(lease.submission(request(4, 1, 3, port, "overflow.bin")))
         .expect_err("queue full");
     assert_eq!(full.code(), "queue_full");
     assert_eq!(pool.tracked_jobs(), before);
@@ -920,6 +930,34 @@ fn serve_until_stop(
     }
 }
 
+fn request_target(headers: &[u8]) -> String {
+    let text = String::from_utf8_lossy(headers);
+    text.lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("")
+        .to_string()
+}
+
+fn serve_recording(listener: TcpListener, paths: Arc<Mutex<Vec<String>>>, stop: Arc<AtomicBool>) {
+    let _ = listener.set_nonblocking(false);
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        let headers = read_headers(&mut stream);
+        paths.lock().expect("paths").push(request_target(&headers));
+        let _ = stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+    }
+}
+
 fn read_headers(stream: &mut std::net::TcpStream) -> Vec<u8> {
     let mut buf = [0u8; 1024];
     let mut got = Vec::new();
@@ -945,8 +983,8 @@ fn dns_hold_hits_connect_deadline_without_a_file() {
     config.hooks.dns_hold = Some(Arc::clone(&hold));
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(20, 1).expect("register");
-    pool.submit(request(20, 1, 1, port, "dns.bin"))
+    let lease = pool.register(20, 1).expect("register");
+    pool.submit(lease.submission(request(20, 1, 1, port, "dns.bin")))
         .expect("submit");
     let events = pool
         .wait_terminals(1, Duration::from_secs(5))
@@ -976,17 +1014,17 @@ fn write_hold_cancel_removes_staging() {
     config.hooks.write_hold = Some(Arc::clone(&hold));
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(21, 1).expect("register");
+    let lease = pool.register(21, 1).expect("register");
     let key = JobKey {
         task_id: 21,
         epoch: 1,
         job_id: 1,
     };
-    pool.submit(request(21, 1, 1, port, "write.bin"))
+    pool.submit(lease.submission(request(21, 1, 1, port, "write.bin")))
         .expect("submit");
     hold.wait_arrived(1, Duration::from_secs(5))
         .expect("writing");
-    pool.cancel(&key).expect("cancel");
+    pool.cancel(&lease, &key).expect("cancel");
     let events = pool
         .wait_terminals(1, Duration::from_secs(5))
         .expect("terminal");
@@ -1013,8 +1051,8 @@ fn shutdown_during_uncancellable_hold_stays_pending_until_retry() {
     config.hooks.uncancellable_hold = Some(Arc::clone(&hold));
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(22, 1).expect("register");
-    pool.submit(request(22, 1, 1, port, "stuck.bin"))
+    let lease = pool.register(22, 1).expect("register");
+    pool.submit(lease.submission(request(22, 1, 1, port, "stuck.bin")))
         .expect("submit");
     hold.wait_arrived(1, Duration::from_secs(5)).expect("held");
     let pending = pool
@@ -1040,10 +1078,10 @@ fn many_unique_failures_keep_observation_bounded() {
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
     for id in 1..=80 {
-        pool.register(id, 1).expect("register");
+        let lease = pool.register(id, 1).expect("register");
         let mut job = request(id, 1, 1, 9, "no.bin");
         job.url = format!("http://denied.example/{id}");
-        pool.submit(job).expect("submit");
+        pool.submit(lease.submission(job)).expect("submit");
         if id % 8 == 0 {
             pool.wait_terminals(8, Duration::from_secs(5))
                 .expect("batch");
@@ -1080,8 +1118,8 @@ fn dropped_receiver_releases_the_permit() {
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
     pool.detach_events();
-    pool.register(23, 1).expect("register");
-    pool.submit(request(23, 1, 1, port, "drop.bin"))
+    let lease = pool.register(23, 1).expect("register");
+    pool.submit(lease.submission(request(23, 1, 1, port, "drop.bin")))
         .expect("submit");
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while pool.permits() != 0 || pool.dropped_terminal() == 0 {
@@ -1119,9 +1157,11 @@ fn two_workers_hold_bytes_and_vecs_at_once() {
     config.hooks.buffer_hold = Some(Arc::clone(&hold));
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(24, 1).expect("register");
-    pool.submit(request(24, 1, 1, port, "a.bin")).expect("a");
-    pool.submit(request(24, 1, 2, port, "b.bin")).expect("b");
+    let lease = pool.register(24, 1).expect("register");
+    pool.submit(lease.submission(request(24, 1, 1, port, "a.bin")))
+        .expect("a");
+    pool.submit(lease.submission(request(24, 1, 2, port, "b.bin")))
+        .expect("b");
     hold.wait_arrived(2, Duration::from_secs(5))
         .expect("both held");
     let payload = 4usize;
@@ -1146,6 +1186,11 @@ fn two_workers_hold_bytes_and_vecs_at_once() {
         .expect("done");
     assert_eq!(events.len(), 2);
     assert_eq!(pool.application_bytes(), 0);
+    assert_eq!(
+        pool.application_capacity(),
+        0,
+        "copy capacity must return to zero"
+    );
     pool.shutdown().expect("shutdown");
     server.join().expect("server");
 }
@@ -1168,10 +1213,10 @@ fn hostname_peer_is_not_the_dns_decoy() {
     config.hooks.dns_decoy = Some(decoy);
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(25, 1).expect("register");
+    let lease = pool.register(25, 1).expect("register");
     let mut job = request(25, 1, 1, port, "host.bin");
     job.url = format!("http://localhost:{port}/host.bin");
-    pool.submit(job).expect("submit");
+    pool.submit(lease.submission(job)).expect("submit");
     let events = pool
         .wait_terminals(1, Duration::from_secs(5))
         .expect("terminal");
@@ -1196,22 +1241,109 @@ fn retired_incarnation_cannot_submit_the_old_epoch() {
     let root = TestRoot::create();
     let pool = WorkerPool::start(pool_config(&root, 9, 1, 1, 4, 64)).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(1, 1).expect("first");
+    let first = pool.register(1, 1).expect("first");
+    let evicted_job = first.submission(request(1, 1, 1, 9, "old.bin"));
     for id in 2..=65 {
         pool.register(id, 1).expect("fill");
     }
-    let evicted = pool
-        .submit(request(1, 1, 1, 9, "old.bin"))
-        .expect_err("evicted");
+    let evicted = pool.submit(evicted_job).expect_err("evicted");
     assert_eq!(evicted.code(), "unregistered");
-    pool.register(1, 2).expect("reregister");
+    let second = pool.register(1, 2).expect("reregister");
     let stale = pool
-        .submit(request(1, 1, 1, 9, "old.bin"))
+        .submit(second.submission(request(1, 1, 1, 9, "old.bin")))
         .expect_err("old epoch");
     assert_eq!(stale.code(), "stale_epoch");
     assert!(!root.path().join("old.bin").exists());
     assert_eq!(pool.tracked_jobs(), 0);
     pool.shutdown().expect("shutdown");
+}
+
+/// The envelope is built while registration A owns task 1/epoch 1. After A is
+/// evicted, B reuses the same id and epoch. A's envelope must stay rejected.
+/// B's own envelope completes through the RSS worker, and the server sees only
+/// that request.
+#[test]
+fn same_epoch_reregistration_rejects_the_request_prepared_before_eviction() {
+    let root = TestRoot::create();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let port = listener.local_addr().expect("port").port();
+    let paths = Arc::new(Mutex::new(Vec::<String>::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let server_paths = Arc::clone(&paths);
+    let server_stop = Arc::clone(&stop);
+    let server = std::thread::spawn(move || serve_recording(listener, server_paths, server_stop));
+    let link = CommitGate::new();
+    let mut config = pool_config(&root, port, 1, 1, 4, 64);
+    config.link_gate = Some(Arc::clone(&link));
+    let pool = WorkerPool::start(config).expect("pool");
+    pool.wait_ready(Duration::from_secs(5)).expect("ready");
+    let registration_a = pool.register(1, 1).expect("registration A");
+    let old = registration_a.submission(request(1, 1, 1, port, "old.bin"));
+    for id in 2..=65 {
+        pool.register(id, 1).expect("fill");
+    }
+    let registration_b = pool.register(1, 1).expect("registration B");
+    let before_tracked = pool.tracked_jobs();
+    let before_pending = pool.pending_jobs();
+    let before_drivers = pool.active_drivers();
+    let rejected = pool.submit(old);
+    assert_eq!(
+        rejected.expect_err("evicted envelope").code(),
+        "stale_registration"
+    );
+    assert!(
+        paths.lock().expect("paths").is_empty(),
+        "old request reached the server"
+    );
+    assert!(!root.path().join("old.bin").exists());
+    assert_eq!(pool.tracked_jobs(), before_tracked);
+    assert_eq!(pool.pending_jobs(), before_pending);
+    assert_eq!(pool.active_drivers(), before_drivers);
+    let other = WorkerPool::start(pool_config(&root, 9, 1, 1, 1, 64)).expect("other");
+    let foreign = other.register(9, 1).expect("foreign");
+    let moved = foreign.submission(request(9, 1, 1, port, "foreign.bin"));
+    assert_eq!(
+        pool.submit(moved).expect_err("wrong pool").code(),
+        "wrong_pool"
+    );
+    other.shutdown().expect("other shutdown");
+    pool.submit(registration_b.submission(request(1, 1, 2, port, "new.bin")))
+        .expect("registration B");
+    link.wait_arrived(1, Duration::from_secs(5))
+        .expect("B reached link");
+    let live = JobKey {
+        task_id: 1,
+        epoch: 1,
+        job_id: 2,
+    };
+    assert_eq!(
+        pool.cancel(&registration_a, &live)
+            .expect_err("old lease cancel")
+            .code(),
+        "stale_registration"
+    );
+    assert_eq!(
+        pool.advance_epoch(&registration_a, 2)
+            .expect_err("old lease advance")
+            .code(),
+        "stale_registration"
+    );
+    link.release();
+    let events = pool
+        .wait_terminals(1, Duration::from_secs(5))
+        .expect("B terminal");
+    assert_eq!(events[0].terminal_status.as_deref(), Some("completed"));
+    assert_eq!(events[0].key.job_id, 2);
+    assert_files_equal(&root.path().join("new.bin"), b"ok");
+    assert!(!root.path().join("old.bin").exists());
+    let seen = paths.lock().expect("paths").clone();
+    assert_eq!(seen, vec!["/new.bin".to_string()]);
+    assert_eq!(pool.tracked_jobs(), 0);
+    assert_eq!(pool.active_drivers(), 0);
+    stop.store(true, Ordering::Release);
+    let _ = std::net::TcpStream::connect(("127.0.0.1", port));
+    pool.shutdown().expect("shutdown");
+    server.join().expect("server");
 }
 
 #[test]
@@ -1232,20 +1364,14 @@ fn live_receiver_keeps_a_full_terminal_until_drain() {
     config.hooks.buffer_hold = Some(Arc::clone(&hold));
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(28, 1).expect("register");
-    pool.submit(request(28, 1, 1, port, "one.bin"))
+    let lease = pool.register(28, 1).expect("register");
+    pool.submit(lease.submission(request(28, 1, 1, port, "one.bin")))
         .expect("one");
-    pool.submit(request(28, 1, 2, port, "two.bin"))
+    pool.submit(lease.submission(request(28, 1, 2, port, "two.bin")))
         .expect("two");
     hold.wait_arrived(2, Duration::from_secs(5))
         .expect("both held");
     hold.release();
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(
-        pool.dropped_terminal(),
-        0,
-        "live receiver dropped a terminal"
-    );
     let events = pool
         .wait_terminals(2, Duration::from_secs(5))
         .expect("both terminals");
@@ -1265,12 +1391,12 @@ fn register_after_advance_rejects_a_lower_epoch() {
     let root = TestRoot::create();
     let pool = WorkerPool::start(pool_config(&root, 9, 1, 1, 4, 64)).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(8, 8).expect("initial");
-    pool.advance_epoch(8, 8).expect("same epoch");
+    let lease = pool.register(8, 8).expect("initial");
+    pool.advance_epoch(&lease, 8).expect("same epoch");
     let error = pool.register(8, 5).expect_err("duplicate register");
     assert_eq!(error.code(), "task_exists");
     let stale = pool
-        .submit(request(8, 5, 1, 9, "old.bin"))
+        .submit(lease.submission(request(8, 5, 1, 9, "old.bin")))
         .expect_err("lower epoch");
     assert_eq!(stale.code(), "stale_epoch");
     assert_eq!(pool.tracked_jobs(), 0);
@@ -1286,8 +1412,8 @@ fn same_epoch_register_does_not_cancel_a_live_job() {
     config.link_gate = Some(Arc::clone(&link));
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(8, 1).expect("register");
-    pool.submit(request(8, 1, 1, port, "live.bin"))
+    let lease = pool.register(8, 1).expect("register");
+    pool.submit(lease.submission(request(8, 1, 1, port, "live.bin")))
         .expect("submit");
     link.wait_arrived(1, Duration::from_secs(5))
         .expect("before link");
@@ -1314,9 +1440,9 @@ fn many_executions_keep_thread_samples_bounded() {
     let port = serve_ok_in_background(16);
     let pool = WorkerPool::start(pool_config(&root, port, 1, 4, 8, 64)).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(40, 1).expect("register");
+    let lease = pool.register(40, 1).expect("register");
     for job in 1..=16 {
-        pool.submit(request(40, 1, job, port, &format!("n{job}.bin")))
+        pool.submit(lease.submission(request(40, 1, job, port, &format!("n{job}.bin"))))
             .expect("submit");
         if job % 4 == 0 {
             pool.wait_terminals(4, Duration::from_secs(5))
@@ -1353,14 +1479,14 @@ fn rebuild_does_not_append_another_owner_sample() {
     config.fail_worker_once = true;
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(41, 1).expect("register");
-    pool.submit(request(41, 1, 1, port, "panic.bin"))
+    let lease = pool.register(41, 1).expect("register");
+    pool.submit(lease.submission(request(41, 1, 1, port, "panic.bin")))
         .expect("panic submit");
     let failed = pool
         .wait_terminals(1, Duration::from_secs(5))
         .expect("panic terminal");
     assert_eq!(failed[0].terminal_status.as_deref(), Some("worker_failed"));
-    pool.submit(request(41, 1, 2, port, "after.bin"))
+    pool.submit(lease.submission(request(41, 1, 2, port, "after.bin")))
         .expect("retry submit");
     let done = pool
         .wait_terminals(1, Duration::from_secs(5))
@@ -1421,9 +1547,9 @@ fn body_idle_does_not_wait_for_the_overall_deadline() {
     config.http.max_stream_duration = Duration::from_secs(30);
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(42, 1).expect("register");
+    let lease = pool.register(42, 1).expect("register");
     let started = Instant::now();
-    pool.submit(request(42, 1, 1, port, "idle.bin"))
+    pool.submit(lease.submission(request(42, 1, 1, port, "idle.bin")))
         .expect("submit");
     let events = pool
         .wait_terminals(1, Duration::from_secs(3))
@@ -1449,13 +1575,13 @@ fn invalid_header_does_not_open_a_connection() {
     let port = listener.local_addr().expect("port").port();
     let pool = WorkerPool::start(pool_config(&root, port, 1, 1, 4, 64)).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(43, 1).expect("register");
+    let lease = pool.register(43, 1).expect("register");
     let mut job = request(43, 1, 1, port, "bad.bin");
     job.headers = vec![HeaderEntry {
         name: b"bad name".to_vec(),
         value: b"x".to_vec(),
     }];
-    pool.submit(job).expect("submit");
+    pool.submit(lease.submission(job)).expect("submit");
     let events = pool
         .wait_terminals(1, Duration::from_secs(5))
         .expect("terminal");
@@ -1510,17 +1636,17 @@ fn cancel_while_waiting_for_headers_closes_the_socket() {
     });
     let pool = WorkerPool::start(pool_config(&root, port, 1, 1, 4, 64)).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(44, 1).expect("register");
+    let lease = pool.register(44, 1).expect("register");
     let key = JobKey {
         task_id: 44,
         epoch: 1,
         job_id: 1,
     };
-    pool.submit(request(44, 1, 1, port, "hdr.bin"))
+    pool.submit(lease.submission(request(44, 1, 1, port, "hdr.bin")))
         .expect("submit");
     read.wait_count(1, Duration::from_secs(5))
         .expect("headers read");
-    pool.cancel(&key).expect("cancel");
+    pool.cancel(&lease, &key).expect("cancel");
     let events = pool
         .wait_terminals(1, Duration::from_secs(5))
         .expect("terminal");
@@ -1545,9 +1671,9 @@ fn expired_deadline_after_commit_hold_does_not_link() {
     config.http.max_stream_duration = Duration::from_millis(800);
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(45, 1).expect("register");
+    let lease = pool.register(45, 1).expect("register");
     let started = Instant::now();
-    pool.submit(request(45, 1, 1, port, "late.bin"))
+    pool.submit(lease.submission(request(45, 1, 1, port, "late.bin")))
         .expect("submit");
     hold.wait_arrived(1, Duration::from_secs(5))
         .expect("inside commit");
@@ -1571,8 +1697,8 @@ fn linked_job_blocked_on_a_full_terminal_is_already_complete() {
     let port = serve_ok_in_background(2);
     let pool = WorkerPool::start(pool_config(&root, port, 1, 2, 1, 64)).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(50, 1).expect("register");
-    pool.submit(request(50, 1, 1, port, "first.bin"))
+    let lease = pool.register(50, 1).expect("register");
+    pool.submit(lease.submission(request(50, 1, 1, port, "first.bin")))
         .expect("first");
     let first = root.path().join("first.bin");
     let second = root.path().join("second.bin");
@@ -1583,14 +1709,10 @@ fn linked_job_blocked_on_a_full_terminal_is_already_complete() {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    pool.submit(request(50, 1, 2, port, "second.bin"))
+    pool.submit(lease.submission(request(50, 1, 2, port, "second.bin")))
         .expect("second");
-    while pool.terminal_waiters() == 0 {
-        if Instant::now() >= deadline {
-            panic!("terminal publish did not block");
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    pool.wait_terminal_waiter(true, Duration::from_secs(5))
+        .expect("terminal publish blocked");
     assert_eq!(
         pool.permits(),
         0,
@@ -1608,7 +1730,7 @@ fn linked_job_blocked_on_a_full_terminal_is_already_complete() {
         epoch: 1,
         job_id: 2,
     };
-    let cancel = pool.cancel(&key);
+    let cancel = pool.cancel(&lease, &key);
     assert_eq!(cancel.expect_err("linked").code(), "already_complete");
     assert_eq!(pool.completion_count(50, 1), 2);
     assert_files_equal(&second, b"ok");
@@ -1635,9 +1757,9 @@ fn pending_is_visible_before_the_queue_accepts_the_job() {
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
     let submitted = Arc::clone(&pool);
     let worker = std::thread::spawn(move || {
-        submitted.register(60, 1).expect("register");
+        let lease = submitted.register(60, 1).expect("register");
         submitted
-            .submit(request(60, 1, 1, 9, "held.bin"))
+            .submit(lease.submission(request(60, 1, 1, 9, "held.bin")))
             .expect("submit");
     });
     hold.wait_arrived(1, Duration::from_secs(5)).expect("held");
@@ -1664,8 +1786,8 @@ fn borrowed_shutdown_keeps_the_pool_for_a_second_drain() {
     config.hooks.uncancellable_hold = Some(Arc::clone(&hold));
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(61, 1).expect("register");
-    pool.submit(request(61, 1, 1, port, "stuck.bin"))
+    let lease = pool.register(61, 1).expect("register");
+    pool.submit(lease.submission(request(61, 1, 1, port, "stuck.bin")))
         .expect("submit");
     hold.wait_arrived(1, Duration::from_secs(5)).expect("held");
     let pending = pool.shutdown().expect("default drain");
@@ -1685,8 +1807,9 @@ fn failed_terminal_cancel_is_not_already_complete() {
     let port = serve_ok_in_background(1);
     let pool = WorkerPool::start(pool_config(&root, port, 1, 2, 1, 64)).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(62, 1).expect("register");
-    pool.submit(request(62, 1, 1, port, "ok.bin")).expect("ok");
+    let lease = pool.register(62, 1).expect("register");
+    pool.submit(lease.submission(request(62, 1, 1, port, "ok.bin")))
+        .expect("ok");
     let ok = root.path().join("ok.bin");
     let deadline = Instant::now() + Duration::from_secs(5);
     while !ok.exists() {
@@ -1697,36 +1820,81 @@ fn failed_terminal_cancel_is_not_already_complete() {
     }
     let mut denied = request(62, 1, 2, port, "no.bin");
     denied.url = "http://denied.example/no.bin".to_string();
-    pool.submit(denied).expect("denied");
-    while pool.terminal_waiters() == 0 {
-        if Instant::now() >= deadline {
-            panic!("failed terminal did not block");
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    pool.submit(lease.submission(denied)).expect("denied");
+    pool.wait_terminal_waiter(true, Duration::from_secs(5))
+        .expect("failed terminal blocked");
     let key = JobKey {
         task_id: 62,
         epoch: 1,
         job_id: 2,
     };
     assert_eq!(
-        pool.cancel(&key).expect_err("failed").code(),
+        pool.cancel(&lease, &key).expect_err("failed").code(),
         "already_failed"
     );
     assert_eq!(pool.completion_count(62, 1), 1);
     assert_eq!(pool.permits(), 0);
     pool.detach_events();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while pool.terminal_waiters() != 0 {
-        if Instant::now() >= deadline {
-            panic!("receiver close did not unblock the terminal");
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    pool.wait_terminal_waiter(false, Duration::from_secs(5))
+        .expect("receiver close unblocked the terminal");
     assert_eq!(pool.completion_count(62, 1), 1);
     assert!(pool.dropped_terminal() >= 1);
     let report = pool.shutdown().expect("shutdown");
     assert!(report.joined);
+    assert_eq!(
+        pool.tracked_jobs(),
+        0,
+        "retire did not clear the closed receiver"
+    );
+}
+
+#[test]
+fn status_error_closes_the_driver_and_the_server_sees_eof() {
+    let root = TestRoot::create();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let port = listener.local_addr().expect("port").port();
+    let eof = Arc::new(Note::new());
+    let server_eof = Arc::clone(&eof);
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let _ = read_headers(&mut stream);
+        let _ =
+            stream.write_all(b"HTTP/1.1 500 NO\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let mut buf = [0u8; 64];
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => {
+                    server_eof.signal();
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+    });
+    let pool = WorkerPool::start(pool_config(&root, port, 1, 1, 4, 64)).expect("pool");
+    pool.wait_ready(Duration::from_secs(5)).expect("ready");
+    let lease = pool.register(70, 1).expect("register");
+    pool.submit(lease.submission(request(70, 1, 1, port, "status.bin")))
+        .expect("submit");
+    let events = pool
+        .wait_terminals(1, Duration::from_secs(5))
+        .expect("terminal");
+    assert_eq!(events[0].terminal_status.as_deref(), Some("http_status"));
+    assert!(!root.path().join("status.bin").exists());
+    assert_eq!(
+        pool.active_drivers(),
+        0,
+        "status error left a connection driver"
+    );
+    eof.wait_count(1, Duration::from_secs(5))
+        .expect("server saw EOF");
+    assert_eq!(pool.tracked_jobs(), 0);
+    let report = pool.shutdown().expect("shutdown");
+    assert!(report.joined);
+    assert_eq!(pool.active_drivers(), 0);
+    server.join().expect("server");
 }
 
 fn local_tls_material() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
@@ -1790,10 +1958,10 @@ fn untrusted_tls_certificate_does_not_complete() {
     config.http.allowed_schemes = vec!["https".to_string()];
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(26, 1).expect("register");
+    let lease = pool.register(26, 1).expect("register");
     let mut job = request(26, 1, 1, port, "bad-tls.bin");
     job.url = format!("https://localhost:{port}/bad-tls.bin");
-    pool.submit(job).expect("submit");
+    pool.submit(lease.submission(job)).expect("submit");
     let events = pool
         .wait_terminals(1, Duration::from_secs(5))
         .expect("terminal");
@@ -1815,10 +1983,10 @@ fn trusted_local_tls_certificate_completes() {
     config.hooks.extra_trust_der = vec![ca];
     let pool = WorkerPool::start(config).expect("pool");
     pool.wait_ready(Duration::from_secs(5)).expect("ready");
-    pool.register(27, 1).expect("register");
+    let lease = pool.register(27, 1).expect("register");
     let mut job = request(27, 1, 1, port, "tls.bin");
     job.url = format!("https://localhost:{port}/tls.bin");
-    pool.submit(job).expect("submit");
+    pool.submit(lease.submission(job)).expect("submit");
     let events = pool
         .wait_terminals(1, Duration::from_secs(5))
         .expect("terminal");
