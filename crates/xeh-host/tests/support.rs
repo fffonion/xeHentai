@@ -1,11 +1,14 @@
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use vm::resource::HostResource;
 use vm::{
     register_catalog_function, CallOutcome, CallReturn, HostApiCatalog, HostFunction,
     HostFunctionRegistry, HostFunctionSchema, HostParamPassing, HostParamSchema, HostResourceType,
-    HostTypeSchema, ResourceHandle, ResourceTypeKey, ResourceTypeSchema, Value, Vm, VmError,
-    VmResult,
+    HostTypeSchema, HttpConfig, HttpHostExt, ResourceHandle, ResourceTypeKey, ResourceTypeSchema,
+    Value, Vm, VmError, VmResult,
 };
 
 use xeh_host::{
@@ -13,8 +16,40 @@ use xeh_host::{
     EmbeddingTimer,
 };
 
-pub const LEASE_FIXTURES: &str =
-    "/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-20261029-main-13b130ba/task2-fixtures";
+static TEST_ROOT_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// One test-owned directory under the process temp dir (`TMPDIR`).
+///
+/// The path is unique for this process and is removed when the guard drops.
+/// Callers must close VM handles before dropping the guard.
+pub struct TestRoot {
+    path: PathBuf,
+}
+
+impl TestRoot {
+    pub fn create() -> Self {
+        let seq = TEST_ROOT_SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        let path =
+            std::env::temp_dir().join(format!("xeh-host-{}-{}-{}", std::process::id(), nanos, seq));
+        std::fs::create_dir(&path)
+            .unwrap_or_else(|error| panic!("create test root {}: {error}", path.display()));
+        Self { path }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TestRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
 
 const PROBE_KEY: &str = "xeh.test.probe";
 
@@ -95,6 +130,44 @@ impl HostFunction for CloseProbe {
         vm.host_context()
             .take_resource::<ProbeHandle>(handle)
             .map_err(|error| VmError::HostError(error.to_string()))?;
+        Ok(CallOutcome::Return(CallReturn::one(Value::Int(1))))
+    }
+}
+
+struct FailFn;
+
+impl HostFunction for FailFn {
+    fn call(&mut self, _vm: &mut Vm, _args: &[Value]) -> VmResult<CallOutcome> {
+        Err(VmError::HostError(
+            "intentional timer callback failure".to_string(),
+        ))
+    }
+}
+
+struct ArmHttp {
+    config: HttpConfig,
+}
+
+impl HostFunction for ArmHttp {
+    fn call(&mut self, vm: &mut Vm, _args: &[Value]) -> VmResult<CallOutcome> {
+        vm.configure_http(self.config.clone())
+            .map_err(|error| VmError::HostError(error.to_string()))?;
+        Ok(CallOutcome::Return(CallReturn::one(Value::Int(1))))
+    }
+}
+
+struct ReenterFn {
+    timer: Arc<EmbeddingTimer>,
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+impl HostFunction for ReenterFn {
+    fn call(&mut self, _vm: &mut Vm, _args: &[Value]) -> VmResult<CallOutcome> {
+        let message = match self.timer.drive_due() {
+            Ok(driven) => format!("reenter-ok:{driven}"),
+            Err(error) => error.to_string(),
+        };
+        self.log.lock().expect("reenter log").push(message);
         Ok(CallOutcome::Return(CallReturn::one(Value::Int(1))))
     }
 }
@@ -185,6 +258,24 @@ pub fn probe_catalog() -> Arc<HostApiCatalog> {
         HostTypeSchema::Int,
         "Record a timer callback observation",
     ));
+    builder.function(host_fn(
+        "xeh_test::fail",
+        vec![],
+        HostTypeSchema::Int,
+        "Fail the current timer callback",
+    ));
+    builder.function(host_fn(
+        "xeh_test::arm_http",
+        vec![],
+        HostTypeSchema::Int,
+        "Install the fixture HTTP policy on this callback VM",
+    ));
+    builder.function(host_fn(
+        "xeh_test::reenter",
+        vec![],
+        HostTypeSchema::Int,
+        "Attempt to drive the owner timer from inside a callback",
+    ));
     Arc::new(
         builder
             .build()
@@ -233,6 +324,56 @@ pub fn register_record(
         },
     )
     .expect("record host should register");
+}
+
+pub fn register_fail(registry: &mut HostFunctionRegistry, catalog: &HostApiCatalog) {
+    register_one(registry, catalog, "xeh_test::fail", || Box::new(FailFn));
+}
+
+pub fn register_arm_http(
+    registry: &mut HostFunctionRegistry,
+    catalog: &HostApiCatalog,
+    config: HttpConfig,
+) {
+    register_catalog_function(
+        registry,
+        catalog,
+        "xeh_test::arm_http",
+        catalog
+            .function("xeh_test::arm_http")
+            .expect("arm_http schema")
+            .clone(),
+        move || {
+            Box::new(ArmHttp {
+                config: config.clone(),
+            })
+        },
+    )
+    .expect("arm_http host should register");
+}
+
+pub fn register_reenter(
+    registry: &mut HostFunctionRegistry,
+    catalog: &HostApiCatalog,
+    timer: Arc<EmbeddingTimer>,
+    log: Arc<Mutex<Vec<String>>>,
+) {
+    register_catalog_function(
+        registry,
+        catalog,
+        "xeh_test::reenter",
+        catalog
+            .function("xeh_test::reenter")
+            .expect("reenter schema")
+            .clone(),
+        move || {
+            Box::new(ReenterFn {
+                timer: Arc::clone(&timer),
+                log: Arc::clone(&log),
+            })
+        },
+    )
+    .expect("reenter host should register");
 }
 
 fn register_one<F>(
