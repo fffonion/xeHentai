@@ -40,8 +40,9 @@ pub fn install_reused_hosts(
             )));
         };
         if module.name == "io" {
-            // write/flush/read_line stay on the namespaced builtin path. The
-            // catalog surface is only open/read_all/close.
+            // Retain the Core owned builtin authorization. The typed catalog
+            // now includes write/flush alongside open/read_all/close.
+            // read_line is not in the typed catalog.
             grant_owned_builtins(registry, module.owned)?;
         }
         surface
