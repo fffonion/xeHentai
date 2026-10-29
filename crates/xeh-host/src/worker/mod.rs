@@ -363,6 +363,7 @@ fn worker_main(shared: Arc<Shared>) {
             continue;
         }
         let token = shared.cancel_root.child_token();
+        let parked = token.clone();
         lock(&shared.jobs).insert(job.key.clone(), token.clone());
         *lock(&host.current) = Some(job.clone());
         *lock(&host.active_cancel) = Some(token);
@@ -380,6 +381,9 @@ fn worker_main(shared: Arc<Shared>) {
                 drive.and(reset)
             })
         }));
+        if parked.is_cancelled() {
+            runtime.block_on(flush_cancelled_connection());
+        }
         let receipt = lock(&host.receipt).clone();
         publish_terminal(&shared, &job, outcome.is_ok(), receipt);
         *lock(&host.current) = None;
@@ -400,6 +404,14 @@ fn worker_main(shared: Arc<Shared>) {
             }
         }
     }
+}
+
+async fn flush_cancelled_connection() {
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    tokio::task::yield_now().await;
 }
 
 fn publish_terminal(

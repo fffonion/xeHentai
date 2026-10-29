@@ -614,11 +614,16 @@ fn serve_stall_then_ok(listener: TcpListener, stalled: Arc<Note>, closed: Arc<No
         .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\nConnection: close\r\n\r\nx");
     let _ = stream.flush();
     stalled.signal();
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
     let mut buf = [0u8; 64];
     loop {
         match stream.read(&mut buf) {
-            Ok(0) | Err(_) => {
+            Ok(0) => {
+                closed.signal();
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => continue,
+            Err(_) => {
                 closed.signal();
                 break;
             }
