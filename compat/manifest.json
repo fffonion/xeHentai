@@ -20,6 +20,17 @@
         "cargo run -p xeh-xtask -- diff --suite session",
         "cargo test -p xeh-xtask --test session_e2e"
       ]
+    },
+    {
+      "task": 7,
+      "scope": "site-rules",
+      "note": "Task 7 provides the pure-RSS site filters and ordered rule kernel on the accepted Task1-6 App base, with the Core dependency pinned to 3ba2de5cc5a6b3b4a67c0c82cc1bc4aaa6c16216 and read back through the Cargo lock. app/site/{metadata,pages,mpv,image,login} plus app/site/support own every extraction, entity decode and decision; app/rules/engine.rss owns the named SiteContext/StreamInput and ordered dispatch, and app/site/entry.rss is a thin public delegate. app/rules/{image,metadata} hold the quota/metadata rule phase. app/rules/download.rss keeps the quota, 404, length and callback preflight order and exposes a bounded per-stream state machine: stream_begin returns a scalar-only StreamState, stream_chunk/stream_connection_error/stream_end take one bounded chunk at a time and return ordered events/decisions, and the fixture batch runner drives those same transitions, so no second event model exists and no image body is retained in the VM. Unicode Nd numerals are normalized from a static ten-class decimal-value table generated from the oracle interpreter's Unicode 16.0.0 database before the existing ASCII conversion, so the former human-time and numeric-entity deltas now compare directly. The fixed-source differential verifies the pinned 43fc55c 19-file upstream package by Git tree/blob and executes the real filters.py/util in an isolated cwd/env under compat/oracle/site_runner.py; the production comparator checks callbacks and order, return, exception class, debug bytes and stream events/chunk bytes, and nine mutations are rejected by that same comparator. Three narrow deltas remain and are documented in docs/compatibility-deltas.md: Python json.loads accepts the non-standard NaN constant while Core strict JSON rejects it and RSS emits its own failure callback; Python can hold a lone-surrogate string from &#55296; while Rust strings cannot, so RSS raises ValueError; Python int() accepts underscores in &#1_0; while RSS decimal entities accept Nd digits only. Task9 downloader orchestration, Task3 network transport, proxy/Task8 and archive/Task10 work are not implemented here, and fixture-only stream decisions are not claimed as network integration. Task7 behavior entries stay pending/unverified; this note does not mark implementation accepted.",
+      "tests": [
+        "cargo test -p xeh-host --test site_rules",
+        "cargo run -p xeh-xtask -- rss-test --suite rules",
+        "cargo run -p xeh-xtask -- diff --suite site",
+        "cargo test -p xeh-xtask --test site_contract"
+      ]
     }
   ],
   "features": [

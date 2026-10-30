@@ -1,0 +1,263 @@
+//! Regex composition and one-pass text helpers used by the RSS site filters.
+use json;
+use re;
+
+fn scan(pattern: string, text: string) -> map {
+    let nul = json::decode::<string>("\"\\u0000\"");
+    let soh = json::decode::<string>("\"\\u0001\"");
+    let mut nul_run = nul.copy();
+    let mut delimiter = nul_run.copy() + soh.copy();
+    while string_contains(text.copy(), delimiter.copy()) {
+        nul_run = nul_run.copy() + nul_run.copy();
+        delimiter = nul_run.copy() + soh.copy();
+    }
+    let marked = re::replace(pattern.copy(), text.copy(), "$0" + delimiter.copy());
+    let pieces = string_split_literal(marked.copy(), delimiter.copy());
+    let combined_pattern = "(?s)^(.*)(" + pattern.copy() + ")$";
+    let mut matches: [map] = [];
+    let mut tail = "";
+    if pieces.length > 0 {
+        for index in 0..(pieces.length - 1) {
+            let segment: string = pieces[index].copy();
+            let captures = re::captures(combined_pattern.copy(), segment.copy());
+            if captures.length > 2 {
+                let mut groups: [string] = [];
+                for group_index in 3..captures.length {
+                    groups[groups.length] = captures[group_index].copy();
+                }
+                let mut item: map = {};
+                item["prefix"] = captures[1].copy();
+                item["matched"] = captures[2].copy();
+                item["groups"] = groups;
+                matches[matches.length] = item;
+            }
+        }
+        let last_piece: string = pieces[pieces.length - 1].copy();
+        tail = last_piece;
+    }
+    let mut output: map = {};
+    output["matches"] = matches;
+    output["tail"] = tail;
+    output
+}
+
+pub fn capture_all(pattern: string, text: string) -> [string] {
+    capture_group_all(pattern.copy(), text.copy(), 0)
+}
+
+pub fn capture_group_all(pattern: string, text: string, group_index: int) -> [string] {
+    let scanned = scan(pattern.copy(), text.copy());
+    let mut output: [string] = [];
+    let matches: [map] = scanned["matches"].copy();
+    for index in 0..matches.length {
+        let item: map = matches[index].copy();
+        let groups: [string] = item["groups"].copy();
+        if group_index >= 0 && group_index < groups.length {
+            output[output.length] = groups[group_index].copy();
+        }
+    }
+    output
+}
+
+pub fn first(pattern: string, text: string) -> [string] {
+    re::captures(pattern.copy(), text.copy())
+}
+
+/// Standard Unicode decimal digits (`Nd`) grouped by decimal value.
+///
+/// The table is generated from the oracle interpreter's `unicodedata`
+/// database (Unicode 16.0.0), so normalization is explicit data rather than a
+/// dependence on the embedded regex engine's Unicode release.
+fn nd_digits() -> [string] {
+    ["0٠۰߀०০੦૦୦௦౦೦൦෦๐໐༠၀႐០᠐᥆᧐᪀᪐᭐᮰᱀᱐꘠꣐꤀꧐꧰꩐꯰０𐒠𐴰𐵀𑁦𑃰𑄶𑇐𑋰𑑐𑓐𑙐𑛀𑛐𑛚𑜰𑣠𑥐𑯰𑱐𑵐𑶠𑽐𖄰𖩠𖫀𖭐𖵰𜳰𝟎𝟘𝟢𝟬𝟶𞅀𞋰𞓰𞗱𞥐🯰", "1١۱߁१১੧૧୧௧౧೧൧෧๑໑༡၁႑១᠑᥇᧑᪁᪑᭑᮱᱁᱑꘡꣑꤁꧑꧱꩑꯱１𐒡𐴱𐵁𑁧𑃱𑄷𑇑𑋱𑑑𑓑𑙑𑛁𑛑𑛛𑜱𑣡𑥑𑯱𑱑𑵑𑶡𑽑𖄱𖩡𖫁𖭑𖵱𜳱𝟏𝟙𝟣𝟭𝟷𞅁𞋱𞓱𞗲𞥑🯱", "2٢۲߂२২੨૨୨௨౨೨൨෨๒໒༢၂႒២᠒᥈᧒᪂᪒᭒᮲᱂᱒꘢꣒꤂꧒꧲꩒꯲２𐒢𐴲𐵂𑁨𑃲𑄸𑇒𑋲𑑒𑓒𑙒𑛂𑛒𑛜𑜲𑣢𑥒𑯲𑱒𑵒𑶢𑽒𖄲𖩢𖫂𖭒𖵲𜳲𝟐𝟚𝟤𝟮𝟸𞅂𞋲𞓲𞗳𞥒🯲", "3٣۳߃३৩੩૩୩௩౩೩൩෩๓໓༣၃႓៣᠓᥉᧓᪃᪓᭓᮳᱃᱓꘣꣓꤃꧓꧳꩓꯳３𐒣𐴳𐵃𑁩𑃳𑄹𑇓𑋳𑑓𑓓𑙓𑛃𑛓𑛝𑜳𑣣𑥓𑯳𑱓𑵓𑶣𑽓𖄳𖩣𖫃𖭓𖵳𜳳𝟑𝟛𝟥𝟯𝟹𞅃𞋳𞓳𞗴𞥓🯳", "4٤۴߄४৪੪૪୪௪౪೪൪෪๔໔༤၄႔៤᠔᥊᧔᪄᪔᭔᮴᱄᱔꘤꣔꤄꧔꧴꩔꯴４𐒤𐴴𐵄𑁪𑃴𑄺𑇔𑋴𑑔𑓔𑙔𑛄𑛔𑛞𑜴𑣤𑥔𑯴𑱔𑵔𑶤𑽔𖄴𖩤𖫄𖭔𖵴𜳴𝟒𝟜𝟦𝟰𝟺𞅄𞋴𞓴𞗵𞥔🯴", "5٥۵߅५৫੫૫୫௫౫೫൫෫๕໕༥၅႕៥᠕᥋᧕᪅᪕᭕᮵᱅᱕꘥꣕꤅꧕꧵꩕꯵５𐒥𐴵𐵅𑁫𑃵𑄻𑇕𑋵𑑕𑓕𑙕𑛅𑛕𑛟𑜵𑣥𑥕𑯵𑱕𑵕𑶥𑽕𖄵𖩥𖫅𖭕𖵵𜳵𝟓𝟝𝟧𝟱𝟻𞅅𞋵𞓵𞗶𞥕🯵", "6٦۶߆६৬੬૬୬௬౬೬൬෬๖໖༦၆႖៦᠖᥌᧖᪆᪖᭖᮶᱆᱖꘦꣖꤆꧖꧶꩖꯶６𐒦𐴶𐵆𑁬𑃶𑄼𑇖𑋶𑑖𑓖𑙖𑛆𑛖𑛠𑜶𑣦𑥖𑯶𑱖𑵖𑶦𑽖𖄶𖩦𖫆𖭖𖵶𜳶𝟔𝟞𝟨𝟲𝟼𞅆𞋶𞓶𞗷𞥖🯶", "7٧۷߇७৭੭૭୭௭౭೭൭෭๗໗༧၇႗៧᠗᥍᧗᪇᪗᭗᮷᱇᱗꘧꣗꤇꧗꧷꩗꯷７𐒧𐴷𐵇𑁭𑃷𑄽𑇗𑋷𑑗𑓗𑙗𑛇𑛗𑛡𑜷𑣧𑥗𑯷𑱗𑵗𑶧𑽗𖄷𖩧𖫇𖭗𖵷𜳷𝟕𝟟𝟩𝟳𝟽𞅇𞋷𞓷𞗸𞥗🯷", "8٨۸߈८৮੮૮୮௮౮೮൮෮๘໘༨၈႘៨᠘᥎᧘᪈᪘᭘᮸᱈᱘꘨꣘꤈꧘꧸꩘꯸８𐒨𐴸𐵈𑁮𑃸𑄾𑇘𑋸𑑘𑓘𑙘𑛈𑛘𑛢𑜸𑣨𑥘𑯸𑱘𑵘𑶨𑽘𖄸𖩨𖫈𖭘𖵸𜳸𝟖𝟠𝟪𝟴𝟾𞅈𞋸𞓸𞗹𞥘🯸", "9٩۹߉९৯੯૯୯௯౯೯൯෯๙໙༩၉႙៩᠙᥏᧙᪉᪙᭙᮹᱉᱙꘩꣙꤉꧙꧹꩙꯹９𐒩𐴹𐵉𑁯𑃹𑄿𑇙𑋹𑑙𑓙𑙙𑛉𑛙𑛣𑜹𑣩𑥙𑯹𑱙𑵙𑶩𑽙𖄹𖩩𖫉𖭙𖵹𜳹𝟗𝟡𝟫𝟵𝟿𞅉𞋹𞓹𞗺𞥙🯹"]
+}
+
+fn nd_all() -> string {
+    let classes = nd_digits();
+    let mut combined = "";
+    for value in 0..classes.length {
+        combined = combined + classes[value].copy();
+    }
+    combined
+}
+
+fn ascii_digit(value: int) -> string {
+    if value == 0 => { "0" }
+    else if value == 1 => { "1" }
+    else if value == 2 => { "2" }
+    else if value == 3 => { "3" }
+    else if value == 4 => { "4" }
+    else if value == 5 => { "5" }
+    else if value == 6 => { "6" }
+    else if value == 7 => { "7" }
+    else if value == 8 => { "8" }
+    else => { "9" }
+}
+
+/// Maps captured `Nd` digit characters onto ASCII digits. Callers pass one
+/// numeric token, never a title, URL or whole page.
+pub fn ascii_digits(text: string) -> string {
+    let classes = nd_digits();
+    let mut output = text.copy();
+    for value in 0..classes.length {
+        let class: string = classes[value].copy();
+        let pattern = "[" + class.copy() + "]";
+        output = re::replace(pattern.copy(), output.copy(), ascii_digit(value));
+    }
+    output
+}
+
+pub fn decimal(text: string) -> int {
+    let digits = scan("([0-9])", ascii_digits(text.copy()));
+    let matches: [map] = digits["matches"].copy();
+    let mut value = 0;
+    for index in 0..matches.length {
+        let item: map = matches[index].copy();
+        let digit: string = item["matched"].copy();
+        let number = if digit == "0" => { 0 }
+            else if digit == "1" => { 1 }
+            else if digit == "2" => { 2 }
+            else if digit == "3" => { 3 }
+            else if digit == "4" => { 4 }
+            else if digit == "5" => { 5 }
+            else if digit == "6" => { 6 }
+            else if digit == "7" => { 7 }
+            else if digit == "8" => { 8 }
+            else => { 9 };
+        value = value * 10 + number;
+    }
+    value
+}
+
+fn hex_digit(value: int) -> string {
+    if value == 0 => { "0" }
+    else if value == 1 => { "1" }
+    else if value == 2 => { "2" }
+    else if value == 3 => { "3" }
+    else if value == 4 => { "4" }
+    else if value == 5 => { "5" }
+    else if value == 6 => { "6" }
+    else if value == 7 => { "7" }
+    else if value == 8 => { "8" }
+    else if value == 9 => { "9" }
+    else if value == 10 => { "a" }
+    else if value == 11 => { "b" }
+    else if value == 12 => { "c" }
+    else if value == 13 => { "d" }
+    else if value == 14 => { "e" }
+    else => { "f" }
+}
+
+fn hex4(value: int) -> string {
+    hex_digit(value / 4096)
+        + hex_digit((value / 256) % 16)
+        + hex_digit((value / 16) % 16)
+        + hex_digit(value % 16)
+}
+
+fn unicode_scalar(value: int) -> map {
+    let mut result: map = {};
+    if value < 0 || value > 1114111 || (value >= 55296 && value <= 57343) {
+        result["ok"] = false;
+        result["exception"] = "ValueError";
+        result["value"] = "";
+    } else {
+        let encoded = if value <= 65535 => {
+            "\"\\u" + hex4(value) + "\""
+        } else => {
+            let offset = value - 65536;
+            let high = 55296 + offset / 1024;
+            let low = 56320 + offset % 1024;
+            "\"\\u" + hex4(high) + "\\u" + hex4(low) + "\""
+        };
+        if json::is_valid(encoded.copy()) {
+            result["ok"] = true;
+            result["exception"] = "";
+            result["value"] = json::decode::<string>(encoded.copy());
+        } else {
+            result["ok"] = false;
+            result["exception"] = "ValueError";
+            result["value"] = "";
+        }
+    }
+    result
+}
+
+pub fn htmlescape(text: string) -> map {
+    let pattern = "&(#?)(" + "[" + nd_all() + "]{1,5}" + "|\\w{1,8}|[a-z]+);";
+    let scan_result = scan(pattern, text.copy());
+    let matches: [map] = scan_result["matches"].copy();
+    let tail: string = scan_result["tail"].copy();
+    let mut output = "";
+    let mut exception = "";
+    for index in 0..matches.length {
+        let item: map = matches[index].copy();
+        let groups: [string] = item["groups"].copy();
+        let marker: string = groups[0].copy();
+        let entity: string = groups[1].copy();
+        output = output + item["prefix"].copy();
+        if marker == "#" {
+            if first("^[0-9]+$", ascii_digits(entity.copy())).length == 0 {
+                exception = "ValueError";
+            } else {
+                let decoded = unicode_scalar(decimal(entity.copy()));
+                if decoded["ok"].copy() == false {
+                    let decoded_exception: string = decoded["exception"].copy();
+                    exception = decoded_exception;
+                } else {
+                    output = output + decoded["value"].copy();
+                }
+            }
+        } else if entity == "amp" {
+            output = output + "&";
+        } else if entity == "nbsp" {
+            output = output + " ";
+        } else if entity == "quot" {
+            output = output + "\"";
+        } else if entity == "lt" {
+            output = output + "<";
+        } else if entity == "gt" {
+            output = output + ">";
+        } else if entity == "copy" {
+            output = output + "©";
+        } else if entity == "reg" {
+            output = output + "®";
+        } else {
+            output = output + "?";
+        }
+        if exception != "" {
+            break;
+        }
+    }
+    let mut result: map = {};
+    if exception != "" {
+        result["ok"] = false;
+        result["exception"] = exception;
+        result["text"] = "";
+    } else {
+        result["ok"] = true;
+        result["exception"] = "";
+        result["text"] = output + tail;
+    }
+    result
+}
+
+pub fn parse_human_time(text: string) -> int {
+    let digits = "([" + nd_all() + "]+)";
+    let days = first(digits.copy() + "\\sdays*", text.copy());
+    let hours = first(digits.copy() + "\\shours*", text.copy());
+    let minutes = first(digits.copy() + "\\sminutes*", text.copy());
+    let mut seconds = 0;
+    if days.length > 1 {
+        seconds = seconds + 86400 * decimal(days[1].copy());
+    }
+    if hours.length > 1 {
+        seconds = seconds + 3600 * decimal(hours[1].copy());
+    }
+    if minutes.length > 1 {
+        seconds = seconds + 60 * decimal(minutes[1].copy());
+    } else {
+        seconds = seconds + 60;
+    }
+    seconds
+}

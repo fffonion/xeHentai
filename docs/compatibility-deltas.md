@@ -334,3 +334,28 @@
 - 输入：带 `filelist` 的任务 `meta.total` 超过累计预算、为负数，或导入 JSON 试图扩大预算
 - 实测输出：RSS 在任何 scan/零文件删除/新 Root 发布前预检所有任务 total，拒绝为稳定的 `session:scan_budget`；原文件、Root、磁盘与队列不变。默认一次恢复最多 100000 个 fid，预算只来自可信 `SessionOptions`
 - 拟定合同：不实现通用 schema 框架或完整 Task9 调度，不增加 sidecar/配置键；超大 total 不进入 fid 遍历。
+
+
+## delta.site-strict-json-nan
+
+- 来源：`xeHentai/filters.py:flt_pageurl_mpv` 的 `json.loads`
+- 状态：Task7 明确保留的 Core 边界
+- 输入：`imagelist = NaN;`
+- 实测输出：Python `json.loads` 接受 `NaN` 常量并以 `TypeError` 结束，且没有 callback；Core 严格 JSON 拒绝非有限常量，RSS 先发 `1008` fail callback（`returned=strict-json-invalid`）再以 `TypeError` 结束。该 case 只放行这一对精确观测（callback 数量、code、returned、exception 逐项核对），debug/stream 及其他字段仍全量比较
+- 拟定合同：不为兼容 Python 的宽松 JSON 常量修改 Core 解码器；如未来需要，必须单列 Core 变更并重新冻结证据。
+
+## delta.site-surrogate-escape
+
+- 来源：`xeHentai/util/__init__.py:htmlescape`
+- 状态：Task7 明确保留的标量表示边界
+- 输入：`&#55296;`
+- 实测输出：Python `unichr(55296)` 返回孤立代理项字符串（观测为 codepoints `[55296]`）；Rust 字符串无法表示孤立代理项，RSS 以 `ValueError` 结束。该 case 固定 oracle codepoints、两侧 exception 与空 callbacks
+- 拟定合同：不构造非法 UTF-8 或代理项仿真；若上游真实页面依赖该行为，需单独决定可表示输出。
+
+## delta.site-numeric-entity-underscore
+
+- 来源：`xeHentai/util/__init__.py:htmlescape` 的 `int(match.group(2))`
+- 状态：Task7 剩余窄边界
+- 输入：`&#1_0;`
+- 实测输出：Python `int()` 接受数字间下划线，返回 `chr(10)`；RSS 的十进制实体检查只接受 `Nd` 十进制数字（可表示范围仍按 `chr()` 边界拒绝），返回 `ValueError`。该 case 固定 `chr(10)` 与 `ValueError` 两侧观测
+- 拟定合同：不实现 Python 整数字面量的下划线语法；真实站点实体不使用该写法。Unicode `Nd` 数字实体与人类时间已直接比较，不再列为差异。

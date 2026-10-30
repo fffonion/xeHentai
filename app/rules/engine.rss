@@ -1,0 +1,147 @@
+//! Ordered site/rule engine: named request context and filter dispatch.
+//!
+//! The engine owns rule order only. Every extraction and every decision stays
+//! in the site filters and rule modules it calls; nothing here inspects fixture
+//! case names or reimplements site behaviour.
+use json;
+
+use super::site::login;
+use super::site::mpv;
+use super::site::pages;
+use super::site::support;
+use self::download;
+use self::image;
+use self::metadata;
+
+struct StreamInput {
+    kind: string,
+    bytes: [int],
+    callback_return: string,
+}
+
+struct SiteContext {
+    operation: string,
+    status_code: int,
+    requested_url: string,
+    real_url: string,
+    content_length: int?,
+    header_names: [string],
+    header_values: [string],
+    text: string,
+    original_image: bool,
+    stream_callback_present: bool,
+    stream_events: [StreamInput],
+    suc_returns: [string],
+    fail_returns: [string],
+}
+
+fn dispatch_context(context: SiteContext, debug_path: string) -> string {
+    if context.operation.copy() == "metadata" => {
+        metadata::run_metadata(
+            context.status_code,
+            context.text.copy(),
+            context.suc_returns,
+            context.fail_returns
+        )
+    } else if context.operation.copy() == "pages" => {
+        pages::extract_page_urls(
+            context.text.copy(),
+            debug_path.copy(),
+            context.suc_returns,
+            context.fail_returns
+        )
+    } else if context.operation.copy() == "mpv" => {
+        mpv::extract_mpv_urls(
+            context.text.copy(),
+            context.real_url.copy(),
+            context.suc_returns,
+            context.fail_returns
+        )
+    } else if context.operation.copy() == "login" => {
+        login::filter_login(
+            context.header_names,
+            context.header_values,
+            context.text.copy(),
+            context.suc_returns,
+            context.fail_returns
+        )
+    } else if context.operation.copy() == "support.time" => {
+        let mut output: map = {};
+        output["callbacks"] = [];
+        output["return"] = support::parse_human_time(context.text.copy());
+        output["exception"] = null;
+        output["decisions"] = ["support:human-time-parsed"];
+        output["debug"] = null;
+        output["stream"] = [];
+        json::encode(output)
+    } else if context.operation.copy() == "support.escape" => {
+        let escaped = support::htmlescape(context.text.copy());
+        let mut output: map = {};
+        output["callbacks"] = [];
+        if escaped["ok"].copy() {
+            output["return"] = escaped["text"].copy();
+            output["exception"] = null;
+        } else {
+            output["return"] = null;
+            output["exception"] = escaped["exception"].copy();
+        }
+        output["decisions"] = ["support:entities-decoded"];
+        output["debug"] = null;
+        output["stream"] = [];
+        json::encode(output)
+    } else if context.operation.copy() == "reset_quota" => {
+        let mut output: map = {};
+        output["callbacks"] = [];
+        output["return"] = null;
+        output["exception"] = null;
+        output["decisions"] = ["quota:reset-noop"];
+        output["debug"] = null;
+        output["stream"] = [];
+        json::encode(output)
+    } else if context.operation.copy() == "image" => {
+        image::run_image(
+            context.status_code,
+            context.requested_url.copy(),
+            context.real_url.copy(),
+            context.content_length,
+            context.header_names,
+            context.header_values,
+            context.text.copy(),
+            context.original_image,
+            context.suc_returns,
+            context.fail_returns
+        )
+    } else if context.operation.copy() == "download" => {
+        download::run_download(
+            context.status_code,
+            context.requested_url.copy(),
+            context.real_url.copy(),
+            context.content_length,
+            context.header_names,
+            context.header_values,
+            context.text.copy(),
+            context.stream_callback_present,
+            json::encode(context.stream_events.copy()),
+            context.suc_returns,
+            context.fail_returns
+        )
+    } else => {
+        let mut output: map = {};
+        output["callbacks"] = [];
+        output["return"] = null;
+        output["exception"] = "UnknownOperation";
+        output["decisions"] = ["request:unknown-operation"];
+        output["debug"] = null;
+        output["stream"] = [];
+        json::encode(output)
+    }
+}
+
+pub fn run_engine(request: string, debug_path: string) -> string {
+    if json::is_valid(request.copy()) == false => {
+        "{\"callbacks\":[],\"return\":null,\"exception\":\"JSONDecodeError\",\"decisions\":[\"request:invalid-json\"],\"debug\":null,\"stream\":[]}"
+    } else => {
+        let context: SiteContext = json::decode::<SiteContext>(request.copy());
+        dispatch_context(context, debug_path.copy())
+    }
+}

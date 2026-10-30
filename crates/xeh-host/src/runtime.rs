@@ -16,6 +16,7 @@ use crate::types::HostError;
 
 const DRIVE_STEP_LIMIT: usize = 10_000;
 const CONFIG_IO_LIMIT_BYTES: usize = 4 * 1024 * 1024;
+const SITE_IO_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
 pub fn app_main_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../app/main.rss")
@@ -222,6 +223,87 @@ async fn run_config_scenario_async(root: &Path, request: &str) -> Result<String,
         Value::String(text) => Ok(text.as_str().to_string()),
         other => Err(HostError::runtime(format!(
             "config entry returned {other:?}, not a string"
+        ))),
+    }
+}
+
+/// Runs the RSS site/rule entry with a fixture-owned debug-write root.
+///
+/// The guest receives only the fixed `debug.htm` target under `root`; it cannot
+/// select an ambient host path. This runner is for controlled fixture execution.
+pub fn run_site_scenario(root: &Path, request: &str) -> Result<String, HostError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| HostError::runtime(error.to_string()))?;
+    runtime.block_on(run_site_scenario_async(root, request))
+}
+
+async fn run_site_scenario_async(root: &Path, request: &str) -> Result<String, HostError> {
+    let root_text = root
+        .to_str()
+        .ok_or_else(|| HostError::runtime("site fixture root is not valid UTF-8"))?;
+    let debug_path = root.join("debug.htm");
+    let debug_text = debug_path
+        .to_str()
+        .ok_or_else(|| HostError::runtime("site debug path is not valid UTF-8"))?;
+    let catalog = standard_catalog();
+    let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../app/site/entry.rss");
+    let program = compile_file_with_catalog(&entry, Arc::clone(&catalog))
+        .map_err(|error| HostError::compile(format!("site entry {}: {error}", entry.display())))?;
+    let mut vm = Vm::try_new(program).map_err(HostError::from_vm)?;
+    vm.set_jit_config(vm::JitConfig {
+        enabled: false,
+        ..Default::default()
+    });
+    let registry = open_registry(&catalog)?;
+    bind_vm(&mut vm, &registry)?;
+    attach_timer(&mut vm, Arc::new(EmbeddingTimer::new()));
+    vm.configure_io(IoPolicy {
+        allowed_roots: vec![root_text.to_string()],
+        allow_write: true,
+        allow_process: false,
+        max_read_bytes: SITE_IO_LIMIT_BYTES,
+        max_write_bytes: SITE_IO_LIMIT_BYTES,
+    });
+    drive_to_halt(&mut vm).await?;
+    let callable = vm
+        .resolve_exported_callable("run")
+        .map_err(HostError::from_vm)?;
+    let mut invocation = vm
+        .start_invocation(
+            callable,
+            vec![
+                Value::string(request.to_string()),
+                Value::string(debug_text.to_string()),
+            ],
+        )
+        .map_err(HostError::from_vm)?;
+    let value = poll_fn(|context| loop {
+        match invocation.poll_next_with_context(context) {
+            Ok(InvocationPoll::Pending) => return Poll::Pending,
+            Ok(InvocationPoll::Ready(Some(Ok(InvocationItem::Event(_))))) => continue,
+            Ok(InvocationPoll::Ready(Some(Ok(InvocationItem::Complete(value))))) => {
+                return Poll::Ready(Ok(value));
+            }
+            Ok(InvocationPoll::Ready(Some(Err(error)))) => {
+                return Poll::Ready(Err(HostError::runtime(format!(
+                    "site invocation failed: {error:?}"
+                ))));
+            }
+            Ok(InvocationPoll::Ready(None)) => {
+                return Poll::Ready(Err(HostError::runtime(
+                    "site invocation ended without a result",
+                )));
+            }
+            Err(error) => return Poll::Ready(Err(HostError::from_vm(error))),
+        }
+    })
+    .await?;
+    match value {
+        Value::String(text) => Ok(text.as_str().to_string()),
+        other => Err(HostError::runtime(format!(
+            "site entry returned {other:?}, not a string"
         ))),
     }
 }

@@ -1,0 +1,8 @@
+//! Public site/rules entry. The ordered engine owns every filter decision.
+use super::rules::engine;
+
+pub fn run(request: string, debug_path: string) -> string {
+    engine::run_engine(request.copy(), debug_path.copy())
+}
+
+0;

@@ -1,0 +1,97 @@
+//! Multipage-viewer page URL extraction; JSON failure deliberately continues.
+use json;
+
+use self::support;
+
+fn fail_event(returned: string) -> map {
+    let mut item: map = {};
+    item["kind"] = "fail";
+    item["value"] = 1008;
+    item["returned"] = returned;
+    item
+}
+
+fn success_event(value: string, returned: string) -> map {
+    let mut item: map = {};
+    item["kind"] = "suc";
+    item["value"] = value;
+    item["returned"] = returned;
+    item
+}
+
+fn callback_return(values: [string], index: int) -> string {
+    if index >= 0 && index < values.length => {
+        values[index].copy()
+    } else => { "" }
+}
+
+fn report(callbacks: [map], exception: string, decisions: [string]) -> string {
+    let mut output: map = {};
+    output["callbacks"] = callbacks;
+    output["return"] = null;
+    if exception == "" {
+        output["exception"] = null;
+    } else {
+        output["exception"] = exception;
+    }
+    output["decisions"] = decisions;
+    output["debug"] = null;
+    output["stream"] = [];
+    json::encode(output)
+}
+
+pub fn extract_mpv_urls(text: string, real_url: string, suc_returns: [string], fail_returns: [string]) -> string {
+    let imagelist_texts = support::capture_group_all("imagelist\\s=\\s([^;]+)", text.copy(), 0);
+    let mut callbacks: [map] = [];
+    let mut decisions: [string] = [];
+    let mut images: [map] = [];
+    let mut invalid_json = false;
+
+    if imagelist_texts.length == 0 {
+        callbacks[callbacks.length] = fail_event(callback_return(fail_returns, callbacks.length));
+        decisions[decisions.length] = "mpv:imagelist-missing";
+        callbacks[callbacks.length] = fail_event(callback_return(fail_returns, callbacks.length));
+        decisions[decisions.length] = "mpv:json-load-failed";
+    } else {
+        let first_json: string = imagelist_texts[0].copy();
+        if json::is_valid(first_json.copy()) {
+            images = json::decode::<[map]>(first_json.copy());
+            decisions[decisions.length] = "mpv:json-decoded";
+        } else {
+            callbacks[callbacks.length] = fail_event(callback_return(fail_returns, callbacks.length));
+            decisions[decisions.length] = "mpv:json-load-failed";
+            invalid_json = true;
+        }
+    }
+
+    let baseurls = support::capture_group_all("(https?://[^/]+)", real_url.copy(), 0);
+    let gids = support::capture_group_all(".+/(\\d+)/([^/]+)/*", real_url.copy(), 0);
+    let exception: string = if baseurls.length == 0 || gids.length == 0 => {
+        "IndexError"
+    } else if invalid_json => {
+        "TypeError"
+    } else => {
+        ""
+    };
+
+    let output: string = if exception != "" => {
+        report(callbacks, exception, decisions)
+    } else => {
+        let baseurl: string = baseurls[0].copy();
+        let gid: string = gids[0].copy();
+        let mut loop_exception = "";
+        for index in 0..images.length {
+            if index >= images.length {
+                loop_exception = "IndexError";
+                break;
+            }
+            let image: map = images[index].copy();
+            let key: string = image["k"].copy();
+            let page_url = baseurl + "/s/" + key + "/" + gid + "-" + json::encode(index + 1);
+            callbacks[callbacks.length] = success_event(page_url, callback_return(suc_returns, index));
+            decisions[decisions.length] = "mpv:page-url-found";
+        }
+        report(callbacks, loop_exception, decisions)
+    };
+    output
+}

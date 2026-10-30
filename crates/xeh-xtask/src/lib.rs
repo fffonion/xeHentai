@@ -8,6 +8,7 @@ mod manifest;
 mod oracle;
 mod paths;
 mod session;
+mod site;
 mod task_api;
 mod verify;
 
@@ -19,6 +20,7 @@ pub use session::{
     load_produced_session, produce_remaining_session, run_session_diff, run_session_suite,
     ProducedSession,
 };
+pub use site::{run_rules_suite, run_site_diff, run_site_suite};
 pub use task_api::{run_state_suite, run_task_diff};
 pub use verify::{verify_deny_unverified, VerifyReport};
 

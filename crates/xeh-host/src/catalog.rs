@@ -44,15 +44,20 @@ pub fn install_reused_hosts(
                 module.name
             )));
         };
-        if module.name == "io" {
-            // Retain the Core owned builtin authorization. The typed catalog
-            // now includes write/flush alongside open/read_all/close.
-            // read_line is not in the typed catalog.
-            grant_owned_builtins(registry, module.owned)?;
-        }
         surface
             .install_from_catalog(registry, catalog)
             .map_err(|error| HostError::bind(error.to_string()))?;
+        if module.name == "io" {
+            // Catalog-backed io operations (including the new typed writer)
+            // must be installed before builtin authorization so allow_builtin
+            // recognizes them as named host imports instead of static IDs.
+            let catalog_names: Vec<String> = surface
+                .descriptors()
+                .into_iter()
+                .map(|descriptor| descriptor.schema.name)
+                .collect();
+            grant_owned_builtins(registry, module.owned, &catalog_names)?;
+        }
         installed.push(module.name);
     }
     for name in REUSED_CATALOG_MODULES {
@@ -88,9 +93,19 @@ fn install_surface_state(vm: &mut Vm, surface: &HostModuleDescriptor) -> Result<
 fn grant_owned_builtins(
     registry: &mut HostFunctionRegistry,
     owned: &'static [fn() -> vm::HostFunctionDescriptor],
+    catalog_names: &[String],
 ) -> Result<(), HostError> {
     for factory in owned {
         let name = factory().schema.name;
+        // Some owned functions are formal catalog imports rather than static
+        // namespaced builtins. The surface has already installed those, and
+        // `allow_builtin` would reject them because they have no static ID.
+        if catalog_names
+            .iter()
+            .any(|catalog_name| catalog_name == &name)
+        {
+            continue;
+        }
         registry
             .allow_builtin(&name)
             .map_err(|error| HostError::bind(error.to_string()))?;

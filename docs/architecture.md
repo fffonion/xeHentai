@@ -86,3 +86,14 @@ Task5 不实现 session、站点扫描、代理、下载器、文件归档或 RP
 会话差分使用显式失败 case 表，而不是“任何双方失败”放行：`unreadable_session`/`bad_json`/`missing_tasks`/`tasks_type`/`missing_guid` 的 oracle outcome/exception/return 与 RSS class/code 都是固定 tuple；`outside_root` 只接受带 `xeh_fs:root_denied` 的 host failure 且不发布任务。所有失败还比较 post tasks/queue/cookies/header/login/disk 与各自 pre-invocation baseline（`outside_root` 的 upstream 发布行为单独记录为安全差异）。失败 mutation gates 与成功四负例共用同一生产 comparator。
 
 跨版本剩余图验收在 `crates/xeh-xtask/tests/session_e2e.rs`：固定 43fc55c 的 `xeHentai.save_session()` 通过共享 `compat/oracle/session_runner.py` 写出原始 `h.json`（输入任务同时含已下载 fid 1 与缺页 11/12）；新 VM 加载后由 RSS done 集/`remaining_plan` 过滤 fid 1，薄 driver 只运输计划到已接受 Task3 worker 与 `xeh_fs::rename_atomic`。本地 HTTP fixture 为三个 fid 都准备响应，但只允许 fid 11/12 被请求；重扫 finished=3、plan 为空、保存后第三 VM 保持旧 GUID/queue/cookie，并与原版在同一磁盘布局上的 load/scan 结果对照。
+
+
+## Task 7 站点过滤与 RSS 规则内核
+
+站点/规则入口是 `app/site/entry.rss`，它只做一次委托；`app/rules/engine.rss` 持有命名的 `SiteContext`/`StreamInput` 和有序分发。engine 只决定哪个过滤器先跑，不解析夹具 id、不重写站点行为；站点提取仍在 `app/site/{metadata,pages,mpv,image,login,support}.rss`，配额与流规则在 `app/rules/{image,download}.rss`，`app/rules/metadata.rss` 是 metadata 的规则相位包装。
+
+`support.rss` 负责固定源 regex 组合（`re::replace` 标记 + literal split + 逐段 captures）、单遍 HTML 实体替换与十进制转换。Unicode `Nd` 数字不依赖内嵌 regex 引擎的 Unicode 版本：`nd_digits()` 的十组十进制值字符类由 oracle 解释器的 `unicodedata`（Unicode 16.0.0）生成，`ascii_digits()` 只归一化被捕获的数字 token，之后才进入既有 ASCII 累加；标题、URL 与整页文本不经过该归一化。
+
+`download.rss` 保持原有配额/404/长度/回调预检顺序，并把流处理拆成 Task9 可复用的有界状态机：`stream_begin(expected_length)` 返回命名 `StreamState`（只含计数、终端标志与失败码，不保存镜像字节），`stream_chunk`、`stream_connection_error`、`stream_end` 每次只接收一个有界 chunk 并返回 `StreamStep{state,events,decisions}`。夹具批量 runner 与跨调用测试驱动同一组 transition，没有第二套事件模型；空 chunk、连接/回调异常、短/长完成和互不相关的流都由同一实现处理。
+
+站点差分在 `crates/xeh-xtask/src/site.rs`：先按 Git 树与 blob 逐字节核对固定源 `43fc55c0c662f195d048becf6276a26ce06b09d9` 的 19 个包文件，再由 `compat/oracle/site_runner.py` 在隔离 cwd/env 中执行真实上游 `filters.py`/`util`。比较覆盖 callbacks/顺序、return、exception class、debug 字节与 stream 事件/chunk 字节；9 个 mutation 由同一生产 comparator 拒绝。`rss-test --suite rules` 执行 17 个 RSS 断言 case，`diff --suite site` 执行 36 个 oracle 差分 case（site+rules）。已知差异只有三个窄边界，逐条记录在 `docs/compatibility-deltas.md`，没有全局放行或业务 URL/状态忽略。

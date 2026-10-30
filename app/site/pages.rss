@@ -1,0 +1,58 @@
+//! Ordered page URL extraction and best-effort raw-body debug effect.
+use io;
+use json;
+
+use self::support;
+
+fn success_event(value: string, returned: string) -> map {
+    let mut item: map = {};
+    item["kind"] = "suc";
+    item["value"] = value;
+    item["returned"] = returned;
+    item
+}
+
+fn fail_event(returned: string) -> map {
+    let mut item: map = {};
+    item["kind"] = "fail";
+    item["value"] = 1008;
+    item["returned"] = returned;
+    item
+}
+
+fn report(callbacks: [map], decisions: [string]) -> string {
+    let mut output: map = {};
+    output["callbacks"] = callbacks;
+    output["return"] = null;
+    output["exception"] = null;
+    output["decisions"] = decisions;
+    output["debug"] = null;
+    output["stream"] = [];
+    json::encode(output)
+}
+
+pub fn extract_page_urls(text: string, debug_path: string, suc_returns: [string], fail_returns: [string]) -> string {
+    let urls = support::capture_group_all(
+        "<a href=\"(https*://(?:[g\\.]*e-|ex)hentai\\.org/./[a-f0-9]{10}/\\d+\\-\\d+)\">(?:<div>)?(?:<div|<img alt=\"\\d+\") title=\"Page",
+        text.copy(),
+        0
+    );
+    let mut callbacks: [map] = [];
+    let mut decisions: [string] = [];
+    if urls.length == 0 {
+        let _debug_write = io::try_write_text(debug_path.copy(), text.copy());
+        decisions[decisions.length] = "pages:debug-write-attempted";
+        decisions[decisions.length] = "pages:no-url";
+        callbacks[callbacks.length] = fail_event(fail_returns[0].copy());
+    } else {
+        for index in 0..urls.length {
+            let page_url: string = urls[index].copy();
+            let returned: string = if index < suc_returns.length => {
+                suc_returns[index].copy()
+            } else => { "" };
+            callbacks[callbacks.length] = success_event(page_url, returned);
+            decisions[decisions.length] = "pages:url-found";
+        }
+    }
+    report(callbacks, decisions)
+}

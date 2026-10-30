@@ -7,6 +7,7 @@
 //! invents credentials; callers pass the cookie data they already own.
 use json;
 
+use self::support;
 use super::domain::task;
 
 /// `util.make_cookie`: adjacent `name=value` pairs joined by `;` in the order
@@ -114,4 +115,95 @@ pub fn parse_cookie_string(text: string) -> string {
         out = out + pairs[index].copy();
     }
     out + "]}"
+}
+
+fn login_suc_event(member: string, pass: string, returned: string) -> map {
+    let mut cookies: map = {};
+    cookies["ipb_member_id"] = member;
+    cookies["ipb_pass_hash"] = pass;
+    let mut event: map = {};
+    event["kind"] = "suc";
+    event["value"] = cookies;
+    event["returned"] = returned;
+    event
+}
+
+fn login_fail_event(message: string, returned: string) -> map {
+    let mut event: map = {};
+    event["kind"] = "fail";
+    event["value"] = message;
+    event["returned"] = returned;
+    event
+}
+
+fn login_report(callbacks: [map], return_code: int, exception: string, decisions: [string]) -> string {
+    let mut output: map = {};
+    output["callbacks"] = callbacks;
+    output["return"] = return_code;
+    if exception == "" {
+        output["exception"] = null;
+    } else {
+        output["exception"] = exception;
+    }
+    output["decisions"] = decisions;
+    output["debug"] = null;
+    output["stream"] = [];
+    json::encode(output)
+}
+
+fn login_exception_report(exception: string, decisions: [string]) -> string {
+    let mut output: map = {};
+    output["callbacks"] = [];
+    output["return"] = null;
+    output["exception"] = exception;
+    output["decisions"] = decisions;
+    output["debug"] = null;
+    output["stream"] = [];
+    json::encode(output)
+}
+
+/// Upstream `login_exhentai`: only IndexError is caught; a missing header
+/// retains its TypeError and creates no callback.
+pub fn filter_login(header_names: [string], header_values: [string], text: string, suc_returns: [string], fail_returns: [string]) -> string {
+    let mut found = false;
+    let mut cookie_text = "";
+    for index in 0..header_names.length {
+        let name: string = header_names[index].copy();
+        if string_lower_ascii(name.copy()) == "set-cookie" {
+            if index < header_values.length {
+                cookie_text = header_values[index].copy();
+                found = true;
+            }
+            break;
+        }
+    }
+    let mut decisions: [string] = [];
+    let output: string = if !found => {
+        decisions[decisions.length] = "login:set-cookie-missing-typeerror";
+        login_exception_report("TypeError", decisions)
+    } else => {
+        let members = support::capture_group_all("ipb_member_id=(.*?);", cookie_text.copy(), 0);
+        let passwords = support::capture_group_all("ipb_pass_hash=(.*?);", cookie_text.copy(), 0);
+        if members.length == 0 || passwords.length == 0 => {
+            let messages = support::capture_group_all("<span class=\"postcolor\">([^<]+)</span>", text.copy(), 0);
+            let mut callbacks: [map] = [];
+            let message: string = if messages.length > 0 => {
+                let value: string = messages[0].copy();
+                value
+            } else => { "ex: list index out of range" };
+            let returned: string = if fail_returns.length > 0 => { fail_returns[0].copy() } else => { "" };
+            callbacks[callbacks.length] = login_fail_event(message, returned);
+            decisions[decisions.length] = if messages.length > 0 => { "login:postcolor-failure" } else => { "login:indexerror-fallback" };
+            login_report(callbacks, 1, "", decisions)
+        } else => {
+            let member: string = members[0].copy();
+            let pass: string = passwords[0].copy();
+            let mut callbacks: [map] = [];
+            let returned: string = if suc_returns.length > 0 => { suc_returns[0].copy() } else => { "" };
+            callbacks[callbacks.length] = login_suc_event(member, pass, returned);
+            decisions[decisions.length] = "login:success";
+            login_report(callbacks, 0, "", decisions)
+        }
+    };
+    output
 }

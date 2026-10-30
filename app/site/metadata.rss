@@ -1,0 +1,147 @@
+//! Gallery metadata extraction from the original response body.
+use json;
+use re;
+
+use self::support;
+
+fn fail_event(code: int, returned: string) -> map {
+    let mut event: map = {};
+    event["kind"] = "fail";
+    event["value"] = code;
+    event["returned"] = returned;
+    event
+}
+
+fn result(callbacks: [map], returned: string?, exception: string, decisions: [string]) -> string {
+    let mut output: map = {};
+    output["callbacks"] = callbacks;
+    output["return"] = returned;
+    if exception == "" {
+        output["exception"] = null;
+    } else {
+        output["exception"] = exception;
+    }
+    output["decisions"] = decisions;
+    output["debug"] = null;
+    output["stream"] = [];
+    json::encode(output)
+}
+
+fn fail_result(code: int, returned: string, decision: string) -> string {
+    let mut callbacks: [map] = [];
+    callbacks[callbacks.length] = fail_event(code, returned.copy());
+    let mut decisions: [string] = [];
+    decisions[decisions.length] = decision;
+    result(callbacks, returned, "", decisions)
+}
+
+pub fn extract(status_code: int, text: string, suc_returns: [string], fail_returns: [string]) -> string {
+    let outcome: string = if status_code == 600 => {
+        fail_result(1009, fail_returns[0].copy(), "status:connection-error")
+    } else if status_code == 404 => {
+        fail_result(1004, fail_returns[0].copy(), "status:gallery-removed")
+    } else if support::first("^This gallery is pining for the fjords", text.copy()).length > 0 => {
+        fail_result(1002, fail_returns[0].copy(), "prefix:only-visible-exhentai")
+    } else if support::first("^Your IP address has been temporarily banned", text.copy()).length > 0 => {
+        let mut callbacks: [map] = [];
+        callbacks[callbacks.length] = fail_event(1010, fail_returns[0].copy());
+        let mut decisions: [string] = [];
+        decisions[decisions.length] = "prefix:ip-banned";
+        let expiry = support::first("The ban expires in (.+)", text.copy());
+        let ban_result: string = if expiry.length < 2 => {
+            decisions[decisions.length] = "ban-expiry:missing";
+            result(callbacks, null, "IndexError", decisions)
+        } else => {
+            decisions[decisions.length] = "ban-expiry:returned-text";
+            result(callbacks, expiry[1].copy(), "", decisions)
+        };
+        ban_result
+    } else => {
+        let mut callbacks: [map] = [];
+        let mut decisions: [string] = [];
+        let mut problem = "";
+        let gj_match = support::first("=\"gj\">(.*?)</h1>", text.copy());
+        let gj_raw: string = if gj_match.length > 1 => {
+            let value: string = gj_match[1].copy();
+            value
+        } else => { "" };
+        let gj_escape = support::htmlescape(gj_raw);
+        if gj_match.length < 2 {
+            problem = "IndexError";
+            decisions[decisions.length] = "metadata:gjname-missing";
+        } else if gj_escape["ok"].copy() == false {
+            let error_name: string = gj_escape["exception"].copy();
+            problem = error_name;
+            decisions[decisions.length] = "metadata:gjname-escape-error";
+        }
+
+        let gn_match = support::first("=\"gn\">(.*?)</h1>", text.copy());
+        let gn_raw: string = if gn_match.length > 1 => {
+            let value: string = gn_match[1].copy();
+            value
+        } else => { "" };
+        let gn_escape = support::htmlescape(gn_raw);
+        if problem == "" {
+            if gn_match.length < 2 {
+                problem = "IndexError";
+                decisions[decisions.length] = "metadata:gnname-missing";
+            } else if gn_escape["ok"].copy() == false {
+                let error_name: string = gn_escape["exception"].copy();
+                problem = error_name;
+                decisions[decisions.length] = "metadata:gnname-escape-error";
+            }
+        }
+
+        let total_match = support::first("Length:</td><td class=\"gdt2\">(\\d+)\\s+page", text.copy());
+        let total_text: string = if total_match.length > 1 => {
+            let value: string = total_match[1].copy();
+            value
+        } else => { "" };
+        if problem == "" && total_match.length < 2 {
+            problem = "IndexError";
+            decisions[decisions.length] = "metadata:total-missing";
+        }
+
+        let showing = support::first("Showing (\\d+) \\- (\\d+) of ([\\d,]+) images", text.copy());
+        let shown_start: string = if showing.length > 1 => {
+            let value: string = showing[1].copy();
+            value
+        } else => { "0" };
+        let shown_end: string = if showing.length > 2 => {
+            let value: string = showing[2].copy();
+            value
+        } else => { "0" };
+        if problem == "" && showing.length < 4 {
+            problem = "IndexError";
+            decisions[decisions.length] = "metadata:thumbnail-count-missing";
+        }
+
+        let tags = support::capture_all("toggle_tagmenu\\('([^']+)'", text.copy());
+        let mpv = re::captures(
+            "<a href=\"https*://(?:[g\\.]*e-|ex)hentai\\.org/mpv/(\\d+)/[a-f0-9]{10}/#page\\d+\">(?:<div|<img alt=\"\\d+\") title=\"Page",
+            text.copy()
+        );
+
+        let report: string = if problem != "" => {
+            result(callbacks, null, problem, decisions)
+        } else => {
+            let mut metadata: map = {};
+            metadata["gjname"] = gj_escape["text"].copy();
+            metadata["gnname"] = gn_escape["text"].copy();
+            metadata["total"] = support::decimal(total_text);
+            metadata["finished"] = 0;
+            metadata["tags"] = tags;
+            metadata["thumbnail_cnt"] = support::decimal(shown_end) - support::decimal(shown_start) + 1;
+            metadata["use_multipage_viewer"] = mpv.length > 0;
+            let mut event: map = {};
+            event["kind"] = "suc";
+            event["value"] = metadata;
+            event["returned"] = suc_returns[0].copy();
+            callbacks[callbacks.length] = event;
+            decisions[decisions.length] = "metadata:success";
+            result(callbacks, null, "", decisions)
+        };
+        report
+    };
+    outcome
+}

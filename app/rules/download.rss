@@ -1,0 +1,324 @@
+//! Download quota plus reusable bounded per-stream transitions.
+//!
+//! `stream_begin` / `stream_chunk` / `stream_end` / `stream_connection_error`
+//! are the rule-layer state machine a downloader drives one bounded chunk at a
+//! time. The fixture batch runner below drives exactly these transitions; there
+//! is no second event model, and the state keeps counts plus the terminal
+//! decision only, so no image body is accumulated inside the VM.
+use json;
+
+use self::image;
+use super::site::support;
+
+struct StreamInput {
+    kind: string,
+    bytes: [int],
+    callback_return: string,
+}
+
+/// Per-stream accounting carried between bounded transition calls.
+struct StreamState {
+    expected_length: int,
+    bytes_read: int,
+    next_order: int,
+    terminal: bool,
+    aborted: bool,
+    finished: bool,
+    failure_code: int,
+    failure_reason: string,
+}
+
+/// One transition result: the successor state and the ordered observables the
+/// caller appends to its report.
+struct StreamStep {
+    state: StreamState,
+    events: [map],
+    decisions: [string],
+}
+
+fn failure(code: int, real_url: string, requested_url: string, returned: string, order: int) -> map {
+    let mut value = [code, real_url, requested_url];
+    let mut event: map = {};
+    event["kind"] = "fail";
+    event["value"] = value;
+    event["returned"] = returned;
+    event["order"] = order;
+    event
+}
+
+fn success(real_url: string, requested_url: string, returned: string) -> map {
+    let mut value: [string] = ["stream", real_url, requested_url];
+    let mut event: map = {};
+    event["kind"] = "suc";
+    event["value"] = value;
+    event["returned"] = returned;
+    event["order"] = 0;
+    event
+}
+
+fn stream_event(kind: string, bytes: [int], callback_return: string, bytes_read: int, order: int) -> map {
+    let mut event: map = {};
+    event["kind"] = kind;
+    event["bytes"] = bytes;
+    event["callback_return"] = callback_return;
+    event["bytes_read"] = bytes_read;
+    event["order"] = order;
+    event
+}
+
+fn complete_event(bytes_read: int, order: int) -> map {
+    let mut event: map = {};
+    event["kind"] = "complete";
+    event["bytes_read"] = bytes_read;
+    event["order"] = order;
+    event
+}
+
+fn step_of(state: StreamState, events: [map], decisions: [string]) -> StreamStep {
+    {
+        state: state,
+        events: events,
+        decisions: decisions,
+    }
+}
+
+fn carried_state(state: StreamState, bytes_read: int, next_order: int, terminal: bool, aborted: bool, finished: bool, failure_code: int, failure_reason: string) -> StreamState {
+    {
+        expected_length: state.expected_length,
+        bytes_read: bytes_read,
+        next_order: next_order,
+        terminal: terminal,
+        aborted: aborted,
+        finished: finished,
+        failure_code: failure_code,
+        failure_reason: failure_reason,
+    }
+}
+
+fn stream_terminal(state: StreamState) -> bool {
+    state.terminal
+}
+
+fn stream_bytes_read(state: StreamState) -> int {
+    state.bytes_read
+}
+
+fn stream_next_order(state: StreamState) -> int {
+    state.next_order
+}
+
+fn stream_expected_length(state: StreamState) -> int {
+    state.expected_length
+}
+
+fn stream_aborted(state: StreamState) -> bool {
+    state.aborted
+}
+
+fn stream_failure_code(state: StreamState) -> int {
+    state.failure_code
+}
+
+fn stream_failure_reason(state: StreamState) -> string {
+    state.failure_reason
+}
+
+/// Starts one stream with its expected body length. No image bytes are stored.
+pub fn stream_begin(expected_length: int) -> StreamState {
+    {
+        expected_length: expected_length,
+        bytes_read: 0,
+        next_order: 1,
+        terminal: false,
+        aborted: false,
+        finished: false,
+        failure_code: 0,
+        failure_reason: "",
+    }
+}
+
+/// Consumes one bounded chunk: the chunk callback fires, then the body yields.
+pub fn stream_chunk(state: StreamState, bytes: [int], callback_return: string) -> StreamStep {
+    if stream_terminal(state.copy()) => {
+        step_of(state.copy(), [], ["download:chunk-after-terminal"])
+    } else => {
+        let read = stream_bytes_read(state.copy()) + bytes.length;
+        let callback_order = stream_next_order(state.copy());
+        let yield_order = callback_order + 1;
+        let next = carried_state(state, read, yield_order + 1, false, false, false, 0, "");
+        step_of(
+            next,
+            [stream_event("callback", bytes.copy(), callback_return.copy(), read, callback_order), stream_event("yield", bytes.copy(), "", read, yield_order)],
+            ["download:chunk-callback-before-yield"]
+        )
+    }
+}
+
+/// Completes the stream only when exactly the announced length arrived.
+pub fn stream_end(state: StreamState) -> StreamStep {
+    if stream_terminal(state.copy()) => {
+        step_of(state.copy(), [], ["download:end-after-terminal"])
+    } else if stream_bytes_read(state.copy()) != stream_expected_length(state.copy()) => {
+        let read = stream_bytes_read(state.copy());
+        let order = stream_next_order(state.copy());
+        let next = carried_state(state, read, order, true, true, false, 1012, "download:final-length-mismatch-aborted");
+        step_of(next, [], ["download:final-length-mismatch"])
+    } else => {
+        let read = stream_bytes_read(state.copy());
+        let order = stream_next_order(state.copy());
+        let next = carried_state(state, read, order + 1, true, false, true, 0, "");
+        step_of(next, [complete_event(read, order)], ["download:stream-complete"])
+    }
+}
+
+/// Aborts after an iterator or chunk-callback connection failure.
+pub fn stream_connection_error(state: StreamState, kind: string, bytes: [int], callback_return: string) -> StreamStep {
+    if stream_terminal(state.copy()) => {
+        step_of(state.copy(), [], ["download:error-after-terminal"])
+    } else if kind == "callback-connection-error" => {
+        let read = stream_bytes_read(state.copy()) + bytes.length;
+        let callback_order = stream_next_order(state.copy());
+        let error_order = callback_order + 1;
+        let events = [stream_event("callback", bytes.copy(), callback_return.copy(), read, callback_order), stream_event("connection-error", [], callback_return.copy(), read, error_order)];
+        let next = carried_state(state, read, error_order + 1, true, true, false, 1012, "download:callback-connection-error-aborted");
+        step_of(next, events, ["download:callback-connection-error"])
+    } else if kind == "connection-error" => {
+        let read = stream_bytes_read(state.copy());
+        let order = stream_next_order(state.copy());
+        let events = [stream_event("connection-error", [], callback_return.copy(), read, order)];
+        let next = carried_state(state, read, order + 1, true, true, false, 1012, "download:connection-error-aborted");
+        step_of(next, events, ["download:connection-error"])
+    } else => {
+        step_of(state.copy(), [], ["download:unrecognized-stream-error"])
+    }
+}
+
+/// Renders one transition for a caller that keeps the typed state as data.
+pub fn stream_step_json(step: StreamStep) -> string {
+    json::encode(step)
+}
+
+/// Hands the successor state back to a caller that keeps it between calls.
+pub fn stream_step_state(step: StreamStep) -> StreamState {
+    step.state
+}
+
+pub fn run_download(status_code: int, requested_url: string, real_url: string, content_length: int?, header_names: [string], header_values: [string], text: string, stream_callback_present: bool, stream_events_json: string, suc_returns: [string], fail_returns: [string]) -> string {
+    let stream_events: [StreamInput] = json::decode::<[StreamInput]>(stream_events_json.copy());
+    let quota = image::check_quota(
+        status_code,
+        requested_url.copy(),
+        real_url.copy(),
+        content_length,
+        header_names.copy(),
+        header_values.copy(),
+        text.copy()
+    );
+    let quota_blocked: bool = quota["blocked"].copy();
+    let quota_code: int = quota["code"].copy();
+    let quota_exception: string = quota["exception"].copy();
+    let quota_decision: string = quota["decision"].copy();
+
+    let mut has_length = false;
+    let mut length = 0;
+    if content_length != null {
+        has_length = true;
+        length = content_length;
+    }
+    let sizes = support::capture_group_all(
+        "/([a-f0-9]{40})-(\\d+)-(\\d+)-(\\d+)-([a-z]{0,4})",
+        requested_url.copy(),
+        1
+    );
+    let mut expected_size = -1;
+    if sizes.length > 0 {
+        expected_size = support::decimal(sizes[sizes.length - 1].copy());
+    }
+
+    let mut callbacks: [map] = [];
+    let mut stream: [map] = [];
+    let mut decisions: [string] = [quota_decision];
+    let mut exception = quota_exception;
+    let mut fail_code = 0;
+    let mut failure_reason = "";
+
+    if exception == "" {
+        if quota_blocked {
+            fail_code = quota_code;
+            failure_reason = "download:quota-blocked";
+        } else if status_code == 404 {
+            fail_code = 1011;
+            failure_reason = "download:hath-not-found";
+        } else if !has_length || length == 0 {
+            fail_code = 1012;
+            failure_reason = "download:missing-or-zero-content-length";
+        } else if expected_size >= 0 && expected_size != length {
+            fail_code = 1012;
+            failure_reason = "download:encoded-size-mismatch";
+        } else if !stream_callback_present {
+            fail_code = 1014;
+            failure_reason = "download:stream-callback-missing";
+        } else {
+            decisions[decisions.length] = "download:success-callback-before-consumption";
+            let success_return: string = if suc_returns.length > 0 => { suc_returns[0].copy() } else => { "" };
+            callbacks[callbacks.length] = success(real_url.copy(), requested_url.copy(), success_return);
+            let mut state = stream_begin(length);
+            for index in 0..stream_events.length {
+                let event: StreamInput = stream_events[index].copy();
+                let kind: string = event.kind.copy();
+                let step = if kind == "connection-error" || kind == "callback-connection-error" => {
+                    stream_connection_error(state.copy(), kind.copy(), event.bytes.copy(), event.callback_return.copy())
+                } else => {
+                    stream_chunk(state.copy(), event.bytes.copy(), event.callback_return.copy())
+                };
+                let step_events: [map] = step.events.copy();
+                for at in 0..step_events.length {
+                    stream[stream.length] = step_events[at].copy();
+                }
+                let step_decisions: [string] = step.decisions.copy();
+                for at in 0..step_decisions.length {
+                    decisions[decisions.length] = step_decisions[at].copy();
+                }
+                state = step.state.copy();
+                if stream_aborted(state.copy()) {
+                    break;
+                }
+            }
+            if stream_aborted(state.copy()) == false {
+                let step = stream_end(state.copy());
+                let step_events: [map] = step.events.copy();
+                for at in 0..step_events.length {
+                    stream[stream.length] = step_events[at].copy();
+                }
+                let step_decisions: [string] = step.decisions.copy();
+                for at in 0..step_decisions.length {
+                    decisions[decisions.length] = step_decisions[at].copy();
+                }
+                state = step.state.copy();
+            }
+            if stream_aborted(state.copy()) {
+                fail_code = stream_failure_code(state.copy());
+                failure_reason = stream_failure_reason(state.copy());
+                exception = "DownloadAbortedException";
+            }
+        }
+    }
+
+    if failure_reason != "" {
+        decisions[decisions.length] = failure_reason;
+        let returned: string = if fail_returns.length > 0 => { fail_returns[0].copy() } else => { "" };
+        callbacks[callbacks.length] = failure(fail_code, real_url.copy(), requested_url.copy(), returned, callbacks.length);
+    }
+    let mut output: map = {};
+    output["callbacks"] = callbacks;
+    output["return"] = null;
+    if exception == "" {
+        output["exception"] = null;
+    } else {
+        output["exception"] = exception;
+    }
+    output["decisions"] = decisions;
+    output["debug"] = null;
+    output["stream"] = stream;
+    json::encode(output)
+}

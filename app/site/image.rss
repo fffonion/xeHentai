@@ -1,0 +1,154 @@
+//! Pure-RSS image-page filter matching the frozen upstream source.
+use json;
+
+use self::support;
+
+fn callback_return(values: [string]) -> string {
+    if values.length > 0 => { values[0].copy() } else => { "" }
+}
+
+fn fail_event(code: int, real_url: string, requested_url: string, returned: string) -> map {
+    let mut value = [code, real_url, requested_url];
+    let mut event: map = {};
+    event["kind"] = "fail";
+    event["value"] = value;
+    event["returned"] = returned;
+    event
+}
+
+fn success_event(image_url: string, reload_url: string, filename: string, returned: string) -> map {
+    let mut value: [string] = [image_url, reload_url, filename];
+    let mut event: map = {};
+    event["kind"] = "suc";
+    event["value"] = value;
+    event["returned"] = returned;
+    event
+}
+
+fn report(callbacks: [map], returned: string, exception: string, decisions: [string]) -> map {
+    let mut output: map = {};
+    output["callbacks"] = callbacks;
+    if exception == "" {
+        output["return"] = returned;
+        output["exception"] = null;
+    } else {
+        output["return"] = null;
+        output["exception"] = exception;
+    }
+    output["decisions"] = decisions;
+    output["debug"] = null;
+    output["stream"] = [];
+    output
+}
+
+fn query_url(base: string, key: string, value: string) -> string {
+    let separator: string = if string_contains(base.copy(), "?") => { "&" } else => { "?" };
+    base + separator + key + "=" + value
+}
+
+pub fn extract(text: string, requested_url: string, real_url: string, original_image: bool, suc_returns: [string], fail_returns: [string]) -> map {
+    let mut callbacks: [map] = [];
+    let mut decisions: [string] = [];
+    let fail_return = callback_return(fail_returns);
+    let suc_return = callback_return(suc_returns);
+    let invalid_page = support::first("^Invalid page", text.copy());
+
+    let output: map = if invalid_page.length > 0 => {
+        callbacks[callbacks.length] = fail_event(1005, real_url.copy(), requested_url.copy(), fail_return.copy());
+        decisions[decisions.length] = "image:invalid-page-prefix";
+        report(callbacks, fail_return, "", decisions)
+    } else => {
+        let stamped = support::capture_group_all("src=\"([^\"]+keystamp[^\"]+)\"", text.copy(), 0);
+        let sources: [string] = if stamped.length > 0 => {
+            stamped
+        } else => {
+            support::capture_group_all("src=\"([^\"]+)\"\\s+style=\"", text.copy(), 0)
+        };
+        if sources.length == 0 => {
+            decisions[decisions.length] = "image:src-not-found";
+            callbacks[callbacks.length] = fail_event(1013, real_url.copy(), requested_url.copy(), fail_return.copy());
+            report(callbacks, fail_return, "", decisions)
+        } else => {
+            let raw_image_url: string = sources[0].copy();
+            let escaped_url = support::htmlescape(raw_image_url.copy());
+            if escaped_url["ok"].copy() == false => {
+                decisions[decisions.length] = "image:source-url-unescape-error";
+                report(callbacks, "", "ValueError", decisions)
+            } else => {
+                let image_url: string = escaped_url["text"].copy();
+                let names = support::capture_group_all("</a></div><div>(.*?) ::.+::.+</di", text.copy(), 0);
+                if names.length == 0 => {
+                    decisions[decisions.length] = "image:filename-not-found";
+                    callbacks[callbacks.length] = fail_event(1013, real_url.copy(), requested_url.copy(), fail_return.copy());
+                    report(callbacks, fail_return, "", decisions)
+                } else => {
+                    let mut filename: string = names[0].copy();
+                    if string_contains(filename.copy(), "image.php") {
+                        let query_names = support::capture_group_all("n=(.+)", image_url.copy(), 0);
+                        if query_names.length > 0 {
+                            filename = query_names[0].copy();
+                            decisions[decisions.length] = "image:filename-from-n-query";
+                        }
+                    }
+                    let extensions = support::capture_group_all(".*?\\.([a-zA-Z]+)", filename.copy(), 0);
+                    if extensions.length == 0 => {
+                        decisions[decisions.length] = "image:extension-not-found";
+                        callbacks[callbacks.length] = fail_event(1013, real_url.copy(), requested_url.copy(), fail_return.copy());
+                        report(callbacks, fail_return, "", decisions)
+                    } else => {
+                        decisions[decisions.length] = "image:extension-found";
+                        let indexes = support::capture_group_all(".+/(\\d+)-(\\d*)", real_url.copy(), 0);
+                        if indexes.length == 0 => {
+                            decisions[decisions.length] = "image:real-url-index-not-found";
+                            callbacks[callbacks.length] = fail_event(1013, real_url.copy(), requested_url.copy(), fail_return.copy());
+                            report(callbacks, fail_return, "", decisions)
+                        } else => {
+                            decisions[decisions.length] = "image:real-url-index-found";
+                            let original_urls = support::capture_group_all("class=\"mr\".+<a href=\"(.+)\"\\s*>Download original", text.copy(), 0);
+                            let raw_original_url: string = if original_urls.length > 0 => {
+                                decisions[decisions.length] = "image:original-url-found";
+                                original_urls[0].copy()
+                            } else => {
+                                decisions[decisions.length] = "image:original-url-fallback";
+                                image_url.copy()
+                            };
+                            let escaped_original = support::htmlescape(raw_original_url.copy());
+                            if escaped_original["ok"].copy() == false => {
+                                decisions[decisions.length] = "image:original-url-unescape-error";
+                                report(callbacks, "", "ValueError", decisions)
+                            } else => {
+                                let original_url: string = escaped_original["text"].copy();
+                                let fullsizes = support::capture_group_all("Download\\soriginal\\s[0-9]+\\sx\\s[0-9]+\\s(.*)\\ssource", text.copy(), 0);
+                                if fullsizes.length > 0 {
+                                    decisions[decisions.length] = "image:fullsize-found";
+                                }
+                                let nonces = support::capture_group_all("return nl\\('([a-zA-Z\\d\\-]+)'\\)", text.copy(), 0);
+                                if nonces.length == 0 => {
+                                    decisions[decisions.length] = "image:nonce-not-found";
+                                    callbacks[callbacks.length] = fail_event(1013, real_url.copy(), requested_url.copy(), fail_return.copy());
+                                    report(callbacks, fail_return, "", decisions)
+                                } else => {
+                                    let nonce: string = nonces[0].copy();
+                                    let mut reload_url = query_url(real_url.copy(), "nl", nonce.copy());
+                                    let mut callback_url: string = image_url.copy();
+                                    if original_image {
+                                        callback_url = original_url.copy();
+                                        callback_url = query_url(callback_url.copy(), "redirect", requested_url.copy());
+                                        reload_url = query_url(reload_url.copy(), "redirect", requested_url.copy());
+                                        decisions[decisions.length] = "image:original-requested";
+                                    } else {
+                                        decisions[decisions.length] = "image:resampled-requested";
+                                    }
+                                    callbacks[callbacks.length] = success_event(callback_url, reload_url, filename.copy(), suc_return.copy());
+                                    decisions[decisions.length] = "image:payload-emitted";
+                                    report(callbacks, suc_return, "", decisions)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+    output
+}

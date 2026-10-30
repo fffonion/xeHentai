@@ -1,0 +1,6 @@
+//! Rule-phase entry for metadata status and HTML filtering.
+use super::site::metadata;
+
+pub fn run_metadata(status_code: int, text: string, suc_returns: [string], fail_returns: [string]) -> string {
+    metadata::extract(status_code, text.copy(), suc_returns, fail_returns)
+}

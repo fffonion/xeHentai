@@ -1,0 +1,156 @@
+//! Ordered quota preflight wraps the pure-RSS image-page filter.
+use json;
+
+use super::site::image;
+use super::site::support;
+
+fn fail_event(code: int, real_url: string, requested_url: string, returned: string) -> map {
+    let mut value = [code, real_url, requested_url];
+    let mut event: map = {};
+    event["kind"] = "fail";
+    event["value"] = value;
+    event["returned"] = returned;
+    event
+}
+
+fn quota_result(blocked: bool, code: int, exception: string, decision: string) -> map {
+    let mut result: map = {};
+    result["blocked"] = blocked;
+    result["code"] = code;
+    result["exception"] = exception;
+    result["decision"] = decision;
+    result
+}
+
+pub fn check_quota(status_code: int, requested_url: string, real_url: string, content_length: int?, header_names: [string], header_values: [string], text: string) -> map {
+    let sizes = support::capture_group_all("/([a-f0-9]{40})-(\\d+)-(\\d+)-(\\d+)-([a-z]{0,4})", requested_url.copy(), 1);
+    let mut expected_size = -1;
+    if sizes.length > 0 {
+        expected_size = support::decimal(sizes[sizes.length - 1].copy());
+    }
+
+    let mut has_length = false;
+    let mut length = 0;
+    if content_length != null {
+        has_length = true;
+        length = content_length;
+    }
+
+    let size_mismatch = if expected_size < 0 && !has_length => {
+        false
+    } else if expected_size < 0 || !has_length => {
+        true
+    } else => {
+        expected_size != length
+    };
+
+    let mut quota_lengths: [int] = [925, 28658, 144, 210, 1009];
+    let mut length_is_quota = false;
+    if has_length {
+        for index in 0..quota_lengths.length {
+            if quota_lengths[index].copy() == length {
+                length_is_quota = true;
+                break;
+            }
+        }
+    }
+    let marker_509 = string_contains(requested_url.copy(), "/509.gif") || string_contains(real_url.copy(), "/509.gif");
+
+    let mut code = 0;
+    let mut blocked = false;
+    let mut exception = "";
+    let decision: string = if status_code == 600 => {
+        code = 1009;
+        blocked = true;
+        "quota:status-600-connection"
+    } else if status_code == 403 => {
+        code = 1007;
+        blocked = true;
+        "quota:status-403-key"
+    } else if status_code == 509 || (size_mismatch && (length_is_quota || marker_509)) => {
+        code = 1006;
+        blocked = true;
+        "quota:status-size-or-509-marker"
+    } else if !has_length => {
+        exception = "TypeError";
+        "quota:missing-content-length-typeerror"
+    } else if length < 200 => {
+        let mut content_type = "";
+        for index in 0..header_names.length {
+            if string_lower_ascii(header_names[index].copy()) == "content-type" {
+                if index < header_values.length {
+                    content_type = header_values[index].copy();
+                }
+                break;
+            }
+        }
+        let text_type = support::first("^text", content_type.copy()).length > 0;
+        let quota_text = support::first("exceeded your image viewing limits", text.copy()).length > 0;
+        if text_type && quota_text => {
+            code = 1006;
+            blocked = true;
+            "quota:small-text-image-limit"
+        } else => {
+            "quota:small-body-allowed"
+        }
+    } else => {
+        "quota:allowed"
+    };
+    quota_result(blocked, code, exception, decision)
+}
+
+pub fn run_image(status_code: int, requested_url: string, real_url: string, content_length: int?, header_names: [string], header_values: [string], text: string, original_image: bool, suc_returns: [string], fail_returns: [string]) -> string {
+    let gate = check_quota(
+        status_code,
+        requested_url.copy(),
+        real_url.copy(),
+        content_length,
+        header_names.copy(),
+        header_values.copy(),
+        text.copy()
+    );
+    let decision: string = gate["decision"].copy();
+    let exception: string = gate["exception"].copy();
+    let blocked: bool = gate["blocked"].copy();
+    let code: int = gate["code"].copy();
+    let output: string = if exception != "" => {
+        let mut result: map = {};
+        result["callbacks"] = [];
+        result["return"] = null;
+        result["exception"] = exception;
+        result["decisions"] = [decision];
+        result["debug"] = null;
+        result["stream"] = [];
+        json::encode(result)
+    } else if blocked => {
+        let returned: string = if fail_returns.length > 0 => { fail_returns[0].copy() } else => { "" };
+        let mut callbacks: [map] = [];
+        callbacks[callbacks.length] = fail_event(code, real_url.copy(), requested_url.copy(), returned);
+        let mut result: map = {};
+        result["callbacks"] = callbacks;
+        result["return"] = null;
+        result["exception"] = null;
+        result["decisions"] = [decision];
+        result["debug"] = null;
+        result["stream"] = [];
+        json::encode(result)
+    } else => {
+        let mut report = image::extract(
+            text.copy(),
+            requested_url.copy(),
+            real_url.copy(),
+            original_image,
+            suc_returns,
+            fail_returns
+        );
+        let inner_decisions: [string] = report["decisions"].copy();
+        let mut decisions: [string] = [decision];
+        for index in 0..inner_decisions.length {
+            decisions[decisions.length] = inner_decisions[index].copy();
+        }
+        report["decisions"] = decisions;
+        report["return"] = null;
+        json::encode(report)
+    };
+    output
+}
