@@ -64,7 +64,79 @@ fn local_http(port: u16) -> HttpConfig {
 
 #[tokio::test(flavor = "current_thread")]
 async fn standard_modules_install_at_the_pinned_revision() {
-    open_registry(&standard_catalog()).expect("io, timer, and http catalogs install");
+    open_registry(&standard_catalog()).expect("io, timer, http, and json catalogs install");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ordered_json_entries_preserve_document_order_and_values() {
+    // The input orders its keys against their lexical sort, nests an object
+    // whose member order is inspected through a second decode, and keeps a
+    // null/array/escaped value. `Value::Map` is an unordered hash map, so a
+    // re-sorted or value-losing codec cannot pass this comparison.
+    let source = r#"
+        use json;
+        let text = "{\"zzzzzzz9\":1,\"0000000a\":{\"nested\":[1,null,\"x\"]},\"mmmmmmmm\":{},\"zzzzzzz1\":\"ok\"}";
+        let entries = json::decode_object_entries(text);
+        let mut keys: [string] = [];
+        for index in 0..entries.length {
+            let entry = entries[index].copy();
+            keys[keys.length] = entry.key;
+        }
+        let encoded = json::encode_object_entries(entries);
+        let inner_entries = json::decode_object_entries("{\"nested\":[1,null,\"x\"]}");
+        [keys[0].copy(), keys[keys.length - 1].copy(), encoded, json::encode_object_entries(inner_entries)];
+        "#;
+    let mut vm = prepare_catalog_vm(source);
+    drive_to_halt(&mut vm)
+        .await
+        .expect("the ordered json surface runs through the normal app catalog");
+    let Some(Value::Array(items)) = vm.stack().last() else {
+        panic!(
+            "ordered json script should return an array, got {:?}",
+            vm.stack()
+        );
+    };
+    let text = |value: &Value| match value {
+        Value::String(text) => text.as_str().to_string(),
+        other => panic!("expected a string, got {other:?}"),
+    };
+    assert_eq!(items.len(), 4);
+    assert_eq!(text(&items[0]), "zzzzzzz9");
+    assert_eq!(text(&items[1]), "zzzzzzz1");
+    assert_eq!(
+        text(&items[2]),
+        r#"{"zzzzzzz9":1,"0000000a":{"nested":[1,null,"x"]},"mmmmmmmm":{},"zzzzzzz1":"ok"}"#
+    );
+    assert_eq!(text(&items[3]), r#"{"nested":[1,null,"x"]}"#);
+    assert_eq!(resource_count(&mut vm), 0, "ordered json is resource-free");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ordered_json_surface_fails_closed_without_the_json_module() {
+    let catalog = standard_catalog();
+    assert!(
+        catalog.function("json::decode_object_entries").is_some()
+            && catalog.function("json::encode_object_entries").is_some(),
+        "the standard catalog must publish both ordered-entry imports"
+    );
+    let program = compile_source_with_catalog(
+        "use json; let entries = json::decode_object_entries(\"{}\"); json::encode_object_entries(entries);",
+        Arc::clone(&catalog),
+    )
+    .expect("the script compiles against the standard catalog");
+    let mut vm = vm::Vm::try_new(program).expect("vm");
+    vm.set_default_host_fallback_enabled(false);
+    let message = match HostFunctionRegistry::empty().bind_vm_cached(&mut vm) {
+        Err(error) => error.to_string(),
+        Ok(()) => drive_to_halt(&mut vm)
+            .await
+            .expect_err("an unregistered ordered-entry import must fail closed")
+            .to_string(),
+    };
+    assert!(
+        message.contains("json"),
+        "the fail-closed error must name the missing json import: {message}"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

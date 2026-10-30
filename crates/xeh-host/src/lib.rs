@@ -3,6 +3,7 @@ mod catalog;
 mod dto;
 mod net;
 mod observe;
+pub mod os;
 mod runtime;
 mod task_control;
 mod timer;
@@ -20,7 +21,9 @@ pub use runtime::{
     config_entry_path, drive_to_halt, drive_until_waiting, release_for_reuse, resource_count,
     run_app, run_config_scenario, run_entry, stack_int,
 };
-pub use task_control::{task_catalog, task_entry_path, ControlOptions, TaskControl};
+pub use task_control::{
+    task_catalog, task_entry_path, ControlOptions, SessionOptions, TaskControl,
+};
 pub use timer::EmbeddingTimer;
 pub use types::HostError;
 pub use worker::WorkerPool;

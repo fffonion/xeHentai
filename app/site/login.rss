@@ -1,0 +1,117 @@
+//! Cookie and login helpers (Task6 scope: helpers only).
+//!
+//! This module ports the observable cookie rules of the pinned upstream:
+//! `util.parse_cookie` / `util.make_cookie`, the presence-based
+//! `ipb_member_id` + `ipb_pass_hash` login flag, and the legacy
+//! `.ehentai.cookie` two-value import. It performs no network login and never
+//! invents credentials; callers pass the cookie data they already own.
+use json;
+
+use super::domain::task;
+
+/// `util.make_cookie`: adjacent `name=value` pairs joined by `;` in the order
+/// the caller supplies, with no extra whitespace.
+///
+/// Returns one JSON result object. A non-string value fails exactly where the
+/// upstream `"".join` would raise instead of silently writing `None`.
+pub fn cookie_header(names: [string], values: map) -> string {
+    let mut parts: [string] = [];
+    let mut error = "";
+    for index in 0..names.length {
+        let name: string = names[index].copy();
+        if values.has(name) && error == "" {
+            if type(values[name].copy()) != "string" {
+                error = "{\"ok\":false,\"error\":\"cookie_value_not_string\",\"name\":"
+                    + json::encode(name) + "}";
+            } else {
+                let text: string = values[name].copy();
+                parts[parts.length] = name + "=" + text;
+            }
+        }
+    }
+    if error != "" => {
+        error
+    } else => {
+        let mut header = "";
+        for index in 0..parts.length {
+            if index > 0 {
+                header = header + ";";
+            }
+            header = header + parts[index].copy();
+        }
+        "{\"ok\":true,\"header\":" + json::encode(header) + "}"
+    }
+}
+
+/// `has_login`: both `ipb_member_id` and `ipb_pass_hash` are present. The
+/// upstream test is membership, not value truthiness.
+pub fn has_login(names: [string]) -> bool {
+    let mut member = false;
+    let mut pass = false;
+    for index in 0..names.length {
+        let name: string = names[index].copy();
+        if name == "ipb_member_id" {
+            member = true;
+        } else if name == "ipb_pass_hash" {
+            pass = true;
+        }
+    }
+    member && pass
+}
+
+/// The legacy `.ehentai.cookie` import: the whole file is stripped with
+/// Python `str.strip()` whitespace and split on `,`; only exactly two parts
+/// are accepted and neither part is trimmed again. A malformed file is
+/// silently ignored upstream, reported here as `ok:false`.
+pub fn parse_legacy(text: string) -> string {
+    let stripped = task::trim(text);
+    let parts = string_split_literal(stripped, ",");
+    if parts.length != 2 => {
+        "{\"ok\":false,\"ignored\":true}"
+    } else => {
+        let member: string = parts[0].copy();
+        let pass: string = parts[1].copy();
+        "{\"ok\":true,\"member\":" + json::encode(member)
+            + ",\"pass\":" + json::encode(pass) + "}"
+    }
+}
+
+/// `util.parse_cookie`: split on `;`, trim each candidate with Python
+/// whitespace, drop cookie attributes, keep the first `=` as the separator and
+/// join any remaining `=` back into the value. Returned pairs keep document
+/// order; callers merge them with update-not-replace semantics.
+pub fn parse_cookie_string(text: string) -> string {
+    let parts = string_split_literal(text, ";");
+    let mut pairs: [string] = [];
+    for index in 0..parts.length {
+        let raw: string = parts[index].copy();
+        let item = task::trim(raw);
+        let lower = string_lower_ascii(item.copy());
+        if lower != "secure" && lower != "httponly" && (&item).length > 0 {
+            let fields = string_split_literal(item.copy(), "=");
+            let name: string = fields[0].copy();
+            let lowered = string_lower_ascii(name.copy());
+            if lowered != "path" && lowered != "expires" && lowered != "domain"
+                && lowered != "max-age" && lowered != "comment" {
+                let mut value = "";
+                for field_index in 1..fields.length {
+                    if field_index > 1 {
+                        value = value + "=";
+                    }
+                    let field_text: string = fields[field_index].copy();
+                    value = value + field_text;
+                }
+                pairs[pairs.length] = "{\"name\":" + json::encode(name)
+                    + ",\"value\":" + json::encode(value) + "}";
+            }
+        }
+    }
+    let mut out = "{\"pairs\":[";
+    for index in 0..pairs.length {
+        if index > 0 {
+            out = out + ",";
+        }
+        out = out + pairs[index].copy();
+    }
+    out + "]}"
+}

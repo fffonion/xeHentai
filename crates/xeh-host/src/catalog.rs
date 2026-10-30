@@ -9,9 +9,14 @@ use crate::types::HostError;
 
 /// Catalog modules whose guest functions are installed from Core descriptors.
 ///
-/// `json` and `re` are descriptor-only builtins. They stay on the namespaced
-/// builtin path and are reached through `standard_composition`, not this list.
-pub const REUSED_CATALOG_MODULES: &[&str] = &["http", "io", "timer"];
+/// `http`, `io`, and `timer` publish their owned typed surfaces. `json` now
+/// publishes one additional typed surface at the pinned revision: the ordered
+/// object-entry codec (`json::decode_object_entries` /
+/// `json::encode_object_entries`). The plain `json::encode` / `json::decode`
+/// builtins are unchanged and stay on the namespaced-builtin path reached
+/// through `standard_composition`; this list only adds the two named,
+/// resource-free ordered-entry imports once, from the same catalog snapshot.
+pub const REUSED_CATALOG_MODULES: &[&str] = &["http", "io", "json", "timer"];
 
 pub fn standard_catalog() -> Arc<HostApiCatalog> {
     standard_host_catalog()

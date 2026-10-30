@@ -238,3 +238,67 @@
 - 输入：pause
 - 实测输出：RSS 只把控制状态置 paused 并推进 epoch；不发网络/文件取消
 - 拟定合同：native monitor/worker 的取消由 Task9 经 Task3 opaque registration 接线；当前不声称已实现网络或文件取消，也不以 Rust DTO 断言替代。
+
+## delta.session-ordered-json
+
+- 来源：`xeHentai/core.py:390-427`、`task.py:434-440`
+- 状态：Task6 已对齐（依赖 Core d54b509eb897ad867a098219ed8325d1a1356a10）
+- 输入：反向字典序的 `tasks` 成员、重复内部 GUID、非空 `page_q`/`img_q`
+- 实测输出：RSS 与上游保存/重载后的任务表顺序、ready queue 顺序（含重复项）一致；普通 `Value::Map` 仍是无序 HashMap，只有显式 ordered object-entry codec 承担成员顺序
+- 拟定合同：通过标准 `json::decode_object_entries`/`encode_object_entries` 在两个方向保持 `tasks`/`cookies` 成员顺序和每个 value 的原始 JSON 子值；不做全局 Map/VMBC 改造，不新增 preserve_order 或业务 sidecar。
+
+## delta.session-save-json-formatting
+
+- 来源：`xeHentai/core.py:390-400`
+- 状态：Task6 已声明差异
+- 输入：相同任务/ cookie 数据
+- 实测输出：上游 `json.dumps` 默认分隔符/空格与 RSS 紧凑编码的字节不同；解码后的 tasks 成员顺序、Task 字段值、cookies 顺序、返回码一致
+- 拟定合同：比较解码后文档、公开任务/queue/cookies/header/login 与磁盘状态，不比较 JSON 空白。
+
+## delta.session-failure-classes
+
+- 来源：`xeHentai/core.py:402-438`
+- 状态：Task6 安全差异
+- 输入：坏 JSON、缺 `tasks`/`cookies`、`tasks` 非对象、任务缺 `guid`、任务字段类型错误、读/写 IO 失败
+- 实测输出：上游对坏 JSON 返回 `(1103, str(ex))`，对缺键/类型错误常抛出未捕获的 `KeyError`/`AttributeError`/`TypeError`，且可能已应用前序任务；RSS 对坏 JSON 返回 `1103`，其余情况返回带 class 的失败报告且不发布半个 Root，原 `h.json` 字节保持不变
+- 拟定合同：不把上游异常伪装成 1103；差分比较“是否失败/返回码”，把上游异常类与 RSS 安全拒绝作为显式 delta 记录。真实解析消息文本不逐字节比较。写路径另有数据保全差异：上游 `fopen(...,"w")` 在 try 外，权限/打开失败会抛异常且可能已截断；RSS 先完整序列化再同目录原子替换，任何 precommit 失败返回 1103+诊断并保留旧文件。读取权限拒绝时两侧都失败（上游 `PermissionError`，RSS host_failure）。
+
+## delta.session-outside-root
+
+- 来源：`xeHentai/task.py:173-206`（`get_fpath`/`scan_downloaded`）
+- 状态：Task6 安全差异
+- 输入：会话任务 `config.dir` 指向可信 download roots 之外
+- 实测输出：上游 `os.path.exists` 对不存在路径静默返回 False 并发布任务；RSS 的 `xeh_fs` 在路径越界时拒绝，加载失败且不发布任务
+- 拟定合同：所有 stat/remove 受可信 roots 限制，导入任务的 `config.dir` 不能扩大权限；Task7/Task10 接入生产配置目录时再显式加入可信根。
+
+## delta.session-set-duplicate-map
+
+- 来源：`xeHentai/task.py:434-440`（`json.dumps` 遇到 `set` 抛 `TypeError`）
+- 状态：Task6 不可达差异
+- 输入：`duplicate_map[fid] = set([...])`
+- 实测输出：上游保存返回 `1103`；RSS 的 JSON 数据模型没有 set 值，离线会话中 `duplicate_map` 只以数组形式存在，因此不会构造该失败
+- 拟定合同：不新增 Python 容器或 set 仿真；若未来运行期需要 set 等价物，必须用显式数组/顺序规则并由真实 oracle 重新验证。权限拒绝与 rename 前失败已覆盖“保旧文件”。
+
+## delta.session-ticket-owner
+
+- 来源：Task5 ticket 边界（无上游对应物）
+- 状态：Task6 增强
+- 输入：两个控制器使用相同 GUID、相同 epoch 计划；把 A 的 prepare 票交给 B
+- 实测输出：B 以 `stale_owner` 拒绝，状态/完成计数不变；票中 owner 为每控制器 full UUID，不写入旧 `h.json`
+- 拟定合同：prepare 与 event 同时校验 owner+guid+epoch+kind；恢复导入只重新分配运行期 epoch，不把磁盘数据变成 live 授权。
+
+## delta.session-set-login-boundary
+
+- 来源：Task5 Q5 / Task6 登录边界
+- 状态：Task6 收口
+- 输入：生产控制器收到 `set_login=true`
+- 实测输出：返回 `set_login_not_allowed`，`has_login` 不变；fixture `allow_seed` 仍可注入以复用 oracle 计划
+- 拟定合同：生产登录状态只来自真实导入 cookie 与后续 Task7 登录响应；不以 bool RPC 构造认证入口。通用 dispatch report 对生产控制器只返回 `has_login`，cookies/cookie_header 为 `null`；只有可信 fixture（`allow_seed`）报告有序合成 cookie，供 session 差分与测试核对。
+
+## delta.session-remaining-download
+
+- 来源：Task6 部分下载闭环
+- 状态：Task6 已执行（本地合成 HTTP）
+- 输入：上游产物 `h.json` + 已下载 fid + 已解析 `page_q`/`img_q`/`reload_map`
+- 实测输出：RSS 载入/扫描后给出剩余计划；已存在 fid 不发请求；缺失页经 Task3 本地 HTTP worker 下载到 `.xehpart`，再由 `xeh_fs::rename_atomic` 同目录换名；重新 load/scan 得到相同磁盘布局与公开 `finished`，保存后新 VM 读回相同旧 GUID/queue
+- 拟定合同：Rust 只运输计划与执行文件原语，页面/图片选择留在 RSS；不提前实现 Task7/Task9/Task10 的解析、调度或归档，真实站点/账号/公网代理不参与。

@@ -9,6 +9,16 @@
         "cargo run -p xeh-xtask -- rss-test --suite config",
         "cargo run -p xeh-xtask -- diff --suite config"
       ]
+    },
+    {
+      "task": 6,
+      "scope": "session",
+      "note": "Task 6 owns the RSS session document and recovery rules over the accepted Task5 store. The Core dependency is pinned to d54b509eb897ad867a098219ed8325d1a1356a10; the App installs its ordered object-entry codec once through the normal standard catalog/open_registry path so `tasks`/`cookies` member order and task-queue order survive a decoded VmMap. Session serialization reads the real store order and cookie runtime order; loading merges into the existing table without clearing it, keeps inner GUIDs, re-queues every document entry without de-duplication, re-parses gid/sethash from the URL, and applies the real scan rules (marker/archive/nonzero/zero removal/download range) through named `xeh_fs` primitives bounded by trusted download roots. The session/legacy paths are trusted `SessionOptions` bound per VM; no dispatch request can widen them and a plain TaskControl has a deny-all IO policy. Saves build the complete document in RSS first and then use the same-parent atomic write; pre-commit failures leave the previous bytes, a directory-sync failure is reported separately after commit. Controller tickets carry a per-owner full UUID nonce in addition to guid/epoch/kind; a batch restore pre-checks the epoch budget before publishing. The production `set_login` boolean is fixture-only; production login state comes from imported cookies, and production dispatch reports redact cookie values/header while retaining `has_login`. Known deltas are recorded in docs/compatibility-deltas.md: saved JSON whitespace differs while decoded content/order is compared; missing-key/type upstream exceptions are reported as typed RSS refusals without half-applying the Root; an out-of-root task directory is refused instead of silently scanned; Python set-valued duplicate maps have no RSS data representation, so a set serialization failure is unreachable here. Remaining-image download is proven with the accepted local HTTP worker plus `xeh_fs::rename_atomic`, then a fresh load/scan/save/new-VM read.",
+      "tests": [
+        "cargo test -p xeh-host --test session",
+        "cargo run -p xeh-xtask -- rss-test --suite session",
+        "cargo run -p xeh-xtask -- diff --suite session"
+      ]
     }
   ],
   "features": [

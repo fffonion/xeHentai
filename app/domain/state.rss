@@ -21,11 +21,15 @@
 //!
 //! The global 25-key configuration crosses as parsed Core map data from its
 //! single owner in `app/config/types.rss`.
+use io;
 use json;
 
 use self::queue;
+use self::session;
 use self::task;
 use super::config::types;
+use super::site::login;
+use xeh_fs;
 use xeh_system;
 
 /// Largest epoch the JSON wire represents exactly. Advancing past it fails
@@ -82,8 +86,18 @@ fn err_task_cannot_resume() -> int {
     1107
 }
 
-/// The stored task record. Fields that the upstream `Task.to_dict()` omits
-/// (no gallery ids, no queues yet) stay absent through the optional fields.
+/// `ERR_SAVE_SESSION_FAILED`.
+fn err_save_session_failed() -> int {
+    1103
+}
+
+/// The stored task record.
+///
+/// `img_q` / `page_q` carry the exact JSON array text of a non-empty queue, or
+/// `null` when absent/empty. The upstream `to_dict()` only writes a queue that
+/// is truthy, and `from_dict()` copies a falsy value as-is, so a raw-value
+/// carrier keeps `null`, `[]` and non-empty lists distinguishable without
+/// pretending an unordered map iteration is the record order.
 struct Task {
     url: string,
     gid: string?,
@@ -96,8 +110,18 @@ struct Task {
     reload_map: map,
     duplicate_map: map,
     renamed_map: map,
-    img_q: [string]?,
-    page_q: [string]?,
+    img_q: string?,
+    page_q: string?,
+}
+
+/// Ordered cookie state. `nw=1` is the upstream constructor default; loading a
+/// session updates existing names in place and appends new ones, so the header
+/// order is observable. `cookie_header` stays `null` until a document or the
+/// legacy file has been merged, matching the upstream constructor.
+struct CookieState {
+    names: [string],
+    values: map,
+    header: string?,
 }
 
 struct Store {
@@ -112,6 +136,11 @@ struct Store {
     guid_plan: [string],
     guid_cursor: int,
     allow_seed: bool,
+    cookies: CookieState,
+    /// Per-controller owner nonce. Never serialized into `h.json`.
+    owner_nonce: string,
+    /// Private `_flist_done` observations: guid -> JSON array of finished ids.
+    scan_done: map,
 }
 
 struct Control {
@@ -141,6 +170,75 @@ struct Step {
     event: EventCheck?,
     pending: PendingEffect?,
     presence: map?,
+    session: SessionCheck?,
+}
+
+/// Observable session effect of one save/load command.
+///
+/// `code`/`value` mirror the upstream `(code, value)` return; `error` is the
+/// RSS-side refusal class when upstream would have raised outside the JSON
+/// parse handler. `cookies` is rendered as an ordered array so a JSON object
+/// comparison cannot hide a reordered Cookie header.
+struct SessionCheck {
+    code: int?,
+    value: string?,
+    error: string,
+    committed: bool,
+    directory_synced: bool,
+}
+
+struct SessionTaskEntry {
+    key: string,
+    value_json: string,
+}
+
+struct SessionCookieEntry {
+    key: string,
+    value_json: string,
+}
+
+struct SessionPlan {
+    ok: bool,
+    error: string?,
+    tasks: [SessionTaskEntry]?,
+    cookies: [SessionCookieEntry]?,
+}
+
+struct ScanPlan {
+    ok: bool,
+    error: string?,
+    detail: string?,
+    meta: map?,
+    finished: int?,
+    done: [int]?,
+}
+
+struct RemainingItem {
+    fid: int,
+    url: string,
+    renamed: string,
+    file: string,
+    staging: string,
+}
+
+struct RemainingPlan {
+    ok: bool,
+    error: string?,
+    items: [RemainingItem]?,
+}
+
+struct CookieHeaderPlan {
+    ok: bool,
+    header: string?,
+    error: string?,
+    name: string?,
+}
+
+struct LegacyPlan {
+    ok: bool,
+    ignored: bool?,
+    member: string?,
+    pass: string?,
 }
 
 // ---- task record -----------------------------------------------------------
@@ -216,19 +314,88 @@ fn delete_needs_files(record: Task) -> bool {
     task::config_flag(cfg, "delete_task_files", false) && record.meta.has("title")
 }
 
-/// `Task.to_dict()` order: insertion order, never sorted. The record's fields
-/// that are absent (null gid/sethash/queues) stay absent, exactly like the
-/// upstream dict comprehension.
+/// `Task.to_dict()` order: insertion order, never sorted. Fields that the
+/// upstream dict comprehension omits (absent ids, falsy queues) stay absent.
+fn task_text(record: Task) -> string {
+    let mut entries = [];
+    entries[entries.length] = {
+        key: "url",
+        value_json: json::encode(record.url.copy()),
+    };
+    if type(record?.gid) != "null" {
+        entries[entries.length] = {
+            key: "gid",
+            value_json: json::encode(record?.gid.unwrap_or("")),
+        };
+    }
+    if type(record?.sethash) != "null" {
+        entries[entries.length] = {
+            key: "sethash",
+            value_json: json::encode(record?.sethash.unwrap_or("")),
+        };
+    }
+    entries[entries.length] = {
+        key: "failcode",
+        value_json: json::encode(record.failcode),
+    };
+    entries[entries.length] = {
+        key: "state",
+        value_json: json::encode(record.state),
+    };
+    entries[entries.length] = {
+        key: "guid",
+        value_json: json::encode(record.guid.copy()),
+    };
+    entries[entries.length] = {
+        key: "config",
+        value_json: json::encode(record.config.copy()),
+    };
+    entries[entries.length] = {
+        key: "meta",
+        value_json: json::encode(record.meta.copy()),
+    };
+    entries[entries.length] = {
+        key: "reload_map",
+        value_json: json::encode(record.reload_map.copy()),
+    };
+    entries[entries.length] = {
+        key: "duplicate_map",
+        value_json: json::encode(record.duplicate_map.copy()),
+    };
+    entries[entries.length] = {
+        key: "renamed_map",
+        value_json: json::encode(record.renamed_map.copy()),
+    };
+    if type(record?.img_q) != "null" {
+        entries[entries.length] = {
+            key: "img_q",
+            value_json: record?.img_q.unwrap_or(""),
+        };
+    }
+    if type(record?.page_q) != "null" {
+        entries[entries.length] = {
+            key: "page_q",
+            value_json: record?.page_q.unwrap_or(""),
+        };
+    }
+    json::encode_object_entries(entries)
+}
+
 fn table_json(tasks: map, order: [string]) -> string {
-    let mut records: [Task] = [];
+    let mut out = "[";
+    let mut count = 0;
     for index in 0..order.length {
         let guid: string = order[index].copy();
         if tasks.has(guid) {
             let record: Task = tasks[guid].copy();
-            records[records.length] = record;
+            if count > 0 {
+                out = out + ",";
+            }
+            out = out + task_text(record);
+            count = count + 1;
         }
     }
-    json::encode(records)
+    out + "]"
 }
 
 // ---- request field readers -------------------------------------------------
@@ -286,6 +453,7 @@ fn ok_step(store: Store) -> Step {
         event: null,
         pending: null,
         presence: null,
+        session: null,
     }
 }
 
@@ -300,6 +468,7 @@ fn code_step(store: Store, code: int, value: string?) -> Step {
         event: null,
         pending: null,
         presence: null,
+        session: null,
     }
 }
 
@@ -314,6 +483,7 @@ fn error_step(store: Store, error: string) -> Step {
         event: null,
         pending: null,
         presence: null,
+        session: null,
     }
 }
 
@@ -328,6 +498,7 @@ fn event_step(store: Store, accepted: bool, reason: string) -> Step {
         event: { accepted: accepted, reason: reason },
         pending: null,
         presence: null,
+        session: null,
     }
 }
 
@@ -347,6 +518,7 @@ fn pending_step(store: Store, guid: string, directory: string, title: string) ->
             title: title,
         },
         presence: null,
+        session: null,
     }
 }
 
@@ -370,6 +542,35 @@ fn store_epochs(store: Store) -> map {
 
 fn store_config(store: Store) -> map {
     store.config.copy()
+}
+
+fn cookie_index(names: [string], name: string) -> int {
+    let mut found = -1;
+    for index in 0..names.length {
+        let existing: string = names[index].copy();
+        if existing == name && found < 0 {
+            found = index;
+        }
+    }
+    found
+}
+
+/// `dict.update` order semantics: an existing name keeps its position, a new
+/// name is appended in the document order it was first seen. Cookie values are
+/// strings: the upstream header join cannot render any other JSON type.
+fn cookie_set(state: CookieState, name: string, value: string) -> CookieState {
+    let index = cookie_index(state.names.copy(), name.copy());
+    let mut names = state.names.copy();
+    if index < 0 {
+        names[names.length] = name.copy();
+    }
+    let mut values = state.values.copy();
+    values[name.copy()] = value;
+    {
+        names: names,
+        values: values,
+        header: state?.header,
+    }
 }
 
 fn task_of(store: Store, guid: string) -> Task {
@@ -563,7 +764,7 @@ fn op_del(store: Store, document: map) -> Step {
 }
 
 fn delete_record(store: Store, guid: string) -> Step {
-    let record = task_of(store.copy(), guid);
+    let record: Task = task_of(store.copy(), guid);
     let record_state_value = record_state(record.copy());
     if active_state(record_state_value) => {
         code_step(store, err_delete_running_task(), null)
@@ -605,7 +806,7 @@ fn pause_record(store: Store, guid: string) -> Step {
     } else if epoch_seq_of(store.copy()) >= max_epoch() => {
         error_step(store, "epoch_exhausted")
     } else => {
-        let record = task_of(store.copy(), guid);
+        let record: Task = task_of(store.copy(), guid);
         let mut paused = record.copy();
         paused.state = state_paused();
         let mut next = replace_task(store, paused);
@@ -632,7 +833,7 @@ fn resume_record(store: Store, guid: string) -> Step {
     } else if epoch_seq_of(store.copy()) >= max_epoch() => {
         error_step(store, "epoch_exhausted")
     } else => {
-        let record = task_of(store.copy(), guid);
+        let record: Task = task_of(store.copy(), guid);
         let mut resumed = record.copy();
         // Upstream `max(state, waiting)`: finished stays 20, paused and failed
         // become waiting. Every accepted resume is enqueued, including
@@ -688,7 +889,12 @@ fn prepare_record(store: Store, guid: string) -> Step {
         if epoch == null => {
             error_step(store, "missing_epoch")
         } else => {
-            let ticket = json::encode({ guid: guid, epoch: epoch, kind: "run" });
+            let ticket = json::encode({
+                guid: guid,
+                epoch: epoch,
+                kind: "run",
+                owner: store.owner_nonce.copy(),
+            });
             let mut step = ok_step(store);
             step.value = ticket;
             step
@@ -701,22 +907,35 @@ fn op_event(store: Store, document: map) -> Step {
     let guid = field_string(ticket.copy(), "guid", "");
     let epoch = field_int(ticket.copy(), "epoch", -1);
     let kind = field_string(ticket.copy(), "kind", "");
+    let owner = field_string(ticket.copy(), "owner", "");
     if guid == "" || epoch < 0 || kind == "" => {
         event_step(store, false, "malformed_ticket")
     } else => {
-        apply_event(store, document, guid, epoch, kind)
+        apply_event(store, document, guid, epoch, kind, owner)
     }
 }
 
-fn apply_event(store: Store, document: map, guid: string, epoch: int, kind: string) -> Step {
+fn apply_event(
+    store: Store,
+    document: map,
+    guid: string,
+    epoch: int,
+    kind: string,
+    owner: string
+) -> Step {
     if store_has_task(store.copy(), guid) == false => {
         event_step(store, false, "unknown_task")
     } else if kind != "run" => {
         event_step(store, false, "unknown_ticket_kind")
+    } else if owner != store.owner_nonce => {
+        // A ticket minted by another controller (or a restored pre-owner
+        // ticket) is not this incarnation's authorization, even when guid and
+        // epoch happen to match.
+        event_step(store, false, "stale_owner")
     } else if current_epoch(store_epochs(store.copy()), guid).unwrap_or(-1) != epoch => {
         event_step(store, false, "stale_epoch")
     } else => {
-        let record = task_of(store.copy(), guid);
+        let record: Task = task_of(store.copy(), guid);
         let record_state_value = record_state(record.copy());
         if active_state(record_state_value) == false => {
             event_step(store, false, "not_running")
@@ -757,7 +976,7 @@ fn op_seed_state(store: Store, document: map) -> Step {
             error_step(store, "unknown_task")
         } else => {
             let state = field_int(document, "state", state_waiting());
-            let record = task_of(store.copy(), guid);
+            let record: Task = task_of(store.copy(), guid);
             let mut seeded = record.copy();
             seeded.state = state;
             ok_step(replace_task(store, seeded))
@@ -774,7 +993,7 @@ fn op_seed_meta(store: Store, document: map) -> Step {
             error_step(store, "unknown_task")
         } else => {
             let meta = field_map(document, "meta");
-            let record = task_of(store.copy(), guid);
+            let record: Task = task_of(store.copy(), guid);
             let mut seeded = record.copy();
             seeded.meta = meta;
             ok_step(replace_task(store, seeded))
@@ -782,10 +1001,492 @@ fn op_seed_meta(store: Store, document: map) -> Step {
     }
 }
 
+/// Fixture-only login seeding. Production login state comes from imported
+/// cookies / the Task7 login response; a bare boolean request is not an
+/// authentication entry point.
 fn op_set_login(store: Store, document: map) -> Step {
-    let mut next = store;
-    next.has_login = field_bool(document, "value", false);
-    ok_step(next)
+    if store.allow_seed == false => {
+        error_step(store, "set_login_not_allowed")
+    } else => {
+        let mut next = store;
+        next.has_login = field_bool(document, "value", false);
+        ok_step(next)
+    }
+}
+
+// ---- session ---------------------------------------------------------------
+
+fn read_text(path: string) -> string {
+    let handle = io::open(path, "r");
+    let text = io::read_all(handle);
+    let closed = io::close(handle);
+    text
+}
+
+fn session_step(
+    store: Store,
+    ok: bool,
+    error: string,
+    code: int?,
+    value: string?,
+    committed: bool,
+    directory_synced: bool
+) -> Step {
+    {
+        store: store,
+        ok: ok,
+        error: error,
+        code: null,
+        value: null,
+        warnings: [],
+        event: null,
+        pending: null,
+        presence: null,
+        session: {
+            code: code,
+            value: value,
+            error: error,
+            committed: committed,
+            directory_synced: directory_synced,
+        },
+    }
+}
+
+fn json_starts(value_json: string, marker: string) -> bool {
+    let length = (&value_json).length;
+    length > 0 && (&value_json)[0:1] == marker
+}
+
+fn queue_elements_are_strings(values: array, index: int) -> bool {
+    let mut current = index;
+    let mut ok = true;
+    while current < values.length && ok {
+        if type(values[current].copy()) == "string" {
+            current = current + 1;
+        } else {
+            ok = false;
+        }
+    }
+    ok
+}
+
+/// Structural checks the upstream would hit at `from_dict` / `to_dict` time.
+/// Every accepted value is exactly what the typed record can carry; a safe
+/// refusal is reported instead of a half-applied table.
+fn task_shape_error(value_json: string, outer_key: string) -> string {
+    let mut error = "";
+    if json_starts(value_json.copy(), "{") == false {
+        error = "type:task";
+    } else {
+        let object: map = json::decode::<map>(value_json);
+        if object.has("guid") == false {
+            error = "missing_guid";
+        } else if type(object["guid"].copy()) != "string" {
+            error = "type:guid";
+        } else if object.has("url") && type(object["url"].copy()) != "string" {
+            error = "type:url";
+        } else if object.has("state") && type(object["state"].copy()) != "int" {
+            error = "type:state";
+        } else if object.has("failcode") && type(object["failcode"].copy()) != "int" {
+            error = "type:failcode";
+        } else if object.has("config") && type(object["config"].copy()) != "map" {
+            error = "type:config";
+        } else if object.has("meta") && type(object["meta"].copy()) != "map" {
+            error = "type:meta";
+        } else if object.has("reload_map") && type(object["reload_map"].copy()) != "map" {
+            error = "type:reload_map";
+        } else if object.has("duplicate_map") && type(object["duplicate_map"].copy()) != "map" {
+            error = "type:duplicate_map";
+        } else if object.has("renamed_map") && type(object["renamed_map"].copy()) != "map" {
+            error = "type:renamed_map";
+        } else if object.has("img_q") && type(object["img_q"].copy()) != "null" {
+            if type(object["img_q"].copy()) != "array" {
+                error = "type:img_q";
+            } else {
+                let values: array = object["img_q"].copy();
+                if queue_elements_are_strings(values, 0) == false {
+                    error = "type:img_q";
+                }
+            }
+        }
+        if error == "" && object.has("page_q") && type(object["page_q"].copy()) != "null" {
+            if type(object["page_q"].copy()) != "array" {
+                error = "type:page_q";
+            } else {
+                let values: array = object["page_q"].copy();
+                if queue_elements_are_strings(values, 0) == false {
+                    error = "type:page_q";
+                }
+            }
+        }
+        if error == "" && object.has("guid") {
+            let guid: string = object["guid"].copy();
+            if (&guid).length == 0 {
+                error = "type:guid";
+            }
+        }
+    }
+    error
+}
+
+fn queue_text(object: map, name: string) -> string? {
+    let mut result: string? = null;
+    if object.has(name) && type(object[name].copy()) != "null" {
+        let values: [string] = object[name].copy();
+        if values.length > 0 {
+            result = json::encode(values);
+        }
+    }
+    result
+}
+
+fn record_from_text(value_json: string) -> Task {
+    let object: map = json::decode::<map>(value_json);
+    let url = field_string(object.copy(), "url", "");
+    let gid_value: string? = if (&url).length > 0 => {
+        task::url_gid(url.copy())
+    } else => {
+        null
+    };
+    let sethash_value: string? = if (&url).length > 0 => {
+        task::url_sethash(url.copy())
+    } else => {
+        null
+    };
+    {
+        url: url,
+        gid: gid_value,
+        sethash: sethash_value,
+        guid: field_string(object.copy(), "guid", ""),
+        state: field_int(object.copy(), "state", state_waiting()),
+        failcode: field_int(object.copy(), "failcode", 0),
+        config: field_map(object.copy(), "config"),
+        meta: field_map(object.copy(), "meta"),
+        reload_map: field_map(object.copy(), "reload_map"),
+        duplicate_map: field_map(object.copy(), "duplicate_map"),
+        renamed_map: field_map(object.copy(), "renamed_map"),
+        img_q: queue_text(object.copy(), "img_q"),
+        page_q: queue_text(object.copy(), "page_q"),
+    }
+}
+
+fn session_save(store: Store) -> Step {
+    let paths = xeh_fs::session_paths();
+    let save_tasks = task::config_flag(store.config.copy(), "save_tasks", false);
+    let mut texts: [string] = [];
+    for index in 0..store.order.length {
+        let guid: string = store.order[index].copy();
+        if store.tasks.has(guid) {
+            let record: Task = store.tasks[guid].copy();
+            texts[texts.length] = task_text(record);
+        }
+    }
+    let document_text = session::session_document(
+        store.order.copy(),
+        texts,
+        save_tasks,
+        store.cookies.names.copy(),
+        store.cookies.values.copy()
+    );
+    let written = xeh_fs::write_atomic(paths.session_path.copy(), document_text);
+    let error_text = if type(written.error) == "null" => {
+        ""
+    } else => {
+        "session write failed"
+    };
+    if written.committed.copy() == false => {
+        let value = if error_text == "" => {
+            "session write failed"
+        } else => {
+            error_text
+        };
+        session_step(
+            store,
+            false,
+            "session:write_failed",
+            err_save_session_failed(),
+            value,
+            false,
+            false
+        )
+    } else => {
+        let directory_synced = written.directory_synced.copy();
+        let mut step = session_step(
+            store,
+            true,
+            "",
+            err_no_error(),
+            null,
+            true,
+            directory_synced
+        );
+        if directory_synced == false && error_text != "" {
+            let mut warnings = step.warnings;
+            warnings[warnings.length] = "session_directory_sync_failed";
+            step.warnings = warnings;
+        }
+        step
+    }
+}
+
+fn session_load(store: Store) -> Step {
+    let paths = xeh_fs::session_paths();
+    let session_path = paths.session_path.copy();
+    let legacy_path = paths.legacy_cookie_path.copy();
+    let mut next = store.copy();
+    let mut error = "";
+    let mut cookies = store.cookies.copy();
+    let mut has_login = store.has_login.copy();
+    if io::exists(session_path.copy()) {
+        let text = read_text(session_path.copy());
+        let plan_text = session::parse_session(text);
+        let plan: SessionPlan = json::decode::<SessionPlan>(plan_text);
+        if plan.ok.copy() == false {
+            error = "session:" + plan.copy()?.error.unwrap_or("invalid_document");
+        } else {
+            let no_tasks: [SessionTaskEntry] = [];
+            let no_cookies: [SessionCookieEntry] = [];
+            let task_entries = plan.copy()?.tasks.unwrap_or(no_tasks);
+            let cookie_entries = plan.copy()?.cookies.unwrap_or(no_cookies);
+            for index in 0..cookie_entries.length {
+                let entry: SessionCookieEntry = cookie_entries[index].copy();
+                let value_json: string = entry.value_json;
+                let name: string = entry.key;
+                if json_starts(value_json.copy(), "\"") == false {
+                    error = "session:cookie_value_not_string";
+                } else if error == "" {
+                    let value: string = json::decode::<string>(value_json);
+                    cookies = cookie_set(cookies, name, value);
+                }
+            }
+            if error == "" {
+                let header_plan: CookieHeaderPlan = json::decode::<CookieHeaderPlan>(
+                    login::cookie_header(cookies.names.copy(), cookies.values.copy())
+                );
+                if header_plan.ok.copy() == false {
+                    error = "session:cookie_value_not_string";
+                } else {
+                    cookies.header = header_plan.copy()?.header;
+                    has_login = login::has_login(cookies.names.copy());
+                }
+            }
+            let mut records: [Task] = [];
+            let mut done_texts: [string] = [];
+            for index in 0..task_entries.length {
+                let entry: SessionTaskEntry = task_entries[index].copy();
+                let outer_key: string = entry.key;
+                let value_json: string = entry.value_json;
+                if error == "" {
+                    let shape = task_shape_error(value_json.copy(), outer_key.copy());
+                    if shape != "" {
+                        error = "session:" + shape;
+                    } else {
+                        let mut record: Task = record_from_text(value_json);
+                        let mut done_text = "[]";
+                        if record.meta.copy().has("filelist") {
+                            let scan_plan: ScanPlan = json::decode::<ScanPlan>(
+                                session::scan_task(
+                                    json::encode(record.config.copy()),
+                                    json::encode(record.meta.copy())
+                                )
+                            );
+                            if scan_plan.ok.copy() == false {
+                                let class = scan_plan.copy()?.error.unwrap_or("scan_failed");
+                                error = "session:scan:" + class;
+                            } else {
+                                let meta_map: map = scan_plan.copy()?.meta.unwrap_or({});
+                                record.meta = meta_map;
+                                let no_done: [int] = [];
+                                let done_values: [int] = scan_plan.copy()?.done.unwrap_or(no_done);
+                                done_text = json::encode(done_values);
+                            }
+                        }
+                        if error == "" {
+                            if record.state.copy() == 10 && type(record?.page_q) != "null" {
+                                record.state = 4;
+                            }
+                            records[records.length] = record;
+                            done_texts[done_texts.length] = done_text;
+                        }
+                    }
+                }
+            }
+            if error == "" {
+                if next.epoch_seq + records.length > max_epoch() {
+                    error = "session:epoch_exhausted";
+                } else {
+                    let mut position = 0;
+                    while position < records.length {
+                        let record = records[position].copy();
+                        let guid = record.guid.copy();
+                        let mut tasks = next.tasks;
+                        tasks[guid.copy()] = record;
+                        next.tasks = tasks;
+                        let mut order = next.order.copy();
+                        let mut present = false;
+                        for order_index in 0..order.length {
+                            let existing: string = order[order_index].copy();
+                            if existing == guid {
+                                present = true;
+                                break;
+                            }
+                        }
+                        if present == false {
+                            order[order.length] = guid.copy();
+                        }
+                        next.order = order;
+                        next.queue = queue::push(next.queue.copy(), guid.copy());
+                        let seq = next.epoch_seq.copy();
+                        let mut epochs = next.epochs;
+                        epochs[guid.copy()] = seq + 1;
+                        next.epochs = epochs;
+                        next.epoch_seq = seq + 1;
+                        let mut scan_map = next.scan_done;
+                        scan_map[guid.copy()] = done_texts[position].copy();
+                        next.scan_done = scan_map;
+                        position = position + 1;
+                    }
+                }
+            }
+        }
+    }
+    if error == "" && has_login == false && (&legacy_path).length > 0
+        && io::exists(legacy_path.copy()) {
+        let legacy_text = read_text(legacy_path.copy());
+        let plan: LegacyPlan = json::decode::<LegacyPlan>(login::parse_legacy(legacy_text));
+        if plan.ok.copy() {
+            let member: string = plan.copy()?.member.unwrap_or("");
+            let pass: string = plan.copy()?.pass.unwrap_or("");
+            let mut legacy_cookies = cookies.copy();
+            legacy_cookies = cookie_set(legacy_cookies, "ipb_member_id", member);
+            legacy_cookies = cookie_set(legacy_cookies, "ipb_pass_hash", pass);
+            let header_plan: CookieHeaderPlan = json::decode::<CookieHeaderPlan>(
+                login::cookie_header(legacy_cookies.names.copy(), legacy_cookies.values.copy())
+            );
+            if header_plan.ok.copy() == false {
+                error = "session:cookie_value_not_string";
+            } else {
+                legacy_cookies.header = header_plan.copy()?.header;
+                cookies = legacy_cookies;
+                has_login = true;
+            }
+        }
+    }
+    if error != "" => {
+        session_step(store, false, error, null, null, false, false)
+    } else => {
+        next.cookies = cookies;
+        next.has_login = has_login;
+        session_step(next, true, "", err_no_error(), null, false, false)
+    }
+}
+
+/// Report a host-side failure (malformed JSON, structural refusal, I/O) through
+/// the normal report shape after the embedding converted the invocation error.
+fn op_session_failed(store: Store, document: map) -> Step {
+    let message = field_string(document.copy(), "message", "");
+    let class = field_string(document.copy(), "class", "host_failure");
+    let raw_code = field_int(document.copy(), "code", -1);
+    let code: int? = if raw_code < 0 => {
+        null
+    } else => {
+        raw_code
+    };
+    session_step(store, false, "session:" + class, code, message, false, false)
+}
+
+
+fn op_session_save(store: Store, _document: map) -> Step {
+    session_save(store)
+}
+
+fn op_session_load(store: Store, _document: map) -> Step {
+    session_load(store)
+}
+
+fn op_seed_queue(store: Store, document: map) -> Step {
+    if store.allow_seed == false => {
+        error_step(store, "seed_not_allowed")
+    } else => {
+        let guid = field_string(document.copy(), "guid", "");
+        if store_has_task(store.copy(), guid.copy()) == false => {
+            error_step(store, "unknown_task")
+        } else => {
+            let record: Task = task_of(store.copy(), guid.copy());
+            let mut seeded = record.copy();
+            if document.has("img_q") {
+                let values: [string] = document["img_q"].copy();
+                if values.length == 0 {
+                    seeded.img_q = null;
+                } else {
+                    seeded.img_q = json::encode(values);
+                }
+            }
+            if document.has("page_q") {
+                let values: [string] = document["page_q"].copy();
+                if values.length == 0 {
+                    seeded.page_q = null;
+                } else {
+                    seeded.page_q = json::encode(values);
+                }
+            }
+            ok_step(replace_task(store, seeded))
+        }
+    }
+}
+
+fn op_remaining_plan(store: Store, document: map) -> Step {
+    let guid = field_string(document.copy(), "guid", "");
+    if store_has_task(store.copy(), guid.copy()) == false => {
+        error_step(store, "unknown_task")
+    } else => {
+        let record: Task = task_of(store.copy(), guid.copy());
+        if type(record?.page_q) == "null" => {
+            error_step(store, "no_remaining_queue")
+        } else if record.meta.copy().has("total") == false
+            || type(record.meta.copy()["total"].copy()) != "int" => {
+            error_step(store, "plan:missing_total")
+        } else if record.meta.copy().has("title") == false
+            || type(record.meta.copy()["title"].copy()) != "string" => {
+            error_step(store, "plan:missing_title")
+        } else if record.config.copy().has("dir") == false
+            || type(record.config.copy()["dir"].copy()) != "string" => {
+            error_step(store, "plan:missing_dir")
+        } else => {
+            let total: int = record.meta.copy()["total"].copy();
+            let title: string = record.meta.copy()["title"].copy();
+            let dir: string = record.config.copy()["dir"].copy();
+            let page_q: string = record?.page_q.unwrap_or("");
+            let img_q = if type(record?.img_q) == "null" => {
+                "[]"
+            } else => {
+                record?.img_q.unwrap_or("")
+            };
+            let done = if store.scan_done.has(guid.copy()) => {
+                let text: string = store.scan_done[guid.copy()].copy();
+                text
+            } else => {
+                "[]"
+            };
+            let plan_text = session::download_plan(
+                page_q,
+                img_q,
+                json::encode(record.reload_map.copy()),
+                done,
+                total,
+                dir,
+                title
+            );
+            let plan: RemainingPlan = json::decode::<RemainingPlan>(plan_text);
+            if plan.ok.copy() == false => {
+                error_step(store, "plan:" + plan.copy()?.error.unwrap_or("invalid"))
+            } else => {
+                let mut step = ok_step(store);
+                step.value = plan_text;
+                step
+            }
+        }
+    }
 }
 
 // ---- report ----------------------------------------------------------------
@@ -847,6 +1548,43 @@ fn presence_text(presence: map?) -> string {
     }
 }
 
+fn session_text(session: SessionCheck?) -> string {
+    if type(session) == "null" => {
+        "null"
+    } else => {
+        let typed: SessionCheck = session.unwrap_or({
+            code: null,
+            value: null,
+            error: "",
+            committed: false,
+            directory_synced: false,
+        });
+        "{\"code\":" + int_or_null(typed?.code)
+            + ",\"value\":" + string_or_null(typed?.value)
+            + ",\"error\":" + json::encode(typed.error)
+            + ",\"committed\":" + json::encode(typed.committed)
+            + ",\"directory_synced\":" + json::encode(typed.directory_synced) + "}"
+    }
+}
+
+fn cookies_text(cookies: CookieState) -> string {
+    let mut out = "[";
+    for index in 0..cookies.names.length {
+        let name: string = cookies.names[index].copy();
+        if index > 0 {
+            out = out + ",";
+        }
+        let value = if cookies.values.has(name) => {
+            let text: string = cookies.values[name.copy()].copy();
+            json::encode(text)
+        } else => {
+            "null"
+        };
+        out = out + "{\"name\":" + json::encode(name) + ",\"value\":" + value + "}";
+    }
+    out + "]"
+}
+
 fn build_report(
     store: Store,
     ok: bool,
@@ -856,7 +1594,8 @@ fn build_report(
     warnings: [string],
     event: EventCheck?,
     pending: PendingEffect?,
-    presence: map?
+    presence: map?,
+    session: SessionCheck?
 ) -> string {
     let head = "{\"ok\":" + json::encode(ok)
         + ",\"error\":" + json::encode(error)
@@ -865,17 +1604,36 @@ fn build_report(
         + ",\"warnings\":" + json::encode(warnings)
         + ",\"event\":" + event_text(event)
         + ",\"pending\":" + pending_text(pending)
-        + ",\"presence\":" + presence_text(presence);
+        + ",\"presence\":" + presence_text(presence)
+        + ",\"session\":" + session_text(session);
     let config_text = json::encode(store.config);
     let tasks_text = table_json(store.tasks, store.order);
     let queue_text = json::encode(store.queue);
     let epochs_text = json::encode(store.epochs);
     let completions_text = json::encode(store.completions);
+    // Cookie plaintext is only exposed to trusted fixtures. Production
+    // reports keep the login flag but do not publish the imported values.
+    let expose_cookies = store.allow_seed.copy();
+    let cookies_json = if expose_cookies => {
+        let cookies = store.cookies.copy();
+        cookies_text(cookies)
+    } else => {
+        "null"
+    };
+    let header_json = if expose_cookies => {
+        let cookies = store.cookies.copy();
+        string_or_null(cookies?.header)
+    } else => {
+        "null"
+    };
     head + ",\"config\":" + config_text
         + ",\"tasks\":" + tasks_text
         + ",\"queue\":" + queue_text
         + ",\"epochs\":" + epochs_text
         + ",\"completions\":" + completions_text
+        + ",\"cookies\":" + cookies_json
+        + ",\"cookie_header\":" + header_json
+        + ",\"has_login\":" + json::encode(store.has_login)
         + "}"
 }
 
@@ -890,7 +1648,8 @@ fn finish(step: Step) -> Control {
         step.warnings,
         step?.event,
         step?.pending,
-        step?.presence
+        step?.presence,
+        step?.session
     );
     { store: store, report: report }
 }
@@ -913,6 +1672,13 @@ pub fn create(guids: [string], epoch_start: int, allow_seed: bool) -> Control {
             guid_plan: guids,
             guid_cursor: 0,
             allow_seed: allow_seed,
+            cookies: {
+                names: ["nw"],
+                values: { nw: "1" },
+                header: null,
+            },
+            owner_nonce: xeh_system::uuid_v4(),
+            scan_done: {},
         },
         report: "",
     }
@@ -948,6 +1714,16 @@ pub fn dispatch(control: Control, request: string) -> Control {
         op_seed_state(store.copy(), document)
     } else if op == "seed_meta" => {
         op_seed_meta(store.copy(), document)
+    } else if op == "seed_queue" => {
+        op_seed_queue(store.copy(), document)
+    } else if op == "session_save" => {
+        op_session_save(store.copy(), document)
+    } else if op == "session_load" => {
+        op_session_load(store.copy(), document)
+    } else if op == "session_failed" => {
+        op_session_failed(store.copy(), document)
+    } else if op == "remaining_plan" => {
+        op_remaining_plan(store.copy(), document)
     } else => {
         error_step(store.copy(), "unknown_op:" + op)
     };

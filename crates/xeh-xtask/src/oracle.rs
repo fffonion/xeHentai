@@ -300,6 +300,13 @@ fn ensure_python(python: &Path) -> Result<(), String> {
     ))
 }
 
+/// Verifies the checked-out upstream tree against the pinned authoritative
+/// revision and returns the verified checkout path.
+pub fn verify_pinned_upstream() -> Result<PathBuf, String> {
+    let root = workspace_root();
+    prepare_verified_upstream(&root).map(|(candidate, _report)| candidate)
+}
+
 fn prepare_verified_upstream(root: &Path) -> Result<(PathBuf, VerifyReport), String> {
     let bare = authoritative_git("xeHentai")?;
     ensure_pin(

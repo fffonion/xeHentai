@@ -1,0 +1,399 @@
+//! Session document codec and recovery scanning.
+//!
+//! The RSS control owns the business document: the top-level `tasks` and
+//! `cookies` members, their member order, the task dictionary keys, and the
+//! scan/remaining decisions. Core's ordered object-entry codec carries member
+//! order because a decoded `Value::Map` is an unordered hash map; ordinary
+//! `json::decode` still reads every value.
+//!
+//! File access is only through Core `io` (read/exists) and the named
+//! `xeh_fs` primitives (stat, zero-file removal, atomic replace). No path is
+//! taken from a request: `xeh_fs::session_paths` reads the trusted targets the
+//! embedder bound to this VM, and every other path is checked against the
+//! trusted roots inside the host.
+use json;
+use re;
+use xeh_fs;
+
+fn error_plan(code: string) -> string {
+    "{\"ok\":false,\"error\":" + json::encode(code) + "}"
+}
+
+/// Builds the complete `h.json` text. `task_keys` and `task_texts` are
+/// parallel arrays in `_all_tasks` insertion order; cookies are supplied in
+/// their stable runtime order. `save_tasks = false` still writes `cookies`.
+pub fn session_document(
+    task_keys: [string],
+    task_texts: [string],
+    save_tasks: bool,
+    cookie_names: [string],
+    cookie_values: map
+) -> string {
+    let tasks_text = if save_tasks => {
+        let mut entries = [];
+        for index in 0..task_keys.length {
+            let key: string = task_keys[index].copy();
+            let value_json: string = task_texts[index].copy();
+            entries[entries.length] = { key: key, value_json: value_json };
+        }
+        json::encode_object_entries(entries)
+    } else => {
+        "{}"
+    };
+    let mut cookie_entries = [];
+    for index in 0..cookie_names.length {
+        let name: string = cookie_names[index].copy();
+        let value: string = cookie_values[name.copy()].copy();
+        let value_json = json::encode(value);
+        cookie_entries[cookie_entries.length] = { key: name, value_json: value_json };
+    }
+    let cookies_text = json::encode_object_entries(cookie_entries);
+    json::encode_object_entries([
+        { key: "tasks", value_json: tasks_text },
+        { key: "cookies", value_json: cookies_text }
+    ])
+}
+
+/// Splits a session document into its ordered `tasks` and `cookies` members.
+///
+/// The plan keeps each member's document order and each task's raw JSON value
+/// text; the task and cookie business rules are applied by the control module.
+/// A missing member is reported instead of being invented, and malformed JSON
+/// reaches the embedding as the Core decoder error.
+pub fn parse_session(text: string) -> string {
+    let entries = json::decode_object_entries(text);
+    let mut tasks_text = "";
+    let mut tasks_found = false;
+    let mut cookies_text = "";
+    let mut cookies_found = false;
+    for index in 0..entries.length {
+        let entry = entries[index].copy();
+        let key: string = entry.key;
+        if key == "tasks" {
+            tasks_text = entry.value_json;
+            tasks_found = true;
+        } else if key == "cookies" {
+            cookies_text = entry.value_json;
+            cookies_found = true;
+        }
+    }
+    if tasks_found == false => {
+        error_plan("missing_tasks")
+    } else if cookies_found == false => {
+        error_plan("missing_cookies")
+    } else => {
+        let task_entries = json::decode_object_entries(tasks_text);
+        let cookie_entries = json::decode_object_entries(cookies_text);
+        let mut tasks_out = "";
+        for index in 0..task_entries.length {
+            let entry = task_entries[index].copy();
+            if index > 0 {
+                tasks_out = tasks_out + ",";
+            }
+            tasks_out = tasks_out + "{\"key\":" + json::encode(entry.key)
+                + ",\"value_json\":" + json::encode(entry.value_json) + "}";
+        }
+        let mut cookies_out = "";
+        for index in 0..cookie_entries.length {
+            let entry = cookie_entries[index].copy();
+            if index > 0 {
+                cookies_out = cookies_out + ",";
+            }
+            cookies_out = cookies_out + "{\"key\":" + json::encode(entry.key)
+                + ",\"value_json\":" + json::encode(entry.value_json) + "}";
+        }
+        "{\"ok\":true,\"tasks\":[" + tasks_out + "],\"cookies\":[" + cookies_out + "]}"
+    }
+}
+
+// ---------------------------------------------------------------- file naming
+
+/// `util.legalpath` on POSIX: remove every `/` and `:` character. The Windows
+/// trailing-space/named-stream branch is not reachable on this platform.
+pub fn legalpath(text: string) -> string {
+    re::replace("[\\/:]", text, "")
+}
+
+/// `os.path.join` for the two components this task needs: an empty second
+/// component keeps a trailing separator, and a separator is not doubled.
+pub fn join_path(base: string, name: string) -> string {
+    let base_length = (&base).length;
+    if base_length == 0 => {
+        name
+    } else if (&name).length == 0 => {
+        let last = (&base)[(base_length - 1):base_length];
+        if last == "/" => {
+            base
+        } else => {
+            base + "/"
+        }
+    } else => {
+        let last = (&base)[(base_length - 1):base_length];
+        if last == "/" => {
+            base + name
+        } else => {
+            base + "/" + name
+        }
+    }
+}
+
+/// `Task.get_fidpad`: zero-pad the decimal fid to the width of the decimal
+/// total and append `.jpg`.
+pub fn fid_name(fid: int, total: int) -> string {
+    let total_text = json::encode(total);
+    let width = (&total_text).length;
+    let fid_text = json::encode(fid);
+    let mut pad = "";
+    for _index in 0..(width - (&fid_text).length) {
+        pad = pad + "0";
+    }
+    pad + fid_text + ".jpg"
+}
+
+// --------------------------------------------------------------- scan recovery
+
+fn range_pair_ok(values: array, index: int) -> bool {
+    if type(values[index].copy()) != "array" => {
+        false
+    } else => {
+        let pair: [int] = values[index].copy();
+        pair.length == 2
+    }
+}
+
+fn all_ranges(values: array, index: int) -> bool {
+    let mut current = index;
+    let mut ok = true;
+    while current < values.length && ok {
+        if range_pair_ok(values.copy(), current) {
+            current = current + 1;
+        } else {
+            ok = false;
+        }
+    }
+    ok
+}
+
+/// `Task.scan_downloaded` decisions over the trusted file system.
+///
+/// Returns the updated meta JSON, the number of finished ids, and the done ids
+/// in ascending order. The upstream `self.state == TASK_STATE_FINISHED`
+/// comparison never assigns the state, so neither does this function.
+pub fn scan_task(config_json: string, meta_json: string) -> string {
+    let config: map = json::decode::<map>(config_json);
+    let mut meta: map = json::decode::<map>(meta_json);
+    if meta.has("total") == false => {
+        error_plan("missing_total")
+    } else if type(meta["total"].copy()) != "int" => {
+        error_plan("type:total")
+    } else if meta.has("title") == false => {
+        error_plan("missing_title")
+    } else if type(meta["title"].copy()) != "string" => {
+        error_plan("type:title")
+    } else if config.has("dir") == false => {
+        error_plan("missing_dir")
+    } else if config.has("download_range") == false => {
+        error_plan("missing_download_range")
+    } else if type(config["dir"].copy()) != "string" => {
+        error_plan("type:dir")
+    } else => {
+        let range_state = if config.has("download_range") == false => {
+            0
+        } else if type(config["download_range"].copy()) == "null" => {
+            0
+        } else if type(config["download_range"].copy()) != "array" => {
+            -1
+        } else => {
+            let outer: array = config["download_range"].copy();
+            if all_ranges(outer, 0) => {
+                let typed: [[int]] = config["download_range"].copy();
+                if typed.length > 0 => {
+                    1
+                } else => {
+                    0
+                }
+            } else => {
+                -1
+            }
+        };
+        if range_state < 0 => {
+            error_plan("type:download_range")
+        } else => {
+            let total: int = meta["total"].copy();
+            let title: string = meta["title"].copy();
+            let dir: string = config["dir"].copy();
+            let fpath = join_path(dir, legalpath(title));
+            let marker = join_path(fpath.copy(), ".xehdone");
+            let zip_path = fpath + ".zip";
+            let marker_stat = xeh_fs::stat(marker);
+            let zip_stat = xeh_fs::stat(zip_path);
+            let donefile = marker_stat.exists || zip_stat.exists;
+            let has_ranges = range_state == 1;
+            let ranges: [[int]] = if has_ranges => {
+                let typed: [[int]] = config["download_range"].copy();
+                typed
+            } else => {
+                let empty: [[int]] = [];
+                empty
+            };
+            let mut done: [int] = [];
+            let mut failure = "";
+            let mut range_idx = 0;
+            let mut fid = 1;
+            while fid <= total && failure == "" {
+                let mut found = has_ranges == false;
+                let mut walking = has_ranges;
+                while walking && range_idx < ranges.length && found == false {
+                    let pair: [int] = ranges[range_idx].copy();
+                    let start = pair[0];
+                    let end = pair[1];
+                    if fid > end {
+                        range_idx = range_idx + 1;
+                    } else if start <= fid && fid <= end {
+                        found = true;
+                    } else {
+                        walking = false;
+                    }
+                }
+                if found == false {
+                    done[done.length] = fid;
+                } else {
+                    let fname = join_path(fpath.copy(), fid_name(fid, total));
+                    if donefile {
+                        done[done.length] = fid;
+                    } else {
+                        let stat = xeh_fs::stat(fname.copy());
+                        if stat.exists {
+                            if stat.size == 0 {
+                                let removed = xeh_fs::remove_zero_file(fname);
+                                if removed.removed == false && type(removed.error) != "null" {
+                                    failure = "remove_zero_file failed";
+                                }
+                            } else {
+                                done[done.length] = fid;
+                            }
+                        }
+                    }
+                }
+                fid = fid + 1;
+            }
+            if failure != "" => {
+                "{\"ok\":false,\"error\":\"remove_failed\",\"detail\":"
+                    + json::encode(failure) + "}"
+            } else => {
+                let finished = done.length;
+                let mut next = meta.copy();
+                next["finished"] = finished;
+                let mut done_text = "[";
+                for index in 0..done.length {
+                    if index > 0 {
+                        done_text = done_text + ",";
+                    }
+                    done_text = done_text + json::encode(done[index].copy());
+                }
+                done_text = done_text + "]";
+                "{\"ok\":true,\"meta\":" + json::encode(next)
+                    + ",\"finished\":" + json::encode(finished)
+                    + ",\"done\":" + done_text + "}"
+            }
+        }
+    }
+}
+
+// ----------------------------------------------------------- remaining plan
+
+fn contains_int(values: [int], wanted: int) -> bool {
+    let mut found = false;
+    for index in 0..values.length {
+        if values[index] == wanted {
+            found = true;
+        }
+    }
+    found
+}
+
+fn page_pattern() -> string {
+    "/([a-f0-9]{10})/[^-]+-([0-9]+)"
+}
+
+fn image_pattern() -> string {
+    "/([a-f0-9]{40})-([0-9]+)-([0-9]+)-([0-9]+)-([a-z]{0,4})"
+}
+
+/// Selects the not-yet-downloaded image transports from the already parsed
+/// `page_q` / `img_q` / `reload_map` values. The plan is data only: a thin
+/// driver transports it to the accepted worker; no page or image rule is
+/// re-parsed here beyond the identifiers the session file already contains.
+pub fn download_plan(
+    page_q_json: string,
+    img_q_json: string,
+    reload_json: string,
+    done_json: string,
+    total: int,
+    config_dir: string,
+    title: string
+) -> string {
+    let pages: [string] = json::decode::<[string]>(page_q_json);
+    let images: [string] = json::decode::<[string]>(img_q_json);
+    let done: [int] = json::decode::<[int]>(done_json);
+    let reload: map = json::decode::<map>(reload_json);
+    let fpath = join_path(config_dir, legalpath(title));
+    let mut items = "";
+    let mut count = 0;
+    let mut failure = "";
+    for index in 0..pages.length {
+        let page: string = pages[index].copy();
+        let groups = re::captures(page_pattern(), page.copy());
+        if groups.length < 3 {
+            failure = "page_shape";
+        } else {
+            let hash: string = groups[1].copy();
+            let fid: int = json::decode::<int>(groups[2].copy());
+            if contains_int(done.copy(), fid) == false && failure == "" {
+                if reload.has(hash) == false {
+                    failure = "reload_missing";
+                } else if type(reload[hash].copy()) != "array" {
+                    failure = "reload_shape";
+                } else {
+                    let entry: array = reload[hash].copy();
+                    if entry.length < 2 || type(entry[1].copy()) != "string" {
+                        failure = "reload_shape";
+                    } else {
+                        let renamed: string = entry[1].copy();
+                        let mut image_url = "";
+                        for image_index in 0..images.length {
+                            let candidate: string = images[image_index].copy();
+                            let matches = re::captures(image_pattern(), candidate.copy());
+                            if matches.length >= 2 {
+                                let full: string = matches[1].copy();
+                                if (&full)[0:10] == hash && image_url == "" {
+                                    image_url = candidate;
+                                }
+                            }
+                        }
+                        if image_url == "" {
+                            failure = "image_missing";
+                        } else {
+                            let file = join_path(fpath.copy(), fid_name(fid, total));
+                            if count > 0 {
+                                items = items + ",";
+                            }
+                            items = items + "{\"fid\":" + json::encode(fid)
+                                + ",\"url\":" + json::encode(image_url)
+                                + ",\"renamed\":" + json::encode(renamed)
+                                + ",\"file\":" + json::encode(file.copy())
+                                + ",\"staging\":" + json::encode(file + ".xehpart")
+                                + "}";
+                            count = count + 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if failure != "" => {
+        "{\"ok\":false,\"error\":" + json::encode(failure) + "}"
+    } else => {
+        "{\"ok\":true,\"items\":[" + items + "]}"
+    }
+}

@@ -7,6 +7,7 @@ mod config;
 mod manifest;
 mod oracle;
 mod paths;
+mod session;
 mod task_api;
 mod verify;
 
@@ -14,6 +15,7 @@ pub use config::{run_diff, run_suite};
 pub use manifest::{check_coverage_claims, feature_ids, reject_unmapped, ManifestError};
 pub use oracle::{capture, compare_trees};
 pub use paths::{evidence_dir, lease_tmp, workspace_root};
+pub use session::{run_session_diff, run_session_suite};
 pub use task_api::{run_state_suite, run_task_diff};
 pub use verify::{verify_deny_unverified, VerifyReport};
 
