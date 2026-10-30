@@ -153,17 +153,19 @@ fn glype_session_survives_a_second_owner_and_stale_publish_misses() {
 
 #[test]
 fn glype_raw_403_is_status_not_connection_error() {
-    let port = serve(|_| http(403, "Content-Type: text/html\r\n", "denied"));
-    let report = run_port(
-        json!({
-            "operation": "glype",
-            "address": format!("http://127.0.0.1:{port}/browse.php?u=x&b=4"),
-            "targets": [format!("http://127.0.0.1:{port}/page")]
-        }),
-        port,
-    );
-    assert_eq!(report["flows"][0]["status"], json!(403));
-    assert_eq!(report["flows"][0]["exception"], json!(""));
+    for status in [403u16, 429, 500] {
+        let port = serve(move |_| http(status, "Content-Type: text/html\r\n", "denied"));
+        let report = run_port(
+            json!({
+                "operation": "glype",
+                "address": format!("http://127.0.0.1:{port}/browse.php?u=x&b=4"),
+                "targets": [format!("http://127.0.0.1:{port}/page")]
+            }),
+            port,
+        );
+        assert_eq!(report["flows"][0]["status"], json!(status));
+        assert_eq!(report["flows"][0]["exception"], json!(""));
+    }
 }
 
 #[test]
