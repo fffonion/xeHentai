@@ -14,7 +14,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use http_body_util::BodyExt;
-use tokio_util::sync::CancellationToken;
 use vm::{
     register_catalog_function, CallOutcome, CallReturn, HostApiCatalog, HostFunction,
     HostFunctionRegistry, HostFunctionSchema, HostFutureOutput, HostParamSchema, HostStructField,
@@ -22,7 +21,7 @@ use vm::{
 };
 
 use crate::dto::{HeaderEntry, TransportHooks};
-use crate::net::{open_get_with_options, DriverOwner, NativeProxyRoute, OpenOptions, ProxyKind};
+use crate::net::{open_get_with_options, NativeProxyRoute, OpenOptions, ProxyKind};
 use crate::observe::Metrics;
 use crate::task_control::task_catalog;
 use crate::types::HostError;
@@ -34,6 +33,7 @@ const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 pub struct ProxyHost {
     pub http: vm::HttpConfig,
     pub hooks: TransportHooks,
+    pub session: std::sync::Arc<crate::proxy_exchange::ProxySession>,
 }
 
 pub fn proxy_catalog() -> Arc<HostApiCatalog> {
@@ -51,7 +51,16 @@ pub fn proxy_catalog() -> Arc<HostApiCatalog> {
     for schema in proxy_structs() {
         builder.named_struct(schema);
     }
+    for schema in crate::proxy_exchange::exchange_structs() {
+        builder.named_struct(schema);
+    }
+    for resource in crate::proxy_exchange::exchange_resources() {
+        builder.resource(resource);
+    }
     for function in proxy_functions() {
+        builder.function(function);
+    }
+    for function in crate::proxy_exchange::exchange_functions() {
         builder.function(function);
     }
     Arc::new(builder.build().expect("proxy catalog"))
@@ -66,12 +75,14 @@ pub fn register_proxy(
         .function("xeh_proxy::request")
         .ok_or_else(|| HostError::bind("missing application schema xeh_proxy::request"))?
         .clone();
+    let request_host = Arc::clone(&host);
     register_catalog_function(registry, catalog, "xeh_proxy::request", schema, move || {
         Box::new(ProxyRequestFn {
-            host: Arc::clone(&host),
+            host: Arc::clone(&request_host),
         })
     })
-    .map_err(|error| HostError::bind(error.to_string()))
+    .map_err(|error| HostError::bind(error.to_string()))?;
+    crate::proxy_exchange::register_exchange(registry, catalog, host)
 }
 
 fn proxy_structs() -> Vec<HostStructSchema> {
@@ -145,6 +156,7 @@ impl HostFunction for ProxyRequestFn {
     fn call(&mut self, vm: &mut Vm, args: &[Value]) -> VmResult<CallOutcome> {
         let parsed =
             parse_request(args).map_err(|error| vm::VmError::HostError(error.to_string()))?;
+        crate::proxy_exchange::ensure_lease(vm, &self.host.session)?;
         let host = Arc::clone(&self.host);
         let future = async move {
             let response = execute(&host, parsed).await;
@@ -167,8 +179,8 @@ struct ProxyResponse {
 
 async fn execute(host: &ProxyHost, request: ParsedRequest) -> ProxyResponse {
     let metrics = Metrics::default();
-    let owner = Arc::new(DriverOwner::new());
-    let cancel = CancellationToken::new();
+    let owner = crate::proxy_exchange::session_owner(host);
+    let cancel = crate::proxy_exchange::child_cancel(host);
     let started = Instant::now();
     let mut opened = match open_get_with_options(
         &host.http,
@@ -183,6 +195,9 @@ async fn execute(host: &ProxyHost, request: ParsedRequest) -> ProxyResponse {
             route: request.route.as_ref(),
             follow_redirects: request.follow_redirects,
             allow_redirect_response: !request.follow_redirects,
+            return_raw_status: false,
+            method: "GET",
+            body: b"",
         },
     )
     .await

@@ -757,11 +757,7 @@ fn run_open(
             hooks,
             &owner,
             Instant::now(),
-            OpenOptions {
-                route: route.as_ref(),
-                follow_redirects,
-                allow_redirect_response: false,
-            },
+            OpenOptions::get(route.as_ref(), follow_redirects, false),
         )
         .await?;
         let mut body = Vec::new();
@@ -1200,11 +1196,7 @@ fn redirect_follow_reauthorizes_and_strips_cross_origin_headers() {
                 &TransportHooks::default(),
                 &owner,
                 Instant::now(),
-                OpenOptions {
-                    route: Some(&route(ProxyKind::Http, &proxy, true)),
-                    follow_redirects: true,
-                    allow_redirect_response: false,
-                },
+                OpenOptions::get(Some(&route(ProxyKind::Http, &proxy, true)), true, false),
             )
             .await
             .expect("open");
@@ -1490,11 +1482,7 @@ fn cancel_during_connect_handshake_releases_every_driver() {
             &TransportHooks::default(),
             &owner,
             Instant::now(),
-            OpenOptions {
-                route: Some(&route),
-                follow_redirects: false,
-                allow_redirect_response: false,
-            },
+            OpenOptions::get(Some(&route), false, false),
         )
         .await;
         let code = match result {

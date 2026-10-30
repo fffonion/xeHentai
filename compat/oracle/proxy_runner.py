@@ -58,7 +58,18 @@ def pool_state(pool):
         "order": list(pool.proxies.keys()),
         "counts": {key: [value[1], value[2]] for key, value in pool.proxies.items()},
         "disabled": dict(pool.disabled),
+        "glyph": glyph_state(pool),
     }
+
+
+def glyph_state(pool):
+    found = {}
+    for addr, row in pool.proxies.items():
+        handle = row[0]
+        defaults = getattr(handle, "__defaults__", None) or ()
+        if defaults and isinstance(defaults[0], dict) and "s" in defaults[0]:
+            found[addr] = defaults[0]["s"]
+    return found
 
 
 def selected_address(not_good):
@@ -99,7 +110,7 @@ def run_pool(case):
                 elif op == "proxy_trace":
                     run_trace(pool, step)
                 elif op == "proxy_has":
-                    pool.has_available_proxies()
+                    entry["available"] = bool(pool.has_available_proxies())
                 else:
                     entry["ok"] = False
                     entry["error"] = "UnknownOp"

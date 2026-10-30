@@ -5,11 +5,13 @@
 //! creation state across every step. Policy and Glype cases call the same
 //! functions the application uses; they do not duplicate selection logic.
 use json;
+use xeh_proxy;
 
 use super::domain::state;
 use self::glype;
 use self::policy;
 use self::pool;
+use self::worker;
 
 fn field_string(document: map, name: string, fallback: string) -> string {
     if document.has(name) && type(document[name].copy()) == "string" => {
@@ -183,6 +185,86 @@ fn run_glype(document: map) -> string {
         + ",\"glyph_s\":" + json::encode(glyph_s) + "}"
 }
 
+fn run_worker(document: map) -> string {
+    let url = field_string(document.copy(), "url", "");
+    let method = field_string(document.copy(), "method", "GET");
+    let data = field_string(document.copy(), "data", "");
+    let explicit = bool_field(document.copy(), "explicit_allow_redirects", false);
+    let agreement = field_string(document.copy(), "agreement_url", "");
+    let image = bool_field(document.copy(), "proxy_image", false);
+    let image_only = bool_field(document.copy(), "proxy_image_only", false);
+    let report = worker::request(url, method, data, explicit, agreement, image, image_only);
+    let ok: bool = report["ok"].copy();
+    let exception: string = report["exception"].copy();
+    let detail: string = report["detail"].copy();
+    let logical_url: string = report["logical_url"].copy();
+    let real_url: string = report["real_url"].copy();
+    let final_url: string = report["final_url"].copy();
+    let status: int = report["status"].copy();
+    let byte_length: int = report["byte_length"].copy();
+    let hops: [map] = report["hops"].copy();
+    let mut hop_texts: [string] = [];
+    for index in 0..hops.length {
+        let hop: map = hops[index].copy();
+        let hop_url: string = hop["url"].copy();
+        let proxied: bool = hop["proxied"].copy();
+        let hop_status: int = hop["status"].copy();
+        let hop_error: string = hop["error_kind"].copy();
+        hop_texts[hop_texts.length] = "{\"url\":" + json::encode(hop_url)
+            + ",\"proxied\":" + json::encode(proxied)
+            + ",\"status\":" + json::encode(hop_status)
+            + ",\"error_kind\":" + json::encode(hop_error) + "}";
+    }
+    "{\"operation\":\"worker\",\"ok\":" + json::encode(ok)
+        + ",\"exception\":" + json::encode(exception)
+        + ",\"detail\":" + json::encode(detail)
+        + ",\"logical_url\":" + json::encode(logical_url)
+        + ",\"real_url\":" + json::encode(real_url)
+        + ",\"final_url\":" + json::encode(final_url)
+        + ",\"status\":" + json::encode(status)
+        + ",\"byte_length\":" + json::encode(byte_length)
+        + ",\"hops\":[" + join(hop_texts) + "]}"
+}
+
+fn run_transfer(document: map) -> string {
+    let url = field_string(document.copy(), "url", "");
+    let method = field_string(document.copy(), "method", "GET");
+    let data = field_string(document.copy(), "data", "");
+    let relative = field_string(document.copy(), "stage", "");
+    let names: [string] = [];
+    let values: [string] = [];
+    let response = xeh_proxy::exchange(
+        url.copy(),
+        method.copy(),
+        names,
+        values,
+        data.copy(),
+        "direct",
+        "",
+        0,
+        false,
+        false,
+        true,
+        0
+    );
+    let status: int = response.status;
+    let byte_length: int = response.byte_length;
+    let body_text: string = response.body_text;
+    let error_kind: string = response.error_kind;
+    let staged = xeh_proxy::body_stage(response.body, relative.copy());
+    let staged_ok: bool = staged["ok"].copy();
+    let staged_bytes: int = staged["bytes"].copy();
+    let staged_error: string = staged["error"].copy();
+    let _closed = xeh_proxy::body_close(response.body);
+    "{\"operation\":\"transfer\",\"status\":" + json::encode(status)
+        + ",\"byte_length\":" + json::encode(byte_length)
+        + ",\"body_text\":" + json::encode(body_text)
+        + ",\"error_kind\":" + json::encode(error_kind)
+        + ",\"staged_ok\":" + json::encode(staged_ok)
+        + ",\"staged_bytes\":" + json::encode(staged_bytes)
+        + ",\"staged_error\":" + json::encode(staged_error) + "}"
+}
+
 pub fn run_scenario(request: string) -> string {
     let document: map = json::decode::<map>(request);
     let operation = field_string(document.copy(), "operation", "");
@@ -194,6 +276,10 @@ pub fn run_scenario(request: string) -> string {
         run_routes(document)
     } else if operation == "glype" => {
         run_glype(document)
+    } else if operation == "worker" => {
+        run_worker(document)
+    } else if operation == "transfer" => {
+        run_transfer(document)
     } else => {
         "{\"operation\":\"unknown\",\"error\":\"unknown_operation\"}"
     }

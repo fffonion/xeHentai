@@ -195,11 +195,7 @@ async fn execute_inner(
         &host.hooks,
         &host.drivers,
         started,
-        crate::net::OpenOptions {
-            route: submission.route(),
-            follow_redirects: submission.follow_redirects(),
-            allow_redirect_response: false,
-        },
+        crate::net::OpenOptions::get(submission.route(), submission.follow_redirects(), false),
     )
     .await?;
     let deadline = started + host.http.request_timeout.min(host.http.max_stream_duration);

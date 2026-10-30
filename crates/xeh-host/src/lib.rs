@@ -5,6 +5,7 @@ mod dto;
 mod net;
 mod observe;
 pub mod os;
+mod proxy_exchange;
 mod proxy_host;
 mod runtime;
 mod task_control;

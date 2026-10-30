@@ -424,6 +424,7 @@ fn proxy_state(step: &Value) -> Value {
         "order": proxy.get("order").cloned().unwrap_or(Value::Null),
         "counts": proxy.get("counts").cloned().unwrap_or(Value::Null),
         "disabled": proxy.get("disabled").cloned().unwrap_or(Value::Null),
+        "glyph": proxy.get("glyph").cloned().unwrap_or(json!({})),
     })
 }
 
@@ -443,13 +444,23 @@ fn pool_steps(report: &Value) -> Result<Value, String> {
                 }
             }
         }
-        output.push(json!({
+        let mut row = json!({
             "op": op,
             "ok": step.get("ok").cloned().unwrap_or(Value::Null),
             "error": step.get("error").cloned().unwrap_or(Value::Null),
             "address": address,
             "proxy": proxy_state(step),
-        }));
+        });
+        if op == "proxy_has" {
+            let available = step
+                .get("value")
+                .and_then(Value::as_str)
+                .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                .and_then(|value| value.get("value").cloned())
+                .unwrap_or(Value::Null);
+            row["available"] = available;
+        }
+        output.push(row);
     }
     Ok(Value::Array(output))
 }
@@ -666,6 +677,22 @@ fn mutation_gates(
                 .pointer_mut("/steps/5/error")
                 .ok_or_else(|| "pool exception is absent".to_string())?;
             *error = json!("KeyError");
+            Ok(())
+        })?;
+        count += 1;
+        reject_mutant("pool-available", expected, actual, |value| {
+            let available = value
+                .pointer_mut("/steps/5/available")
+                .ok_or_else(|| "pool available is absent".to_string())?;
+            *available = json!(true);
+            Ok(())
+        })?;
+        count += 1;
+        reject_mutant("pool-glyph", expected, actual, |value| {
+            let glyph = value
+                .pointer_mut("/steps/1/proxy/glyph")
+                .ok_or_else(|| "pool glyph is absent".to_string())?;
+            *glyph = json!({"http://a.invalid:1": "stale"});
             Ok(())
         })?;
         count += 1;

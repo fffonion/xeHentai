@@ -1005,6 +1005,25 @@ fn op_proxy_has(store: Store, _document: map) -> Step {
     code_step(store, err_no_error(), "{\"value\":" + json::encode(value) + "}")
 }
 
+fn op_proxy_glyph_read(store: Store, document: map) -> Step {
+    let address = field_string(document, "address", "");
+    let read = pool::glyph_read(pool_of(store.copy()), address.copy());
+    let s: string = read["s"].copy();
+    let epoch: int = read["epoch"].copy();
+    let value = "{\"s\":" + json::encode(s) + ",\"epoch\":" + json::encode(epoch) + "}";
+    code_step(store, err_no_error(), value)
+}
+
+fn op_proxy_glyph_publish(store: Store, document: map) -> Step {
+    let address = field_string(document, "address", "");
+    let epoch = field_int(document.copy(), "epoch", 0);
+    let cookie = field_string(document, "value", "");
+    let result = pool::glyph_publish(pool_of(store.copy()), address.copy(), epoch, cookie.copy());
+    let next = with_pool(store, result["state"].copy());
+    let updated: bool = result["updated"].copy();
+    code_step(next, err_no_error(), "{\"updated\":" + json::encode(updated) + "}")
+}
+
 fn op_prepare(store: Store, document: map) -> Step {
     let guid = field_string(document, "guid", "");
     if store_has_task(store.copy(), guid) == false => {
@@ -1911,6 +1930,10 @@ pub fn dispatch(control: Control, request: string) -> Control {
         op_proxy_trace(store.copy(), document)
     } else if op == "proxy_has" => {
         op_proxy_has(store.copy(), document)
+    } else if op == "proxy_glyph_read" => {
+        op_proxy_glyph_read(store.copy(), document)
+    } else if op == "proxy_glyph_publish" => {
+        op_proxy_glyph_publish(store.copy(), document)
     } else if op == "event" => {
         op_event(store.copy(), document)
     } else if op == "snapshot" => {

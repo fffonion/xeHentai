@@ -488,19 +488,40 @@ fn fetch_request(url: string, headers: [map], follow: bool) -> map {
         names[names.length] = name.copy();
         values[values.length] = value.copy();
     }
-    let response = xeh_proxy::request(
+    let response = xeh_proxy::exchange(
         url.copy(),
         "GET",
         names.copy(),
         values.copy(),
+        "",
         "direct",
         "",
         0,
         false,
-        follow
+        follow,
+        true,
+        262144
     );
-    let response_names: [string] = response.header_names.copy();
-    let response_values: [string] = response.header_values.copy();
+    let status: int = response.status;
+    let response_url: string = response.url;
+    let response_names: [string] = response.header_names;
+    let response_values: [string] = response.header_values;
+    let body_text: string = response.body_text;
+    let text_valid: bool = response.text_valid;
+    let error_kind: string = response.error_kind;
+    let error_detail: string = response.error_detail;
+    let marker = xeh_proxy::body_scan(
+        response.body,
+        "<input type=\"hidden\" name=\"action\" value=\"sslagree\">"
+    );
+    let inline = xeh_proxy::body_inline(response.body, 65536);
+    let _closed = xeh_proxy::body_close(response.body);
+    let bytes: [int] = if inline.ok => {
+        let copied: [int] = inline.bytes.copy();
+        copied
+    } else => {
+        []
+    };
     let mut fields: [map] = [];
     for index in 0..response_names.length {
         let name: string = response_names[index].copy();
@@ -508,14 +529,15 @@ fn fetch_request(url: string, headers: [map], follow: bool) -> map {
         fields[fields.length] = { name: name.copy(), value: value.copy() };
     }
     {
-        status: response.status.copy(),
-        url: response.url.copy(),
+        status: status,
+        url: response_url.copy(),
         headers: fields,
-        body: response.body.copy(),
-        body_text: response.body_text.copy(),
-        text_valid: response.text_valid.copy(),
-        error_kind: response.error_kind.copy(),
-        error_detail: response.error_detail.copy(),
+        body: bytes,
+        body_text: body_text.copy(),
+        text_valid: text_valid,
+        error_kind: error_kind.copy(),
+        error_detail: error_detail.copy(),
+        marker: marker,
     }
 }
 
@@ -593,8 +615,9 @@ pub fn run_flows(
                     }
                     let body_text_value: string = response["body_text"].copy();
                     let body_text_valid: bool = response["text_valid"].copy();
-                    let mut warned = false;
-                    if body_text_valid {
+                    let marker_value: bool = response["marker"].copy();
+                    let mut warned = marker_value;
+                    if body_text_valid && warned == false {
                         warned = warning(body_text_value.copy());
                     }
                     if warned == false {

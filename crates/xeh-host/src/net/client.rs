@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use http_body_util::Empty;
+use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper_util::rt::TokioIo;
 use rustls::pki_types::ServerName;
@@ -39,7 +39,7 @@ pub struct OpenedResponse {
 
 pub struct Connection {
     driver: Option<JoinHandle<()>>,
-    sender: Option<hyper::client::conn::http1::SendRequest<Empty<Bytes>>>,
+    sender: Option<hyper::client::conn::http1::SendRequest<Full<Bytes>>>,
     owner: Option<Arc<DriverOwner>>,
 }
 
@@ -55,14 +55,39 @@ pub struct OpenOptions<'a> {
     /// Return a 3xx response to the caller instead of following or rejecting
     /// it. The Task3 transfer entry leaves this false.
     pub allow_redirect_response: bool,
+    /// Return 4xx/5xx as a response instead of `http_status`. Task3 leaves this
+    /// false. Redirect policy above is unchanged.
+    pub return_raw_status: bool,
+    /// `GET` or `POST`. Any other method is `method_rejected` before connect.
+    pub method: &'a str,
+    /// Request body. Empty for GET. Synthetic form bytes only; never credentials.
+    pub body: &'a [u8],
 }
 
-impl OpenOptions<'_> {
+impl<'a> OpenOptions<'a> {
     pub fn direct() -> Self {
         Self {
             route: None,
             follow_redirects: false,
             allow_redirect_response: false,
+            return_raw_status: false,
+            method: "GET",
+            body: b"",
+        }
+    }
+
+    pub fn get(
+        route: Option<&'a NativeProxyRoute>,
+        follow_redirects: bool,
+        allow_redirect_response: bool,
+    ) -> Self {
+        Self {
+            route,
+            follow_redirects,
+            allow_redirect_response,
+            return_raw_status: false,
+            method: "GET",
+            body: b"",
         }
     }
 }
@@ -252,6 +277,8 @@ pub async fn open_get_with_options(
             owner,
             started,
             overall,
+            options.method,
+            options.body,
         )
         .await?;
         if options.follow_redirects && (300..400).contains(&opened.status) {
@@ -281,6 +308,9 @@ pub async fn open_get_with_options(
             return Err("redirect_unsupported");
         }
         if !(200..300).contains(&opened.status) {
+            if options.return_raw_status {
+                return Ok(opened);
+            }
             let _ = opened.connection.shutdown(cleanup_deadline(overall)).await;
             return Err("http_status");
         }
@@ -307,12 +337,17 @@ async fn open_once(
     owner: &Arc<DriverOwner>,
     started: Instant,
     overall: Instant,
+    method: &str,
+    body: &[u8],
 ) -> Result<OpenedResponse, &'static str> {
     reject_headers(http, headers)?;
+    if method != "GET" && method != "POST" {
+        return Err("method_rejected");
+    }
     let https = parsed.scheme().eq_ignore_ascii_case("https");
     let connect_deadline = (started + http.connect_timeout).min(overall);
     let Some(route) = route else {
-        let request = build_request(parsed, headers, false)?;
+        let request = build_request(parsed, headers, false, method, body)?;
         let target = admit_target(
             http,
             parsed,
@@ -392,7 +427,7 @@ async fn open_once(
                 "target_tls_failed",
             )
             .await?;
-            let request = build_request(parsed, headers, false)?;
+            let request = build_request(parsed, headers, false, method, body)?;
             return finish_request(
                 request,
                 parsed.as_str().to_string(),
@@ -406,7 +441,7 @@ async fn open_once(
             )
             .await;
         }
-        let request = build_request(parsed, headers, true)?;
+        let request = build_request(parsed, headers, true, method, body)?;
         return finish_request(
             request,
             parsed.as_str().to_string(),
@@ -440,7 +475,7 @@ async fn open_once(
             "target_tls_failed",
         )
         .await?;
-        let request = build_request(parsed, headers, false)?;
+        let request = build_request(parsed, headers, false, method, body)?;
         finish_request(
             request,
             parsed.as_str().to_string(),
@@ -454,7 +489,7 @@ async fn open_once(
         )
         .await
     } else {
-        let request = build_request(parsed, headers, false)?;
+        let request = build_request(parsed, headers, false, method, body)?;
         finish_request(
             request,
             parsed.as_str().to_string(),
@@ -472,7 +507,7 @@ async fn open_once(
 
 #[allow(clippy::too_many_arguments)]
 async fn finish_request<I>(
-    request: http::Request<Empty<Bytes>>,
+    request: http::Request<Full<Bytes>>,
     url: String,
     cancel: &CancellationToken,
     metrics: &Metrics,
@@ -602,25 +637,35 @@ fn build_request(
     url: &Url,
     headers: &[HeaderEntry],
     absolute_form: bool,
-) -> Result<http::Request<Empty<Bytes>>, &'static str> {
+    method: &str,
+    body: &[u8],
+) -> Result<http::Request<Full<Bytes>>, &'static str> {
     let target = if absolute_form {
         url.as_str().to_string()
     } else {
         origin_form(url)
     };
+    let http_method = http::Method::from_bytes(method.as_bytes()).map_err(|_| "method_rejected")?;
     let mut request = http::Request::builder()
-        .method(http::Method::GET)
+        .method(http_method)
         .uri(target)
         .header(http::header::HOST, host_header(url))
-        .header(http::header::CONNECTION, "close")
-        .header(http::header::USER_AGENT, "xeh-host");
+        .header(http::header::CONNECTION, "close");
+    // A caller-supplied User-Agent, any case, replaces the default. Duplicate
+    // caller values are appended raw; they are not folded into one map entry.
+    if !headers
+        .iter()
+        .any(|header| header.name.eq_ignore_ascii_case(b"user-agent"))
+    {
+        request = request.header(http::header::USER_AGENT, "xeh-host");
+    }
     for header in headers {
         let name = http::HeaderName::from_bytes(&header.name).map_err(|_| "header_rejected")?;
         let value = http::HeaderValue::from_bytes(&header.value).map_err(|_| "header_rejected")?;
         request = request.header(name, value);
     }
     request
-        .body(Empty::<Bytes>::new())
+        .body(Full::new(Bytes::copy_from_slice(body)))
         .map_err(|_| "header_rejected")
 }
 

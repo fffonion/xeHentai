@@ -18,6 +18,7 @@ fn empty_state() -> map {
         disabled: {},
         disabled_order: [],
         glyph: {},
+        glyph_epoch: {},
     }
 }
 
@@ -33,6 +34,15 @@ fn num(value: map, key: string, fallback: number) -> number {
 fn text(value: map, key: string, fallback: string) -> string {
     if value.has(key) && type(value[key].copy()) == "string" => {
         let typed: string = value[key].copy();
+        typed
+    } else => {
+        fallback
+    }
+}
+
+fn whole(value: map, key: string, fallback: int) -> int {
+    if value.has(key) && type(value[key].copy()) == "int" => {
+        let typed: int = value[key].copy();
         typed
     } else => {
         fallback
@@ -257,26 +267,40 @@ pub fn add(snapshot: map, addr: string) -> map {
         let mut order: [string] = next["order"].copy();
         let mut counts: map = next["counts"].copy();
         let mut glyph: map = next["glyph"].copy();
+        let mut glyph_epoch: map = next["glyph_epoch"].copy();
         if counts.has(addr) == false {
             order[order.length] = addr.copy();
         }
         counts = put_row(counts, addr.copy(), [0, 0]);
         if parsed["kind"].copy() == "glype" {
+            let mut epoch = 1;
+            if glyph_epoch.has(addr) {
+                let previous: int = glyph_epoch[addr].copy();
+                epoch = previous + 1;
+            }
             glyph[addr] = "";
+            glyph_epoch[addr] = epoch;
         } else {
             let mut fresh: map = {};
+            let mut fresh_epoch: map = {};
             let keys = (&glyph).keys;
             for index in 0..keys.length {
                 let name: string = keys[index].copy();
                 if name != addr {
                     fresh[name] = glyph[name].copy();
+                    if glyph_epoch.has(name) {
+                        let kept: int = glyph_epoch[name].copy();
+                        fresh_epoch[name] = kept;
+                    }
                 }
             }
             glyph = fresh;
+            glyph_epoch = fresh_epoch;
         }
         next["order"] = order;
         next["counts"] = counts;
         next["glyph"] = glyph;
+        next["glyph_epoch"] = glyph_epoch;
         outcome = {
             ok: true,
             error: "",
@@ -515,6 +539,31 @@ pub fn configure(snapshot: map, addresses: [string]) -> map {
         state: state,
         warnings: warnings,
     }
+}
+
+pub fn glyph_read(snapshot: map, addr: string) -> map {
+    let glyph: map = snapshot["glyph"].copy();
+    let epochs: map = snapshot["glyph_epoch"].copy();
+    { s: text(glyph, addr.copy(), ""), epoch: whole(epochs, addr.copy(), 0) }
+}
+
+/// Writes `s` only when `epoch` is still the entry created by the last add.
+/// A re-add replaces the entry, so an in-flight cookie from the old entry
+/// cannot land on the new one.
+pub fn glyph_publish(snapshot: map, addr: string, epoch: int, cookie: string) -> map {
+    let mut next: map = snapshot.copy();
+    let mut glyph: map = next["glyph"].copy();
+    let epochs: map = next["glyph_epoch"].copy();
+    let mut updated: bool = false;
+    if epochs.has(addr) && type(epochs[addr].copy()) == "int" {
+        let current = whole(epochs, addr.copy(), 0);
+        if current == epoch {
+            glyph[addr] = cookie.copy();
+            next["glyph"] = glyph;
+            updated = true;
+        }
+    }
+    { state: next, updated: updated }
 }
 
 pub fn initial() -> map {

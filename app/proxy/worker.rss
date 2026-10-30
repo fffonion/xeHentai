@@ -1,0 +1,179 @@
+//! Source `HttpReq.request` redirect loop, owned by RSS.
+//!
+//! Each hop is one native exchange with redirects disabled. A 3xx updates the
+//! logical URL and the policy is evaluated again before the next hop. The
+//! native fixed-route follower is not used here. `_real_url` is
+//! `url_history[-1]`, the previous hop, not the URL that was finally opened.
+use xeh_proxy;
+
+use self::policy;
+
+fn location_of(names: [string], values: [string]) -> string? {
+    let mut found: string? = null;
+    for index in 0..names.length {
+        let name: string = names[index].copy();
+        if name == "Location" || name == "location" {
+            let value: string = values[index].copy();
+            found = value;
+            break;
+        }
+    }
+    found
+}
+
+fn hop(
+    url: string,
+    method: string,
+    data: string,
+    names: [string],
+    values: [string]
+) -> map {
+    let response = xeh_proxy::exchange(
+        url.copy(),
+        method.copy(),
+        names.copy(),
+        values.copy(),
+        data.copy(),
+        "direct",
+        "",
+        0,
+        false,
+        false,
+        true,
+        262144
+    );
+    let marker = xeh_proxy::body_scan(
+        response.body,
+        "<input type=\"hidden\" name=\"action\" value=\"sslagree\">"
+    );
+    let status: int = response.status;
+    let opened: string = response.url;
+    let error_kind: string = response.error_kind;
+    let error_detail: string = response.error_detail;
+    let byte_length: int = response.byte_length;
+    let header_names: [string] = response.header_names;
+    let header_values: [string] = response.header_values;
+    let _closed = xeh_proxy::body_close(response.body);
+    {
+        status: status,
+        url: opened.copy(),
+        error_kind: error_kind.copy(),
+        error_detail: error_detail.copy(),
+        byte_length: byte_length,
+        marker: marker,
+        header_names: header_names,
+        header_values: header_values,
+    }
+}
+
+/// One worker-shaped call. `explicit_allow_redirects` is the source defect:
+/// the worker always passes the keyword, and the Glype agreement call also
+/// passes it, so a warning page raises TypeError before that second request.
+pub fn request(
+    url: string,
+    method: string,
+    data: string,
+    explicit_allow_redirects: bool,
+    agreement_url: string,
+    image: bool,
+    image_only: bool
+) -> map {
+    let mut history: [string] = [url.copy()];
+    let mut current = url.copy();
+    let mut status = 0;
+    let mut opened = url.copy();
+    let mut error_kind = "";
+    let mut error_detail = "";
+    let mut byte_length = 0;
+    let mut hops: [map] = [];
+    let mut tried = 0;
+    let mut stop = false;
+    let names: [string] = [];
+    let values: [string] = [];
+    while stop == false {
+        let proxied = policy::matches(image, image_only, current.copy());
+        let response = hop(current.copy(), method.copy(), data.copy(), names.copy(), values.copy());
+        let hop_status: int = response["status"].copy();
+        let hop_error: string = response["error_kind"].copy();
+        let hop_detail: string = response["error_detail"].copy();
+        let hop_url: string = response["url"].copy();
+        let hop_bytes: int = response["byte_length"].copy();
+        let hop_marker: bool = response["marker"].copy();
+        hops[hops.length] = {
+            url: current.copy(),
+            proxied: proxied,
+            status: hop_status,
+            error_kind: hop_error.copy(),
+        };
+        status = hop_status;
+        opened = hop_url.copy();
+        error_kind = hop_error.copy();
+        error_detail = hop_detail.copy();
+        byte_length = hop_bytes;
+        if hop_error != "" {
+            stop = true;
+        } else if hop_marker && explicit_allow_redirects {
+            error_kind = "TypeError";
+            error_detail = "got multiple values for keyword argument 'allow_redirects'";
+            stop = true;
+        } else if hop_marker && agreement_url != "" {
+            if tried == 2 {
+                error_kind = "PoolException";
+                error_detail = "can't bypass glype https warning";
+                stop = true;
+            } else {
+                let agreement = hop(
+                    agreement_url.copy(),
+                    "GET",
+                    "",
+                    names.copy(),
+                    values.copy()
+                );
+                let agreement_error: string = agreement["error_kind"].copy();
+                hops[hops.length] = {
+                    url: agreement_url.copy(),
+                    proxied: proxied,
+                    status: agreement["status"].copy(),
+                    error_kind: agreement_error.copy(),
+                };
+                tried = tried + 1;
+                if agreement_error != "" {
+                    error_kind = agreement_error.copy();
+                    error_detail = agreement["error_detail"].copy();
+                    stop = true;
+                }
+            }
+        } else if hop_status > 300 && hop_status < 400 {
+            history[history.length] = current.copy();
+            if history.length > 30 {
+                error_kind = "TooManyRedirects";
+                error_detail = "too many redirects";
+                stop = true;
+            } else {
+                let header_names: [string] = response["header_names"].copy();
+                let header_values: [string] = response["header_values"].copy();
+                let location = location_of(header_names, header_values);
+                if type(location) == "null" {
+                    stop = true;
+                } else {
+                    let next_url: string = location.unwrap_or("");
+                    current = next_url.copy();
+                }
+            }
+        } else {
+            stop = true;
+        }
+    }
+    let real_url: string = history[history.length - 1].copy();
+    {
+        ok: error_kind == "",
+        exception: error_kind.copy(),
+        detail: error_detail.copy(),
+        logical_url: url.copy(),
+        real_url: real_url,
+        final_url: opened.copy(),
+        status: status,
+        byte_length: byte_length,
+        hops: hops,
+    }
+}

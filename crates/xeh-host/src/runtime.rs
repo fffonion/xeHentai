@@ -234,7 +234,7 @@ async fn run_config_scenario_async(root: &Path, request: &str) -> Result<String,
 /// It is fixed before the guest starts and is never read from the guest
 /// request, environment proxy variables or a user configuration file.
 pub fn run_proxy_scenario(
-    _root: &Path,
+    root: &Path,
     request: &str,
     authorization: &str,
 ) -> Result<String, HostError> {
@@ -242,7 +242,7 @@ pub fn run_proxy_scenario(
         .enable_all()
         .build()
         .map_err(|error| HostError::runtime(error.to_string()))?;
-    runtime.block_on(run_proxy_scenario_async(request, authorization))
+    runtime.block_on(run_proxy_scenario_async(root, request, authorization))
 }
 
 fn authorization_config(authorization: &str) -> Result<vm::HttpConfig, HostError> {
@@ -292,7 +292,11 @@ fn authorization_config(authorization: &str) -> Result<vm::HttpConfig, HostError
     })
 }
 
-async fn run_proxy_scenario_async(request: &str, authorization: &str) -> Result<String, HostError> {
+async fn run_proxy_scenario_async(
+    root: &Path,
+    request: &str,
+    authorization: &str,
+) -> Result<String, HostError> {
     let http = authorization_config(authorization)?;
     let catalog = crate::proxy_host::proxy_catalog();
     let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../app/proxy/entry.rss");
@@ -307,6 +311,7 @@ async fn run_proxy_scenario_async(request: &str, authorization: &str) -> Result<
     let host = Arc::new(crate::proxy_host::ProxyHost {
         http,
         hooks: crate::dto::TransportHooks::default(),
+        session: crate::proxy_exchange::ProxySession::new(root.to_path_buf()),
     });
     crate::proxy_host::register_proxy(&mut registry, &catalog, host)?;
     bind_vm(&mut vm, &registry)?;
