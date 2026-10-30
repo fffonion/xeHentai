@@ -22,6 +22,7 @@ use vm::{
 };
 
 use crate::catalog::{open_registry, standard_catalog};
+use crate::os::fs::SESSION_READ_LIMIT_BYTES;
 use crate::runtime::{bind_vm, compile_file_with_catalog, drive_to_halt};
 use crate::types::HostError;
 
@@ -39,6 +40,8 @@ pub struct SessionOptions {
     session_path: PathBuf,
     legacy_cookie_path: PathBuf,
     download_roots: Vec<PathBuf>,
+    scan_budget: u64,
+    session_byte_limit: usize,
 }
 
 impl SessionOptions {
@@ -51,7 +54,19 @@ impl SessionOptions {
             session_path,
             legacy_cookie_path,
             download_roots,
+            scan_budget: 100_000,
+            session_byte_limit: SESSION_READ_LIMIT_BYTES,
         }
+    }
+
+    /// Trusted embedding/test limits: at most `scan_budget` fids are scanned
+    /// during one restore, and one session document is at most
+    /// `session_byte_limit` UTF-8 bytes for both the Core read and the native
+    /// atomic write. Neither limit can be raised by imported JSON.
+    pub fn with_limits(mut self, scan_budget: u64, session_byte_limit: usize) -> Self {
+        self.scan_budget = scan_budget;
+        self.session_byte_limit = session_byte_limit;
+        self
     }
 
     /// Production defaults: `h.json` in the process working directory and the
@@ -69,11 +84,11 @@ impl SessionOptions {
         let app_dir = executable.parent().ok_or_else(|| {
             HostError::runtime("the executable has no parent directory".to_string())
         })?;
-        Ok(Self {
-            session_path: cwd.join("h.json"),
-            legacy_cookie_path: app_dir.join(".ehentai.cookie"),
-            download_roots: vec![cwd],
-        })
+        Ok(Self::new(
+            cwd.join("h.json"),
+            app_dir.join(".ehentai.cookie"),
+            vec![cwd],
+        ))
     }
 
     pub fn session_path(&self) -> &Path {
@@ -88,16 +103,12 @@ impl SessionOptions {
         &self.download_roots
     }
 
-    fn roots(&self) -> Vec<PathBuf> {
-        let mut roots = self.download_roots.clone();
-        for path in [&self.session_path, &self.legacy_cookie_path] {
-            if let Some(parent) = path.parent() {
-                roots.push(parent.to_path_buf());
-            }
-        }
-        roots.sort();
-        roots.dedup();
-        roots
+    pub fn scan_budget(&self) -> u64 {
+        self.scan_budget
+    }
+
+    pub fn session_byte_limit(&self) -> usize {
+        self.session_byte_limit
     }
 }
 
@@ -258,6 +269,12 @@ impl TaskControl {
         self.session.is_some()
     }
 
+    /// Live execution-scope resource count for the owner VM. A completed
+    /// session read/write leaves no open file resources behind.
+    pub fn resource_count(&mut self) -> usize {
+        crate::runtime::resource_count(&mut self.vm)
+    }
+
     fn invoke_session(&mut self, request: &str) -> Result<String, HostError> {
         match self.invoke(request) {
             Ok(report) => Ok(report),
@@ -318,29 +335,34 @@ fn configure_session_boundaries(
 ) -> Result<(), HostError> {
     match session {
         Some(session) => {
-            let roots = session.roots();
-            let root_text = roots
+            // Core IO carries only the two trusted read sources. Passing the
+            // exact files (not their parents) keeps a session/legacy parent
+            // from becoming a general read root; every mutation is either the
+            // exact atomic session target or the explicit download roots.
+            let read_roots = [session.session_path(), session.legacy_cookie_path()]
                 .iter()
+                .filter(|path| path.exists())
                 .map(|path| {
                     path.to_str().map(str::to_string).ok_or_else(|| {
-                        HostError::bind("session root is not valid UTF-8".to_string())
+                        HostError::bind("session read path is not valid UTF-8".to_string())
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             vm.configure_io(vm::IoPolicy {
-                allowed_roots: root_text,
+                allowed_roots: read_roots,
                 allow_write: false,
                 allow_process: false,
-                max_read_bytes: SESSION_READ_LIMIT_BYTES,
-                max_write_bytes: SESSION_READ_LIMIT_BYTES,
+                max_read_bytes: session.session_byte_limit(),
+                max_write_bytes: session.session_byte_limit(),
             });
             crate::os::fs::install(
                 vm,
                 crate::os::fs::FsState::new(
-                    roots,
+                    session.download_roots().to_vec(),
                     Some(session.session_path().to_path_buf()),
                     Some(session.legacy_cookie_path().to_path_buf()),
-                ),
+                )
+                .with_limits(session.scan_budget(), session.session_byte_limit()),
             );
         }
         None => {
@@ -356,8 +378,6 @@ fn configure_session_boundaries(
     }
     Ok(())
 }
-
-const SESSION_READ_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 
 async fn invoke_value(vm: &mut Vm, callable: Value, args: Vec<Value>) -> Result<Value, HostError> {
     let mut invocation = vm

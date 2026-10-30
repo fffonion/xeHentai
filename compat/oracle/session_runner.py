@@ -7,7 +7,10 @@ own owned directory tree (session root, legacy root, downloads root, boot
 directory) and its own HOME/TMPDIR. The runner only calls the real upstream
 `xeHentai.save_session` / `load_session` and `Task.from_dict` / `to_dict` /
 `scan_downloaded`; it never models those rules itself and never contacts a
-site, proxy or account.
+site, proxy or account. `produce_remaining` and `load_existing` are the shared
+cross-version fixture producer/loader used by the xtask session E2E: the first
+writes the real `h.json` with `save_session`, the second loads those same bytes
+back with the real `load_session` and takes a snapshot.
 """
 import argparse
 import json
@@ -70,7 +73,8 @@ def build_document(case, downloads):
 
 def prepare_case(root, case):
     case_root = os.path.join(root, "cases", case["name"])
-    if os.path.exists(case_root):
+    keep_existing = case["mode"] == "load_existing"
+    if os.path.exists(case_root) and not keep_existing:
         shutil.rmtree(case_root)
     session_dir = os.path.join(case_root, "session")
     legacy_dir = os.path.join(case_root, "legacy")
@@ -78,9 +82,11 @@ def prepare_case(root, case):
     boot = os.path.join(case_root, "boot")
     boot_legacy = os.path.join(case_root, "boot-legacy")
     for path in (session_dir, legacy_dir, downloads, boot, boot_legacy):
-        os.makedirs(path)
+        os.makedirs(path, exist_ok=True)
     if case["mode"] == "save":
         document = build_document(case, downloads)
+    elif case["mode"] in ("produce_remaining", "load_existing"):
+        document = None
     else:
         document = case.get("document")
     if document is not None:
@@ -139,8 +145,30 @@ def run_case(root, case, core):
     xe = clean_instance(core, boot, boot_legacy, legacy_dir)
     os.chdir(session_dir)
     result = {"name": case["name"], "mode": case["mode"]}
+    result["pre"] = snapshot(xe, case_root)
     try:
-        if case["mode"] == "save":
+        if case["mode"] == "produce_remaining":
+            from xeHentai.task import Task
+            record = substitute(case["record"], downloads)
+            task = Task("", {}, xe.logger).from_dict(record)
+            task.scan_downloaded()
+            xe.cfg["save_tasks"] = True
+            xe._all_tasks = {str(record["guid"]): task}
+            ret = xe.save_session()
+            result["outcome"] = "return"
+            result["ret"] = jsonable(ret)
+            saved_path = os.path.join(session_dir, "h.json")
+            result["saved_path"] = saved_path
+            result["saved_size"] = os.path.getsize(saved_path)
+            result["finished"] = task.meta.get("finished")
+            result["scan_done"] = sorted(task._flist_done)
+            result.update(snapshot(xe, case_root))
+        elif case["mode"] == "load_existing":
+            ret = xe.load_session()
+            result["outcome"] = "return"
+            result["ret"] = [ret[0], ret[1] if ret[1] is None else str(ret[1])]
+            result.update(snapshot(xe, case_root))
+        elif case["mode"] == "save":
             loaded = xe.load_session()
             if loaded[0] != 0:
                 result["outcome"] = "return"

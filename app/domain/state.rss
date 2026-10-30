@@ -1229,15 +1229,63 @@ fn session_save(store: Store) -> Step {
     }
 }
 
+/// Pre-checks the aggregate scan budget before any stat, zero-file removal or
+/// Root publication. `meta.total` is the number of fids `scan_task` walks; the
+/// budget belongs to the trusted `SessionOptions` and is never raised by the
+/// imported document. A negative, overflowing or over-budget total is a stable
+/// `scan_budget` refusal.
+fn scan_budget_error(entries: [SessionTaskEntry], budget: int) -> string {
+    let mut total: int = 0;
+    let mut error = "";
+    for index in 0..entries.length {
+        if error == "" {
+            let entry: SessionTaskEntry = entries[index].copy();
+            let value_json: string = entry.value_json;
+            let shape = task_shape_error(value_json.copy(), entry.key.copy());
+            if shape != "" {
+                error = "session:" + shape;
+            } else {
+                let object: map = json::decode::<map>(value_json);
+                if object.has("meta") {
+                    let meta: map = object["meta"].copy();
+                    if meta.has("filelist") {
+                        if meta.has("total") == false {
+                            error = "session:scan:missing_total";
+                        } else if type(meta["total"].copy()) != "int" {
+                            error = "session:scan:type:total";
+                        } else {
+                            let count: int = meta["total"].copy();
+                            if count < 0 || budget < 0 || total > budget || count > budget - total {
+                                error = "session:scan_budget";
+                            } else {
+                                total = total + count;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    error
+}
+
 fn session_load(store: Store) -> Step {
     let paths = xeh_fs::session_paths();
     let session_path = paths.session_path.copy();
     let legacy_path = paths.legacy_cookie_path.copy();
+    let session_present = paths.session_exists.copy();
+    let session_size = paths.session_size.copy();
+    let max_session_bytes = paths.max_session_bytes.copy();
+    let legacy_present = paths.legacy_exists.copy();
+    let scan_budget = paths.scan_budget.copy();
     let mut next = store.copy();
     let mut error = "";
     let mut cookies = store.cookies.copy();
     let mut has_login = store.has_login.copy();
-    if io::exists(session_path.copy()) {
+    if session_present && session_size > max_session_bytes {
+        error = "session:read_limit";
+    }
+    if session_present && error == "" {
         let text = read_text(session_path.copy());
         let plan_text = session::parse_session(text);
         let plan: SessionPlan = json::decode::<SessionPlan>(plan_text);
@@ -1268,6 +1316,12 @@ fn session_load(store: Store) -> Step {
                 } else {
                     cookies.header = header_plan.copy()?.header;
                     has_login = login::has_login(cookies.names.copy());
+                }
+            }
+            if error == "" {
+                let budget_error = scan_budget_error(task_entries.copy(), scan_budget.copy());
+                if budget_error != "" {
+                    error = budget_error;
                 }
             }
             let mut records: [Task] = [];
@@ -1351,7 +1405,7 @@ fn session_load(store: Store) -> Step {
         }
     }
     if error == "" && has_login == false && (&legacy_path).length > 0
-        && io::exists(legacy_path.copy()) {
+        && legacy_present {
         let legacy_text = read_text(legacy_path.copy());
         let plan: LegacyPlan = json::decode::<LegacyPlan>(login::parse_legacy(legacy_text));
         if plan.ok.copy() {

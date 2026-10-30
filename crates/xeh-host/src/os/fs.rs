@@ -7,8 +7,10 @@
 //! here, next to the two trusted-path accessors that keep the session target
 //! out of the dispatch request:
 //!
-//! * [`install`] binds one [`FsState`] to a single VM. Every path is resolved
-//!   against the state's trusted roots; a request can never widen them.
+//! * [`install`] binds one [`FsState`] to a single VM. Download mutations are
+//!   resolved only against the state's explicit download roots, and the exact
+//!   session/legacy files stay reserved even inside one of those roots; a
+//!   request can never widen either capability.
 //! * `write_atomic` stages in the target's own directory, writes the complete
 //!   UTF-8 payload, syncs it, renames over the target, and then syncs the
 //!   parent directory. A failure before the rename leaves the old target
@@ -27,24 +29,46 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use vm::{
     register_catalog_function, CallOutcome, CallReturn, HostApiCatalog, HostFunction,
     HostFunctionRegistry, HostFunctionSchema, HostParamSchema, HostStructField, HostStructSchema,
-    HostTypeSchema, Value, Vm, VmError, VmResult,
+    HostTypeSchema, IoHostExt, Value, Vm, VmError, VmResult,
 };
 
 use crate::types::HostError;
+
+/// The single byte budget for one session document: used by the Core read
+/// bound and by the native atomic write.
+pub const SESSION_READ_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Stable diagnostic tag for a refused `xeh_fs` path authority check.
+pub const ROOT_DENIED_TAG: &str = "xeh_fs:root_denied";
 
 static STAGING_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Per-VM trusted file-system policy.
 ///
 /// `roots` are the only directories `stat` / `remove_zero_file` /
-/// `write_atomic` may touch. `session_path` and `legacy_cookie_path` are the
-/// trusted targets the RSS session module reads from `session_paths`; they are
-/// installed here, never supplied by a guest request.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// `rename_atomic` may touch. `session_path` is the only path `write_atomic`
+/// accepts; `legacy_cookie_path` is read-only. Both exact files are installed
+/// by the embedding, never supplied by a guest request, and remain reserved
+/// from the download-root mutation surface even when a root contains them.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FsState {
     roots: Vec<PathBuf>,
     session_path: Option<PathBuf>,
     legacy_cookie_path: Option<PathBuf>,
+    scan_budget: u64,
+    max_session_bytes: usize,
+}
+
+impl Default for FsState {
+    fn default() -> Self {
+        Self {
+            roots: Vec::new(),
+            session_path: None,
+            legacy_cookie_path: None,
+            scan_budget: 100_000,
+            max_session_bytes: SESSION_READ_LIMIT_BYTES,
+        }
+    }
 }
 
 impl FsState {
@@ -57,11 +81,28 @@ impl FsState {
             roots,
             session_path,
             legacy_cookie_path,
+            ..Self::default()
         }
+    }
+
+    /// Trusted test/embedding configuration for the aggregate scan budget and
+    /// the session byte budget. Both defaults stay in force in production.
+    pub fn with_limits(mut self, scan_budget: u64, max_session_bytes: usize) -> Self {
+        self.scan_budget = scan_budget;
+        self.max_session_bytes = max_session_bytes;
+        self
     }
 
     pub fn roots(&self) -> &[PathBuf] {
         &self.roots
+    }
+
+    pub fn scan_budget(&self) -> u64 {
+        self.scan_budget
+    }
+
+    pub fn session_byte_limit(&self) -> usize {
+        self.max_session_bytes
     }
 
     pub fn session_path(&self) -> Option<&Path> {
@@ -70,6 +111,35 @@ impl FsState {
 
     pub fn legacy_cookie_path(&self) -> Option<&Path> {
         self.legacy_cookie_path.as_deref()
+    }
+
+    fn existing_read_roots(&self) -> Vec<String> {
+        [
+            self.session_path.as_deref(),
+            self.legacy_cookie_path.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|path| path.exists())
+        .filter_map(|path| path.to_str().map(str::to_string))
+        .collect()
+    }
+
+    /// Keeps the Core read surface at exactly the files that exist now.
+    ///
+    /// The Core policy resolves every configured root on each call, so an
+    /// absent target cannot be listed as a root and a parent directory is not
+    /// used as a substitute read authority. `session_paths` is the first call
+    /// of every session operation, which makes the refresh cover a session
+    /// file created by a previous save in the same VM.
+    fn refresh_core_policy(&self, vm: &mut Vm) {
+        vm.configure_io(vm::IoPolicy {
+            allowed_roots: self.existing_read_roots(),
+            allow_write: false,
+            allow_process: false,
+            max_read_bytes: self.max_session_bytes,
+            max_write_bytes: self.max_session_bytes,
+        });
     }
 }
 
@@ -100,7 +170,7 @@ pub fn functions() -> Vec<HostFunctionSchema> {
             vec![HostParamSchema::value("path", HostTypeSchema::String)],
             named("ZeroFileResult", zero_fields()),
         )
-        .with_description("Remove one zero-byte regular file inside the configured roots"),
+        .with_description("Remove one zero-byte regular file inside the configured download roots"),
         HostFunctionSchema::with_return(
             "xeh_fs::write_atomic",
             vec![
@@ -109,7 +179,7 @@ pub fn functions() -> Vec<HostFunctionSchema> {
             ],
             named("AtomicWriteResult", atomic_fields()),
         )
-        .with_description("Replace one UTF-8 file atomically inside the configured roots"),
+        .with_description("Replace the trusted session file atomically within its byte budget"),
         HostFunctionSchema::with_return(
             "xeh_fs::rename_atomic",
             vec![
@@ -118,13 +188,17 @@ pub fn functions() -> Vec<HostFunctionSchema> {
             ],
             named("AtomicWriteResult", atomic_fields()),
         )
-        .with_description("Rename one staged file over its target inside the configured roots"),
+        .with_description(
+            "Rename one staged file over its target inside the configured download roots",
+        ),
         HostFunctionSchema::with_return(
             "xeh_fs::session_paths",
             Vec::new(),
             named("SessionPaths", session_paths_fields()),
         )
-        .with_description("Read the trusted session and legacy-cookie targets for this VM"),
+        .with_description(
+            "Read the trusted session/legacy targets, their existence and the scan budget",
+        ),
     ]
 }
 
@@ -207,6 +281,11 @@ fn session_paths_fields() -> Vec<HostStructField> {
     vec![
         HostStructField::new("session_path", HostTypeSchema::String),
         HostStructField::new("legacy_cookie_path", HostTypeSchema::String),
+        HostStructField::new("session_exists", HostTypeSchema::Bool),
+        HostStructField::new("legacy_exists", HostTypeSchema::Bool),
+        HostStructField::new("session_size", HostTypeSchema::Int),
+        HostStructField::new("max_session_bytes", HostTypeSchema::Int),
+        HostStructField::new("scan_budget", HostTypeSchema::Int),
     ]
 }
 
@@ -252,46 +331,82 @@ impl HostFunction for RemoveZeroFn {
     fn call(&mut self, vm: &mut Vm, args: &[Value]) -> VmResult<CallOutcome> {
         let state = state_of(vm)?;
         let path = string_arg(args.first(), "path")?;
-        let resolved = resolve(&state, &path)?;
-        let Some(metadata) = resolved.metadata() else {
-            return Ok(CallOutcome::Return(CallReturn::one(zero_result(
-                false, 0, None,
-            )?)));
-        };
-        if metadata.is_dir() {
-            return Err(VmError::HostError(
-                "xeh_fs remove_zero_file target is a directory".to_string(),
-            ));
-        }
-        let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
-        if metadata.len() != 0 {
-            return Ok(CallOutcome::Return(CallReturn::one(zero_result(
-                false, size, None,
-            )?)));
-        }
-        match fs::remove_file(resolved.path()) {
-            Ok(()) => Ok(CallOutcome::Return(CallReturn::one(zero_result(
-                true, 0, None,
-            )?))),
-            Err(error) => Ok(CallOutcome::Return(CallReturn::one(zero_result(
-                false,
-                0,
-                Some(format!("remove_zero_file failed: {error}")),
-            )?))),
+        let outcome = remove_zero_file(&state, Path::new(&path))?;
+        Ok(CallOutcome::Return(CallReturn::one(outcome.to_value())))
+    }
+}
+
+pub struct ZeroOutcome {
+    removed: bool,
+    size: i64,
+    error: Option<String>,
+}
+
+impl ZeroOutcome {
+    pub fn removed(&self) -> bool {
+        self.removed
+    }
+
+    pub fn size(&self) -> i64 {
+        self.size
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    fn to_value(&self) -> Value {
+        match &self.error {
+            Some(message) => Value::map(vec![
+                (Value::string("removed"), Value::Bool(self.removed)),
+                (Value::string("size"), Value::Int(self.size)),
+                (Value::string("error"), Value::string(message.clone())),
+            ]),
+            None => Value::map(vec![
+                (Value::string("removed"), Value::Bool(self.removed)),
+                (Value::string("size"), Value::Int(self.size)),
+                (Value::string("error"), Value::Null),
+            ]),
         }
     }
 }
 
-fn zero_result(removed: bool, size: i64, error: Option<String>) -> VmResult<Value> {
-    let mut entries = vec![
-        (Value::string("removed"), Value::Bool(removed)),
-        (Value::string("size"), Value::Int(size)),
-    ];
-    match error {
-        Some(message) => entries.push((Value::string("error"), Value::string(message))),
-        None => entries.push((Value::string("error"), Value::Null)),
+/// Removes one zero-byte regular file after the trusted-root check.
+pub fn remove_zero_file(state: &FsState, path: &Path) -> VmResult<ZeroOutcome> {
+    let resolved = resolve(state, &path.to_string_lossy())?;
+    reserved(state, resolved.path())?;
+    let Some(metadata) = resolved.metadata() else {
+        return Ok(ZeroOutcome {
+            removed: false,
+            size: 0,
+            error: None,
+        });
+    };
+    if metadata.is_dir() {
+        return Err(VmError::HostError(
+            "xeh_fs remove_zero_file target is a directory".to_string(),
+        ));
     }
-    Ok(Value::map(entries))
+    let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
+    if metadata.len() != 0 {
+        return Ok(ZeroOutcome {
+            removed: false,
+            size,
+            error: None,
+        });
+    }
+    match fs::remove_file(resolved.path()) {
+        Ok(()) => Ok(ZeroOutcome {
+            removed: true,
+            size: 0,
+            error: None,
+        }),
+        Err(error) => Ok(ZeroOutcome {
+            removed: false,
+            size: 0,
+            error: Some(format!("remove_zero_file failed: {error}")),
+        }),
+    }
 }
 
 struct WriteAtomicFn;
@@ -323,6 +438,7 @@ struct SessionPathsFn;
 impl HostFunction for SessionPathsFn {
     fn call(&mut self, vm: &mut Vm, _args: &[Value]) -> VmResult<CallOutcome> {
         let state = state_of(vm)?;
+        state.refresh_core_policy(vm);
         let session = state.session_path().ok_or_else(|| {
             VmError::HostError("session paths are not configured for this VM".to_string())
         })?;
@@ -338,6 +454,19 @@ impl HostFunction for SessionPathsFn {
                 .to_string(),
             None => String::new(),
         };
+        let session_exists = state
+            .session_path()
+            .map(|path| path.exists())
+            .unwrap_or(false);
+        let session_size = state
+            .session_path()
+            .and_then(|path| fs::metadata(path).ok())
+            .map(|metadata| i64::try_from(metadata.len()).unwrap_or(i64::MAX))
+            .unwrap_or(0);
+        let legacy_exists = state
+            .legacy_cookie_path()
+            .map(|path| path.exists())
+            .unwrap_or(false);
         Ok(CallOutcome::Return(CallReturn::one(Value::map(vec![
             (
                 Value::string("session_path"),
@@ -346,6 +475,17 @@ impl HostFunction for SessionPathsFn {
             (
                 Value::string("legacy_cookie_path"),
                 Value::string(legacy_text),
+            ),
+            (Value::string("session_exists"), Value::Bool(session_exists)),
+            (Value::string("session_size"), Value::Int(session_size)),
+            (
+                Value::string("max_session_bytes"),
+                Value::Int(i64::try_from(state.session_byte_limit()).unwrap_or(i64::MAX)),
+            ),
+            (Value::string("legacy_exists"), Value::Bool(legacy_exists)),
+            (
+                Value::string("scan_budget"),
+                Value::Int(i64::try_from(state.scan_budget()).unwrap_or(i64::MAX)),
             ),
         ]))))
     }
@@ -377,13 +517,27 @@ impl Resolved {
     }
 }
 
-/// Resolves `requested` inside one of the state's canonical roots.
+/// Resolves `requested` against the trusted download roots without following
+/// the final component.
 ///
-/// A missing target is resolved through its nearest existing ancestor so a
+/// A missing target is resolved through its nearest existing ancestor, so a
 /// not-yet-created scan target still answers `exists = false` without widening
-/// the root check. Existing paths are canonicalized again, so a symlink that
-/// points outside the roots is rejected.
+/// the root check. The final component is deliberately not canonicalized: a
+/// symlink is inspected/removed through the path the caller passed, exactly
+/// like upstream `os.stat` + `os.remove` (stat follows, remove unlinks the
+/// link). The metadata query still follows the link.
 fn resolve(state: &FsState, requested: &str) -> Result<Resolved, VmError> {
+    let path = resolve_without_final_follow(requested)?;
+    check_roots(&state.roots, &path)?;
+    let metadata = match fs::metadata(&path) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(VmError::HostError(format!("xeh_fs stat failed: {error}"))),
+    };
+    Ok(Resolved { path, metadata })
+}
+
+fn resolve_without_final_follow(requested: &str) -> Result<PathBuf, VmError> {
     if requested.is_empty() {
         return Err(VmError::HostError("xeh_fs path is empty".to_string()));
     }
@@ -395,8 +549,16 @@ fn resolve(state: &FsState, requested: &str) -> Result<Resolved, VmError> {
             .map_err(|error| VmError::HostError(format!("xeh_fs cwd failed: {error}")))?
             .join(requested)
     };
-    let mut existing = absolute.clone();
-    let mut suffix: Vec<OsString> = Vec::new();
+    let Some(name) = absolute.file_name() else {
+        return Err(VmError::HostError(
+            "xeh_fs path has no file name".to_string(),
+        ));
+    };
+    let mut suffix: Vec<OsString> = vec![name.to_os_string()];
+    let mut existing = absolute
+        .parent()
+        .ok_or_else(|| VmError::HostError("xeh_fs path has no parent".to_string()))?
+        .to_path_buf();
     while !existing.exists() {
         let Some(name) = existing.file_name() else {
             return Err(VmError::HostError(
@@ -416,27 +578,11 @@ fn resolve(state: &FsState, requested: &str) -> Result<Resolved, VmError> {
     for name in suffix.iter().rev() {
         path.push(name);
     }
-    check_root(state, &path)?;
-    if path.exists() {
-        path = fs::canonicalize(&path).map_err(|error| {
-            VmError::HostError(format!("xeh_fs path resolution failed: {error}"))
-        })?;
-        check_root(state, &path)?;
-        let metadata = fs::metadata(&path)
-            .map_err(|error| VmError::HostError(format!("xeh_fs stat failed: {error}")))?;
-        return Ok(Resolved {
-            path,
-            metadata: Some(metadata),
-        });
-    }
-    Ok(Resolved {
-        path,
-        metadata: None,
-    })
+    Ok(path)
 }
 
-fn check_root(state: &FsState, path: &Path) -> Result<(), VmError> {
-    for root in &state.roots {
+fn check_roots(roots: &[PathBuf], path: &Path) -> Result<(), VmError> {
+    for root in roots {
         let canonical = fs::canonicalize(root).map_err(|error| {
             VmError::HostError(format!(
                 "xeh_fs allowed root '{}' cannot be resolved: {error}",
@@ -447,10 +593,30 @@ fn check_root(state: &FsState, path: &Path) -> Result<(), VmError> {
             return Ok(());
         }
     }
-    Err(VmError::HostError(format!(
-        "xeh_fs path '{}' is outside the allowed roots",
+    Err(root_denied(path))
+}
+
+fn root_denied(path: &Path) -> VmError {
+    VmError::HostError(format!(
+        "{ROOT_DENIED_TAG}: xeh_fs path '{}' is outside the allowed roots",
         path.display()
-    )))
+    ))
+}
+
+/// Refuses an exact session/legacy target from the download-root mutation
+/// surface, even when a download root happens to be the same directory.
+fn reserved(state: &FsState, path: &Path) -> Result<(), VmError> {
+    for target in [state.session_path(), state.legacy_cookie_path()]
+        .into_iter()
+        .flatten()
+    {
+        if let Ok(normalized) = resolve_without_final_follow(&target.to_string_lossy()) {
+            if normalized == path {
+                return Err(root_denied(path));
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------- atomic file
@@ -518,9 +684,38 @@ pub fn write_atomic_with_hook(
     pause_after: Option<usize>,
     hook: impl FnOnce(),
 ) -> VmResult<AtomicOutcome> {
-    let target = resolve(state, &path.to_string_lossy())?;
-    let parent = target
-        .path()
+    let requested = resolve_without_final_follow(&path.to_string_lossy())?;
+    let session = state.session_path().ok_or_else(|| {
+        VmError::HostError(format!(
+            "{ROOT_DENIED_TAG}: no trusted session target is configured for this VM"
+        ))
+    })?;
+    let session_target = resolve_without_final_follow(&session.to_string_lossy())?;
+    if requested != session_target {
+        return Err(root_denied(&requested));
+    }
+    if let Some(legacy) = state.legacy_cookie_path() {
+        if let Ok(normalized) = resolve_without_final_follow(&legacy.to_string_lossy()) {
+            if normalized == requested {
+                return Err(root_denied(&requested));
+            }
+        }
+    }
+    if let Ok(metadata) = fs::symlink_metadata(&requested) {
+        if metadata.file_type().is_symlink() {
+            return Ok(AtomicOutcome::failed(
+                "xeh_fs:session_target_symlink: refusing to replace a symlink".to_string(),
+            ));
+        }
+    }
+    if contents.len() > state.session_byte_limit() {
+        return Ok(AtomicOutcome::failed(format!(
+            "xeh_fs:session_payload_limit: {} bytes exceeds the {} byte budget",
+            contents.len(),
+            state.session_byte_limit()
+        )));
+    }
+    let parent = requested
         .parent()
         .ok_or_else(|| VmError::HostError("xeh_fs target has no parent".to_string()))?
         .to_path_buf();
@@ -529,8 +724,7 @@ pub fn write_atomic_with_hook(
             "xeh_fs parent directory does not exist".to_string(),
         ));
     }
-    let name = target
-        .path()
+    let name = requested
         .file_name()
         .ok_or_else(|| VmError::HostError("xeh_fs target has no file name".to_string()))?;
     let seq = STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -575,7 +769,7 @@ pub fn write_atomic_with_hook(
         )));
     }
     drop(file);
-    if let Err(error) = fs::rename(&staging, target.path()) {
+    if let Err(error) = fs::rename(&staging, &requested) {
         let _ = fs::remove_file(&staging);
         return Ok(AtomicOutcome::failed(format!(
             "xeh_fs rename failed: {error}"
@@ -601,6 +795,8 @@ pub fn write_atomic_with_hook(
 pub fn rename_atomic(state: &FsState, source: &Path, target: &Path) -> VmResult<AtomicOutcome> {
     let resolved_source = resolve(state, &source.to_string_lossy())?;
     let resolved_target = resolve(state, &target.to_string_lossy())?;
+    reserved(state, resolved_source.path())?;
+    reserved(state, resolved_target.path())?;
     let Some(metadata) = resolved_source.metadata() else {
         return Ok(AtomicOutcome::failed(
             "xeh_fs rename source does not exist".to_string(),

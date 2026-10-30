@@ -1,6 +1,6 @@
 # RustScript 嵌入与 Core host 复用
 
-锁定 revision：`99890b68119715df9ddd19f6a6362ff8d6258ffa`。依赖包名是 `pd-vm`，库名是 `vm`。默认 feature 含 JIT，本嵌入关闭默认 feature，只打开 `runtime`、`async`、`http-client`。不复制 Core 源码，不启用 SQLite 或 CLI。
+锁定 revision：`cdb0b798d631cd7ffab6dfed3fe4b69381ed3340`。依赖包名是 `pd-vm`，库名是 `vm`。默认 feature 含 JIT，本嵌入关闭默认 feature，只打开 `runtime`、`async`、`http-client`。不复制 Core 源码，不启用 SQLite 或 CLI。该 revision 的有序 object-entry codec 仍是会话成员顺序的唯一来源；`io::read_all` 已按 `IoPolicy::max_read_bytes` 在 Reader 层最多读取 `limit + 1` 字节后拒绝，App 不复制 Reader、也不以 stat 预查冒充硬上限。
 
 编译和绑定使用同一份 catalog。`json` / `re` 没有 guest catalog，走 namespaced builtin，VM 上安装 `standard_composition()` 后才能调用。`io`、`timer`、`http` 由 `standard_host_modules()` 的 catalog surface 经 `install_from_catalog` 安装，adapter 是 Core descriptor，不是应用侧重写。
 
@@ -60,8 +60,29 @@ RustScript 的几项语言事实决定了这个布局，实测记录在 `crates/
 
 配置仍由 `app/config/types.rss` 唯一拥有：`defaults_data`、`baseline_from_data`、`update_data` 把 25 键记录以已解析 Core map 数据交给 task 域，校验/更新仍走 `apply_update`。`data_of` 用本模块自己的 25 键 JSON 编码解码出数据，`with_null` 只在键确实缺失时补 `null`，避免重复键。
 
-GUID：pinned Core 99890b6 没有 UUID/随机 builtin。新增唯一宿主原语 `xeh_system::uuid_v4`（named typed，返回规范 UUID v4 文本），RSS 取前 8 字符；测试通过 `ControlOptions::fixture` 注入与 oracle 相同的计划前缀，生产 `open` 不暴露任意 GUID 参数。
+GUID：当前 pin 的 Core 没有 UUID/随机 builtin。新增唯一宿主原语 `xeh_system::uuid_v4`（named typed，返回规范 UUID v4 文本），RSS 取前 8 字符；测试通过 `ControlOptions::fixture` 注入与 oracle 相同的计划前缀，生产 `open` 不暴露任意 GUID 参数。
 
 epoch/queue：RSS 唯一拥有 task 表、ready queue、每 GUID incarnation epoch 和完成计数。pause/delete/resume、终态记录被同 GUID add 复活都会推进 epoch；pause/delete/resume 之前准备的票据在之后返回 `stale_epoch`、`unknown_task` 或 `not_running`，不改状态、不重开、不重复计数。epoch 达到 2^53-1 后 fail-closed。队列保留已删除任务的旧 guid（与原版 `Queue` 一致），resume 一律入队，finished resume 保持 20。
 
 Task5 不实现 session、站点扫描、代理、下载器、文件归档或 RPC server；`delete_task_files` 需要物理效果时只返回 `pending_effect` 待执行请求并保留任务。native worker/monitor 的取消与真实扫描/下载接线属于 Task9，当前没有声称网络或文件取消已验证。
+
+## Task 6 会话、扫描与文件权限
+
+会话恢复入口仍是 `app/domain/state.rss` 的同一 owner VM。`app/domain/session.rss` 只拥有文档编解码、路径/文件名与扫描/剩余计划规则；`crates/xeh-host/src/os/fs.rs` 只提供 Core 未公开的文件原语。
+
+文件能力按来源分开，不合并成一组 root：
+
+- **Core 只读来源**：`IoPolicy.allowed_roots` 只放当前存在的 exact session 文件与 exact legacy cookie 文件，绝不放它们的父目录；`xeh_fs::session_paths` 每次调用先按当前存在性刷新这份 policy，因此 absent→save→load 的同 VM 顺序也可用。不存在的目标不登记为 root，RSS 通过 `session_exists`/`legacy_exists` 决定是否调用 `io::open`，不会拿父目录做替代读权限。
+- **session exact target**：只有 `FsState` 记录的 exact session 文件可通过 `write_atomic` 原子替换；`write_atomic` 不写 download roots，也不写 legacy。目标若是 symlink 明确拒绝替换。
+- **legacy exact file**：只读；Core 读取之外没有任何写/删/改名入口。
+- **显式 download roots**：`stat`（含 follow symlink 的元数据）、零字节文件删除、图片 stage 的 `rename_atomic` 只按这些 roots 授权。session/legacy 父目录即使等于某个 download root，exact session/legacy 文件仍是保留目标：`remove_zero_file`、`rename_atomic` 的 source/target 命中它们时以 `xeh_fs:root_denied` 拒绝，不能用同名 rename 绕过写预算或改 legacy。
+
+零字节图片 symlink 保持上游 `os.stat` + `os.remove` 语义：元数据跟随链接（目标为空才进入删除），删除的是调用方传入的链接路径，不删除规范目标。普通零文件仍直接删除；不安全的外向链接也只会被移除链接本身。
+
+读写使用同一个 `SESSION_READ_LIMIT_BYTES`（16 MiB）byte 预算。Core `io::read_all` 的 Reader 层硬上限由已审 Core 提供（最多 `limit + 1` 字节再拒绝）；App 在 `session_paths` 里用 exact 文件元数据做同预算预检，已知超限的文件不会先打开句柄，失败后同 VM 仍可继续小文件读写且资源/pending 归零。`write_atomic` 在创建 staging、写入或 rename 之前检查完整 UTF-8 载荷的字节数（不是字符数），超限返回 `committed=false` 并保持旧文件精确字节；正常 pre/post-commit 崩溃语义不变。
+
+扫描预算来自可信 `SessionOptions`（默认一次恢复累计 100000 个待扫描 fid），导入 JSON 与 `config.json` 都不能扩大。RSS 在任何 `xeh_fs::stat`、零文件删除或新 Root 发布之前检查全部带 `filelist` 任务的 `meta.total`：非整数/缺失沿用既有 scan 结构错误，负数、累加溢出或超预算统一以稳定的 `session:scan_budget` 拒绝，原文件、Root 与磁盘不变。
+
+会话差分使用显式失败 case 表，而不是“任何双方失败”放行：`unreadable_session`/`bad_json`/`missing_tasks`/`tasks_type`/`missing_guid` 的 oracle outcome/exception/return 与 RSS class/code 都是固定 tuple；`outside_root` 只接受带 `xeh_fs:root_denied` 的 host failure 且不发布任务。所有失败还比较 post tasks/queue/cookies/header/login/disk 与各自 pre-invocation baseline（`outside_root` 的 upstream 发布行为单独记录为安全差异）。失败 mutation gates 与成功四负例共用同一生产 comparator。
+
+跨版本剩余图验收在 `crates/xeh-xtask/tests/session_e2e.rs`：固定 43fc55c 的 `xeHentai.save_session()` 通过共享 `compat/oracle/session_runner.py` 写出原始 `h.json`（输入任务同时含已下载 fid 1 与缺页 11/12）；新 VM 加载后由 RSS done 集/`remaining_plan` 过滤 fid 1，薄 driver 只运输计划到已接受 Task3 worker 与 `xeh_fs::rename_atomic`。本地 HTTP fixture 为三个 fid 都准备响应，但只允许 fid 11/12 被请求；重扫 finished=3、plan 为空、保存后第三 VM 保持旧 GUID/queue/cookie，并与原版在同一磁盘布局上的 load/scan 结果对照。

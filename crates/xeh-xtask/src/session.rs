@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
-use xeh_host::{ControlOptions, SessionOptions, TaskControl};
+use xeh_host::{ControlOptions, SessionOptions, TaskControl, ROOT_DENIED_TAG};
 
 use crate::paths::{lease_tmp, python_executable, scripts_dir, UPSTREAM_APP_REV};
 
@@ -429,6 +429,14 @@ fn run_rss_case(root: &Path, case: &Value) -> Result<Value, String> {
     }
     write_case_files(&case_root, &prepared, &downloads)?;
     let mut control = open_case(&case_root)?;
+    let baseline_text = control
+        .invoke(&json!({"op": "snapshot"}).to_string())
+        .map_err(|error| error.to_string())?;
+    let baseline = session_snapshot(
+        &control,
+        &parse(&baseline_text, "baseline report")?,
+        &case_root,
+    )?;
     let mut last = Value::Null;
     if case["mode"] == "save" {
         let loaded = control.load_session().map_err(|error| error.to_string())?;
@@ -470,6 +478,7 @@ fn run_rss_case(root: &Path, case: &Value) -> Result<Value, String> {
                 result.insert(key.clone(), value.clone());
             }
         }
+        result["pre"] = baseline;
         Ok(result)
     } else {
         let repeat = case["repeat"].as_u64().unwrap_or(1);
@@ -496,6 +505,7 @@ fn run_rss_case(root: &Path, case: &Value) -> Result<Value, String> {
                 result.insert(key.clone(), value.clone());
             }
         }
+        result["pre"] = baseline;
         restore_case_permissions(&case_root);
         restore_case_permissions(&case_root);
         Ok(result)
@@ -538,6 +548,78 @@ fn run_rss(script: &Value, root: &Path) -> Result<Value, String> {
         records.push(run_rss_case(root, case)?);
     }
     Ok(json!({"records": records}))
+}
+
+// ---- shared upstream producer for the cross-version E2E --------------------
+
+/// One session fixture written by the pinned upstream `save_session`.
+pub struct ProducedSession {
+    pub session_path: PathBuf,
+    pub case_root: PathBuf,
+    pub record: Value,
+}
+
+/// Runs the pinned upstream producer for the remaining-image case and returns
+/// the path of the `h.json` it actually wrote. The caller never rewrites or
+/// normalizes that file.
+pub fn produce_remaining_session(
+    root: &Path,
+    record: Value,
+    files: Value,
+) -> Result<ProducedSession, String> {
+    fs::create_dir_all(root)
+        .map_err(|error| format!("cannot create producer root {}: {error}", root.display()))?;
+    let script = json!({
+        "cases": [{
+            "name": "remaining",
+            "mode": "produce_remaining",
+            "record": record,
+            "files": files,
+        }]
+    });
+    let response = run_python(root, &script)?;
+    let record = response["records"]
+        .as_array()
+        .and_then(|records| records.first())
+        .cloned()
+        .ok_or_else(|| "producer returned no record".to_string())?;
+    if record["outcome"] != json!("return") || record["ret"][0] != json!(0) {
+        return Err(format!("upstream save_session did not succeed: {record}"));
+    }
+    let case_root = root.join("cases/remaining");
+    let session_path = case_root.join("session/h.json");
+    if !session_path.is_file() {
+        return Err(format!(
+            "upstream producer did not write {}",
+            session_path.display()
+        ));
+    }
+    Ok(ProducedSession {
+        session_path,
+        case_root,
+        record,
+    })
+}
+
+/// Loads the already-produced `h.json` in `root` with the pinned upstream
+/// implementation and returns its real load/scan snapshot.
+pub fn load_produced_session(root: &Path) -> Result<Value, String> {
+    let script = json!({
+        "cases": [{
+            "name": "remaining",
+            "mode": "load_existing",
+        }]
+    });
+    let response = run_python(root, &script)?;
+    let record = response["records"]
+        .as_array()
+        .and_then(|records| records.first())
+        .cloned()
+        .ok_or_else(|| "upstream loader returned no record".to_string())?;
+    if record["outcome"] != json!("return") || record["ret"][0] != json!(0) {
+        return Err(format!("upstream load_session did not succeed: {record}"));
+    }
+    Ok(record)
 }
 
 fn run_python(root: &Path, script: &Value) -> Result<Value, String> {
@@ -596,6 +678,57 @@ fn rust_success(record: &Value) -> bool {
     record["outcome"] == json!("success")
 }
 
+#[derive(Clone, Copy)]
+enum OracleFailure {
+    Exception(&'static str),
+    Return(i64),
+}
+
+struct FailureCase {
+    oracle: OracleFailure,
+    rss_class: &'static str,
+    rss_code: Option<i64>,
+}
+
+/// The explicit failure mapping accepted from the raw oracle run. There is no
+/// wildcard: an unknown failure name, a different upstream exception/return, a
+/// different RSS class/code, or any post-state change is a failure.
+fn failure_case(name: &str) -> Option<FailureCase> {
+    match name {
+        "unreadable_session" => Some(FailureCase {
+            oracle: OracleFailure::Exception("PermissionError"),
+            rss_class: "host_failure",
+            rss_code: None,
+        }),
+        "bad_json" => Some(FailureCase {
+            oracle: OracleFailure::Return(1103),
+            rss_class: "parse",
+            rss_code: Some(1103),
+        }),
+        "missing_tasks" => Some(FailureCase {
+            oracle: OracleFailure::Exception("KeyError"),
+            rss_class: "missing_tasks",
+            rss_code: None,
+        }),
+        "tasks_type" => Some(FailureCase {
+            oracle: OracleFailure::Exception("AttributeError"),
+            rss_class: "structure",
+            rss_code: None,
+        }),
+        "missing_guid" => Some(FailureCase {
+            oracle: OracleFailure::Exception("KeyError"),
+            rss_class: "missing_guid",
+            rss_code: None,
+        }),
+        "outside_root" => Some(FailureCase {
+            oracle: OracleFailure::Return(0),
+            rss_class: "host_failure",
+            rss_code: None,
+        }),
+        _ => None,
+    }
+}
+
 fn compare_cases(
     oracle: &Value,
     candidate: &Value,
@@ -628,65 +761,135 @@ fn compare_cases(
         }
         let oracle_ok = python_success(expected);
         let rss_ok = rust_success(actual);
-        if oracle_ok != rss_ok {
-            if name == "outside_root" && oracle_ok && !rss_ok {
-                deltas.push(format!(
-                    "{name}: upstream leaves the out-of-root task in the table with finished=0; RSS refuses the untrusted root before publishing a task (class {})",
-                    actual["class"]
+        let Some(expectation) = failure_case(name) else {
+            if !oracle_ok || !rss_ok {
+                failures.push(format!(
+                    "{name}: unexpected failure (oracle {}, RSS {})",
+                    expected["outcome"], actual["outcome"]
                 ));
                 continue;
             }
-            failures.push(format!(
-                "{name}: outcome {} vs {} ({actual})",
-                expected["outcome"], actual["outcome"]
-            ));
-            continue;
-        }
-        if !oracle_ok {
-            let oracle_code = expected["ret"][0].clone();
-            let rss_code = actual["code"].clone();
-            if oracle_code != rss_code {
-                let both_fail = expected["outcome"] == json!("exception")
-                    && actual["outcome"] == json!("failure");
-                if both_fail {
-                    deltas.push(format!(
-                        "{name}: upstream raises {}; RSS refuses safely as '{}' (code {:?})",
-                        expected["exception"], actual["class"], rss_code
-                    ));
-                } else {
-                    failures.push(format!("{name}: failure code {oracle_code} vs {rss_code}"));
-                }
-            } else if expected["outcome"] == json!("exception") {
+            compare_value(
+                &expected["ret"],
+                &actual["ret"],
+                &format!("{name}.ret"),
+                failures,
+            );
+            for pointer in ["tasks", "queue", "cookies", "header", "login", "disk"] {
+                compare_value(
+                    &expected[pointer],
+                    &actual[pointer],
+                    &format!("{name}.{pointer}"),
+                    failures,
+                );
+            }
+            if expected["mode"] == json!("save") {
                 deltas.push(format!(
-                    "{name}: upstream raises {}; RSS refuses safely as '{}' (code {:?}); no task/cookie is published by RSS",
-                    expected["exception"], actual["class"], rss_code
-                ));
-            } else {
-                deltas.push(format!(
-                    "{name}: both refuse with code {oracle_code}; the diagnostic text is not byte-compared"
+                    "{name}: saved JSON whitespace differs between the two encoders; the decoded task/cookie content and order are compared through a fresh load"
                 ));
             }
             continue;
+        };
+
+        // Upstream side: the recorded exception class or return code must
+        // still be exactly what the case table declares.
+        match expectation.oracle {
+            OracleFailure::Exception(class) => {
+                if expected["outcome"] != json!("exception")
+                    || expected["exception"] != json!(class)
+                {
+                    failures.push(format!(
+                        "{name}: upstream outcome {:?}/exception {:?} is not the recorded {class}",
+                        expected["outcome"], expected["exception"]
+                    ));
+                }
+            }
+            OracleFailure::Return(code) => {
+                if expected["outcome"] != json!("return") || expected["ret"][0] != json!(code) {
+                    failures.push(format!(
+                        "{name}: upstream return {:?} is not the recorded code {code}",
+                        expected["ret"]
+                    ));
+                }
+            }
         }
-        compare_value(
-            &expected["ret"],
-            &actual["ret"],
-            &format!("{name}.ret"),
-            failures,
-        );
-        for pointer in ["tasks", "queue", "cookies", "header", "login", "disk"] {
-            compare_value(
-                &expected[pointer],
-                &actual[pointer],
-                &format!("{name}.{pointer}"),
-                failures,
-            );
+        if name == "outside_root" && !oracle_ok {
+            failures.push(format!("{name}: upstream must publish instead of failing"));
         }
-        if expected["mode"] == json!("save") {
-            deltas.push(format!(
-                "{name}: saved JSON whitespace differs between the two encoders; the decoded task/cookie content and order are compared through a fresh load"
-            ));
+        if name != "outside_root" && rss_ok {
+            failures.push(format!("{name}: RSS must fail"));
         }
+        if name == "outside_root" && rss_ok {
+            failures.push(format!("{name}: RSS must refuse the untrusted root"));
+        }
+        if !rss_ok {
+            if actual["class"] != json!(expectation.rss_class)
+                || actual["code"] != json!(expectation.rss_code)
+            {
+                failures.push(format!(
+                    "{name}: RSS class/code {:?}/{} is not the recorded {}/{:?}",
+                    actual["class"], actual["code"], expectation.rss_class, expectation.rss_code
+                ));
+            }
+            if name == "outside_root"
+                && !actual["value"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains(ROOT_DENIED_TAG)
+            {
+                failures.push(format!(
+                    "{name}: the failure is not an explicit root denial: {actual}"
+                ));
+            }
+        }
+
+        // The upstream post-state must equal its own pre-invocation baseline,
+        // except outside_root, whose recorded upstream behavior does publish.
+        if name == "outside_root" {
+            let tasks = expected["tasks"].as_array().cloned().unwrap_or_default();
+            if tasks.len() != 1
+                || tasks[0]["guid"] != json!("outside1")
+                || tasks[0]["meta"]["finished"] != json!(0)
+            {
+                failures.push(format!(
+                    "{name}: upstream no longer publishes the recorded out-of-root task: {expected}"
+                ));
+            }
+        } else {
+            for pointer in ["tasks", "queue", "cookies", "header", "login", "disk"] {
+                compare_value(
+                    &expected["pre"][pointer],
+                    &expected[pointer],
+                    &format!("{name}.oracle_post.{pointer}"),
+                    failures,
+                );
+            }
+        }
+        // RSS post-state must equal the independent pre-invocation baseline.
+        if !rss_ok {
+            for pointer in ["tasks", "queue", "cookies", "header", "login", "disk"] {
+                compare_value(
+                    &actual["pre"][pointer],
+                    &actual[pointer],
+                    &format!("{name}.rss_post.{pointer}"),
+                    failures,
+                );
+            }
+        }
+        let upstream = match expectation.oracle {
+            OracleFailure::Exception(class) => format!("raises {class}"),
+            OracleFailure::Return(code) => format!("returns {code}"),
+        };
+        deltas.push(format!(
+            "{name}: upstream {upstream}; RSS {} {:?}; both post-states checked against the pre-invocation baseline{}",
+            expectation.rss_class,
+            expectation.rss_code,
+            if name == "outside_root" {
+                "; upstream publishes the out-of-root task, RSS refuses before publication"
+            } else {
+                ""
+            }
+        ));
     }
     compared
 }
@@ -733,6 +936,98 @@ fn mutate_case(records: &Value, name: &str, mutate: impl Fn(&mut Value)) -> Valu
         mutate(record);
     }
     clone
+}
+
+fn mutation_rejected(
+    oracle: &Value,
+    candidate: &Value,
+    name: &str,
+    mutate: impl Fn(&mut Value),
+    needle: &str,
+) -> bool {
+    let mutant = mutate_case(candidate, name, mutate);
+    let mut failures = Vec::new();
+    let mut ignored = Vec::new();
+    compare_cases(oracle, &mutant, &mut failures, &mut ignored);
+    failures.iter().any(|failure| failure.contains(needle))
+}
+
+/// Mutation gates for the failure cases. The production comparator must reject
+/// a wrong class/code and every post-state change, not accept any failure pair.
+fn failure_negative_gates(oracle: &Value, candidate: &Value) -> [bool; 8] {
+    let class_code = mutation_rejected(
+        oracle,
+        candidate,
+        "bad_json",
+        |record| {
+            record["class"] = json!("structure");
+        },
+        "bad_json",
+    );
+    let code = mutation_rejected(
+        oracle,
+        candidate,
+        "bad_json",
+        |record| {
+            record["code"] = json!(0);
+        },
+        "bad_json",
+    );
+    let task = mutation_rejected(
+        oracle,
+        candidate,
+        "unreadable_session",
+        |record| {
+            record["tasks"] = json!([{"guid": "injected", "state": 10}]);
+        },
+        "unreadable_session",
+    );
+    let cookie = mutation_rejected(
+        oracle,
+        candidate,
+        "missing_tasks",
+        |record| {
+            record["cookies"] = json!([["nw", "mutated"]]);
+        },
+        "missing_tasks",
+    );
+    let queue = mutation_rejected(
+        oracle,
+        candidate,
+        "missing_guid",
+        |record| {
+            record["queue"] = json!(["injected-queue"]);
+        },
+        "missing_guid",
+    );
+    let header = mutation_rejected(
+        oracle,
+        candidate,
+        "tasks_type",
+        |record| {
+            record["header"] = json!("nw=mutated");
+        },
+        "tasks_type",
+    );
+    let login = mutation_rejected(
+        oracle,
+        candidate,
+        "outside_root",
+        |record| {
+            record["login"] = json!(true);
+        },
+        "outside_root",
+    );
+    let disk = mutation_rejected(
+        oracle,
+        candidate,
+        "bad_json",
+        |record| {
+            record["disk"] = json!([["injected.jpg", 1]]);
+        },
+        "bad_json",
+    );
+    [class_code, code, task, cookie, queue, header, login, disk]
 }
 
 fn negative_gates(oracle: &Value, candidate: &Value) -> (bool, bool, bool, bool) {
@@ -978,6 +1273,17 @@ pub fn run_session_diff() -> Result<(), String> {
     let compared = compare_cases(&oracle, &candidate, &mut failures, &mut deltas);
     let (task_rejected, cookie_rejected, scan_queue_rejected, return_rejected) =
         negative_gates(&oracle, &candidate);
+    let failure_gates = failure_negative_gates(&oracle, &candidate);
+    let failure_names = [
+        "class_code",
+        "code",
+        "task",
+        "cookie",
+        "queue",
+        "header",
+        "login",
+        "disk",
+    ];
     if !task_rejected {
         failures.push("negative gate: a changed task guid was not rejected".to_string());
     }
@@ -990,6 +1296,13 @@ pub fn run_session_diff() -> Result<(), String> {
     if !return_rejected {
         failures.push("negative gate: a changed return value was not rejected".to_string());
     }
+    for (name, rejected) in failure_names.iter().zip(failure_gates.iter()) {
+        if !rejected {
+            failures.push(format!(
+                "failure negative gate: a changed {name} on a failure case was not rejected"
+            ));
+        }
+    }
     let report = json!({
         "ok": failures.is_empty(),
         "compared_cases": compared,
@@ -999,7 +1312,12 @@ pub fn run_session_diff() -> Result<(), String> {
             "task": task_rejected,
             "cookie": cookie_rejected,
             "scan_queue": scan_queue_rejected,
-            "return": return_rejected
+            "return": return_rejected,
+            "failure": failure_names
+                .iter()
+                .zip(failure_gates.iter())
+                .map(|(name, rejected)| ((*name).to_string(), Value::Bool(*rejected)))
+                .collect::<serde_json::Map<String, Value>>()
         }
     });
     fs::write(
@@ -1033,6 +1351,15 @@ pub fn run_session_diff() -> Result<(), String> {
             "accepted"
         }
     );
+    let failure_summary = failure_names
+        .iter()
+        .zip(failure_gates.iter())
+        .map(|(name, rejected)| {
+            format!("{name}:{}", if *rejected { "rejected" } else { "accepted" })
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    println!("negative_failure={failure_summary}");
     for delta in &deltas {
         println!("delta={delta}");
     }

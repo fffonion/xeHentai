@@ -12,7 +12,6 @@ mod support;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
@@ -70,8 +69,13 @@ struct Harness {
 
 impl Harness {
     fn open(fixture: &Fixture, guids: &[&str]) -> Self {
-        let options = ControlOptions::fixture(guids, 0);
-        let control = TaskControl::open_with_session(&options, Some(&fixture.options()))
+        Self::open_options(fixture, guids, fixture.options())
+    }
+
+    fn open_options(fixture: &Fixture, guids: &[&str], options: SessionOptions) -> Self {
+        let _ = fixture;
+        let options_control = ControlOptions::fixture(guids, 0);
+        let control = TaskControl::open_with_session(&options_control, Some(&options))
             .unwrap_or_else(|error| panic!("open session control: {error}"));
         Self { control }
     }
@@ -950,8 +954,7 @@ fn atomic_writer_child_entry() {
     };
     let target = PathBuf::from(target);
     let contents = std::env::var("XEH_ATOMIC_CHILD_CONTENTS").expect("child contents");
-    let parent = target.parent().expect("child target parent").to_path_buf();
-    let state = xeh_host::os::fs::FsState::new(vec![parent], None, None);
+    let state = xeh_host::os::fs::FsState::new(Vec::new(), Some(target.clone()), None);
     let outcome =
         xeh_host::os::fs::write_atomic_with_hook(&state, &target, &contents, Some(3), || {
             use std::io::Write;
@@ -1063,219 +1066,476 @@ fn interrupted_atomic_write_leaves_the_old_session_loadable() {
     let _ = fs::remove_dir_all(atomic_child_target_dir());
 }
 
-/// Serves exactly `bodies.len()` connections, records each request path, and
-/// answers with the mapped payload. A client that tries an extra request gets
-/// a refused connection after the expected two, so the test cannot silently
-/// accept a download for an already-finished id.
-fn serve_paths(
-    bodies: Vec<(String, Vec<u8>)>,
-) -> (u16, Arc<Mutex<Vec<String>>>, std::thread::JoinHandle<()>) {
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
+#[test]
+fn scan_budget_precheck_refuses_before_scan_and_keeps_disk_and_state() {
+    let fixture = Fixture::create();
+    fs::create_dir_all(fixture.download_dir.join("partial")).unwrap();
+    fs::write(fixture.download_dir.join("partial/01.jpg"), b"").unwrap();
+    let record = task_record(
+        GALLERY_A,
+        "budget01",
+        10,
+        json!({"dir": fixture.download_dir.to_string_lossy(), "download_range": null}),
+        json!({"total": 12, "title": "partial", "filelist": {}}),
+        json!({}),
+        json!({}),
+        json!({}),
+        json!(null),
+        json!(null),
+    );
+    seed_raw(
+        &fixture,
+        &format!("{{\"tasks\":{{\"a\":{record}}},\"cookies\":{{\"nw\":\"1\"}}}}"),
+    );
+    let small = fixture
+        .options()
+        .with_limits(10, xeh_host::SESSION_READ_LIMIT_BYTES);
+    let mut harness = Harness::open_options(&fixture, &[], small);
+    let report = harness.load_session();
+    assert_eq!(
+        report["session"]["error"],
+        json!("session:scan_budget"),
+        "over-budget scan: {report}"
+    );
+    assert_eq!(report["session"]["code"], json!(null));
+    assert!(
+        fixture.download_dir.join("partial/01.jpg").exists(),
+        "no zero-file deletion happens before the budget decision"
+    );
+    let snapshot = harness.snapshot();
+    assert_eq!(snapshot["tasks"], json!([]));
+    assert_eq!(snapshot["queue"], json!([]));
+    assert_eq!(snapshot["cookies"], json!([{"name": "nw", "value": "1"}]));
+    assert_eq!(harness.control.resource_count(), 0);
 
-    let listener = TcpListener::bind("127.0.0.1:0").expect("fixture listener");
-    let port = listener.local_addr().unwrap().port();
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let log = Arc::clone(&seen);
-    let handle = std::thread::spawn(move || {
-        for (path, body) in bodies {
-            let (mut stream, _) = listener.accept().expect("accept fixture request");
-            let mut buffer = [0u8; 4096];
-            let read = stream.read(&mut buffer).unwrap_or(0);
-            let request = String::from_utf8_lossy(&buffer[..read]).to_string();
-            let requested = request
-                .lines()
-                .next()
-                .and_then(|line| line.split_whitespace().nth(1))
-                .unwrap_or("")
-                .to_string();
-            log.lock().unwrap().push(requested.clone());
-            assert_eq!(requested, path, "unexpected request path");
-            let head = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            stream.write_all(head.as_bytes()).unwrap();
-            stream.write_all(&body).unwrap();
-        }
-    });
-    (port, seen, handle)
+    // A huge total is refused by the same precheck without walking fids.
+    let huge = task_record(
+        GALLERY_A,
+        "budget02",
+        10,
+        json!({"dir": fixture.download_dir.to_string_lossy(), "download_range": null}),
+        json!({"total": 9223372036854775807i64, "title": "partial", "filelist": {}}),
+        json!({}),
+        json!({}),
+        json!({}),
+        json!(null),
+        json!(null),
+    );
+    seed_raw(
+        &fixture,
+        &format!("{{\"tasks\":{{\"b\":{huge}}},\"cookies\":{{\"nw\":\"1\"}}}}"),
+    );
+    let report = harness.load_session();
+    assert_eq!(report["session"]["error"], json!("session:scan_budget"));
+    assert!(fixture.download_dir.join("partial/01.jpg").exists());
+
+    // The same document at the exact budget boundary scans normally.
+    let record = task_record(
+        GALLERY_A,
+        "budget03",
+        10,
+        json!({"dir": fixture.download_dir.to_string_lossy(), "download_range": null}),
+        json!({"total": 12, "title": "partial", "filelist": {}}),
+        json!({}),
+        json!({}),
+        json!({}),
+        json!(null),
+        json!(null),
+    );
+    seed_raw(
+        &fixture,
+        &format!("{{\"tasks\":{{\"c\":{record}}},\"cookies\":{{\"nw\":\"1\"}}}}"),
+    );
+    let exact = fixture
+        .options()
+        .with_limits(12, xeh_host::SESSION_READ_LIMIT_BYTES);
+    let mut harness = Harness::open_options(&fixture, &[], exact);
+    let report = harness.load_session();
+    assert_eq!(
+        report["session"]["code"],
+        json!(0),
+        "exact budget: {report}"
+    );
+    assert_eq!(report["tasks"][0]["guid"], json!("budget03"));
+    assert!(!fixture.download_dir.join("partial/01.jpg").exists());
+    assert_eq!(report["tasks"][0]["meta"]["finished"], json!(0));
 }
 
 #[test]
-fn remaining_downloads_run_through_the_native_worker_and_rescan_cleanly() {
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+fn plain_control_without_session_has_no_file_authority() {
+    let mut control = TaskControl::open(&ControlOptions::fixture(&[], 0)).expect("plain control");
+    let report = control.load_session().expect("load report");
+    let report: Value = serde_json::from_str(&report).unwrap();
+    assert_eq!(report["session"]["error"], json!("session:host_failure"));
+    assert_eq!(report["tasks"], json!([]));
+    let saved = control.save_session().expect("save report");
+    let saved: Value = serde_json::from_str(&saved).unwrap();
+    assert_eq!(saved["session"]["error"], json!("session:host_failure"));
+    assert_eq!(
+        saved["session"]["code"],
+        json!(null),
+        "no session target means no write capability: {saved}"
+    );
+}
 
-    use vm::HttpConfig;
-    use xeh_host::{HeaderEntry, JobKey, PoolConfig, TransferRequest, TransportHooks, WorkerPool};
+// ---- R1: separated file authority ------------------------------------------
 
+fn session_document_of_bytes(size: usize) -> String {
+    let head = "{\"tasks\":{},\"cookies\":{\"nw\":\"";
+    let tail = "\"}}";
+    assert!(size > head.len() + tail.len());
+    let fill = size - head.len() - tail.len();
+    format!("{head}{}{tail}", "a".repeat(fill))
+}
+
+fn session_document_of_bytes_with(size: usize, filler: &str) -> String {
+    let head = "{\"tasks\":{},\"cookies\":{\"nw\":\"";
+    let tail = "\"}}";
+    let room = size - head.len() - tail.len();
+    let fill = room / filler.len();
+    assert_eq!(
+        fill * filler.len(),
+        room,
+        "filler must tile the byte budget"
+    );
+    format!("{head}{}{tail}", filler.repeat(fill))
+}
+
+#[test]
+fn session_and_legacy_parents_do_not_grant_download_authority() {
     let fixture = Fixture::create();
-    let root = fixture.download_dir.clone();
-    let partial = root.join("partial");
-    fs::create_dir(&partial).unwrap();
-    fs::write(partial.join("01.jpg"), b"already-downloaded").unwrap();
-
-    let hash_one = "0123456789";
-    let full_one = "0123456789abcdef0123456789abcdef01234567";
-    let hash_two = "abcdef0123";
-    let full_two = "abcdef0123456789abcdef0123456789abcdef01";
-    let payload_one = b"image-eleven-bytes".to_vec();
-    let payload_two = b"image-twelve-bytes".to_vec();
-    let payloads = Arc::new(Mutex::new(vec![
-        (format!("/{full_one}-11-1-1-jpg"), payload_one.clone()),
-        (format!("/{full_two}-12-1-1-jpg"), payload_two.clone()),
-    ]));
-    let (port, seen, server) = {
-        let payloads = payloads.lock().unwrap().clone();
-        serve_paths(payloads)
-    };
-
-    let image_one = format!("http://127.0.0.1:{port}/{full_one}-11-1-1-jpg");
-    let image_two = format!("http://127.0.0.1:{port}/{full_two}-12-1-1-jpg");
-    let page_one = format!("https://e-hentai.org/s/{hash_one}/999999-11");
-    let page_two = format!("https://e-hentai.org/s/{hash_two}/999999-12");
-    let document = format!(
-        "{{\"tasks\":{{\"partial\":{{\"url\":\"https://e-hentai.org/g/999999/ffffffffff/\",\"guid\":\"partial1\",\"state\":10,\"failcode\":0,\"config\":{{\"dir\":\"{}\",\"save_tasks\":true,\"download_range\":null}},\"meta\":{{\"total\":12,\"title\":\"partial\",\"finished\":0,\"filelist\":{{}}}},\"reload_map\":{{\"{hash_one}\":[\"https://e-hentai.org/s/{hash_one}/999999-11\",\"renamed.jpg\"],\"{hash_two}\":[\"https://e-hentai.org/s/{hash_two}/999999-12\",\"renamed2.jpg\"]}},\"duplicate_map\":{{}},\"renamed_map\":{{}},\"img_q\":[\"{image_one}\",\"{image_two}\"],\"page_q\":[\"{page_one}\",\"{page_two}\"]}}}},\"cookies\":{{\"nw\":\"1\"}}}}",
-        root.display()
-    );
-    seed_raw(&fixture, &document);
-    let mut harness = Harness::open(&fixture, &[]);
-    let loaded = harness.load_session();
-    assert_eq!(loaded["session"]["code"], json!(0), "load: {loaded}");
-    let task = &loaded["tasks"][0];
-    assert_eq!(task["guid"], json!("partial1"));
-    assert_eq!(task["meta"]["finished"], json!(1), "fid 01 already on disk");
-    assert_eq!(
-        task["state"],
-        json!(4),
-        "download + page_q becomes scan_img"
-    );
-
-    let plan_report = harness.command(json!({"op": "remaining_plan", "guid": "partial1"}));
-    assert_eq!(plan_report["ok"], json!(true), "plan: {plan_report}");
-    let plan: Value =
-        serde_json::from_str(plan_report["value"].as_str().expect("plan text")).unwrap();
-    let items = plan["items"].as_array().expect("plan items");
-    assert_eq!(items.len(), 2, "only fids 11 and 12 remain: {plan}");
-    assert_eq!(items[0]["fid"], json!(11));
-    assert_eq!(items[1]["fid"], json!(12));
-    assert_eq!(
-        items[0]["file"],
-        json!(partial.join("11.jpg").to_string_lossy())
-    );
-    assert_eq!(
-        items[0]["staging"],
-        json!(partial.join("11.jpg.xehpart").to_string_lossy())
-    );
-
-    let http = HttpConfig {
-        allowed_schemes: vec!["http".to_string()],
-        allowed_hosts: vec!["127.0.0.1".to_string()],
-        allowed_ports: vec![port],
-        allow_private_ips: true,
-        connect_timeout: Duration::from_secs(5),
-        request_timeout: Duration::from_secs(20),
-        stream_idle_timeout: Duration::from_secs(5),
-        max_stream_duration: Duration::from_secs(20),
-        ..HttpConfig::default()
-    };
-    let pool = WorkerPool::start(PoolConfig {
-        workers: 2,
-        job_capacity: 4,
-        event_capacity: 8,
-        http,
-        root: root.clone(),
-        chunk_bytes: 4096,
-        stream_limit: HttpConfig::default().max_stream_total_bytes,
-        writer_fault: None,
-        commit_gate: None,
-        link_gate: None,
-        commit_hold: None,
-        hooks: TransportHooks::default(),
-        fail_worker_once: false,
-        submit_hold: None,
-    })
-    .expect("worker pool");
-    pool.wait_ready(Duration::from_secs(5)).expect("pool ready");
-    let lease = pool.register(1, 1).expect("register");
-    for (index, item) in items.iter().enumerate() {
-        let staging = PathBuf::from(item["staging"].as_str().unwrap());
-        let relative = staging
-            .strip_prefix(&root)
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
-        pool.submit(lease.submission(TransferRequest {
-            key: JobKey {
-                task_id: 1,
-                epoch: 1,
-                job_id: index as i64 + 1,
-            },
-            url: item["url"].as_str().unwrap().to_string(),
-            headers: Vec::<HeaderEntry>::new(),
-            relative_path: relative,
-        }))
-        .expect("submit download");
+    for base in [&fixture.session_dir, &fixture.legacy_dir] {
+        fs::create_dir_all(base.join("partial")).unwrap();
+        fs::write(base.join("partial/01.jpg"), b"").unwrap();
     }
-    let terminals = pool
-        .wait_terminals(2, Duration::from_secs(30))
-        .expect("terminals");
-    for terminal in &terminals {
+    for (label, dir) in [
+        ("session", fixture.session_dir.clone()),
+        ("legacy", fixture.legacy_dir.clone()),
+    ] {
+        let record = task_record(
+            GALLERY_A,
+            "deny0001",
+            10,
+            json!({"dir": dir.to_string_lossy(), "download_range": null}),
+            json!({"total": 12, "title": "partial", "filelist": {}}),
+            json!({}),
+            json!({}),
+            json!({}),
+            json!(null),
+            json!(null),
+        );
+        seed_raw(
+            &fixture,
+            &format!("{{\"tasks\":{{\"a\":{record}}},\"cookies\":{{\"nw\":\"1\"}}}}"),
+        );
+        let mut harness = Harness::open(&fixture, &[]);
+        let report = harness.load_session();
         assert_eq!(
-            terminal.terminal_status.as_deref(),
-            Some("completed"),
-            "{terminal:?}"
+            report["session"]["error"],
+            json!("session:host_failure"),
+            "{label} parent must not be a download root: {report}"
+        );
+        let message = report["session"]["value"].as_str().unwrap_or("");
+        assert!(
+            message.contains(xeh_host::ROOT_DENIED_TAG),
+            "{label} refusal must carry the stable root-denied tag: {report}"
+        );
+        let snapshot = harness.snapshot();
+        assert_eq!(snapshot["tasks"], json!([]), "{label}: no task published");
+        assert_eq!(snapshot["queue"], json!([]), "{label}: no queue member");
+        assert_eq!(
+            snapshot["cookies"],
+            json!([{"name": "nw", "value": "1"}]),
+            "{label}: cookies unchanged"
+        );
+        assert_eq!(
+            fs::read(dir.join("partial/01.jpg")).unwrap(),
+            b"",
+            "{label}: the zero file must still exist"
         );
     }
-    let fs_state = xeh_host::os::fs::FsState::new(vec![root.clone()], None, None);
-    for item in items {
-        let staging = PathBuf::from(item["staging"].as_str().unwrap());
-        let file = PathBuf::from(item["file"].as_str().unwrap());
-        let renamed = xeh_host::os::fs::rename_atomic(&fs_state, &staging, &file).expect("rename");
-        assert!(renamed.committed(), "rename failed: {:?}", renamed.error());
-        assert!(renamed.directory_synced());
-    }
-    assert_eq!(fs::read(partial.join("11.jpg")).unwrap(), payload_one);
-    assert_eq!(fs::read(partial.join("12.jpg")).unwrap(), payload_two);
-    assert!(!partial.join("11.jpg.xehpart").exists());
-    assert!(!partial.join("12.jpg.xehpart").exists());
-    let requested = seen.lock().unwrap().clone();
-    assert_eq!(
-        requested.len(),
-        2,
-        "no request for the finished fid: {requested:?}"
+
+    // A real download root keeps the zero-file cleanup and publishes the task.
+    fs::create_dir_all(fixture.download_dir.join("partial")).unwrap();
+    fs::write(fixture.download_dir.join("partial/01.jpg"), b"").unwrap();
+    let record = task_record(
+        GALLERY_A,
+        "allow001",
+        10,
+        json!({"dir": fixture.download_dir.to_string_lossy(), "download_range": null}),
+        json!({"total": 12, "title": "partial", "filelist": {}}),
+        json!({}),
+        json!({}),
+        json!({}),
+        json!(null),
+        json!(null),
     );
+    seed_raw(
+        &fixture,
+        &format!("{{\"tasks\":{{\"a\":{record}}},\"cookies\":{{\"nw\":\"1\"}}}}"),
+    );
+    let mut harness = Harness::open(&fixture, &[]);
+    let report = harness.load_session();
+    assert_eq!(report["session"]["code"], json!(0), "allow: {report}");
+    assert_eq!(report["tasks"][0]["guid"], json!("allow001"));
+    assert_eq!(report["tasks"][0]["meta"]["finished"], json!(0));
     assert!(
-        requested.iter().all(|path| !path.contains("-01-")),
-        "finished fid was requested: {requested:?}"
+        !fixture.download_dir.join("partial/01.jpg").exists(),
+        "a trusted download root still removes the zero file"
     );
-    pool.shutdown().expect("shutdown");
-    server.join().expect("server");
+}
 
-    // The reloaded owner observes the same disk layout and stops asking for
-    // the now-finished pages.
-    let mut rescanned = Harness::open(&fixture, &[]);
-    let report = rescanned.load_session();
-    assert_eq!(report["session"]["code"], json!(0), "rescan: {report}");
-    let task = &report["tasks"][0];
-    assert_eq!(task["guid"], json!("partial1"));
-    assert_eq!(task["meta"]["finished"], json!(3));
-    assert_eq!(task["state"], json!(4));
-    let empty_plan = rescanned.command(json!({"op": "remaining_plan", "guid": "partial1"}));
-    assert_eq!(empty_plan["ok"], json!(true), "empty plan: {empty_plan}");
-    let empty: Value = serde_json::from_str(empty_plan["value"].as_str().unwrap()).unwrap();
-    assert_eq!(empty["items"], json!([]));
+#[test]
+fn overlapping_download_root_cannot_mutate_reserved_session_files() {
+    let fixture = Fixture::create();
+    fs::write(fixture.session_path(), b"").unwrap();
+    fs::write(fixture.legacy_path(), b"11,hash\n").unwrap();
+    fs::write(fixture.download_dir.join("zero.jpg"), b"").unwrap();
+    let state = xeh_host::os::fs::FsState::new(
+        vec![fixture.session_dir.clone()],
+        Some(fixture.session_path()),
+        Some(fixture.legacy_path()),
+    );
+    let removed = xeh_host::os::fs::remove_zero_file(&state, &fixture.session_path());
+    assert!(
+        removed.is_err(),
+        "the session file is reserved even inside a download root"
+    );
+    assert!(fixture.session_path().exists());
+    let staged = fixture.session_dir.join("staged.jpg");
+    fs::write(&staged, b"staged").unwrap();
+    let renamed = xeh_host::os::fs::rename_atomic(&state, &staged, &fixture.session_path());
+    assert!(renamed.is_err(), "rename over h.json must be refused");
+    assert_eq!(fs::read(fixture.session_path()).unwrap(), b"");
+    let renamed_away = xeh_host::os::fs::rename_atomic(&state, &fixture.session_path(), &staged);
+    assert!(
+        renamed_away.is_err(),
+        "renaming h.json away must be refused"
+    );
+    assert!(fixture.session_path().exists());
+    let legacy_write = xeh_host::os::fs::write_atomic(&state, &fixture.legacy_path(), "x");
+    assert!(legacy_write.is_err(), "legacy cookies are read-only");
+    assert_eq!(fs::read(fixture.legacy_path()).unwrap(), b"11,hash\n");
+    let session_write = xeh_host::os::fs::write_atomic(&state, &fixture.session_path(), "{}");
+    let outcome = session_write.expect("session target is writable");
+    assert!(outcome.committed(), "{:?}", outcome.error());
+    let download_state =
+        xeh_host::os::fs::FsState::new(vec![fixture.download_dir.clone()], None, None);
+    let zero =
+        xeh_host::os::fs::remove_zero_file(&download_state, &fixture.download_dir.join("zero.jpg"))
+            .expect("ordinary zero file");
+    assert!(zero.removed());
+}
 
-    let updated = rescanned.update(json!({"save_tasks": true}));
-    assert_eq!(updated["code"], json!(0), "save_tasks update: {updated}");
-    let saved = rescanned.save_session();
+#[cfg(unix)]
+#[test]
+fn zero_byte_symlink_removes_the_link_and_keeps_the_target() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::create();
+    let state = xeh_host::os::fs::FsState::new(vec![fixture.download_dir.clone()], None, None);
+    let target = fixture.download_dir.join("target.jpg");
+    fs::write(&target, b"").unwrap();
+    let link = fixture.download_dir.join("link.jpg");
+    symlink(&target, &link).unwrap();
+    let removed = xeh_host::os::fs::remove_zero_file(&state, &link).expect("symlink zero file");
+    assert!(removed.removed(), "{:?}", removed.error());
+    assert!(link.symlink_metadata().is_err(), "the link is gone");
+    assert!(target.exists(), "the target stays");
+    assert_eq!(fs::metadata(&target).unwrap().len(), 0, "target untouched");
+
+    // A link to a non-empty target reports the followed size and removes
+    // nothing, exactly like upstream os.stat + os.remove.
+    let payload = fixture.download_dir.join("payload.jpg");
+    fs::write(&payload, b"payload").unwrap();
+    let payload_link = fixture.download_dir.join("payload-link.jpg");
+    symlink(&payload, &payload_link).unwrap();
+    let kept = xeh_host::os::fs::remove_zero_file(&state, &payload_link).expect("payload link");
+    assert!(!kept.removed(), "a non-zero target is not removed");
+    assert!(payload_link.symlink_metadata().is_ok(), "the link stays");
+    assert_eq!(fs::read(&payload).unwrap(), b"payload");
+
+    let plain = fixture.download_dir.join("plain.jpg");
+    fs::write(&plain, b"").unwrap();
+    let removed = xeh_host::os::fs::remove_zero_file(&state, &plain).expect("plain zero file");
+    assert!(removed.removed());
+    assert!(!plain.exists());
+}
+
+#[test]
+fn session_byte_budget_bounds_reads_and_writes_and_keeps_old_bytes() {
+    let budget = 64usize;
+    assert_eq!(xeh_host::SESSION_READ_LIMIT_BYTES, 16 * 1024 * 1024);
+    let fixture = Fixture::create();
+    let options = fixture.options().with_limits(100_000, budget);
+    let exact = session_document_of_bytes(budget);
+    assert_eq!(exact.len(), budget);
+    fs::write(fixture.session_path(), exact.as_bytes()).unwrap();
+    let mut harness = Harness::open_options(&fixture, &[], options.clone());
+    let report = harness.load_session();
+    assert_eq!(
+        report["session"]["code"],
+        json!(0),
+        "exact budget: {report}"
+    );
+
+    let over = session_document_of_bytes(budget + 1);
+    fs::write(fixture.session_path(), over.as_bytes()).unwrap();
+    let report = harness.load_session();
+    assert_eq!(
+        report["session"]["error"],
+        json!("session:read_limit"),
+        "one byte over the read budget: {report}"
+    );
+    assert_eq!(
+        fs::read(fixture.session_path()).unwrap(),
+        over.as_bytes(),
+        "over-limit load keeps the file bytes"
+    );
+
+    // UTF-8 byte length, not the character count, is the bound: sixteen 'é'
+    // characters are thirty-two bytes and exactly fill the same budget.
+    let unicode = session_document_of_bytes_with(budget, "é");
+    assert_eq!(unicode.len(), budget);
+    fs::write(fixture.session_path(), unicode.as_bytes()).unwrap();
+    let report = harness.load_session();
+    assert_eq!(
+        report["session"]["code"],
+        json!(0),
+        "unicode exact: {report}"
+    );
+    let unicode_over = session_document_of_bytes_with(budget + 1, "éa");
+    assert_eq!(unicode_over.len(), budget + 1);
+    fs::write(fixture.session_path(), unicode_over.as_bytes()).unwrap();
+    let report = harness.load_session();
+    assert_eq!(
+        report["session"]["error"],
+        json!("session:read_limit"),
+        "unicode over the byte budget: {report}"
+    );
+
+    // The same VM stays usable after both failures.
+    fs::write(fixture.session_path(), exact.as_bytes()).unwrap();
+    let report = harness.load_session();
+    assert_eq!(report["session"]["code"], json!(0), "recovery: {report}");
+    assert_eq!(report["pending"], json!(null));
+    assert_eq!(harness.control.resource_count(), 0);
+
+    // A save whose complete UTF-8 document exceeds the budget is refused
+    // before staging: committed=false and the old bytes are exact.
+    let updated = harness.update(json!({"save_tasks": true}));
+    assert_eq!(updated["code"], json!(0), "save_tasks: {updated}");
+    let added = harness.add(GALLERY_A);
+    assert_eq!(added["code"], json!(0), "add: {added}");
+    let saved = harness.save_session();
+    assert_eq!(saved["session"]["code"], json!(1103), "over save: {saved}");
+    assert_eq!(saved["session"]["committed"], json!(false));
+    assert_eq!(
+        fs::read(fixture.session_path()).unwrap(),
+        exact.as_bytes(),
+        "refused save keeps the previous document"
+    );
+    let staging: Vec<PathBuf> = fs::read_dir(&fixture.session_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().starts_with(".h.json.xeh-"))
+                .unwrap_or(false)
+        })
+        .collect();
+    assert!(
+        staging.is_empty(),
+        "the byte-budget refusal happens before staging: {staging:?}"
+    );
+    assert_eq!(harness.control.resource_count(), 0);
+    let shrunk = harness.update(json!({"save_tasks": false}));
+    assert_eq!(shrunk["code"], json!(0), "save_tasks false: {shrunk}");
+    let saved = harness.save_session();
+    assert_eq!(saved["session"]["code"], json!(0), "small save: {saved}");
+    assert_eq!(fs::read(fixture.session_path()).unwrap(), exact.as_bytes());
+    assert_eq!(harness.control.resource_count(), 0);
+}
+
+#[test]
+fn default_session_budget_refuses_sixteen_mib_plus_one_and_recovers() {
+    let limit = xeh_host::SESSION_READ_LIMIT_BYTES;
+    let fixture = Fixture::create();
+    let too_big = vec![b'a'; limit + 1];
+    fs::write(fixture.session_path(), &too_big).unwrap();
+    let mut harness = Harness::open(&fixture, &[]);
+    let report = harness.load_session();
+    assert_eq!(
+        report["session"]["error"],
+        json!("session:read_limit"),
+        "default read budget: {report}"
+    );
+    assert_eq!(
+        fs::read(fixture.session_path()).unwrap(),
+        too_big,
+        "the oversized file is not truncated"
+    );
+
+    let small = b"{\"tasks\":{},\"cookies\":{\"nw\":\"1\"}}";
+    fs::write(fixture.session_path(), small).unwrap();
+    let report = harness.load_session();
+    assert_eq!(report["session"]["code"], json!(0), "small load: {report}");
+    assert_eq!(
+        harness.update(json!({"save_tasks": true}))["code"],
+        json!(0)
+    );
+    let added = harness.add(GALLERY_A);
+    let guid = added["value"].as_str().unwrap().to_string();
+    let huge = "x".repeat(limit + 1);
+    let seeded = harness.command(json!({
+        "op": "seed_meta",
+        "guid": guid,
+        "meta": {"title": huge, "total": 1, "filelist": {}}
+    }));
+    assert_eq!(seeded["ok"], json!(true), "seed meta failed");
+    let saved = harness.save_session();
+    assert_eq!(saved["session"]["code"], json!(1103), "default save");
+    assert_eq!(saved["session"]["committed"], json!(false));
+    assert_eq!(
+        fs::read(fixture.session_path()).unwrap(),
+        small,
+        "refused save keeps the previous document"
+    );
+    let seeded = harness.command(json!({
+        "op": "seed_meta",
+        "guid": guid,
+        "meta": {"title": "small", "total": 1, "filelist": {}}
+    }));
+    assert_eq!(seeded["ok"], json!(true), "small meta: {seeded}");
+    let saved = harness.save_session();
+    assert_eq!(saved["session"]["code"], json!(0), "small save: {saved}");
+    assert_eq!(harness.control.resource_count(), 0);
+    assert_eq!(
+        harness.command(json!({"op": "snapshot"}))["pending"],
+        json!(null)
+    );
+}
+
+#[test]
+fn save_then_load_in_the_same_vm_refreshes_the_exact_read_root() {
+    let fixture = Fixture::create();
+    let mut harness = Harness::open(&fixture, &[]);
+    let first = harness.load_session();
+    assert_eq!(
+        first["session"]["code"],
+        json!(0),
+        "absent session: {first}"
+    );
+    let saved = harness.save_session();
     assert_eq!(saved["session"]["code"], json!(0), "save: {saved}");
-    let mut third = Harness::open(&fixture, &[]);
-    let report = third.load_session();
-    assert_eq!(report["session"]["code"], json!(0), "third load: {report}");
-    assert_eq!(report["tasks"][0]["guid"], json!("partial1"));
-    assert_eq!(report["tasks"][0]["meta"]["finished"], json!(3));
-    assert_eq!(report["queue"], json!(["partial1"]));
-    assert_eq!(report["cookie_header"], json!("nw=1"));
+    assert!(fixture.session_path().is_file());
+    let loaded = harness.load_session();
+    assert_eq!(
+        loaded["session"]["code"],
+        json!(0),
+        "same-VM load after save: {loaded}"
+    );
+    assert_eq!(loaded["cookie_header"], json!("nw=1"));
+    assert_eq!(harness.control.resource_count(), 0);
 }
