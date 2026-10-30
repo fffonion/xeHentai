@@ -1,0 +1,23 @@
+//! Proxy policy predicates, exactly as `util.get_proxy_policy` composes them.
+//!
+//! `proxy_image_only` takes precedence and is the negation of the source's
+//! anchored webpage regex, so it matches every non-webpage URL including the
+//! empty string. `proxy_image` matches all non-empty non-newline URLs.
+//! Otherwise only webpage URLs match. Rust regex has no lookahead, so the
+//! negative predicate is expressed as the RSS negation of the same positive
+//! source pattern; no Python-regex compatibility layer is involved.
+use re;
+
+fn webpage_pattern() -> string {
+    "^https*://([^\\.]+\\.)*(?:[g\\.]*e-|ex)hentai.org"
+}
+
+pub fn matches(image: bool, image_only: bool, url: string) -> bool {
+    let mut result = re::match(webpage_pattern(), url.copy());
+    if image_only {
+        result = re::match(webpage_pattern(), url.copy()) == false;
+    } else if image {
+        result = re::match("^[^\\n]", url.copy());
+    }
+    result
+}

@@ -131,6 +131,48 @@ pub async fn admit_target(
     })
 }
 
+/// Authorizes a request target whose name is delegated to a trusted proxy.
+///
+/// The destination hostname, scheme, port and literal-IP restriction are
+/// checked exactly like a direct request, but no local name resolution is
+/// performed. A caller must have an explicit trusted remote-DNS grant before
+/// reaching this function; it does not weaken the direct path's pinning.
+pub fn admit_remote_target(
+    http: &vm::HttpConfig,
+    url: &Url,
+) -> Result<(String, u16), &'static str> {
+    http.validate().map_err(|_| "policy_denied")?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("policy_denied");
+    }
+    let scheme = url.scheme();
+    if !http
+        .allowed_schemes
+        .iter()
+        .any(|item| item.eq_ignore_ascii_case(scheme))
+    {
+        return Err("policy_denied");
+    }
+    let host = url.host_str().ok_or("policy_denied")?;
+    if !http
+        .allowed_hosts
+        .iter()
+        .any(|item| item.eq_ignore_ascii_case(host))
+    {
+        return Err("policy_denied");
+    }
+    let port = url.port_or_known_default().ok_or("policy_denied")?;
+    if !http.allowed_ports.contains(&port) {
+        return Err("policy_denied");
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if !http.allow_private_ips && is_restricted_ip(ip) {
+            return Err("policy_denied");
+        }
+    }
+    Ok((host.to_string(), port))
+}
+
 pub async fn select_deadline<T>(
     cancel: &CancellationToken,
     deadline: Instant,

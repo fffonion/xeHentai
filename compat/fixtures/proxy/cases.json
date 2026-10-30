@@ -1,0 +1,336 @@
+{
+  "cases": [
+    {
+      "id": "proxy.pool.order-and-readd",
+      "suite": "proxy",
+      "kind": "pool",
+      "request": {
+        "operation": "pool",
+        "steps": [
+          {"op": "proxy_add", "address": "http://a.invalid:1"},
+          {"op": "proxy_add", "address": "http://b.invalid:2"},
+          {"op": "proxy_select", "now": 100.0},
+          {"op": "proxy_not_good", "address": "http://a.invalid:1", "weight": 5, "expire": 0.0, "now": 100.0},
+          {"op": "proxy_select", "now": 200.0},
+          {"op": "proxy_has", "now": 200.0}
+        ]
+      },
+      "assertions": {
+        "/steps/0/proxy/order": ["http://a.invalid:1"],
+        "/steps/1/proxy/order": ["http://a.invalid:1", "http://b.invalid:2"],
+        "/steps/3/proxy/disabled": {"http://a.invalid:1": 100.0},
+        "/steps/4/error": "RuntimeError",
+        "/steps/4/proxy/disabled": {},
+        "/steps/5/value": "{\"value\":false}"
+      }
+    },
+    {
+      "id": "proxy.pool.trace-scores",
+      "suite": "proxy",
+      "kind": "pool",
+      "request": {
+        "operation": "pool",
+        "steps": [
+          {"op": "proxy_add", "address": "http://a.invalid:1"},
+          {"op": "proxy_trace", "address": "http://a.invalid:1", "outcome": "success", "weight": 2, "now": 100.0},
+          {"op": "proxy_trace", "address": "http://a.invalid:1", "outcome": "success", "weight": 1, "check_present": true, "check_ok": false, "now": 100.0},
+          {"op": "proxy_trace", "address": "http://a.invalid:1", "outcome": "exception", "weight": 1, "exception_class": "ConnectionError", "detail": "boom", "now": 100.0},
+          {"op": "proxy_trace", "address": "http://a.invalid:1", "outcome": "exception", "weight": 5, "exception_class": "ConnectionError", "detail": "BadStatusLine: bad", "now": 100.0},
+          {"op": "proxy_trace", "address": "http://a.invalid:1", "outcome": "success", "weight": 1, "now": 100.0},
+          {"op": "proxy_trace", "address": "http://a.invalid:1", "outcome": "exception", "weight": 3, "exception_class": "ProxyError", "detail": "proxy", "now": 100.0},
+          {"op": "proxy_select", "now": 500.0},
+          {"op": "proxy_has", "now": 500.0}
+        ]
+      },
+      "assertions": {
+        "/steps/1/proxy/counts": {"http://a.invalid:1": [2, 0]},
+        "/steps/2/proxy/counts": {"http://a.invalid:1": [2, 1]},
+        "/steps/3/proxy/counts": {"http://a.invalid:1": [2, 2]},
+        "/steps/4/proxy/counts": {"http://a.invalid:1": [2, 7]},
+        "/steps/4/proxy/disabled": {"http://a.invalid:1": 0},
+        "/steps/6/proxy/disabled": {"http://a.invalid:1": 0},
+        "/steps/7/error": "PoolException",
+        "/steps/8/value": "{\"value\":true}"
+      }
+    },
+    {
+      "id": "proxy.pool.add-classification",
+      "suite": "proxy",
+      "kind": "pool",
+      "request": {
+        "operation": "pool",
+        "steps": [
+          {"op": "proxy_add", "address": "socks4://127.0.0.1:1080"},
+          {"op": "proxy_add", "address": "socks4a://proxy.invalid:1080"},
+          {"op": "proxy_add", "address": "socks5://127.0.0.1:1080"},
+          {"op": "proxy_add", "address": "socks5h://proxy.invalid:1080"},
+          {"op": "proxy_add", "address": "socks4ah://proxy.invalid:1080/"},
+          {"op": "proxy_add", "address": "socks5aa://proxy.invalid:1080"},
+          {"op": "proxy_add", "address": "http://127.0.0.1:8080"},
+          {"op": "proxy_add", "address": "http://127.0.0.1:8080/"},
+          {"op": "proxy_add", "address": "https://proxy.invalid:8443"},
+          {"op": "proxy_add", "address": "https://glype.invalid/browse.php?u=http&b=4"},
+          {"op": "proxy_add", "address": "socks5://proxy.invalid:99999"},
+          {"op": "proxy_add", "address": "socks5://proxy.invalid"},
+          {"op": "proxy_add", "address": "socks45://proxy.invalid:1080"},
+          {"op": "proxy_add", "address": "socks5://user:pass@127.0.0.1:1080"},
+          {"op": "proxy_add", "address": "socks5://[::1]:1080"},
+          {"op": "proxy_add", "address": "http://127.0.0.1:8080/path"},
+          {"op": "proxy_add", "address": "HTTP://127.0.0.1:8080"},
+          {"op": "proxy_add", "address": "ftp://127.0.0.1:21"}
+        ]
+      },
+      "assertions": {
+        "/steps/0/error": "",
+        "/steps/4/error": "",
+        "/steps/7/error": "",
+        "/steps/11/error": "",
+        "/steps/12/error": "ValueError",
+        "/steps/13/error": "ValueError",
+        "/steps/14/error": "ValueError",
+        "/steps/15/error": "ValueError",
+        "/steps/16/error": "ValueError",
+        "/steps/17/error": "ValueError",
+        "/steps/17/proxy/order/0": "socks4://127.0.0.1:1080"
+      }
+    },
+    {
+      "id": "proxy.config.update-pool",
+      "suite": "proxy",
+      "kind": "config",
+      "request": {
+        "operation": "pool",
+        "steps": [
+          {"op": "update", "overlay": {"proxy": ["http://a.invalid:1", "bogus://x"], "dir": "existing"}},
+          {"op": "update", "overlay": {"proxy": ["http://b.invalid:2"], "dir": "existing"}},
+          {"op": "update", "overlay": {"proxy": [], "dir": "existing"}},
+          {"op": "update", "overlay": {"proxy": ["http://a.invalid:1"], "dir": "existing"}}
+        ]
+      },
+      "assertions": {
+        "/steps/0/proxy/order": ["http://a.invalid:1"],
+        "/steps/1/proxy/order": ["http://a.invalid:1", "http://b.invalid:2"],
+        "/steps/2/proxy/order": ["http://a.invalid:1", "http://b.invalid:2"],
+        "/steps/3/proxy/counts": {"http://a.invalid:1": [0, 0], "http://b.invalid:2": [0, 0]}
+      }
+    },
+    {
+      "id": "proxy.policy.matrix",
+      "suite": "proxy",
+      "kind": "policy",
+      "request": {
+        "operation": "policy",
+        "config": {"proxy_image": false, "proxy_image_only": false},
+        "urls": [
+          "https://e-hentai.org/g/1/x/",
+          "http://exhentai.org/a",
+          "https://g.e-hentai.org/x",
+          "https://forums.e-hentai.org/x",
+          "https://e-hentai.org.evil/x",
+          "https://example.invalid/x",
+          "http://exhentai.org.evil/",
+          ""
+        ]
+      },
+      "assertions": {
+        "/urls/0/webpage": true,
+        "/urls/5/webpage": false,
+        "/urls/5/all": true,
+        "/urls/5/image_only": true,
+        "/urls/7/all": false,
+        "/urls/7/image_only": true
+      }
+    },
+    {
+      "id": "proxy.policy.image-only",
+      "suite": "proxy",
+      "kind": "policy",
+      "request": {
+        "operation": "policy",
+        "config": {"proxy_image": true, "proxy_image_only": true},
+        "urls": ["https://e-hentai.org/g/1/x/", "https://example.invalid/x", ""]
+      },
+      "assertions": {
+        "/urls/0/image_only": false,
+        "/urls/1/image_only": true,
+        "/urls/2/image_only": true
+      }
+    },
+    {
+      "id": "proxy.glype.flow",
+      "suite": "proxy",
+      "kind": "glype",
+      "request": {
+        "operation": "glype",
+        "session_headers": [
+          {"name": "User-Agent", "value": "xeh-fixture/1"},
+          {"name": "Accept", "value": "*/*"},
+          {"name": "Accept-Charset", "value": "utf-8;q=0.7,*;q=0.7"},
+          {"name": "Accept-Encoding", "value": "identity"},
+          {"name": "Cookie", "value": "ipb_member_id=11; ipb_pass_hash=22; nw=1"}
+        ],
+        "targets": ["http://synthetic.invalid/page?q=a b&z=1"]
+      },
+      "glype": {
+        "path": "/browse.php?u=x&b=4",
+        "session_headers": [
+          {"name": "User-Agent", "value": "xeh-fixture/1"},
+          {"name": "Accept", "value": "*/*"},
+          {"name": "Accept-Charset", "value": "utf-8;q=0.7,*;q=0.7"},
+          {"name": "Accept-Encoding", "value": "identity"},
+          {"name": "Cookie", "value": "ipb_member_id=11; ipb_pass_hash=22; nw=1"}
+        ],
+        "targets": ["http://synthetic.invalid/page?q=a b&z=1"],
+        "responses": [
+          {
+            "status": 200,
+            "headers": [
+              ["Content-Type", "text/html; charset=utf-8"],
+              ["Set-Cookie", "c[synthetic.invalid][/][a]=1; path=/"],
+              ["Set-Cookie", "c[synthetic.invalid][/][b]=2; path=/"]
+            ],
+            "body_text": "see /browse.php?u=http%3A%2F%2Fsynthetic.invalid%2Fpage%3Fq%3Da+b%26z%3D1&b=4&f=norefer done"
+          }
+        ]
+      },
+      "assertions": {
+        "/flows/0/url": "http://synthetic.invalid/page?q=a b&z=1",
+        "/flows/0/content": "see http://synthetic.invalid/page?q=a+b&z=1",
+        "/flows/0/set_cookie": "c[synthetic.invalid][/][a]=1;c[synthetic.invalid][/][b]=2;a=1;b=2",
+        "/seen/0/headers/cookie": "c[synthetic.invalid][/][ipb_member_id]=11;c[synthetic.invalid][/][ipb_pass_hash]=22;c[synthetic.invalid][/][nw]=1",
+        "/seen/0/headers/referer": "<glype>/browse.php",
+        "/seen/0/path": "/browse.php?u=http%3A%2F%2Fsynthetic.invalid%2Fpage%3Fq%3Da+b%26z%3D1&b=4&f=norefer"
+      }
+    },
+    {
+      "id": "proxy.glype.sslagree-retry",
+      "suite": "proxy",
+      "kind": "glype",
+      "request": {
+        "operation": "glype",
+        "session_headers": [
+          {"name": "User-Agent", "value": "xeh-fixture/1"},
+          {"name": "Accept-Encoding", "value": "identity"},
+          {"name": "Cookie", "value": "ipb_member_id=11"}
+        ],
+        "targets": ["http://a.invalid/1", "http://b.invalid/2"]
+      },
+      "glype": {
+        "path": "/browse.php?u=x&b=4",
+        "session_headers": [
+          {"name": "User-Agent", "value": "xeh-fixture/1"},
+          {"name": "Accept-Encoding", "value": "identity"},
+          {"name": "Cookie", "value": "ipb_member_id=11"}
+        ],
+        "targets": ["http://a.invalid/1", "http://b.invalid/2"],
+        "responses": [
+          {"status": 200, "headers": [["Content-Type", "text/html"]], "body_text": "<input type=\"hidden\" name=\"action\" value=\"sslagree\">"},
+          {"status": 302, "headers": [["Content-Type", "text/html"], ["Set-Cookie", "s=synthetic-session; path=/"]], "body_text": ""},
+          {"status": 200, "headers": [["Content-Type", "text/html"]], "body_text": "first-ok"},
+          {"status": 200, "headers": [["Content-Type", "text/html"]], "body_text": "second-ok"}
+        ]
+      },
+      "assertions": {
+        "/flows/0/content": "first-ok",
+        "/flows/1/content": "second-ok",
+        "/glyph_s": "synthetic-session",
+        "/seen/2/headers/cookie": "c[a.invalid][/][ipb_member_id]=11;s=synthetic-session",
+        "/seen/3/headers/cookie": "s=synthetic-session;c[b.invalid][/][ipb_member_id]=11"
+      }
+    },
+    {
+      "id": "proxy.glype.always-warning",
+      "suite": "proxy",
+      "kind": "glype",
+      "request": {
+        "operation": "glype",
+        "session_headers": [{"name": "User-Agent", "value": "xeh-fixture/1"}, {"name": "Accept-Encoding", "value": "identity"}],
+        "targets": ["http://synthetic.invalid/page"]
+      },
+      "glype": {
+        "path": "/browse.php?u=x&b=4",
+        "session_headers": [{"name": "User-Agent", "value": "xeh-fixture/1"}, {"name": "Accept-Encoding", "value": "identity"}],
+        "targets": ["http://synthetic.invalid/page"],
+        "responses": [
+          {"status": 200, "headers": [["Content-Type", "text/html"]], "body_text": "<input type=\"hidden\" name=\"action\" value=\"sslagree\">"},
+          {"status": 200, "headers": [["Content-Type", "text/html"]], "body_text": ""},
+          {"status": 200, "headers": [["Content-Type", "text/html"]], "body_text": "<input type=\"hidden\" name=\"action\" value=\"sslagree\">"},
+          {"status": 200, "headers": [["Content-Type", "text/html"]], "body_text": ""}
+        ]
+      },
+      "assertions": {
+        "/ok": false,
+        "/exception": "PoolException",
+        "/detail": "can't bypass glype https warning"
+      }
+    },
+    {
+      "id": "proxy.glype.error-div",
+      "suite": "proxy",
+      "kind": "glype",
+      "request": {
+        "operation": "glype",
+        "session_headers": [{"name": "User-Agent", "value": "xeh-fixture/1"}, {"name": "Accept-Encoding", "value": "identity"}],
+        "targets": ["http://synthetic.invalid/err"]
+      },
+      "glype": {
+        "path": "/browse.php?u=x&b=4",
+        "session_headers": [{"name": "User-Agent", "value": "xeh-fixture/1"}, {"name": "Accept-Encoding", "value": "identity"}],
+        "targets": ["http://synthetic.invalid/err"],
+        "responses": [
+          {"status": 200, "headers": [["Content-Type", "text/plain"]], "body_text": "<div id=\"error\">denied here</div>"}
+        ]
+      },
+      "assertions": {
+        "/ok": false,
+        "/exception": "PoolException",
+        "/detail": "glype returns: <div id=\"error\">denied here</div>"
+      }
+    },
+    {
+      "id": "proxy.glype.binary",
+      "suite": "proxy",
+      "kind": "glype",
+      "request": {
+        "operation": "glype",
+        "session_headers": [{"name": "User-Agent", "value": "xeh-fixture/1"}, {"name": "Accept-Encoding", "value": "identity"}],
+        "targets": ["http://synthetic.invalid/bin"]
+      },
+      "glype": {
+        "path": "/browse.php?u=x&b=4",
+        "session_headers": [{"name": "User-Agent", "value": "xeh-fixture/1"}, {"name": "Accept-Encoding", "value": "identity"}],
+        "targets": ["http://synthetic.invalid/bin"],
+        "responses": [
+          {"status": 200, "headers": [["Content-Type", "image/png"]], "body_hex": "89504e4700ff"}
+        ]
+      },
+      "assertions": {
+        "/flows/0/content_bytes": [137, 80, 78, 71, 0, 255],
+        "/flows/0/content": ""
+      }
+    },
+    {
+      "id": "proxy.glype.missing-mime",
+      "suite": "proxy",
+      "kind": "glype",
+      "request": {
+        "operation": "glype",
+        "session_headers": [{"name": "User-Agent", "value": "xeh-fixture/1"}, {"name": "Accept-Encoding", "value": "identity"}],
+        "targets": ["http://synthetic.invalid/nomime"]
+      },
+      "glype": {
+        "path": "/browse.php?u=x&b=4",
+        "session_headers": [{"name": "User-Agent", "value": "xeh-fixture/1"}, {"name": "Accept-Encoding", "value": "identity"}],
+        "targets": ["http://synthetic.invalid/nomime"],
+        "responses": [
+          {"status": 200, "headers": [], "body_text": "no-mime"}
+        ]
+      },
+      "assertions": {
+        "/ok": false,
+        "/exception": "AttributeError",
+        "/detail": "'NoneType' object has no attribute 'startswith'"
+      }
+    }
+  ]
+}

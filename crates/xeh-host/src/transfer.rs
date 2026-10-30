@@ -11,7 +11,7 @@ use vm::{
 
 use crate::catalog::standard_catalog;
 use crate::dto::{lock, HeaderEntry, JobKey, NativeSubmission, TransferReceipt, TransferRequest};
-use crate::net::{open_get, write_body, BodyWrite, DriverOwner};
+use crate::net::{write_body, BodyWrite, DriverOwner};
 use crate::observe::Metrics;
 use crate::types::HostError;
 use crate::worker::events::EventBus;
@@ -186,7 +186,7 @@ async fn execute_inner(
         return Err("cancelled");
     }
     let started = std::time::Instant::now();
-    let opened = open_get(
+    let opened = crate::net::open_get_with_options(
         &host.http,
         &request.url,
         &request.headers,
@@ -195,6 +195,11 @@ async fn execute_inner(
         &host.hooks,
         &host.drivers,
         started,
+        crate::net::OpenOptions {
+            route: submission.route(),
+            follow_redirects: submission.follow_redirects(),
+            allow_redirect_response: false,
+        },
     )
     .await?;
     let deadline = started + host.http.request_timeout.min(host.http.max_stream_duration);

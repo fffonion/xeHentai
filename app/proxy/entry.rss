@@ -1,0 +1,8 @@
+//! Public proxy scenario entry. Pool state lives in the application owner.
+use super::proxy::engine;
+
+pub fn run(request: string) -> string {
+    engine::run_scenario(request.copy())
+}
+
+0;

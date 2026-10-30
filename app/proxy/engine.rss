@@ -1,0 +1,200 @@
+//! Thin proxy test façade over the application's retained pool owner.
+//!
+//! Pool operations are dispatched through `app/domain/state.rss`, so the store
+//! (not a demo pool rebuilt per call) carries counters, disables and the pool's
+//! creation state across every step. Policy and Glype cases call the same
+//! functions the application uses; they do not duplicate selection logic.
+use json;
+
+use super::domain::state;
+use self::glype;
+use self::policy;
+use self::pool;
+
+fn field_string(document: map, name: string, fallback: string) -> string {
+    if document.has(name) && type(document[name].copy()) == "string" => {
+        let typed: string = document[name].copy();
+        typed
+    } else => {
+        fallback
+    }
+}
+
+fn field_maps(document: map, name: string) -> [map] {
+    if document.has(name) && type(document[name].copy()) == "array" => {
+        let typed: [map] = document[name].copy();
+        typed
+    } else => {
+        []
+    }
+}
+
+fn field_strings(document: map, name: string) -> [string] {
+    if document.has(name) && type(document[name].copy()) == "array" => {
+        let typed: [string] = document[name].copy();
+        typed
+    } else => {
+        []
+    }
+}
+
+fn join(items: [string]) -> string {
+    let mut output = "";
+    for index in 0..items.length {
+        if index > 0 {
+            output = output + ",";
+        }
+        output = output + items[index].copy();
+    }
+    output
+}
+
+fn run_pool(document: map) -> string {
+    let steps: [map] = field_maps(document.copy(), "steps");
+    let mut control = state::create([], 0, false);
+    let mut results: [string] = [];
+    for index in 0..steps.length {
+        let step: map = steps[index].copy();
+        control = state::dispatch(control, json::encode(step.copy()));
+        let report: map = json::decode::<map>(state::report(control.copy()));
+        let op: string = step["op"].copy();
+        let ok: bool = report["ok"].copy();
+        let error: string = report["error"].copy();
+        let mut code_text = "null";
+        if type(report["code"].copy()) != "null" {
+            let code: int = report["code"].copy();
+            code_text = json::encode(code);
+        }
+        let mut value_text = "null";
+        if type(report["value"].copy()) != "null" {
+            let value: string = report["value"].copy();
+            value_text = json::encode(value);
+        }
+        let mut proxy_text = "null";
+        if type(report["proxy"].copy()) != "null" {
+            let proxy_state: map = report["proxy"].copy();
+            proxy_text = json::encode(proxy_state);
+        }
+        results[results.length] = "{\"index\":" + json::encode(index)
+            + ",\"op\":" + json::encode(op)
+            + ",\"ok\":" + json::encode(ok)
+            + ",\"error\":" + json::encode(error)
+            + ",\"code\":" + code_text
+            + ",\"value\":" + value_text
+            + ",\"proxy\":" + proxy_text + "}";
+    }
+    "{\"operation\":\"pool\",\"steps\":[" + join(results) + "]}"
+}
+
+fn bool_field(document: map, name: string, fallback: bool) -> bool {
+    if document.has(name) && type(document[name].copy()) == "bool" => {
+        let typed: bool = document[name].copy();
+        typed
+    } else => {
+        fallback
+    }
+}
+
+fn policy_map(config: map, urls: [string]) -> string {
+    let image = bool_field(config.copy(), "proxy_image", false);
+    let image_only = bool_field(config.copy(), "proxy_image_only", false);
+    let mut rows: [string] = [];
+    for index in 0..urls.length {
+        let url: string = urls[index].copy();
+        let webpage = policy::matches(image, image_only, url.copy());
+        let all = policy::matches(true, false, url.copy());
+        let image_row = policy::matches(false, true, url.copy());
+        rows[rows.length] = "{\"url\":" + json::encode(url)
+            + ",\"webpage\":" + json::encode(webpage)
+            + ",\"all\":" + json::encode(all)
+            + ",\"image_only\":" + json::encode(image_row) + "}";
+    }
+    "{\"operation\":\"policy\",\"urls\":[" + join(rows) + "]}"
+}
+
+fn run_policy(document: map) -> string {
+    let config = if document.has("config") && type(document["config"].copy()) == "map" => {
+        let value: map = document["config"].copy();
+        value
+    } else => {
+        let empty: map = {};
+        empty
+    };
+    policy_map(config, field_strings(document, "urls"))
+}
+
+fn run_routes(document: map) -> string {
+    let addresses: [string] = field_strings(document.copy(), "addresses");
+    let mut rows: [string] = [];
+    for index in 0..addresses.length {
+        let address: string = addresses[index].copy();
+        let route_map = pool::route_for(address.copy());
+        rows[rows.length] = "{\"address\":" + json::encode(address)
+            + ",\"route\":" + json::encode(route_map) + "}";
+    }
+    "{\"operation\":\"routes\",\"routes\":[" + join(rows) + "]}"
+}
+
+fn flow_json(flow: map) -> string {
+    let ok: bool = flow["ok"].copy();
+    let exception: string = flow["exception"].copy();
+    let detail: string = flow["detail"].copy();
+    if flow.has("url") => {
+        let url: string = flow["url"].copy();
+        let status: int = flow["status"].copy();
+        let content_type: string = flow["content_type"].copy();
+        let content: string = flow["content"].copy();
+        let content_bytes: [int] = flow["content_bytes"].copy();
+        let set_cookie: string = flow["set_cookie"].copy();
+        "{\"ok\":" + json::encode(ok)
+            + ",\"exception\":" + json::encode(exception)
+            + ",\"detail\":" + json::encode(detail)
+            + ",\"url\":" + json::encode(url)
+            + ",\"status\":" + json::encode(status)
+            + ",\"content_type\":" + json::encode(content_type)
+            + ",\"content\":" + json::encode(content)
+            + ",\"content_bytes\":" + json::encode(content_bytes)
+            + ",\"set_cookie\":" + json::encode(set_cookie) + "}"
+    } else => {
+        "{\"ok\":" + json::encode(ok)
+            + ",\"exception\":" + json::encode(exception)
+            + ",\"detail\":" + json::encode(detail) + "}"
+    }
+}
+
+fn run_glype(document: map) -> string {
+    let address = field_string(document.copy(), "address", "");
+    let session_headers: [map] = field_maps(document.copy(), "session_headers");
+    let targets: [string] = field_strings(document, "targets");
+    let report = glype::run_flows(address, session_headers, targets);
+    let ok: bool = report["ok"].copy();
+    let exception: string = report["exception"].copy();
+    let detail: string = report["detail"].copy();
+    let glyph_s: string = report["glyph_s"].copy();
+    let flows: [map] = report["flows"].copy();
+    let mut flow_texts: [string] = [];
+    for index in 0..flows.length {
+        flow_texts[flow_texts.length] = flow_json(flows[index].copy());
+    }
+    "{\"operation\":\"glype\",\"ok\":" + json::encode(ok)
+        + ",\"exception\":" + json::encode(exception)
+        + ",\"detail\":" + json::encode(detail)
+        + ",\"flows\":[" + join(flow_texts) + "]"
+        + ",\"glyph_s\":" + json::encode(glyph_s) + "}"
+}
+
+pub fn run_scenario(request: string) -> string {
+    let document: map = json::decode::<map>(request);
+    let operation = field_string(document.copy(), "operation", "");
+    if operation == "pool" => {
+        run_pool(document)
+    } else if operation == "policy" => {
+        run_policy(document)
+    } else if operation == "routes" => {
+        run_routes(document)
+    } else if operation == "glype" => {
+        run_glype(document)
+    } else => {
+        "{\"operation\":\"unknown\",\"error\":\"unknown_operation\"}"
+    }
+}

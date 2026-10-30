@@ -28,6 +28,7 @@ use self::queue;
 use self::session;
 use self::task;
 use super::config::types;
+use super::proxy::pool;
 use super::site::login;
 use xeh_fs;
 use xeh_system;
@@ -126,6 +127,9 @@ struct CookieState {
 
 struct Store {
     config: map,
+    /// Upstream `Core.proxy`: `null` until a truthy proxy update creates the
+    /// pool. Survives configuration updates, task commands and owner calls.
+    proxy: map?,
     tasks: map,
     order: [string],
     queue: [string],
@@ -412,6 +416,15 @@ fn field_string(document: map, name: string, fallback: string) -> string {
 fn field_int(document: map, name: string, fallback: int) -> int {
     if document.has(name) && type(document[name].copy()) == "int" => {
         let typed: int = document[name].copy();
+        typed
+    } else => {
+        fallback
+    }
+}
+
+fn field_number(document: map, name: string, fallback: number) -> number {
+    if document.has(name) && (type(document[name].copy()) == "float" || type(document[name].copy()) == "int") => {
+        let typed: number = document[name].copy();
         typed
     } else => {
         fallback
@@ -853,7 +866,7 @@ fn resume_record(store: Store, guid: string) -> Step {
 
 fn op_update(store: Store, document: map) -> Step {
     let overlay = field_map(document, "overlay");
-    let result = types::update_data(store_config(store.copy()), overlay);
+    let result = types::update_data(store_config(store.copy()), overlay.copy());
     let error: string = result["error"].copy();
     let presence: map = result["presence"].copy();
     if error != "" => {
@@ -863,10 +876,133 @@ fn op_update(store: Store, document: map) -> Step {
     } else => {
         let mut next = store;
         next.config = result["config"].copy();
-        let mut step = code_step(next, err_no_error(), "");
-        step.presence = presence;
+        let mut step = code_step(next.copy(), err_no_error(), "");
+        step.presence = presence.copy();
+        // Upstream `update_config`: only a truthy incoming `proxy` value enters
+        // this branch. It creates the pool once and adds every entry of the
+        // (already updated) configured list; entries absent from the list stay
+        // in the pool with their counters and disables intact.
+        let mut configured: [string] = [];
+        let mut truthy = false;
+        if overlay.has("proxy") && type(overlay["proxy"].copy()) == "array" {
+            let incoming: [string] = overlay["proxy"].copy();
+            if incoming.length > 0 {
+                truthy = true;
+                configured = result["config"].copy()["proxy"].copy();
+            }
+        }
+        if presence.has("proxy") && presence["proxy"].copy() == true && truthy {
+            let current = if type(next?.proxy) == "null" => {
+                pool::initial()
+            } else => {
+                let value: map = next?.proxy.unwrap_or(pool::initial());
+                value
+            };
+            let applied = pool::configure(current, configured.copy());
+            next.proxy = applied["state"].copy();
+            step.store = next;
+            step.warnings = applied["warnings"].copy();
+        }
         step
     }
+}
+
+fn pool_of(store: Store) -> map {
+    if type(store?.proxy) == "null" => {
+        pool::initial()
+    } else => {
+        let value: map = store?.proxy.unwrap_or(pool::initial());
+        value
+    }
+}
+
+fn with_pool(store: Store, state: map) -> Store {
+    let mut next = store;
+    next.proxy = state;
+    next
+}
+
+fn op_proxy_add(store: Store, document: map) -> Step {
+    let address = field_string(document, "address", "");
+    let result = pool::add(pool_of(store.copy()), address.copy());
+    let next = with_pool(store, result["state"].copy());
+    if result["ok"].copy() == true => {
+        code_step(next, err_no_error(), "")
+    } else => {
+        let mut step = error_step(next, result["error"].copy());
+        step.value = result["detail"].copy();
+        step
+    }
+}
+
+fn op_proxy_select(store: Store, document: map) -> Step {
+    let now = field_number(document, "now", 0.0);
+    let result = pool::select(pool_of(store.copy()), now);
+    let next = with_pool(store, result["state"].copy());
+    if result["ok"].copy() == true => {
+        let address_text: string = result["address"].copy();
+        let route_map: map = result["route"].copy();
+        let value = "{\"address\":" + json::encode(address_text.copy())
+            + ",\"route\":" + json::encode(route_map.copy()) + "}";
+        code_step(next, err_no_error(), value)
+    } else => {
+        let mut step = error_step(next, result["error"].copy());
+        step.value = result["detail"].copy();
+        step
+    }
+}
+
+fn op_proxy_not_good(store: Store, document: map) -> Step {
+    let address = field_string(document, "address", "");
+    let weight = field_int(document.copy(), "weight", 5);
+    let expire = field_number(document.copy(), "expire", 0.0);
+    let now = field_number(document, "now", 0.0);
+    let result = pool::not_good(pool_of(store.copy()), address.copy(), weight, expire, now);
+    let next = with_pool(store, result["state"].copy());
+    if result["ok"].copy() == true => {
+        let disabled_now: bool = result["disabled_now"].copy();
+        let value = "{\"disabled_now\":" + json::encode(disabled_now) + "}";
+        code_step(next, err_no_error(), value)
+    } else => {
+        let mut step = error_step(next, result["error"].copy());
+        step.value = result["detail"].copy();
+        step
+    }
+}
+
+fn op_proxy_trace(store: Store, document: map) -> Step {
+    let address = field_string(document, "address", "");
+    let outcome = field_string(document.copy(), "outcome", "success");
+    let weight = field_int(document.copy(), "weight", 1);
+    let check_present = field_bool(document.copy(), "check_present", false);
+    let check_ok = field_bool(document.copy(), "check_ok", true);
+    let exception_class = field_string(document.copy(), "exception_class", "");
+    let detail = field_string(document, "detail", "");
+    let result = pool::trace(
+        pool_of(store.copy()),
+        address.copy(),
+        outcome.copy(),
+        weight,
+        check_present,
+        check_ok,
+        exception_class.copy(),
+        detail.copy()
+    );
+    let next = with_pool(store, result["state"].copy());
+    if result["ok"].copy() == true => {
+        let counted: bool = result["counted"].copy();
+        let value = "{\"counted\":" + json::encode(counted) + "}";
+        code_step(next, err_no_error(), value)
+    } else => {
+        let mut step = error_step(next, result["error"].copy());
+        step.value = result["detail"].copy();
+        step
+    }
+}
+
+fn op_proxy_has(store: Store, _document: map) -> Step {
+    let value = pool::has_available(pool_of(store.copy()));
+    code_step(store, err_no_error(), "{\"value\":" + json::encode(value) + "}")
 }
 
 fn op_prepare(store: Store, document: map) -> Step {
@@ -1661,6 +1797,11 @@ fn build_report(
         + ",\"presence\":" + presence_text(presence)
         + ",\"session\":" + session_text(session);
     let config_text = json::encode(store.config);
+    let mut proxy_text = "null";
+    if type(store?.proxy) != "null" {
+        let proxy_state: map = store?.proxy.unwrap_or(pool::initial());
+        proxy_text = json::encode(proxy_state);
+    }
     let tasks_text = table_json(store.tasks, store.order);
     let queue_text = json::encode(store.queue);
     let epochs_text = json::encode(store.epochs);
@@ -1681,6 +1822,7 @@ fn build_report(
         "null"
     };
     head + ",\"config\":" + config_text
+        + ",\"proxy\":" + proxy_text
         + ",\"tasks\":" + tasks_text
         + ",\"queue\":" + queue_text
         + ",\"epochs\":" + epochs_text
@@ -1716,6 +1858,7 @@ pub fn create(guids: [string], epoch_start: int, allow_seed: bool) -> Control {
     {
         store: {
             config: types::defaults_data(),
+            proxy: null,
             tasks: {},
             order: [],
             queue: [],
@@ -1758,6 +1901,16 @@ pub fn dispatch(control: Control, request: string) -> Control {
         op_update(store.copy(), document)
     } else if op == "prepare" => {
         op_prepare(store.copy(), document)
+    } else if op == "proxy_add" => {
+        op_proxy_add(store.copy(), document)
+    } else if op == "proxy_select" => {
+        op_proxy_select(store.copy(), document)
+    } else if op == "proxy_not_good" => {
+        op_proxy_not_good(store.copy(), document)
+    } else if op == "proxy_trace" => {
+        op_proxy_trace(store.copy(), document)
+    } else if op == "proxy_has" => {
+        op_proxy_has(store.copy(), document)
     } else if op == "event" => {
         op_event(store.copy(), document)
     } else if op == "snapshot" => {

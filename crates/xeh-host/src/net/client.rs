@@ -15,12 +15,23 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::dto::{lock, HeaderEntry, TransportHooks};
-use crate::net::policy::{admit_target, hooks_decoy, ResolveLimits, ResolvedTarget};
+use crate::net::connectors::{connect_proxy_with_hooks, http_connect, socks_negotiate, tls_wrap};
+use crate::net::policy::{
+    admit_remote_target, admit_target, hooks_decoy, ResolveLimits, ResolvedTarget,
+};
+use crate::net::route::NativeProxyRoute;
 use crate::observe::Metrics;
+
+/// Source `requests` default upper bound for redirect chains.
+const MAX_REDIRECTS: usize = 30;
 
 pub struct OpenedResponse {
     pub body: Incoming,
     pub content_length: Option<u64>,
+    pub status: u16,
+    pub url: String,
+    pub location: Option<String>,
+    pub headers: Vec<(String, String)>,
     #[allow(dead_code)]
     pub peer: SocketAddr,
     pub connection: Connection,
@@ -30,6 +41,30 @@ pub struct Connection {
     driver: Option<JoinHandle<()>>,
     sender: Option<hyper::client::conn::http1::SendRequest<Empty<Bytes>>>,
     owner: Option<Arc<DriverOwner>>,
+}
+
+/// Immutable options for one open request path.
+///
+/// The direct constructor (`route: None`, `follow_redirects: false`) preserves
+/// the Task3 transfer entry exactly: redirects are rejected and no proxy
+/// endpoint is consulted.
+#[derive(Clone, Copy)]
+pub struct OpenOptions<'a> {
+    pub route: Option<&'a NativeProxyRoute>,
+    pub follow_redirects: bool,
+    /// Return a 3xx response to the caller instead of following or rejecting
+    /// it. The Task3 transfer entry leaves this false.
+    pub allow_redirect_response: bool,
+}
+
+impl OpenOptions<'_> {
+    pub fn direct() -> Self {
+        Self {
+            route: None,
+            follow_redirects: false,
+            allow_redirect_response: false,
+        }
+    }
 }
 
 /// Per-worker queue for drivers that could not be joined before a sync drop.
@@ -162,6 +197,7 @@ impl Drop for Connection {
     }
 }
 
+/// Task3-compatible direct open. Redirects are rejected, and no proxy is used.
 #[allow(clippy::too_many_arguments)]
 pub async fn open_get(
     http: &vm::HttpConfig,
@@ -173,29 +209,141 @@ pub async fn open_get(
     owner: &Arc<DriverOwner>,
     started: Instant,
 ) -> Result<OpenedResponse, &'static str> {
-    let parsed = Url::parse(url).map_err(|_| "policy_denied")?;
-    reject_headers(http, headers)?;
-    let request = build_request(&parsed, headers)?;
-    let overall = started + http.request_timeout.min(http.max_stream_duration);
-    let connect_deadline = started + http.connect_timeout;
-    let connect_deadline = connect_deadline.min(overall);
-    let target = admit_target(
+    open_get_with_options(
         http,
-        &parsed,
-        ResolveLimits {
-            cancel,
-            connect: connect_deadline,
-            dns_hold: hooks.dns_hold.as_deref(),
-            decoy: hooks_decoy(hooks),
-        },
+        url,
+        headers,
+        cancel,
+        metrics,
+        hooks,
+        owner,
+        started,
+        OpenOptions::direct(),
     )
-    .await?;
-    metrics.record_dns_candidates(&target.candidates);
+    .await
+}
+
+/// Opens one request with an immutable route snapshot and redirect policy.
+#[allow(clippy::too_many_arguments)]
+pub async fn open_get_with_options(
+    http: &vm::HttpConfig,
+    url: &str,
+    headers: &[HeaderEntry],
+    cancel: &CancellationToken,
+    metrics: &Metrics,
+    hooks: &TransportHooks,
+    owner: &Arc<DriverOwner>,
+    started: Instant,
+    options: OpenOptions<'_>,
+) -> Result<OpenedResponse, &'static str> {
+    let mut current = Url::parse(url).map_err(|_| "policy_denied")?;
+    let overall = started + http.request_timeout.min(http.max_stream_duration);
+    let mut current_headers = headers.to_vec();
+    let mut redirects = 0usize;
+    loop {
+        let mut opened = open_once(
+            http,
+            &current,
+            &current_headers,
+            options.route,
+            cancel,
+            metrics,
+            hooks,
+            owner,
+            started,
+            overall,
+        )
+        .await?;
+        if options.follow_redirects && (300..400).contains(&opened.status) {
+            if let Some(location) = opened.location.clone() {
+                if redirects >= MAX_REDIRECTS {
+                    let _ = opened.connection.shutdown(cleanup_deadline(overall)).await;
+                    return Err("redirect_limit");
+                }
+                let next = current.join(&location).map_err(|_| "policy_denied")?;
+                let cross_origin = next.scheme() != current.scheme()
+                    || next.host_str() != current.host_str()
+                    || next.port_or_known_default() != current.port_or_known_default();
+                if cross_origin {
+                    strip_sensitive_headers(&mut current_headers);
+                }
+                let _ = opened.connection.shutdown(cleanup_deadline(overall)).await;
+                current = next;
+                redirects += 1;
+                continue;
+            }
+        }
+        if opened.status >= 300 && opened.status < 400 {
+            if options.allow_redirect_response {
+                return Ok(opened);
+            }
+            let _ = opened.connection.shutdown(cleanup_deadline(overall)).await;
+            return Err("redirect_unsupported");
+        }
+        if !(200..300).contains(&opened.status) {
+            let _ = opened.connection.shutdown(cleanup_deadline(overall)).await;
+            return Err("http_status");
+        }
+        return Ok(opened);
+    }
+}
+
+fn strip_sensitive_headers(headers: &mut Vec<HeaderEntry>) {
+    headers.retain(|header| {
+        let name = header.name.to_ascii_lowercase();
+        name != b"authorization" && name != b"cookie" && name != b"proxy-authorization"
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn open_once(
+    http: &vm::HttpConfig,
+    parsed: &Url,
+    headers: &[HeaderEntry],
+    route: Option<&NativeProxyRoute>,
+    cancel: &CancellationToken,
+    metrics: &Metrics,
+    hooks: &TransportHooks,
+    owner: &Arc<DriverOwner>,
+    started: Instant,
+    overall: Instant,
+) -> Result<OpenedResponse, &'static str> {
+    reject_headers(http, headers)?;
     let https = parsed.scheme().eq_ignore_ascii_case("https");
-    if https {
-        let (peer, io) = connect_tls(&target, cancel, connect_deadline, hooks).await?;
-        finish_request(
+    let connect_deadline = (started + http.connect_timeout).min(overall);
+    let Some(route) = route else {
+        let request = build_request(parsed, headers, false)?;
+        let target = admit_target(
+            http,
+            parsed,
+            ResolveLimits {
+                cancel,
+                connect: connect_deadline,
+                dns_hold: hooks.dns_hold.as_deref(),
+                decoy: hooks_decoy(hooks),
+            },
+        )
+        .await?;
+        metrics.record_dns_candidates(&target.candidates);
+        if https {
+            let (peer, io) = connect_tls(&target, cancel, connect_deadline, hooks).await?;
+            return finish_request(
+                request,
+                parsed.as_str().to_string(),
+                cancel,
+                metrics,
+                peer,
+                io,
+                overall,
+                connect_deadline,
+                owner,
+            )
+            .await;
+        }
+        let (peer, io) = connect_plain(&target, cancel, connect_deadline).await?;
+        return finish_request(
             request,
+            parsed.as_str().to_string(),
             cancel,
             metrics,
             peer,
@@ -204,15 +352,116 @@ pub async fn open_get(
             connect_deadline,
             owner,
         )
-        .await
+        .await;
+    };
+    if !route.kind.supported() {
+        return Err("proxy_unsupported");
+    }
+    if route.kind.delegates_target_dns() && !route.trusted_remote_dns {
+        return Err("policy_denied");
+    }
+    let (target_host, target_port, local_ip) = if route.kind.delegates_target_dns() {
+        let (host, port) = admit_remote_target(http, parsed)?;
+        (host, port, None)
     } else {
-        let (peer, io) = connect_plain(&target, cancel, connect_deadline).await?;
-        finish_request(
+        let target = admit_target(
+            http,
+            parsed,
+            ResolveLimits {
+                cancel,
+                connect: connect_deadline,
+                dns_hold: hooks.dns_hold.as_deref(),
+                decoy: hooks_decoy(hooks),
+            },
+        )
+        .await?;
+        metrics.record_dns_candidates(&target.candidates);
+        let port = parsed.port_or_known_default().ok_or("policy_denied")?;
+        (target.host.clone(), port, Some(target.address.ip()))
+    };
+    let (mut io, peer) = connect_proxy_with_hooks(route, hooks, cancel, connect_deadline).await?;
+    if route.kind.is_http_proxy() {
+        if https {
+            http_connect(&mut io, &target_host, target_port, cancel, connect_deadline).await?;
+            let io = tls_wrap(
+                io,
+                &target_host,
+                hooks,
+                cancel,
+                connect_deadline,
+                "target_tls_failed",
+            )
+            .await?;
+            let request = build_request(parsed, headers, false)?;
+            return finish_request(
+                request,
+                parsed.as_str().to_string(),
+                cancel,
+                metrics,
+                peer,
+                TokioIo::new(io),
+                overall,
+                connect_deadline,
+                owner,
+            )
+            .await;
+        }
+        let request = build_request(parsed, headers, true)?;
+        return finish_request(
             request,
+            parsed.as_str().to_string(),
             cancel,
             metrics,
             peer,
+            TokioIo::new(io),
+            overall,
+            connect_deadline,
+            owner,
+        )
+        .await;
+    }
+    socks_negotiate(
+        &mut io,
+        route,
+        &target_host,
+        target_port,
+        local_ip,
+        cancel,
+        connect_deadline,
+    )
+    .await?;
+    if https {
+        let io = tls_wrap(
             io,
+            &target_host,
+            hooks,
+            cancel,
+            connect_deadline,
+            "target_tls_failed",
+        )
+        .await?;
+        let request = build_request(parsed, headers, false)?;
+        finish_request(
+            request,
+            parsed.as_str().to_string(),
+            cancel,
+            metrics,
+            peer,
+            TokioIo::new(io),
+            overall,
+            connect_deadline,
+            owner,
+        )
+        .await
+    } else {
+        let request = build_request(parsed, headers, false)?;
+        finish_request(
+            request,
+            parsed.as_str().to_string(),
+            cancel,
+            metrics,
+            peer,
+            TokioIo::new(io),
             overall,
             connect_deadline,
             owner,
@@ -224,6 +473,7 @@ pub async fn open_get(
 #[allow(clippy::too_many_arguments)]
 async fn finish_request<I>(
     request: http::Request<Empty<Bytes>>,
+    url: String,
     cancel: &CancellationToken,
     metrics: &Metrics,
     peer: SocketAddr,
@@ -266,15 +516,22 @@ where
             return Err(code);
         }
     };
-    let status = response.status();
-    if status.is_redirection() {
-        let _ = owned.shutdown(cleanup_deadline(overall)).await;
-        return Err("redirect_unsupported");
-    }
-    if !status.is_success() {
-        let _ = owned.shutdown(cleanup_deadline(overall)).await;
-        return Err("http_status");
-    }
+    let status = response.status().as_u16();
+    let location = response
+        .headers()
+        .get(http::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let headers: Vec<(String, String)> = response
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_string(),
+                String::from_utf8_lossy(value.as_bytes()).into_owned(),
+            )
+        })
+        .collect();
     let length = response
         .headers()
         .get(http::header::CONTENT_LENGTH)
@@ -283,6 +540,10 @@ where
     Ok(OpenedResponse {
         body: response.into_body(),
         content_length: length,
+        status,
+        url,
+        location,
+        headers,
         peer,
         connection: owned,
     })
@@ -324,7 +585,7 @@ async fn connect_tls(
     .await?;
     tcp.set_nodelay(true).map_err(|_| "connect_failed")?;
     let peer = tcp.peer_addr().map_err(|_| "connect_failed")?;
-    let config = rustls_config(hooks)?;
+    let config = crate::net::connectors::rustls_client_config(hooks)?;
     let name = ServerName::try_from(target.host.clone()).map_err(|_| "policy_denied")?;
     let connector = TlsConnector::from(Arc::new(config));
     let tls = crate::net::policy::select_deadline(cancel, deadline, async {
@@ -337,31 +598,19 @@ async fn connect_tls(
     Ok((peer, TokioIo::new(tls)))
 }
 
-fn rustls_config(hooks: &TransportHooks) -> Result<rustls::ClientConfig, &'static str> {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    for der in &hooks.extra_trust_der {
-        let cert = rustls::pki_types::CertificateDer::from(der.clone());
-        roots.add(cert).map_err(|_| "transport_failed")?;
-    }
-    Ok(
-        rustls::ClientConfig::builder_with_provider(
-            rustls::crypto::ring::default_provider().into(),
-        )
-        .with_safe_default_protocol_versions()
-        .map_err(|_| "transport_failed")?
-        .with_root_certificates(roots)
-        .with_no_client_auth(),
-    )
-}
-
 fn build_request(
     url: &Url,
     headers: &[HeaderEntry],
+    absolute_form: bool,
 ) -> Result<http::Request<Empty<Bytes>>, &'static str> {
+    let target = if absolute_form {
+        url.as_str().to_string()
+    } else {
+        origin_form(url)
+    };
     let mut request = http::Request::builder()
         .method(http::Method::GET)
-        .uri(origin_form(url))
+        .uri(target)
         .header(http::header::HOST, host_header(url))
         .header(http::header::CONNECTION, "close")
         .header(http::header::USER_AGENT, "xeh-host");

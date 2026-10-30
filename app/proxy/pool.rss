@@ -1,0 +1,522 @@
+//! Upstream proxy pool state and its real side effects.
+//!
+//! Insertion order, success/failure counters, disabled expiries and the
+//! per-address Glype session value are application data carried by the store.
+//! Selection is the first available key in insertion order. Feedback follows
+//! `not_good` and `trace_proxy`, including the permanent zero expiry and the
+//! observed "dictionary changed size during iteration" partial sweep. The
+//! clock is always an explicit number from the owner; this module never reads
+//! a wall clock, sleeps, or performs network work.
+use re;
+
+use super::site::support;
+
+fn empty_state() -> map {
+    {
+        order: [],
+        counts: {},
+        disabled: {},
+        disabled_order: [],
+        glyph: {},
+    }
+}
+
+fn num(value: map, key: string, fallback: number) -> number {
+    if value.has(key) && (type(value[key].copy()) == "float" || type(value[key].copy()) == "int") => {
+        let typed: number = value[key].copy();
+        typed
+    } else => {
+        fallback
+    }
+}
+
+fn text(value: map, key: string, fallback: string) -> string {
+    if value.has(key) && type(value[key].copy()) == "string" => {
+        let typed: string = value[key].copy();
+        typed
+    } else => {
+        fallback
+    }
+}
+
+fn digits(text_value: string) -> int {
+    let numeric = re::replace("[^0-9]", text_value.copy(), "");
+    support::decimal(numeric.copy())
+}
+
+fn captured(groups: [string], index: int) -> string {
+    if index < groups.length && type(groups[index].copy()) == "string" => {
+        let value: string = groups[index].copy();
+        value
+    } else => {
+        ""
+    }
+}
+
+/// Classifies one configured address with the source's three regexes.
+///
+/// Accepted-but-unsupported suffixes (`socks4ah`, `socks5aa`, ...), a missing
+/// SOCKS port and out-of-range ports stay in the pool as an explicit
+/// unsupported route: selection never silently connects direct.
+fn classify(addr: string) -> map {
+    let socks_port = re::captures("^socks([45])([ah]*)://([^:^/]+):(\\d{1,5})/*$", addr.copy());
+    let socks_plain = re::captures("^socks([45])([ah]*)://([^:^/]+)/*$", addr.copy());
+    let http_port = re::captures("^(https*)://([^:^/]+):(\\d{1,5})/*$", addr.copy());
+    let http_plain = re::captures("^(https*)://([^:^/]+)/*$", addr.copy());
+    let glype_port = re::captures(
+        "^(https*)://([^:^/]+):(\\d{1,5})/.+\\.php\\?.*b=.+",
+        addr.copy()
+    );
+    let glype_plain = re::captures(
+        "^(https*)://([^:^/]+)/.+\\.php\\?.*b=.+",
+        addr.copy()
+    );
+    let mut result: map = {
+        ok: false,
+        error: "ValueError",
+        detail: addr.copy() + " is not an acceptable proxy address",
+        kind: "",
+        host: "",
+        port: 0,
+        trusted_remote_dns: false,
+        proxy_tls: false,
+    };
+    let has_socks = socks_port.length > 0 || socks_plain.length > 0;
+    if has_socks {
+        let source = if socks_port.length > 0 => { socks_port.copy() } else => { socks_plain.copy() };
+        let family = captured(source.copy(), 1);
+        let flags = captured(source.copy(), 2);
+        let host = captured(source.copy(), 3);
+        let port_text = if socks_port.length > 0 => { captured(source.copy(), 4) } else => { "" };
+        let mut kind = "unsupported";
+        if family == "4" && flags == "" {
+            kind = "socks4";
+        } else if family == "4" && flags == "a" {
+            kind = "socks4a";
+        } else if family == "5" && flags == "" {
+            kind = "socks5";
+        } else if family == "5" && flags == "h" {
+            kind = "socks5h";
+        }
+        let mut port: int = 0;
+        if port_text != "" {
+            port = digits(port_text);
+        }
+        if kind != "unsupported" && (port < 1 || port > 65535) {
+            kind = "unsupported";
+        }
+        let trusted = kind == "socks4a" || kind == "socks5h";
+        let mut safe_port: int = 1;
+        if port >= 1 && port <= 65535 {
+            safe_port = port;
+        }
+        result = {
+            ok: true,
+            error: "",
+            detail: "",
+            kind: kind,
+            host: host,
+            port: safe_port,
+            trusted_remote_dns: trusted,
+            proxy_tls: false,
+        };
+    } else if http_port.length > 0 || http_plain.length > 0 {
+        let source = if http_port.length > 0 => { http_port.copy() } else => { http_plain.copy() };
+        let scheme = captured(source.copy(), 1);
+        let host = captured(source.copy(), 2);
+        let port_text = if http_port.length > 0 => { captured(source.copy(), 3) } else => { "" };
+        let mut kind = if scheme == "https" => { "https" } else => { "http" };
+        let mut port: int = 80;
+        if kind == "https" {
+            port = 443;
+        }
+        if port_text != "" {
+            port = digits(port_text);
+        }
+        if port < 1 || port > 65535 {
+            kind = "unsupported";
+        }
+        let mut safe_port: int = 1;
+        if port >= 1 && port <= 65535 {
+            safe_port = port;
+        }
+        result = {
+            ok: true,
+            error: "",
+            detail: "",
+            kind: kind,
+            host: host,
+            port: safe_port,
+            trusted_remote_dns: true,
+            proxy_tls: scheme == "https",
+        };
+    } else if glype_port.length > 0 || glype_plain.length > 0 {
+        let source = if glype_port.length > 0 => { glype_port.copy() } else => { glype_plain.copy() };
+        let scheme = captured(source.copy(), 1);
+        let host = captured(source.copy(), 2);
+        let port_text = if glype_port.length > 0 => { captured(source.copy(), 3) } else => { "" };
+        let mut port: int = 80;
+        if scheme == "https" {
+            port = 443;
+        }
+        if port_text != "" {
+            port = digits(port_text);
+        }
+        let mut safe_port: int = 1;
+        if port >= 1 && port <= 65535 {
+            safe_port = port;
+        }
+        result = {
+            ok: true,
+            error: "",
+            detail: "",
+            kind: "glype",
+            host: host,
+            port: safe_port,
+            trusted_remote_dns: true,
+            proxy_tls: scheme == "https",
+        };
+    }
+    result
+}
+
+/// Native route map for a selected address. `kind: "glype"` is handled by the
+/// RSS Glype transport, which requests the Glype service directly.
+pub fn route_for(addr: string) -> map {
+    let parsed = classify(addr.copy());
+    {
+        address: addr.copy(),
+        kind: parsed["kind"].copy(),
+        host: parsed["host"].copy(),
+        port: parsed["port"].copy(),
+        trusted_remote_dns: parsed["trusted_remote_dns"].copy(),
+        proxy_tls: parsed["proxy_tls"].copy(),
+    }
+}
+
+fn count_row(counts: map, addr: string) -> [int] {
+    if counts.has(addr) && type(counts[addr].copy()) == "array" => {
+        let row: [int] = counts[addr].copy();
+        if row.length == 2 => { row } else => { [0, 0] }
+    } else => {
+        [0, 0]
+    }
+}
+
+fn put_row(counts: map, addr: string, row: [int]) -> map {
+    let mut next = counts.copy();
+    next[addr] = row;
+    next
+}
+
+fn without_key(order: [string], key: string) -> [string] {
+    let mut kept: [string] = [];
+    for index in 0..order.length {
+        if order[index] != key {
+            kept[kept.length] = order[index].copy();
+        }
+    }
+    kept
+}
+
+fn drop_key(values: map, key: string) -> map {
+    let keys = (&values).keys;
+    let mut fresh: map = {};
+    for index in 0..keys.length {
+        let name: string = keys[index].copy();
+        if name != key {
+            fresh[name] = values[name].copy();
+        }
+    }
+    fresh
+}
+
+fn has_key(order: [string], key: string) -> bool {
+    let mut found = false;
+    for index in 0..order.length {
+        if order[index] == key {
+            found = true;
+            break;
+        }
+    }
+    found
+}
+
+/// `Pool.add_proxy`: accepts the source address shapes, resets counters on a
+/// re-add while preserving key order, and never clears an existing disable.
+pub fn add(snapshot: map, addr: string) -> map {
+    let parsed = classify(addr.copy());
+    let mut outcome: map = {
+        ok: false,
+        error: parsed["error"].copy(),
+        detail: parsed["detail"].copy(),
+        state: snapshot,
+    };
+    if parsed["ok"].copy() == true {
+        let mut next = snapshot.copy();
+        let mut order: [string] = next["order"].copy();
+        let mut counts: map = next["counts"].copy();
+        let mut glyph: map = next["glyph"].copy();
+        if counts.has(addr) == false {
+            order[order.length] = addr.copy();
+        }
+        counts = put_row(counts, addr.copy(), [0, 0]);
+        if parsed["kind"].copy() == "glype" {
+            glyph[addr] = "";
+        } else {
+            let mut fresh: map = {};
+            let keys = (&glyph).keys;
+            for index in 0..keys.length {
+                let name: string = keys[index].copy();
+                if name != addr {
+                    fresh[name] = glyph[name].copy();
+                }
+            }
+            glyph = fresh;
+        }
+        next["order"] = order;
+        next["counts"] = counts;
+        next["glyph"] = glyph;
+        outcome = {
+            ok: true,
+            error: "",
+            detail: "",
+            state: next,
+        };
+    }
+    outcome
+}
+
+/// Source sweep: one expired disable is deleted, then Python raises because
+/// the dictionary changed size during iteration. The partial post-state is
+/// retained exactly; that narrow exception is the compatibility decision.
+pub fn select(snapshot: map, now: number) -> map {
+    let mut next = snapshot.copy();
+    let mut disabled: map = next["disabled"].copy();
+    let mut disabled_order: [string] = next["disabled_order"].copy();
+    let mut swept = false;
+    for index in 0..disabled_order.length {
+        let key: string = disabled_order[index].copy();
+        if swept == false && disabled.has(key) {
+            let expiry: number = num(disabled.copy(), key.copy(), 0.0);
+            if 0.0 < expiry && expiry < now {
+                disabled = drop_key(disabled, key.copy());
+                disabled_order = without_key(disabled_order.copy(), key.copy());
+                swept = true;
+                break;
+            }
+        }
+    }
+    next["disabled"] = disabled;
+    next["disabled_order"] = disabled_order;
+    let mut result: map = {
+        ok: false,
+        error: "RuntimeError",
+        detail: "dictionary changed size during iteration",
+        address: "",
+        route: {},
+        state: next.copy(),
+    };
+    if swept == false {
+        let order: [string] = next["order"].copy();
+        let mut available: [string] = [];
+        for index in 0..order.length {
+            let addr: string = order[index].copy();
+            if disabled.has(addr) == false {
+                available[available.length] = addr;
+            }
+        }
+        if available.length == 0 {
+            result = {
+                ok: false,
+                error: "PoolException",
+                detail: "try to use proxy but no proxies avaliable",
+                address: "",
+                route: {},
+                state: next.copy(),
+            };
+        } else {
+            let chosen: string = available[0].copy();
+            result = {
+                ok: true,
+                error: "",
+                detail: "",
+                address: chosen.copy(),
+                route: route_for(chosen.copy()),
+                state: next.copy(),
+            };
+        }
+    }
+    result
+}
+
+/// Source `has_available_proxies`: true when the available list is EMPTY.
+pub fn has_available(snapshot: map) -> bool {
+    let order: [string] = snapshot["order"].copy();
+    let disabled: map = snapshot["disabled"].copy();
+    let mut available = 0;
+    for index in 0..order.length {
+        let addr: string = order[index].copy();
+        if disabled.has(addr) == false {
+            available = available + 1;
+        }
+    }
+    available == 0
+}
+
+fn disable(state: map, addr: string, expiry: number) -> map {
+    let mut next = state.copy();
+    let mut disabled: map = next["disabled"].copy();
+    let mut disabled_order: [string] = next["disabled_order"].copy();
+    disabled[addr] = expiry;
+    if has_key(disabled_order.copy(), addr.copy()) == false {
+        disabled_order[disabled_order.length] = addr;
+    }
+    next["disabled"] = disabled;
+    next["disabled_order"] = disabled_order;
+    next
+}
+
+fn disable_permanent(state: map, addr: string) -> map {
+    let mut next = state.copy();
+    let mut disabled: map = next["disabled"].copy();
+    let mut disabled_order: [string] = next["disabled_order"].copy();
+    disabled[addr] = 0;
+    if has_key(disabled_order.copy(), addr.copy()) == false {
+        disabled_order[disabled_order.length] = addr;
+    }
+    next["disabled"] = disabled;
+    next["disabled_order"] = disabled_order;
+    next
+}
+
+/// Source `not_good(weight=5, expire=0)`: failure weight, default threshold 5,
+/// and `disabled[addr] = expire + now` (zero expires as soon as the clock
+/// advances, unlike `trace_proxy`'s permanent zero).
+pub fn not_good(snapshot: map, addr: string, weight: int, expire: number, now: number) -> map {
+    let mut next = snapshot.copy();
+    let counts: map = next["counts"].copy();
+    let mut result: map = {
+        ok: false,
+        error: "KeyError",
+        detail: addr.copy(),
+        disabled_now: false,
+        state: next.copy(),
+    };
+    if counts.has(addr) {
+        let row = count_row(counts.copy(), addr.copy());
+        let success = row[0];
+        let failed = row[1] + weight;
+        next["counts"] = put_row(counts, addr.copy(), [success, failed]);
+        let mut disabled_now = false;
+        if failed >= 5 {
+            next = disable(next, addr.copy(), expire + now);
+            disabled_now = true;
+        }
+        result = {
+            ok: true,
+            error: "",
+            detail: "",
+            disabled_now: disabled_now,
+            state: next.copy(),
+        };
+    }
+    result
+}
+
+fn trace_counts(exception_class: string) -> bool {
+    // Source `trace_proxy` tests `'BadStatusLine' in str(e)` where `e` is the
+    // exception CLASS, so the intended skip is unreachable and a
+    // ConnectionError always contributes its weight. The observed behavior is
+    // retained; the detail string does not suppress counting.
+    exception_class == "ConnectTimeout"
+        || exception_class == "ConnectionError"
+        || exception_class == "ProxyError"
+        || exception_class == "ProxySchemeUnknown"
+        || exception_class == "InvalidSchema"
+}
+
+/// Source `trace_proxy` accounting. `outcome` is `success` or `exception`.
+///
+/// A transport exception is re-raised by the caller; this function records
+/// whether its class participates in the source's weight list. Successes with
+/// a failing check function count as failures. Any threshold crossing installs
+/// the permanent zero expiry.
+pub fn trace(
+    snapshot: map,
+    addr: string,
+    outcome: string,
+    weight: int,
+    check_present: bool,
+    check_ok: bool,
+    exception_class: string,
+    detail: string
+) -> map {
+    let mut next = snapshot.copy();
+    let counts: map = next["counts"].copy();
+    let mut result: map = {
+        ok: false,
+        error: "KeyError",
+        detail: addr.copy(),
+        counted: false,
+        state: next.copy(),
+    };
+    if counts.has(addr) {
+        let row = count_row(counts.copy(), addr.copy());
+        let mut success = row[0];
+        let mut failed = row[1];
+        let mut counted = false;
+        if outcome == "success" {
+            if check_present && check_ok == false {
+                failed = failed + weight;
+                counted = true;
+            } else {
+                success = success + weight;
+                counted = true;
+            }
+        } else {
+            if trace_counts(exception_class.copy()) {
+                failed = failed + weight;
+                counted = true;
+            }
+        }
+        next["counts"] = put_row(counts, addr.copy(), [success, failed]);
+        if failed >= 5 {
+            next = disable_permanent(next, addr.copy());
+        }
+        result = {
+            ok: true,
+            error: "",
+            detail: "",
+            counted: counted,
+            state: next.copy(),
+        };
+    }
+    result
+}
+
+/// `Core.update_config`'s pool branch: only a truthy incoming proxy list runs
+/// this. Every configured address is added in list order; a rejected address
+/// is warned about and skipped, while entries absent from the list keep their
+/// counters and disables.
+pub fn configure(snapshot: map, addresses: [string]) -> map {
+    let mut state = snapshot.copy();
+    let mut warnings: [string] = [];
+    for index in 0..addresses.length {
+        let addr: string = addresses[index].copy();
+        let result = add(state.copy(), addr.copy());
+        if result["ok"].copy() == true {
+            state = result["state"].copy();
+        } else {
+            warnings[warnings.length] = result["detail"].copy();
+        }
+    }
+    {
+        state: state,
+        warnings: warnings,
+    }
+}
+
+pub fn initial() -> map {
+    empty_state()
+}

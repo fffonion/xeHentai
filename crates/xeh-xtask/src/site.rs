@@ -12,9 +12,9 @@ use crate::paths::{
     authoritative_git, lease_tmp, python_executable, scripts_dir, workspace_root, UPSTREAM_APP_REV,
 };
 
-struct FixedSource {
-    root: PathBuf,
-    files: usize,
+pub(crate) struct FixedSource {
+    pub(crate) root: PathBuf,
+    pub(crate) files: usize,
 }
 
 struct ComparedCase {
@@ -237,7 +237,7 @@ fn collect_tree(root: &Path, current: &Path, output: &mut BTreeSet<String>) -> R
     Ok(())
 }
 
-fn verify_fixed_source() -> Result<FixedSource, String> {
+pub(crate) fn verify_fixed_source() -> Result<FixedSource, String> {
     let root = workspace_root()
         .join("../../reviews/task5-5af6f1e/upstream")
         .canonicalize()

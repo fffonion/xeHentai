@@ -32,6 +32,16 @@
         "cargo run -p xeh-xtask -- diff --suite site",
         "cargo test -p xeh-xtask --test site_contract"
       ]
+    },
+    {
+      "task": 8,
+      "scope": "proxy-transport-and-pool",
+      "note": "Task 8 adds the application-owned native proxy connectors (HTTP absolute-form, HTTP CONNECT, HTTPS proxy outer TLS, SOCKS4/4a/5/5h with the source's local/remote DNS distinction), immutable route snapshots on NativeSubmission, the RSS proxy pool/policy/Glype modules on the retained Store owner, the `xeh_url` percent primitives and the minimal `xeh_proxy::request` no-follow/route host that the pinned Core HTTP client cannot express. The Core dependency remains read-only at cdb0b798d631cd7ffab6dfed3fe4b69381ed3340; no Core API was added. The differential runner executes the real fixed-source Pool/Core.update_config/util and a real requests Glype handler against local scripted servers. Narrow observed decisions (the unreachable BadStatusLine class-string check, the expired-disable RuntimeError partial sweep, missing-MIME AttributeError, invalid-text UnicodeDecodeError, and the source pool's accepted-but-unsupported SOCKS suffixes) are documented in docs/compatibility-deltas.md. Task9 scheduling/retry/monitor and the Task10/11 public RPC, directory and archive surfaces are not implemented here; the Task7 nonblocking backlog remains in the preflight file. This note does not mark the feature accepted: the whole verifier still fails closed with accepted=0 while remaining tasks are pending.",
+      "tests": [
+        "cargo test -p xeh-host --test transport",
+        "cargo run -p xeh-xtask -- rss-test --suite proxy",
+        "cargo run -p xeh-xtask -- diff --suite proxy"
+      ]
     }
   ],
   "features": [

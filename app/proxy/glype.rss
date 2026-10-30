@@ -1,0 +1,694 @@
+//! Glype proxy URL composition, cookie/session flow and response rewriting.
+//!
+//! The source handler is a closure over one mutable `g_session['s']` per pool
+//! entry. This module models that state explicitly as data and performs the
+//! same ordered operations: mkurl, Referer and site-cookie remapping, two
+//! sslagree warnings before PoolException, Set-Cookie unwrapping, restored
+//! response URL, text-only link rewrite with `unquote` (not `unquote_plus`),
+//! and byte preservation for non-text MIME types.
+use re;
+use xeh_proxy;
+use xeh_url;
+
+use super::site::support;
+
+fn captured(groups: [string], index: int) -> string {
+    if index < groups.length && type(groups[index].copy()) == "string" => {
+        let value: string = groups[index].copy();
+        value
+    } else => {
+        ""
+    }
+}
+
+fn or_empty(value: string?) -> string {
+    if type(value) == "null" => {
+        ""
+    } else => {
+        let typed: string = value.unwrap_or("");
+        typed
+    }
+}
+
+/// Parses the Glype address exactly like the source `findall` expressions.
+pub fn parse(addr: string) -> map {
+    let arg = re::captures("[&\\?]([a-zA-Z\\._]+)=[^\\d]*", addr.copy());
+    let bval = re::captures("[&\\?]b=(\\d*)", addr.copy());
+    let parts = re::captures("(https*://[^/]+)/(.*?)([^/]+\\.php)", addr.copy());
+    let result: map = if arg.length < 2 || parts.length < 4 => {
+        {
+            ok: false,
+            error: "IndexError",
+            detail: "list index out of range",
+            server: "",
+            inst_loc: "",
+            script: "",
+            argname: "",
+            bval: "",
+        }
+    } else => {
+        {
+            ok: true,
+            error: "",
+            detail: "",
+            server: captured(parts.copy(), 1),
+            inst_loc: captured(parts.copy(), 2),
+            script: captured(parts.copy(), 3),
+            argname: captured(arg.copy(), 1),
+            bval: if bval.length >= 2 => { captured(bval.copy(), 1) } else => { "4" },
+        }
+    };
+    result
+}
+
+pub fn mkurl(parsed: map, url: string) -> string {
+    let server: string = parsed["server"].copy();
+    let inst_loc: string = parsed["inst_loc"].copy();
+    let script: string = parsed["script"].copy();
+    let argname: string = parsed["argname"].copy();
+    let bval: string = parsed["bval"].copy();
+    server
+        + "/" + inst_loc
+        + script
+        + "?" + argname
+        + "=" + xeh_url::quote_plus(url.copy())
+        + "&b=" + bval
+        + "&f=norefer"
+}
+
+pub fn sslagree_url(parsed: map) -> string {
+    let server: string = parsed["server"].copy();
+    let inst_loc: string = parsed["inst_loc"].copy();
+    server + "/" + inst_loc + "includes/process.php?action=sslagree"
+}
+
+pub fn referer(parsed: map) -> string {
+    let server: string = parsed["server"].copy();
+    let inst_loc: string = parsed["inst_loc"].copy();
+    let script: string = parsed["script"].copy();
+    server + "/" + inst_loc + script
+}
+
+pub fn warning(text_value: string) -> bool {
+    string_contains(
+        text_value.copy(),
+        "<input type=\"hidden\" name=\"action\" value=\"sslagree\">"
+    )
+}
+
+// ---- ordered cookie state --------------------------------------------------
+
+fn cookie_empty() -> map {
+    { keys: [], values: {} }
+}
+
+fn cookie_put(state: map, key: string, value: string) -> map {
+    let mut next = state.copy();
+    let mut keys: [string] = next["keys"].copy();
+    let mut values: map = next["values"].copy();
+    if values.has(key) == false {
+        keys[keys.length] = key.copy();
+    }
+    values[key] = value;
+    next["keys"] = keys;
+    next["values"] = values;
+    next
+}
+
+fn cookie_get(state: map, key: string) -> string {
+    let values: map = state["values"].copy();
+    if values.has(key) && type(values[key].copy()) == "string" => {
+        let value: string = values[key].copy();
+        value
+    } else => {
+        ""
+    }
+}
+
+/// Source `util.parse_cookie`: split on `;`, trim, skip attributes and the
+/// bare Secure/HttpOnly tokens, keep the first `=` split and rejoin the rest.
+pub fn parse_cookie(text_value: string) -> map {
+    let mut state = cookie_empty();
+    let parts = string_split_literal(text_value.copy(), ";");
+    for index in 0..parts.length {
+        let raw: string = parts[index].copy();
+        let mut item = raw.copy();
+        item = re::replace("^[ \\t]+", item.copy(), "");
+        item = re::replace("[ \\t]+$", item.copy(), "");
+        if item == "" {
+            continue;
+        }
+        let lowered = string_lower_ascii(item.copy());
+        if lowered == "secure" || lowered == "httponly" {
+            continue;
+        }
+        let halves = string_split_literal(item.copy(), "=");
+        if halves.length == 0 {
+            continue;
+        }
+        let key: string = halves[0].copy();
+        let mut value = "";
+        for part_index in 1..halves.length {
+            if part_index > 1 {
+                value = value + "=";
+            }
+            value = value + halves[part_index].copy();
+        }
+        let key_lower = string_lower_ascii(key.copy());
+        if key_lower == "path"
+            || key_lower == "expires"
+            || key_lower == "domain"
+            || key_lower == "max-age"
+            || key_lower == "comment"
+        {
+            continue;
+        }
+        state = cookie_put(state, key, value);
+    }
+    state
+}
+
+fn cookie_text(state: map) -> string {
+    let keys: [string] = state["keys"].copy();
+    let values: map = state["values"].copy();
+    let mut output = "";
+    for index in 0..keys.length {
+        let key: string = keys[index].copy();
+        if index > 0 {
+            output = output + ";";
+        }
+        output = output + key + "=" + values[key].copy();
+    }
+    output
+}
+
+fn header_value(headers: [map], name: string) -> string? {
+    let wanted = string_lower_ascii(name.copy());
+    let mut found: string? = null;
+    for index in 0..headers.length {
+        let item: map = headers[index].copy();
+        let item_name: string = item["name"].copy();
+        if type(found) == "null" && string_lower_ascii(item_name.copy()) == wanted {
+            let value: string = item["value"].copy();
+            found = value;
+        }
+    }
+    found
+}
+
+fn header_set(headers: [map], name: string, value: string) -> [map] {
+    let mut output: [map] = [];
+    let wanted = string_lower_ascii(name.copy());
+    let mut replaced = false;
+    for index in 0..headers.length {
+        let item: map = headers[index].copy();
+        let item_name: string = item["name"].copy();
+        if string_lower_ascii(item_name.copy()) == wanted {
+            output[output.length] = { name: name.copy(), value: value.copy() };
+            replaced = true;
+        } else {
+            output[output.length] = item.copy();
+        }
+    }
+    if replaced == false {
+        output[output.length] = { name: name.copy(), value: value.copy() };
+    }
+    output
+}
+
+/// Builds the outgoing header list, Referer and remapped Cookie header.
+///
+/// `g_s` is the per-pool Glype session value. A Cookie header is only emitted
+/// when the session already had one, or when an sslagree response installs
+/// one (handled by `apply_sslagree_cookie`).
+pub fn request_headers(
+    parsed: map,
+    target: string,
+    session_headers: [map],
+    g_s: string
+) -> map {
+    let mut headers: [map] = [];
+    for index in 0..session_headers.length {
+        headers[headers.length] = session_headers[index].copy();
+    }
+    headers = header_set(headers.copy(), "Referer", referer(parsed.copy()));
+    let mut cookie_state = cookie_empty();
+    if g_s != "" {
+        cookie_state = cookie_put(cookie_state, "s", g_s.copy());
+    }
+    let existing = header_value(headers.copy(), "Cookie");
+    let mut outcome: map = {
+        ok: true,
+        error: "",
+        detail: "",
+        headers: headers.copy(),
+        cookie_state: cookie_state.copy(),
+    };
+    if type(existing) == "null" {
+        outcome = {
+            ok: true,
+            error: "",
+            detail: "",
+            headers: headers.copy(),
+            cookie_state: cookie_state.copy(),
+        };
+    } else {
+        let site = re::captures("https*://([^/]+)/*", target.copy());
+        if site.length < 2 {
+            outcome = {
+                ok: false,
+                error: "IndexError",
+                detail: "list index out of range",
+                headers: headers.copy(),
+                cookie_state: cookie_state.copy(),
+            };
+        } else {
+            let site_name = captured(site.copy(), 1);
+            let old = parse_cookie(or_empty(existing.copy()));
+            let keys: [string] = old["keys"].copy();
+            let values: map = old["values"].copy();
+            for index in 0..keys.length {
+                let name: string = keys[index].copy();
+                cookie_state = cookie_put(
+                    cookie_state.copy(),
+                    "c[" + site_name.copy() + "][/][" + name.copy() + "]",
+                    values[name].copy()
+                );
+            }
+            headers = header_set(headers.copy(), "Cookie", cookie_text(cookie_state.copy()));
+            outcome = {
+                ok: true,
+                error: "",
+                detail: "",
+                headers: headers.copy(),
+                cookie_state: cookie_state.copy(),
+            };
+        }
+    }
+    outcome
+}
+
+/// Applies one sslagree response's Set-Cookie value to the shared cookie
+/// state and returns the state plus the `s` value it may publish.
+pub fn apply_sslagree_cookie(cookie_state: map, set_cookie: string) -> map {
+    let combined = string_replace_literal(set_cookie.copy(), ",", ";");
+    let parsed = parse_cookie(combined.copy());
+    let keys: [string] = parsed["keys"].copy();
+    let values: map = parsed["values"].copy();
+    let mut next = cookie_state.copy();
+    for index in 0..keys.length {
+        let key: string = keys[index].copy();
+        next = cookie_put(next.copy(), key.copy(), values[key].copy());
+    }
+    {
+        state: next.copy(),
+        glyph_s: cookie_get(next.copy(), "s"),
+        cookie: cookie_text(next.copy()),
+    }
+}
+
+/// Unwraps `c[host][/][name]` response cookie names using the source order.
+pub fn unwrap_set_cookie(set_cookie: string) -> string {
+    let combined = string_replace_literal(set_cookie.copy(), ",", ";");
+    let parsed = parse_cookie(combined.copy());
+    let keys: [string] = parsed["keys"].copy();
+    let values: map = parsed["values"].copy();
+    let mut next = parsed.copy();
+    for index in 0..keys.length {
+        let key: string = keys[index].copy();
+        if re::match("^c\\[", key.copy()) {
+            let groups = re::captures("c\\[[^]]+\\]\\[[^]]+\\]\\[([^]]+)\\]", key.copy());
+            if groups.length >= 2 {
+                next = cookie_put(next.copy(), captured(groups.copy(), 1), values[key].copy());
+            }
+        }
+    }
+    cookie_text(next.copy())
+}
+
+fn rewrite_links(parsed: map, text_value: string) -> string {
+    let inst_loc: string = parsed["inst_loc"].copy();
+    let script: string = parsed["script"].copy();
+    let pattern = "/" + inst_loc + script + "\\?u=([^&\"']+)&[^\"']+";
+    let scanned = support::scan(pattern.copy(), text_value.copy());
+    let matches: [map] = scanned["matches"].copy();
+    let tail: string = scanned["tail"].copy();
+    let mut output = "";
+    for index in 0..matches.length {
+        let item: map = matches[index].copy();
+        let groups: [string] = item["groups"].copy();
+        output = output + item["prefix"].copy();
+        output = output + xeh_url::unquote(captured(groups.copy(), 0));
+    }
+    output + tail
+}
+
+/// Builds one response observation with a fixed field set. Every branch below
+/// calls this helper so branch type unification never depends on map literals.
+fn response_map(
+    ok: bool,
+    exception: string,
+    detail: string,
+    url: string,
+    status: int,
+    content_type: string,
+    content: string,
+    content_bytes: [int],
+    set_cookie: string
+) -> map {
+    {
+        ok: ok,
+        exception: exception,
+        detail: detail,
+        url: url,
+        status: status,
+        content_type: content_type,
+        content: content,
+        content_bytes: content_bytes,
+        set_cookie: set_cookie,
+    }
+}
+
+/// Processes one final response after the sslagree loop.
+pub fn process(
+    parsed: map,
+    target: string,
+    status: int,
+    headers: [map],
+    body: [int],
+    body_text: string,
+    body_text_valid: bool,
+    set_cookie_present: bool,
+    set_cookie_header: string
+) -> map {
+    let content_type = header_value(headers.copy(), "Content-Type");
+    let checked = if type(content_type) == "null" => {
+        response_map(
+            false,
+            "AttributeError",
+            "'NoneType' object has no attribute 'startswith'",
+            "",
+            status,
+            "",
+            "",
+            [],
+            ""
+        )
+    } else => {
+        let mime: string = or_empty(content_type.copy());
+        let set_cookie = if set_cookie_present == false => {
+            ""
+        } else => {
+            unwrap_set_cookie(set_cookie_header.copy())
+        };
+        if re::match("^text", mime.copy()) => {
+            if body_text_valid == false => {
+                response_map(
+                    false,
+                    "UnicodeDecodeError",
+                    "'utf-8' codec can't decode bytes",
+                    "",
+                    status,
+                    mime.copy(),
+                    "",
+                    [],
+                    set_cookie.copy()
+                )
+            } else => {
+                let decoded: string = body_text.copy();
+                let error_div = re::captures("^<div id=\"error\">(.*?)</div>", decoded.copy());
+                if error_div.length > 0 => {
+                    response_map(
+                        false,
+                        "PoolException",
+                        "glype returns: " + captured(error_div.copy(), 0),
+                        "",
+                        status,
+                        mime.copy(),
+                        "",
+                        [],
+                        set_cookie.copy()
+                    )
+                } else => {
+                    response_map(
+                        true,
+                        "",
+                        "",
+                        target.copy(),
+                        status,
+                        mime.copy(),
+                        rewrite_links(parsed.copy(), decoded.copy()),
+                        [],
+                        set_cookie.copy()
+                    )
+                }
+            }
+        } else => {
+            response_map(
+                true,
+                "",
+                "",
+                target.copy(),
+                status,
+                mime.copy(),
+                "",
+                body.copy(),
+                set_cookie.copy()
+            )
+        }
+    };
+    checked
+}
+
+fn header_combined(value: [map], name: string) -> string? {
+    let mut found: string? = null;
+    let wanted = string_lower_ascii(name.copy());
+    for index in 0..value.length {
+        let item: map = value[index].copy();
+        let item_name: string = item["name"].copy();
+        if string_lower_ascii(item_name.copy()) == wanted {
+            let text_value: string = item["value"].copy();
+            if type(found) == "null" {
+                found = text_value.copy();
+            } else {
+                found = or_empty(found.copy()) + ", " + text_value.copy();
+            }
+        }
+    }
+    found
+}
+
+fn fetch_request(url: string, headers: [map], follow: bool) -> map {
+    let mut names: [string] = [];
+    let mut values: [string] = [];
+    for index in 0..headers.length {
+        let item: map = headers[index].copy();
+        let name: string = item["name"].copy();
+        let value: string = item["value"].copy();
+        names[names.length] = name.copy();
+        values[values.length] = value.copy();
+    }
+    let response = xeh_proxy::request(
+        url.copy(),
+        "GET",
+        names.copy(),
+        values.copy(),
+        "direct",
+        "",
+        0,
+        false,
+        follow
+    );
+    let response_names: [string] = response.header_names.copy();
+    let response_values: [string] = response.header_values.copy();
+    let mut fields: [map] = [];
+    for index in 0..response_names.length {
+        let name: string = response_names[index].copy();
+        let value: string = response_values[index].copy();
+        fields[fields.length] = { name: name.copy(), value: value.copy() };
+    }
+    {
+        status: response.status.copy(),
+        url: response.url.copy(),
+        headers: fields,
+        body: response.body.copy(),
+        body_text: response.body_text.copy(),
+        text_valid: response.text_valid.copy(),
+        error_kind: response.error_kind.copy(),
+        error_detail: response.error_detail.copy(),
+    }
+}
+
+fn failure(flows: [map], glyph_s: string, exception: string, detail: string) -> map {
+    {
+        ok: false,
+        exception: exception.copy(),
+        detail: detail.copy(),
+        flows: flows,
+        glyph_s: glyph_s.copy(),
+    }
+}
+
+/// Executes the source Glype handle over the listed target URLs.
+pub fn run_flows(
+    address: string,
+    session_headers: [map],
+    targets: [string]
+) -> map {
+    let parsed = parse(address.copy());
+    let mut g_s = "";
+    let mut flows: [map] = [];
+    let mut outcome: map = if parsed["ok"].copy() == false => {
+        failure(flows.copy(), g_s.copy(), parsed["error"].copy(), parsed["detail"].copy())
+    } else => {
+        {
+            ok: true,
+            exception: "",
+            detail: "",
+            flows: [],
+            glyph_s: "",
+        }
+    };
+    let mut stop = parsed["ok"].copy() == false;
+    for target_index in 0..targets.length {
+        if stop == false {
+            let target: string = targets[target_index].copy();
+            let prepared = request_headers(parsed.copy(), target.copy(), session_headers.copy(), g_s.copy());
+            if prepared["ok"].copy() == false {
+                flows[flows.length] = {
+                    ok: false,
+                    exception: prepared["error"].copy(),
+                    detail: prepared["detail"].copy(),
+                };
+                outcome = failure(flows.copy(), g_s.copy(), prepared["error"].copy(), prepared["detail"].copy());
+                stop = true;
+            } else {
+                let mut headers: [map] = prepared["headers"].copy();
+                let mut cookie_state: map = prepared["cookie_state"].copy();
+                let mut request_url = mkurl(parsed.copy(), target.copy());
+                let mut tried = 0;
+                while stop == false {
+                    if tried == 2 {
+                        flows[flows.length] = {
+                            ok: false,
+                            exception: "PoolException",
+                            detail: "can't bypass glype https warning",
+                        };
+                        outcome = failure(flows.copy(), g_s.copy(), "PoolException", "can't bypass glype https warning");
+                        stop = true;
+                        break;
+                    }
+                    let response = fetch_request(request_url.copy(), headers.copy(), false);
+                    if response["error_kind"].copy() != "" {
+                        let error_kind: string = response["error_kind"].copy();
+                        let error_detail: string = response["error_detail"].copy();
+                        flows[flows.length] = {
+                            ok: false,
+                            exception: error_kind.copy(),
+                            detail: error_detail.copy(),
+                        };
+                        outcome = failure(flows.copy(), g_s.copy(), error_kind.copy(), error_detail.copy());
+                        stop = true;
+                        break;
+                    }
+                    let body_text_value: string = response["body_text"].copy();
+                    let body_text_valid: bool = response["text_valid"].copy();
+                    let mut warned = false;
+                    if body_text_valid {
+                        warned = warning(body_text_value.copy());
+                    }
+                    if warned == false {
+                        let status: int = response["status"].copy();
+                        let response_headers: [map] = response["headers"].copy();
+                        let response_body: [int] = response["body"].copy();
+                        let set_cookie_value = header_combined(response["headers"].copy(), "Set-Cookie");
+                        let set_cookie_present = type(set_cookie_value) != "null";
+                        let set_cookie_text = or_empty(set_cookie_value.copy());
+                        let processed = process(
+                            parsed.copy(),
+                            target.copy(),
+                            status,
+                            response_headers.copy(),
+                            response_body.copy(),
+                            body_text_value.copy(),
+                            body_text_valid,
+                            set_cookie_present,
+                            set_cookie_text.copy()
+                        );
+                        if processed["ok"].copy() == false {
+                            let exception: string = processed["exception"].copy();
+                            let detail: string = processed["detail"].copy();
+                            flows[flows.length] = {
+                                ok: false,
+                                exception: exception.copy(),
+                                detail: detail.copy(),
+                            };
+                            outcome = failure(flows.copy(), g_s.copy(), exception.copy(), detail.copy());
+                            stop = true;
+                        } else {
+                            let flow_url: string = processed["url"].copy();
+                            let flow_status: int = processed["status"].copy();
+                            let flow_type: string = processed["content_type"].copy();
+                            let flow_content: string = processed["content"].copy();
+                            let flow_bytes: [int] = processed["content_bytes"].copy();
+                            let flow_cookie: string = processed["set_cookie"].copy();
+                            flows[flows.length] = {
+                                ok: true,
+                                exception: "",
+                                detail: "",
+                                url: flow_url.copy(),
+                                status: flow_status,
+                                content_type: flow_type.copy(),
+                                content: flow_content.copy(),
+                                content_bytes: flow_bytes.copy(),
+                                set_cookie: flow_cookie.copy(),
+                            };
+                            outcome = {
+                                ok: true,
+                                exception: "",
+                                detail: "",
+                                flows: [],
+                                glyph_s: g_s.copy(),
+                            };
+                        }
+                        break;
+                    }
+                    let ssl_url = sslagree_url(parsed.copy());
+                    let ssl_response = fetch_request(ssl_url.copy(), headers.copy(), false);
+                    if ssl_response["error_kind"].copy() != "" {
+                        let error_kind: string = ssl_response["error_kind"].copy();
+                        let error_detail: string = ssl_response["error_detail"].copy();
+                        flows[flows.length] = {
+                            ok: false,
+                            exception: error_kind.copy(),
+                            detail: error_detail.copy(),
+                        };
+                        outcome = failure(flows.copy(), g_s.copy(), error_kind.copy(), error_detail.copy());
+                        stop = true;
+                        break;
+                    }
+                    let ssl_cookie = header_combined(ssl_response["headers"].copy(), "Set-Cookie");
+                    if type(ssl_cookie) != "null" {
+                        let applied = apply_sslagree_cookie(cookie_state.copy(), or_empty(ssl_cookie.copy()));
+                        cookie_state = applied["state"].copy();
+                        let updated_s: string = applied["glyph_s"].copy();
+                        if updated_s != "" {
+                            g_s = updated_s.copy();
+                        }
+                        let cookie_text_value: string = applied["cookie"].copy();
+                        headers = header_set(headers.copy(), "Cookie", cookie_text_value.copy());
+                    }
+                    tried = tried + 1;
+                    request_url = mkurl(parsed.copy(), target.copy());
+                }
+            }
+        }
+    }
+    {
+        ok: outcome["ok"].copy(),
+        exception: outcome["exception"].copy(),
+        detail: outcome["detail"].copy(),
+        flows: flows,
+        glyph_s: g_s.copy(),
+    }
+}

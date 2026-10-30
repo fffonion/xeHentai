@@ -1,6 +1,8 @@
 #[allow(dead_code)]
 #[path = "support.rs"]
 mod support;
+#[path = "proxy_fixture/transport_proxy.rs"]
+mod transport_proxy;
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::TcpListener;

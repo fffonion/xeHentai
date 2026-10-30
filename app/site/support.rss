@@ -3,7 +3,7 @@ use json;
 use re;
 use xeh_json;
 
-fn scan(pattern: string, text: string) -> map {
+pub fn scan(pattern: string, text: string) -> map {
     let nul = json::decode::<string>("\"\\u0000\"");
     let soh = json::decode::<string>("\"\\u0001\"");
     let mut nul_run = nul.copy();

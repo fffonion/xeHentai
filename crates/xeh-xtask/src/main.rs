@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use xeh_xtask::{
-    capture, compare_trees, rss_test, run_diff, run_rules_suite, run_session_diff,
-    run_session_suite, run_site_diff, run_site_suite, run_state_suite, run_suite, run_task_diff,
-    verify_deny_unverified, workspace_root,
+    capture, compare_trees, rss_test, run_diff, run_proxy_diff, run_proxy_suite, run_rules_suite,
+    run_session_diff, run_session_suite, run_site_diff, run_site_suite, run_state_suite, run_suite,
+    run_task_diff, verify_deny_unverified, workspace_root,
 };
 
 fn main() -> ExitCode {
@@ -41,6 +41,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             "session" => run_session_suite(),
             "site" => run_site_suite(),
             "rules" => run_rules_suite(),
+            "proxy" => run_proxy_suite(),
             other => Err(format!("rss-test suite '{other}' is not implemented")),
         };
     }
@@ -50,6 +51,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             "task-api" => run_task_diff(),
             "session" => run_session_diff(),
             "site" => run_site_diff(),
+            "proxy" => run_proxy_diff(),
             other => Err(format!("diff suite '{other}' is not implemented")),
         };
     }

@@ -359,3 +359,41 @@
 - 输入：`&#1_0;`
 - 实测输出：Python `int()` 接受数字间下划线，返回 `chr(10)`；RSS 的十进制实体检查只接受 `Nd` 十进制数字（可表示范围仍按 `chr()` 边界拒绝），返回 `ValueError`。该 case 固定 `chr(10)` 与 `ValueError` 两侧观测
 - 拟定合同：不实现 Python 整数字面量的下划线语法；真实站点实体不使用该写法。Unicode `Nd` 数字实体与人类时间已直接比较，不再列为差异。
+
+## delta.proxy-badstatusline-class-check
+
+- 来源：`xeHentai/proxy.py:trace_proxy`
+- 状态：Task8 实测保留的源缺陷
+- 输入：`proxy_trace` 中抛出 `ConnectionError("BadStatusLine: ...")`
+- 实测输出：源码写的是 `if e == ConnectionError and 'BadStatusLine' in str(e)`，其中 `e` 是异常**类**，`str(e)` 永远不含 `BadStatusLine`，因此 `continue` 不可达；该异常仍按 weight 计入失败。RSS 按实测行为计数，不把注释意图当结果
+- 拟定合同：保留源真实计数；若未来上游修复类/实例判断，需重新采集 oracle 并另列差异，不得静默改变。
+
+## delta.proxy-expired-disable-sweep
+
+- 来源：`xeHentai/proxy.py:proxied_request`
+- 状态：Task8 实测保留的源缺陷
+- 输入：`not_good(..., expire=10)` 在 clock 1000 设置两项，再在 clock 2000 选择
+- 实测输出：第一次删除 expired key 后 CPython 抛 `RuntimeError: dictionary changed size during iteration`，状态只保留未删除项；RSS 同样只删除第一项并返回该 narrow `RuntimeError`，不伪造完整 sweep
+- 拟定合同：RSS 只记录该精确 partial post-state/异常；不得用“全部清除”或静默 continue 伪装 parity。
+
+## delta.proxy-missing-mime-and-invalid-text
+
+- 来源：`xeHentai/proxy.py:glype_proxy`
+- 状态：Task8 Glype 窄边界
+- 输入：无 `Content-Type` 的 200 响应；以及 text/* 但正文不是 UTF-8 的响应
+- 实测输出：缺失 MIME 时源码抛 `AttributeError: 'NoneType' object has no attribute 'startswith'`；RSS 返回相同 class/detail。非 UTF-8 文本在 Python 解码时抛 `UnicodeDecodeError`，RSS 以 `UnicodeDecodeError` 结束（detail 不声称 Python 文案完全一致）
+- 拟定合同：MIME 判定、错误类与链接/字节处理保持实测行为；二进制 MIME 保留原始 bytes，不进入文本改写。
+
+## delta.proxy-unsupported-socks-suffix
+
+- 来源：`xeHentai/proxy.py:add_proxy`
+- 状态：Task8 保留的配置差异
+- 输入：`socks4ah://proxy.invalid:1080`、`socks5aa://...`、缺少端口或端口越界的 SOCKS 地址
+- 实测输出：源正则接受这些地址并创建 pool entry，但 urllib3 在真实连接时以 `ProxySchemeUnknown`/连接异常失败；RSS 将其保留为显式 `unsupported` route，选择后由原生层 `proxy_unsupported` 失败并计数，绝不直连回退
+- 拟定合同：不新增认证代理或宽松协议；新增真实协议时必须同时扩展协议夹具与失败类比较。
+
+## delta.proxy-transport-scope
+
+- 来源：Task8 native/app 分层
+- 状态：Task8 实现记录（未标 accepted）
+- 内容：HTTP absolute-form、CONNECT、HTTPS 代理外层 TLS、SOCKS4/4a/5/5h 本地/远端 DNS、无直连回退、显式 Task8 follow-redirect 路径均为本项目原生连接器与 RSS 决策；Core 保持只读。Glype 的 `xeh_url::quote_plus/unquote` 与 `xeh_proxy::request`（no-follow/显式 route/原始响应）是最小 App host；Core HTTP 自带 redirect-follow 且无 proxy route，无法表达 sslagree 的 redirect-disabled 观测。Task9 调度及 Task10/11 公共 RPC/目录/归档仍未实现。

@@ -434,7 +434,9 @@ pub fn task_catalog() -> Arc<HostApiCatalog> {
     Arc::new(builder.build().expect("task control catalog"))
 }
 
-fn registry_with_task_hosts(catalog: &HostApiCatalog) -> Result<HostFunctionRegistry, HostError> {
+pub(crate) fn registry_with_task_hosts(
+    catalog: &HostApiCatalog,
+) -> Result<HostFunctionRegistry, HostError> {
     let mut registry = open_registry(catalog)?;
     crate::os::register_fs(&mut registry, catalog)?;
     let schema = catalog

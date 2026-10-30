@@ -6,6 +6,8 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use vm::HttpConfig;
 
+use crate::net::NativeProxyRoute;
+
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 /// Cross-thread job identity. Values are copied; no VM handle is included.
@@ -83,9 +85,35 @@ impl TaskRegistration {
     }
 
     /// Package `request` with this lease. The envelope snapshots identity and epoch now.
+    /// The route defaults to direct, preserving every existing constructor.
     pub fn submission(&self, request: TransferRequest) -> NativeSubmission {
+        self.submission_with_route(request, None)
+    }
+
+    /// Package `request` with an immutable proxy route snapshot.
+    ///
+    /// The route is captured before admission; a later configuration update
+    /// cannot redirect this envelope. Redirects stay rejected for this entry.
+    pub fn submission_with_route(
+        &self,
+        request: TransferRequest,
+        route: Option<NativeProxyRoute>,
+    ) -> NativeSubmission {
+        self.submission_with_options(request, route, false)
+    }
+
+    /// Explicit Task8 follow-redirect entry. The old constructors keep the
+    /// Task3 reject-redirect behavior.
+    pub fn submission_with_options(
+        &self,
+        request: TransferRequest,
+        route: Option<NativeProxyRoute>,
+        follow_redirects: bool,
+    ) -> NativeSubmission {
         NativeSubmission {
             request,
+            route,
+            follow_redirects,
             pool: Arc::clone(&self.pool),
             task_id: self.task_id,
             epoch: self.epoch(),
@@ -110,6 +138,8 @@ impl TaskRegistration {
 #[derive(Clone, Debug)]
 pub struct NativeSubmission {
     request: TransferRequest,
+    route: Option<NativeProxyRoute>,
+    follow_redirects: bool,
     pool: Arc<PoolToken>,
     task_id: i64,
     epoch: i64,
@@ -123,6 +153,14 @@ impl NativeSubmission {
 
     pub(crate) fn key(&self) -> &JobKey {
         &self.request.key
+    }
+
+    pub(crate) fn route(&self) -> Option<&NativeProxyRoute> {
+        self.route.as_ref()
+    }
+
+    pub(crate) fn follow_redirects(&self) -> bool {
+        self.follow_redirects
     }
 
     pub(crate) fn pool(&self) -> &Arc<PoolToken> {

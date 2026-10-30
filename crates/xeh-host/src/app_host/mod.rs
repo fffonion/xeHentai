@@ -16,9 +16,11 @@
 
 pub mod io;
 pub mod json;
+pub mod url;
 
 use io::IO_WRITE_TEXT_NAME;
 use json::JSON_IS_VALID_NAME;
+use url::{QUOTE_PLUS_NAME, UNQUOTE_NAME};
 
 use vm::{HostApiCatalog, HostFunctionRegistry, HostFunctionSchema, HostStructSchema};
 
@@ -31,7 +33,9 @@ pub fn structs() -> Vec<HostStructSchema> {
 
 /// Guest contracts the application helper functions publish.
 pub fn functions() -> Vec<HostFunctionSchema> {
-    vec![json::is_valid_schema(), io::try_write_text_schema()]
+    let mut functions = vec![json::is_valid_schema(), io::try_write_text_schema()];
+    functions.extend(url::functions());
+    functions
 }
 
 /// Registers both helpers against the application catalog.
@@ -50,6 +54,10 @@ pub fn register(
     register_one(registry, catalog, IO_WRITE_TEXT_NAME, || {
         Box::new(io::TryWriteTextFn)
     })?;
+    register_one(registry, catalog, QUOTE_PLUS_NAME, || {
+        Box::new(url::QuotePlusFn)
+    })?;
+    register_one(registry, catalog, UNQUOTE_NAME, || Box::new(url::UnquoteFn))?;
     Ok(())
 }
 

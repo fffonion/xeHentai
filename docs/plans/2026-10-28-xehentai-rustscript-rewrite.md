@@ -168,13 +168,14 @@ Rust host：
 - JSON wire 字节边界、ZIP64、图片解码/缩放、平台文件替换；配置文件读取优先复用 Core I/O，不新增 Python 桥。
 - 公开 host API 均为命名类型/显式可选字段；禁止原始 `map/unknown` host 合同。RPC 任意 JSON 只存在 wire codec 层，解析后立即转 typed DTO。
 
-默认不修改 RustScript Core。只有应用侧 spike 证明公开 SDK 无法满足最小需求，才建立明确的 Core 前置项；单独定义测试、合并依赖和版本 pin。
+RustScript Core 在本项目实施中保持只读。公开 SDK 或现有 host function 经真实执行仍有能力缺口时，只在本项目 `crates/xeh-host` 中新增最小 host function；不得因此修改 Core、建立 Core 修改前置项，或通过切换依赖引入专为本应用添加的 Core 接口。只有用户另行明确授权，才能改变这一边界。
 
 ### 3.4 Core host function 优先复用
 
 - **Core 已提供且能够满足需求的 host function，必须直接复用，不在应用侧重复实现或新增等价 host function。**
 - 实施前按锁定的 Core revision 核对实际 catalog、源码、feature gate 和调用合同，通过真实 RSS compile/bind/run 验证可用性；不可凭旧文档或函数名称判定缺失。
-- 优先顺序：直接调用 Core → 用 RSS 组合现有 host function → 仅为已验证的能力缺口增加最小应用侧扩展。适配层只处理业务参数和类型转换，不复制底层实现。
+- **强制优先顺序：直接调用锁定 revision 中已有且可用的 Core host function → 用 RSS 组合这些现有函数 → 仅对真实执行证实仍无法覆盖的部分，在本项目 `crates/xeh-host` 增加最小、命名且强类型的 host function。** 不得跳过前两步，也不得把应用缺口转成 Core 修改任务。
+- 应用侧适配优先复用公开 SDK、现有 descriptor/adapter、异步 bridge、资源和权限机制，只补缺失的接口行为；禁止复制 Core 实现、自建等价解析器或为单个缺口替换整套现有能力。
 - 第 3.3 节中的 Rust host 职责及第 5 节的目标文件仅表示能力归属和候选组织方式，不代表必须自建；已有 Core 能力覆盖时，删除对应自建模块计划并复用 Core。
 - 每个新增应用侧 host function 必须在 `docs/architecture.md` 记录对应需求、已检查的 Core 接口、不能满足需求的具体证据、扩展边界及测试；缺少能力缺口证据不得加入。
 - 对 JSON、正则、文件 I/O、定时器、HTTP 等能力逐项检查，不因某一高级场景缺少支持就整套替换 Core 已可用功能；共享底层能力，扩展限制在缺失部分。
@@ -434,7 +435,7 @@ cargo run -p xeh-xtask -- verify --all --deny-unverified
 **文件：** `Cargo.toml`、`crates/xeh-host/src/{main,runtime,catalog,types}.rs`、`app/{main,types}.rss`、`crates/xeh-host/tests/{rss_smoke,host_contract}.rs`。
 
 **步骤：**
-- 锁定 pd-vm revision，开发依赖可用兄弟 path，发布改为可复现来源；不要复制 Core 源码。
+- 锁定 pd-vm revision，开发与发布均使用可复现依赖；兄弟 Core 仓库仅供只读核查 SDK，不修改或复制 Core 源码。能力补充遵循第 3.4 节，在本项目 host 层完成。
 - 编写 RSS 跨模块 named type、typed host 调用、可选字段、guest callable 真实 compile/bind/run 用例。
 - 验证正常退出、host 失败、取消、资源 close 和 VM 重用；编译与执行使用同一 catalog。
 - 建立应用最小入口和 host descriptor 清单；先 interpreter，JIT 后续独立验证。
@@ -455,7 +456,7 @@ cargo run -p xeh-xtask -- verify --all --deny-unverified
 - 先写暂停/取消与完成同时发生、通道满、消费者退出、socket stall、磁盘写失败用例，再补清理实现。
 - 测大于 Core 默认缓冲上限的合法图片仍能流式完成，且 VM 未持有全图。
 
-**验收：** `cargo test -p xeh-host --test concurrency --test transport`；并发数、队列界限、取消后资源计数有断言。关卡失败时先处理 SDK 缺口，不能开始大量 RSS 迁移掩盖问题。
+**验收：** `cargo test -p xeh-host --test concurrency --test transport`；并发数、队列界限、取消后资源计数有断言。关卡失败时先按第 3.4 节验证现有 Core 能力及 RSS 组合；剩余真实缺口只在本项目 host 层补齐，不修改 Core，不能开始大量 RSS 迁移掩盖问题。
 
 ### Task 4：简单 JSON 配置读取、覆盖与业务视图（重做）
 

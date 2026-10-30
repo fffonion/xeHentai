@@ -227,6 +227,126 @@ async fn run_config_scenario_async(root: &Path, request: &str) -> Result<String,
     }
 }
 
+/// Runs the RSS proxy entry with a fixture-owned authorization envelope.
+///
+/// `authorization` is a JSON object with `allowed_schemes` (strings),
+/// `allowed_hosts` (strings), `allowed_ports` (ints) and `allow_private_ips`.
+/// It is fixed before the guest starts and is never read from the guest
+/// request, environment proxy variables or a user configuration file.
+pub fn run_proxy_scenario(
+    _root: &Path,
+    request: &str,
+    authorization: &str,
+) -> Result<String, HostError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| HostError::runtime(error.to_string()))?;
+    runtime.block_on(run_proxy_scenario_async(request, authorization))
+}
+
+fn authorization_config(authorization: &str) -> Result<vm::HttpConfig, HostError> {
+    let value: serde_json::Value = serde_json::from_str(authorization)
+        .map_err(|error| HostError::runtime(format!("proxy authorization is not JSON: {error}")))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| HostError::runtime("proxy authorization must be an object"))?;
+    let strings = |name: &str| -> Result<Vec<String>, HostError> {
+        object
+            .get(name)
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| HostError::runtime(format!("proxy authorization {name} is required")))?
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| HostError::runtime(format!("proxy authorization {name} entry")))
+            })
+            .collect()
+    };
+    let ports: Vec<u16> = object
+        .get("allowed_ports")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| HostError::runtime("proxy authorization allowed_ports is required"))?
+        .iter()
+        .map(|item| {
+            item.as_u64()
+                .and_then(|value| u16::try_from(value).ok())
+                .ok_or_else(|| HostError::runtime("proxy authorization port is invalid"))
+        })
+        .collect::<Result<_, _>>()?;
+    let allow_private_ips = object
+        .get("allow_private_ips")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    Ok(vm::HttpConfig {
+        allowed_schemes: strings("allowed_schemes")?,
+        allowed_hosts: strings("allowed_hosts")?,
+        allowed_ports: ports,
+        allow_private_ips,
+        connect_timeout: std::time::Duration::from_secs(5),
+        request_timeout: std::time::Duration::from_secs(15),
+        stream_idle_timeout: std::time::Duration::from_secs(5),
+        max_stream_duration: std::time::Duration::from_secs(15),
+        ..vm::HttpConfig::default()
+    })
+}
+
+async fn run_proxy_scenario_async(request: &str, authorization: &str) -> Result<String, HostError> {
+    let http = authorization_config(authorization)?;
+    let catalog = crate::proxy_host::proxy_catalog();
+    let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../app/proxy/entry.rss");
+    let program = compile_file_with_catalog(&entry, Arc::clone(&catalog))
+        .map_err(|error| HostError::compile(format!("proxy entry {}: {error}", entry.display())))?;
+    let mut vm = Vm::try_new(program).map_err(HostError::from_vm)?;
+    vm.set_jit_config(vm::JitConfig {
+        enabled: false,
+        ..Default::default()
+    });
+    let mut registry = crate::task_control::registry_with_task_hosts(&catalog)?;
+    let host = Arc::new(crate::proxy_host::ProxyHost {
+        http,
+        hooks: crate::dto::TransportHooks::default(),
+    });
+    crate::proxy_host::register_proxy(&mut registry, &catalog, host)?;
+    bind_vm(&mut vm, &registry)?;
+    attach_timer(&mut vm, Arc::new(EmbeddingTimer::new()));
+    drive_to_halt(&mut vm).await?;
+    let callable = vm
+        .resolve_exported_callable("run")
+        .map_err(HostError::from_vm)?;
+    let mut invocation = vm
+        .start_invocation(callable, vec![Value::string(request.to_string())])
+        .map_err(HostError::from_vm)?;
+    let value = poll_fn(|context| loop {
+        match invocation.poll_next_with_context(context) {
+            Ok(InvocationPoll::Pending) => return Poll::Pending,
+            Ok(InvocationPoll::Ready(Some(Ok(InvocationItem::Event(_))))) => continue,
+            Ok(InvocationPoll::Ready(Some(Ok(InvocationItem::Complete(value))))) => {
+                return Poll::Ready(Ok(value));
+            }
+            Ok(InvocationPoll::Ready(Some(Err(error)))) => {
+                return Poll::Ready(Err(HostError::runtime(format!(
+                    "proxy invocation failed: {error:?}"
+                ))));
+            }
+            Ok(InvocationPoll::Ready(None)) => {
+                return Poll::Ready(Err(HostError::runtime(
+                    "proxy invocation ended without a result",
+                )));
+            }
+            Err(error) => return Poll::Ready(Err(HostError::from_vm(error))),
+        }
+    })
+    .await?;
+    match value {
+        Value::String(text) => Ok(text.as_str().to_string()),
+        other => Err(HostError::runtime(format!(
+            "proxy entry returned {other:?}, not a string"
+        ))),
+    }
+}
+
 /// Runs the RSS site/rule entry with a fixture-owned debug-write root.
 ///
 /// The guest receives only the fixed `debug.htm` target under `root`; it cannot

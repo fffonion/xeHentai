@@ -154,10 +154,25 @@ fn app_catalog_owns_only_the_two_new_helpers() {
         .expect("IoWriteTextResult named body");
     assert_eq!(declared.fields, expected_fields);
 
+    let quote = app
+        .function("xeh_url::quote_plus")
+        .expect("xeh_url::quote_plus schema");
+    assert_eq!(quote.params.len(), 1);
+    assert_eq!(quote.params[0].name, "text");
+    assert_eq!(quote.params[0].ty, HostTypeSchema::String);
+    assert_eq!(quote.return_type, HostTypeSchema::String);
+    let unquote = app
+        .function("xeh_url::unquote")
+        .expect("xeh_url::unquote schema");
+    assert_eq!(unquote.params.len(), 1);
+    assert_eq!(unquote.params[0].name, "text");
+    assert_eq!(unquote.params[0].ty, HostTypeSchema::String);
+    assert_eq!(unquote.return_type, HostTypeSchema::String);
+
     assert_eq!(
         app.functions().len(),
-        core.functions().len() + 2,
-        "the application catalog adds exactly the two named helpers"
+        core.functions().len() + 4,
+        "the application catalog adds exactly the four named helpers"
     );
     for preserved in [
         "json::decode_object_entries",
