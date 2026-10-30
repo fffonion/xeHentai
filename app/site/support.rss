@@ -1,6 +1,7 @@
 //! Regex composition and one-pass text helpers used by the RSS site filters.
 use json;
 use re;
+use xeh_json;
 
 fn scan(pattern: string, text: string) -> map {
     let nul = json::decode::<string>("\"\\u0000\"");
@@ -170,7 +171,7 @@ fn unicode_scalar(value: int) -> map {
             let low = 56320 + offset % 1024;
             "\"\\u" + hex4(high) + "\\u" + hex4(low) + "\""
         };
-        if json::is_valid(encoded.copy()) {
+        if xeh_json::is_valid(encoded.copy()) {
             result["ok"] = true;
             result["exception"] = "";
             result["value"] = json::decode::<string>(encoded.copy());

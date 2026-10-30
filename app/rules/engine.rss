@@ -4,6 +4,7 @@
 //! in the site filters and rule modules it calls; nothing here inspects fixture
 //! case names or reimplements site behaviour.
 use json;
+use xeh_json;
 
 use super::site::login;
 use super::site::mpv;
@@ -138,7 +139,7 @@ fn dispatch_context(context: SiteContext, debug_path: string) -> string {
 }
 
 pub fn run_engine(request: string, debug_path: string) -> string {
-    if json::is_valid(request.copy()) == false => {
+    if xeh_json::is_valid(request.copy()) == false => {
         "{\"callbacks\":[],\"return\":null,\"exception\":\"JSONDecodeError\",\"decisions\":[\"request:invalid-json\"],\"debug\":null,\"stream\":[]}"
     } else => {
         let context: SiteContext = json::decode::<SiteContext>(request.copy());

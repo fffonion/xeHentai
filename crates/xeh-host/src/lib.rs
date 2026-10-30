@@ -1,3 +1,4 @@
+mod app_host;
 mod bridge;
 mod catalog;
 mod dto;

@@ -1,5 +1,6 @@
 //! Multipage-viewer page URL extraction; JSON failure deliberately continues.
 use json;
+use xeh_json;
 
 use self::support;
 
@@ -54,7 +55,7 @@ pub fn extract_mpv_urls(text: string, real_url: string, suc_returns: [string], f
         decisions[decisions.length] = "mpv:json-load-failed";
     } else {
         let first_json: string = imagelist_texts[0].copy();
-        if json::is_valid(first_json.copy()) {
+        if xeh_json::is_valid(first_json.copy()) {
             images = json::decode::<[map]>(first_json.copy());
             decisions[decisions.length] = "mpv:json-decoded";
         } else {

@@ -18,14 +18,40 @@ use crate::types::HostError;
 /// resource-free ordered-entry imports once, from the same catalog snapshot.
 pub const REUSED_CATALOG_MODULES: &[&str] = &["http", "io", "json", "timer"];
 
+/// The application catalog: the pinned Core standard catalog plus the two
+/// application-owned typed helpers.
+///
+/// The Core module tables, resource declarations and restricted binding stay
+/// exactly as `standard_host_catalog()` publishes them; the helpers are added
+/// under their own `xeh_json` / `xeh_io` namespaces, so no Core function is
+/// replaced or overloaded. They are ordinary named catalog entries, not a
+/// namespaced-builtin override.
 pub fn standard_catalog() -> Arc<HostApiCatalog> {
-    standard_host_catalog()
+    let core = standard_host_catalog();
+    let mut builder = HostApiCatalog::builder();
+    for function in core.functions() {
+        builder.function(function.clone());
+    }
+    for resource in core.resources() {
+        builder.resource(resource.clone());
+    }
+    for schema in core.structs() {
+        builder.named_struct(schema.clone());
+    }
+    for schema in crate::app_host::structs() {
+        builder.named_struct(schema);
+    }
+    for function in crate::app_host::functions() {
+        builder.function(function);
+    }
+    Arc::new(builder.build().expect("application host catalog"))
 }
 
 pub fn open_registry(catalog: &HostApiCatalog) -> Result<HostFunctionRegistry, HostError> {
     let mut registry = HostFunctionRegistry::empty();
     registry.set_standard_composition(standard_composition());
     install_reused_hosts(&mut registry, catalog)?;
+    crate::app_host::register(&mut registry, catalog)?;
     Ok(registry)
 }
 

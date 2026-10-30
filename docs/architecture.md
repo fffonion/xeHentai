@@ -2,7 +2,7 @@
 
 锁定 revision：`cdb0b798d631cd7ffab6dfed3fe4b69381ed3340`。依赖包名是 `pd-vm`，库名是 `vm`。默认 feature 含 JIT，本嵌入关闭默认 feature，只打开 `runtime`、`async`、`http-client`。不复制 Core 源码，不启用 SQLite 或 CLI。该 revision 的有序 object-entry codec 仍是会话成员顺序的唯一来源；`io::read_all` 已按 `IoPolicy::max_read_bytes` 在 Reader 层最多读取 `limit + 1` 字节后拒绝，App 不复制 Reader、也不以 stat 预查冒充硬上限。
 
-编译和绑定使用同一份 catalog。`json` / `re` 没有 guest catalog，走 namespaced builtin，VM 上安装 `standard_composition()` 后才能调用。`io`、`timer`、`http` 由 `standard_host_modules()` 的 catalog surface 经 `install_from_catalog` 安装，adapter 是 Core descriptor，不是应用侧重写。
+编译和绑定使用同一份 catalog。Core 的 `json::encode` / `json::decode` / `re` 没有 guest catalog，走 namespaced builtin，VM 上安装 `standard_composition()` 后才能调用；`xeh_json` / `xeh_io` 是应用自己的 named typed host，不覆盖这些 builtin。`io`、`timer`、`http` 由 `standard_host_modules()` 的 catalog surface 经 `install_from_catalog` 安装，adapter 是 Core descriptor，不是应用侧重写。
 
 每个 VM 自有 registry、async bridge 和 `EmbeddingTimer`。没有进程级 registry 缓存，没有 VM 池，不把 `Vm` 或 `Value` 送到另一条线程。取消走 `reset_for_reuse` 和 `poll_reset_for_reuse`，bridge 的 `cancel_op` 丢掉尚未完成的 future。HTTP 的 in-flight permit 跟这条 future 一起释放；`set_http_max_in_flight(1)` 时，取消后的同 VM 仍能发出下一笔请求。
 
@@ -23,9 +23,13 @@ owner 线程 shutdown 先停止准入和后续排程。尚未开跑的 callback 
 | 文件读写 | `io::open`、`io::read_all`、`io::write`、`io::flush`、`io::close`（`src/builtins/runtime/io`；`write` / `flush` / `read_all` 借用 `io.file`，`close` 消耗该资源） | `grant_owned_builtins` 后 `install_from_catalog`，再 `IoHostExt::configure_io` | `async` | `standard_catalog_file_round_trip_reuses_the_vm`、`io_policy_authorizes_only_the_test_root`、`io_policy_rejects_write_when_allow_write_is_false` |
 | 定时器 | `timer::at`、`timer::every`、`timer::pending_count`（`src/builtins/runtime/timer.rs`） | `install_from_catalog` + `TimerHostExt::install_timer_runtime` | `runtime` | `timer_max_running_keeps_a_due_callback_pending_while_http_waits`、`timer_shutdown_closes_an_active_http_callback`、`timer_rejects_drive_and_shutdown_from_another_thread` |
 | 缓冲 HTTP | `http::request::new`、`http::client::request`、`http::response::status`、`http::response::body` | `install_from_catalog` + `HttpHostExt::configure_http` | `http-client` | `http_policy_allow_and_deny`、`cancelled_http_request_closes_and_vm_is_reused` |
+| JSON 严格校验 | `xeh_json::is_valid`（应用侧 named typed host；解析语义来自 Core `json::decode` descriptor 的 StaticArgs adapter） | 应用 `standard_catalog` 的 named 函数 + `register_catalog_function` | `runtime` | `guest_json_validation_matches_the_strict_decoder`、`pinned_core_decode_descriptor_is_an_args_only_adapter` |
+| 整文件文本写入 | `xeh_io::try_write_text`（应用侧 named typed host；`IoPolicy` snapshot + `Vm::submit_host_future`） | 应用 `standard_catalog` 的 named 函数 + `register_catalog_function` | `async` | `guest_text_writer_enforces_policy_and_continues`、`guest_text_writer_denies_without_policy_and_counts_bytes` |
 | UUID v4 文本 | `xeh_system::uuid_v4`（应用侧 named typed host，OS entropy） | `register_catalog_function` | `async` | `production_guids_and_seed_boundary` |
 
-`io` 的 catalog surface 包含 `open`、`read_all`、`write`、`flush`、`close`。`IoResource` 报告 `io.file`。应用不另写文件 host，不伪造资源键或数字句柄。`io::popen`、`io::read_line`、`io::exists` 仍走 namespaced builtin；测试不调用它们。
+`io` 的 catalog surface 包含 `open`、`read_all`、`write`、`flush`、`close`。`IoResource` 报告 `io.file`。应用不复制这些资源型入口，不伪造资源键或数字句柄；`xeh_io::try_write_text` 是应用侧不返回资源的整文件文本写入，只按同一份 `IoPolicy` 工作。`io::popen`、`io::read_line`、`io::exists` 仍走 namespaced builtin；测试不调用它们。
+
+`xeh_json::is_valid` 在 registry 安装时只解析一次 Core `json::decode` descriptor，并校验它确实是 args-only adapter，之后用保证为 string 的 `Value` 调用同一解析路径；成功只回 `true` 并丢弃解码值，严格拒绝回 `false`，其他 VM/类型错误原样传播。`xeh_io::try_write_text` 在 await 前快照 `IoPolicy`（缺少 policy 视为拒绝），在 open/truncate 前检查 `allow_write`、UTF-8 字节上限和允许根（缺失目标经已存在父目录解析，最终符号链接必须解析到根内），普通拒绝/超限/OS 失败返回命名 `IoWriteTextResult`，取消与 bridge 生命周期不变。
 
 `standard_catalog_file_round_trip_reuses_the_vm` 使用同一份 standard catalog 和 registry，关闭 default host fallback，并用只授权当次 RAII `TestRoot` 的 `IoPolicy`。RSS 执行 writable open、borrowed write、flush、consuming close、reopen、`read_all`、close。`io::write` 的返回值与宿主从磁盘读到的字节数一致，`read_all` 与这些磁盘字节一致；flush 和两次 close 成功。结束时 resource count 与 pending IO 操作为 0。`release_for_reuse` 后同一 VM 再执行该脚本，结果相同，资源再次归零。字节数来自 RSS 返回值和宿主读盘，文档不写死计数。
 

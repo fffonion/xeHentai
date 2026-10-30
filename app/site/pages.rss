@@ -1,6 +1,6 @@
 //! Ordered page URL extraction and best-effort raw-body debug effect.
-use io;
 use json;
+use xeh_io;
 
 use self::support;
 
@@ -40,7 +40,7 @@ pub fn extract_page_urls(text: string, debug_path: string, suc_returns: [string]
     let mut callbacks: [map] = [];
     let mut decisions: [string] = [];
     if urls.length == 0 {
-        let _debug_write = io::try_write_text(debug_path.copy(), text.copy());
+        let _debug_write = xeh_io::try_write_text(debug_path.copy(), text.copy());
         decisions[decisions.length] = "pages:debug-write-attempted";
         decisions[decisions.length] = "pages:no-url";
         callbacks[callbacks.length] = fail_event(fail_returns[0].copy());
