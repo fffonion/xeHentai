@@ -782,8 +782,10 @@ fn mutation_gates(
     let readd_id = "proxy.pool.readd-resets-scores";
     if let (Some(expected), Some(actual)) = (expected.get(readd_id), actual.get(readd_id)) {
         reject_mutant("pool-readd-count", expected, actual, |value| {
+            // RFC 6901 encodes `/` in the source address key as `~1`.
+            // The row remains `counts["http://a.invalid:1"]`, not another field.
             let row = value
-                .pointer_mut("/steps/4/proxy/counts/http://a.invalid:1")
+                .pointer_mut("/steps/4/proxy/counts/http:~1~1a.invalid:1")
                 .and_then(Value::as_array_mut)
                 .ok_or_else(|| "re-add counts are absent".to_string())?;
             row[0] = json!(row[0].as_i64().unwrap_or_default() + 1);

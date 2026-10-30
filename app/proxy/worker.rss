@@ -46,13 +46,16 @@ pub fn hop(
         true,
         262144
     );
-    let marker = xeh_proxy::body_scan(
-        response.body,
-        "<input type=\"hidden\" name=\"action\" value=\"sslagree\">"
-    );
+    let error_kind: string = response.error_kind;
+    let mut marker = false;
+    if error_kind == "" {
+        marker = xeh_proxy::body_scan(
+            response.body,
+            "<input type=\"hidden\" name=\"action\" value=\"sslagree\">"
+        );
+    }
     let status: int = response.status;
     let opened: string = response.url;
-    let error_kind: string = response.error_kind;
     let error_detail: string = response.error_detail;
     let byte_length: int = response.byte_length;
     let header_names: [string] = response.header_names;

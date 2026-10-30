@@ -495,7 +495,7 @@
       "assertions": {
         "/ok": false,
         "/exception": "PoolException",
-        "/detail": "glype returns: upstream"
+        "/detail": "glype returns: <div id=\"error\">upstream</div>"
       }
     }
   ]

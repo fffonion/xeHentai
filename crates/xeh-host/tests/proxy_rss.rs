@@ -81,15 +81,33 @@ fn run_port(request: Value, port: u16) -> Value {
     serde_json::from_str(&raw).expect("report")
 }
 
-fn serve(handler: impl Fn(String) -> Vec<u8> + Send + 'static) -> u16 {
+struct FixtureServer {
+    port: u16,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for FixtureServer {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn serve(handler: impl Fn(String) -> Vec<u8> + Send + 'static) -> FixtureServer {
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
     let port = listener.local_addr().expect("port").port();
     listener.set_nonblocking(true).expect("nonblocking");
-    std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        while std::time::Instant::now() < deadline {
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&stop);
+    let thread = std::thread::spawn(move || {
+        while !flag.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     let _ = stream.set_nonblocking(false);
@@ -106,7 +124,11 @@ fn serve(handler: impl Fn(String) -> Vec<u8> + Send + 'static) -> u16 {
             }
         }
     });
-    port
+    FixtureServer {
+        port,
+        stop,
+        thread: Some(thread),
+    }
 }
 
 fn http(status: u16, extra: &str, body: &str) -> Vec<u8> {
@@ -154,14 +176,14 @@ fn glype_session_survives_a_second_owner_and_stale_publish_misses() {
 #[test]
 fn glype_raw_403_is_status_not_connection_error() {
     for status in [403u16, 429, 500] {
-        let port = serve(move |_| http(status, "Content-Type: text/html\r\n", "denied"));
+        let server = serve(move |_| http(status, "Content-Type: text/html\r\n", "denied"));
         let report = run_port(
             json!({
                 "operation": "glype",
-                "address": format!("http://127.0.0.1:{port}/browse.php?u=x&b=4"),
-                "targets": [format!("http://127.0.0.1:{port}/page")]
+                "address": format!("http://127.0.0.1:{}/browse.php?u=x&b=4", server.port),
+                "targets": [format!("http://127.0.0.1:{}/page", server.port)]
             }),
-            port,
+            server.port,
         );
         assert_eq!(report["flows"][0]["status"], json!(status));
         assert_eq!(report["flows"][0]["exception"], json!(""));
@@ -172,7 +194,7 @@ fn glype_raw_403_is_status_not_connection_error() {
 fn worker_redirect_real_url_is_the_previous_hop() {
     let port_slot = std::sync::Arc::new(std::sync::atomic::AtomicU16::new(0));
     let slot = port_slot.clone();
-    let port = serve(move |request| {
+    let server = serve(move |request| {
         let port = slot.load(std::sync::atomic::Ordering::SeqCst);
         if request.contains(" /done ") {
             http(200, "Content-Type: text/plain\r\n", "done")
@@ -184,21 +206,21 @@ fn worker_redirect_real_url_is_the_previous_hop() {
             )
         }
     });
-    port_slot.store(port, std::sync::atomic::Ordering::SeqCst);
-    let start = format!("http://127.0.0.1:{port}/start");
+    port_slot.store(server.port, std::sync::atomic::Ordering::SeqCst);
+    let start = format!("http://127.0.0.1:{}/start", server.port);
     let report = run_port(
         json!({
             "operation": "worker",
             "url": start,
             "explicit_allow_redirects": false
         }),
-        port,
+        server.port,
     );
     assert_eq!(report["status"], json!(200));
     assert_eq!(report["real_url"], json!(start));
     assert_eq!(
         report["final_url"],
-        json!(format!("http://127.0.0.1:{port}/done"))
+        json!(format!("http://127.0.0.1:{}/done", server.port))
     );
     assert_eq!(report["hops"][1]["proxied"], json!(false));
 }
@@ -207,7 +229,7 @@ fn worker_redirect_real_url_is_the_previous_hop() {
 fn explicit_allow_redirects_raises_before_the_agreement_request() {
     let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counted = hits.clone();
-    let port = serve(move |_| {
+    let server = serve(move |_| {
         counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         http(
             200,
@@ -218,11 +240,11 @@ fn explicit_allow_redirects_raises_before_the_agreement_request() {
     let report = run_port(
         json!({
             "operation": "worker",
-            "url": format!("http://127.0.0.1:{port}/warn"),
+            "url": format!("http://127.0.0.1:{}/warn", server.port),
             "explicit_allow_redirects": true,
-            "agreement_url": format!("http://127.0.0.1:{port}/agree")
+            "agreement_url": format!("http://127.0.0.1:{}/agree", server.port)
         }),
-        port,
+        server.port,
     );
     assert_eq!(report["exception"], json!("TypeError"));
     assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -241,17 +263,17 @@ fn run_at(root: &std::path::Path, request: Value, port: u16) -> Value {
 fn worker_reselects_proxy_on_the_image_hop_without_fetching_it() {
     let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counted = hits.clone();
-    let port = serve(move |_| {
+    let server = serve(move |_| {
         counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         http(302, "Location: http://e-hentai.org/image.jpg\r\n", "")
     });
     let report = run_port(
         json!({
             "operation": "worker",
-            "url": format!("http://127.0.0.1:{port}/page"),
+            "url": format!("http://127.0.0.1:{}/page", server.port),
             "explicit_allow_redirects": false
         }),
-        port,
+        server.port,
     );
     assert_eq!(report["hops"][0]["proxied"], json!(false));
     assert_eq!(report["hops"][1]["proxied"], json!(true));
@@ -265,7 +287,7 @@ fn post_and_large_image_stay_native() {
     let posted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let counted = hits.clone();
     let saw = posted.clone();
-    let port = serve(move |request| {
+    let server = serve(move |request| {
         counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if request.starts_with("POST ") {
             saw.store(request.contains("a=1"), std::sync::atomic::Ordering::SeqCst);
@@ -287,12 +309,12 @@ fn post_and_large_image_stay_native() {
         root,
         json!({
             "operation": "transfer",
-            "url": format!("http://127.0.0.1:{port}/form"),
+            "url": format!("http://127.0.0.1:{}/form", server.port),
             "method": "POST",
             "data": "a=1",
             "stage": "post-body.bin"
         }),
-        port,
+        server.port,
     );
     assert_eq!(post["status"], json!(200));
     assert!(posted.load(std::sync::atomic::Ordering::SeqCst));
@@ -303,11 +325,11 @@ fn post_and_large_image_stay_native() {
         root,
         json!({
             "operation": "transfer",
-            "url": format!("http://127.0.0.1:{port}/image.jpg"),
+            "url": format!("http://127.0.0.1:{}/image.jpg", server.port),
             "method": "GET",
             "stage": "large-image.bin"
         }),
-        port,
+        server.port,
     );
     assert_eq!(report["status"], json!(200));
     assert_eq!(report["byte_length"], json!(5 * 1024 * 1024));

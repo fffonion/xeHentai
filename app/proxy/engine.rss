@@ -77,12 +77,24 @@ fn run_pool(document: map) -> string {
             let proxy_state: map = report["proxy"].copy();
             proxy_text = json::encode(proxy_state);
         }
+        // Source `proxied_request` publishes the selected address on the step.
+        // The route object inside `value` is additional and does not replace it.
+        let mut address_text = "null";
+        if op == "proxy_select" && ok && type(report["value"].copy()) != "null" {
+            let selected_text: string = report["value"].copy();
+            let selected: map = json::decode::<map>(selected_text);
+            if selected.has("address") && type(selected["address"].copy()) == "string" {
+                let address: string = selected["address"].copy();
+                address_text = json::encode(address);
+            }
+        }
         results[results.length] = "{\"index\":" + json::encode(index)
             + ",\"op\":" + json::encode(op)
             + ",\"ok\":" + json::encode(ok)
             + ",\"error\":" + json::encode(error)
             + ",\"code\":" + code_text
             + ",\"value\":" + value_text
+            + ",\"address\":" + address_text
             + ",\"proxy\":" + proxy_text + "}";
     }
     "{\"operation\":\"pool\",\"steps\":[" + join(results) + "]}"
