@@ -12,22 +12,31 @@
 //! 8-character task GUID is still chosen in RSS.
 use std::future::poll_fn;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::task::Poll;
 
 use vm::{
     register_catalog_function, CallOutcome, CallReturn, HostApiCatalog, HostFunction,
-    HostFunctionRegistry, HostFunctionSchema, HostTypeSchema, InvocationItem, InvocationPoll,
-    IoHostExt, Value, Vm, VmError, VmResult,
+    HostFunctionRegistry, InvocationItem, InvocationPoll, IoHostExt, Value, Vm, VmError, VmResult,
 };
 
-use crate::catalog::{open_registry, standard_catalog};
+use crate::catalog::open_registry;
 use crate::os::fs::SESSION_READ_LIMIT_BYTES;
 use crate::runtime::{bind_vm, compile_file_with_catalog, drive_to_halt};
 use crate::types::HostError;
 
 pub fn task_entry_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../app/domain/state.rss")
+}
+
+fn task_program(catalog: &Arc<HostApiCatalog>) -> Result<vm::Program, HostError> {
+    static COMPILED: OnceLock<vm::Program> = OnceLock::new();
+    if let Some(program) = COMPILED.get() {
+        return Ok(program.clone());
+    }
+    let program = compile_file_with_catalog(&task_entry_path(), Arc::clone(catalog))?;
+    let _ = COMPILED.set(program.clone());
+    Ok(program)
 }
 
 /// Trusted session storage for one control owner.
@@ -137,6 +146,15 @@ impl ControlOptions {
     }
 }
 
+/// Trusted proxy connector for one control owner.
+///
+/// The HTTP policy and spool root are fixed by the embedding. A dispatch
+/// request cannot widen them.
+pub struct ProxyServices {
+    pub root: PathBuf,
+    pub http: vm::HttpConfig,
+}
+
 pub struct TaskControl {
     runtime: tokio::runtime::Runtime,
     vm: Vm,
@@ -160,6 +178,27 @@ impl TaskControl {
         options: &ControlOptions,
         session: Option<&SessionOptions>,
     ) -> Result<Self, HostError> {
+        Self::open_owner(options, session, None)
+    }
+
+    /// Same owner as `open_with_session`, plus a trusted proxy connector.
+    ///
+    /// The HTTP policy and spool root come from the embedding. A controller
+    /// opened without this binding still compiles the proxy operations and
+    /// rejects every one of them.
+    pub fn open_with_proxy(
+        options: &ControlOptions,
+        session: Option<&SessionOptions>,
+        proxy: ProxyServices,
+    ) -> Result<Self, HostError> {
+        Self::open_owner(options, session, Some(proxy))
+    }
+
+    fn open_owner(
+        options: &ControlOptions,
+        session: Option<&SessionOptions>,
+        proxy: Option<ProxyServices>,
+    ) -> Result<Self, HostError> {
         for guid in &options.guids {
             if guid.len() != 8 {
                 return Err(HostError::bind(format!(
@@ -172,9 +211,11 @@ impl TaskControl {
             .build()
             .map_err(|error| HostError::runtime(error.to_string()))?;
         let catalog = task_catalog();
-        let entry = task_entry_path();
-        let program = compile_file_with_catalog(&entry, Arc::clone(&catalog)).map_err(|error| {
-            HostError::compile(format!("task entry {}: {error}", entry.display()))
+        let program = task_program(&catalog).map_err(|error| {
+            HostError::compile(format!(
+                "task entry {}: {error}",
+                task_entry_path().display()
+            ))
         })?;
         let mut vm = Vm::try_new(program).map_err(HostError::from_vm)?;
         // The pinned Core enables the trace JIT by default on this platform
@@ -184,7 +225,17 @@ impl TaskControl {
             enabled: false,
             ..Default::default()
         });
-        let registry = registry_with_task_hosts(&catalog)?;
+        let mut registry = registry_with_task_hosts(&catalog)?;
+        if let Some(services) = proxy {
+            let host = crate::proxy_host::ProxyHost::new(
+                services.root,
+                services.http,
+                crate::dto::TransportHooks::default(),
+            );
+            crate::proxy_host::register_proxy(&mut registry, &catalog, host)?;
+        } else {
+            crate::proxy_host::register_proxy_denied(&mut registry, &catalog)?;
+        }
         bind_vm(&mut vm, &registry)?;
         configure_session_boundaries(&mut vm, session)?;
         runtime.block_on(drive_to_halt(&mut vm))?;
@@ -409,29 +460,7 @@ async fn invoke_value(vm: &mut Vm, callable: Value, args: Vec<Value>) -> Result<
 /// Standard catalog plus the executed Core gaps: UUID v4 text and the named
 /// file-system primitives the session/scan scope needs.
 pub fn task_catalog() -> Arc<HostApiCatalog> {
-    let standard = standard_catalog();
-    let mut builder = HostApiCatalog::builder();
-    for function in standard.functions() {
-        builder.function(function.clone());
-    }
-    for resource in standard.resources() {
-        builder.resource(resource.clone());
-    }
-    for schema in standard.structs() {
-        builder.named_struct(schema.clone());
-    }
-    for schema in crate::os::fs_structs() {
-        builder.named_struct(schema);
-    }
-    for function in crate::os::fs_functions() {
-        builder.function(function);
-    }
-    builder.function(HostFunctionSchema::with_return(
-        "xeh_system::uuid_v4",
-        Vec::new(),
-        HostTypeSchema::String,
-    ));
-    Arc::new(builder.build().expect("task control catalog"))
+    crate::proxy_host::compose_application_catalog()
 }
 
 pub(crate) fn registry_with_task_hosts(

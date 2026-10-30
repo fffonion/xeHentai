@@ -1,6 +1,6 @@
 mod client;
 mod connectors;
-mod policy;
+pub(crate) mod policy;
 mod route;
 mod stream;
 

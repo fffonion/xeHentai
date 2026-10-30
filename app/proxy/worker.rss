@@ -21,12 +21,16 @@ fn location_of(names: [string], values: [string]) -> string? {
     found
 }
 
-fn hop(
+pub fn hop(
     url: string,
     method: string,
     data: string,
     names: [string],
-    values: [string]
+    values: [string],
+    route_kind: string,
+    route_host: string,
+    route_port: int,
+    trusted_remote_dns: bool
 ) -> map {
     let response = xeh_proxy::exchange(
         url.copy(),
@@ -34,10 +38,10 @@ fn hop(
         names.copy(),
         values.copy(),
         data.copy(),
-        "direct",
-        "",
-        0,
-        false,
+        route_kind.copy(),
+        route_host.copy(),
+        route_port,
+        trusted_remote_dns,
         false,
         true,
         262144
@@ -92,7 +96,17 @@ pub fn request(
     let values: [string] = [];
     while stop == false {
         let proxied = policy::matches(image, image_only, current.copy());
-        let response = hop(current.copy(), method.copy(), data.copy(), names.copy(), values.copy());
+        let response = hop(
+            current.copy(),
+            method.copy(),
+            data.copy(),
+            names.copy(),
+            values.copy(),
+            "direct",
+            "",
+            0,
+            false
+        );
         let hop_status: int = response["status"].copy();
         let hop_error: string = response["error_kind"].copy();
         let hop_detail: string = response["error_detail"].copy();
@@ -127,7 +141,11 @@ pub fn request(
                     "GET",
                     "",
                     names.copy(),
-                    values.copy()
+                    values.copy(),
+                    "direct",
+                    "",
+                    0,
+                    false
                 );
                 let agreement_error: string = agreement["error_kind"].copy();
                 hops[hops.length] = {
@@ -146,8 +164,10 @@ pub fn request(
         } else if hop_status > 300 && hop_status < 400 {
             history[history.length] = current.copy();
             if history.length > 30 {
-                error_kind = "TooManyRedirects";
-                error_detail = "too many redirects";
+                status = 600;
+                opened = url.copy();
+                error_kind = "";
+                error_detail = "";
                 stop = true;
             } else {
                 let header_names: [string] = response["header_names"].copy();

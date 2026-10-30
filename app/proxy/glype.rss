@@ -379,7 +379,8 @@ pub fn process(
     body_text: string,
     body_text_valid: bool,
     set_cookie_present: bool,
-    set_cookie_header: string
+    set_cookie_header: string,
+    text_error: string
 ) -> map {
     let content_type = header_value(headers.copy(), "Content-Type");
     let checked = if type(content_type) == "null" => {
@@ -403,10 +404,20 @@ pub fn process(
         };
         if re::match("^text", mime.copy()) => {
             if body_text_valid == false => {
+                let exception = if text_error == "text_budget" => {
+                    "text_budget"
+                } else => {
+                    "UnicodeDecodeError"
+                };
+                let detail = if text_error == "text_budget" => {
+                    "text byte budget exceeded"
+                } else => {
+                    "'utf-8' codec can't decode bytes"
+                };
                 response_map(
                     false,
-                    "UnicodeDecodeError",
-                    "'utf-8' codec can't decode bytes",
+                    exception,
+                    detail,
                     "",
                     status,
                     mime.copy(),
@@ -515,13 +526,22 @@ fn fetch_request(url: string, headers: [map], follow: bool) -> map {
         "<input type=\"hidden\" name=\"action\" value=\"sslagree\">"
     );
     let inline = xeh_proxy::body_inline(response.body, 65536);
+    let refused = inline.ok.copy() == false;
+    let refused_error: string = inline.error.copy();
     let _closed = xeh_proxy::body_close(response.body);
-    let bytes: [int] = if inline.ok => {
+    let bytes: [int] = if inline.ok.copy() => {
         let copied: [int] = inline.bytes.copy();
         copied
     } else => {
         []
     };
+    let text_error: string = response.text_error;
+    let mut reported_error: string = error_kind.copy();
+    let mut reported_detail: string = error_detail.copy();
+    if refused && reported_error == "" && text_error != "text_budget" {
+        reported_error = "inline_refused";
+        reported_detail = refused_error.copy();
+    }
     let mut fields: [map] = [];
     for index in 0..response_names.length {
         let name: string = response_names[index].copy();
@@ -535,9 +555,10 @@ fn fetch_request(url: string, headers: [map], follow: bool) -> map {
         body: bytes,
         body_text: body_text.copy(),
         text_valid: text_valid,
-        error_kind: error_kind.copy(),
-        error_detail: error_detail.copy(),
+        error_kind: reported_error.copy(),
+        error_detail: reported_detail.copy(),
         marker: marker,
+        text_error: text_error.copy(),
     }
 }
 
@@ -627,6 +648,7 @@ pub fn run_flows(
                         let set_cookie_value = header_combined(response["headers"].copy(), "Set-Cookie");
                         let set_cookie_present = type(set_cookie_value) != "null";
                         let set_cookie_text = or_empty(set_cookie_value.copy());
+                        let response_text_error: string = response["text_error"].copy();
                         let processed = process(
                             parsed.copy(),
                             target.copy(),
@@ -636,7 +658,8 @@ pub fn run_flows(
                             body_text_value.copy(),
                             body_text_valid,
                             set_cookie_present,
-                            set_cookie_text.copy()
+                            set_cookie_text.copy(),
+                            response_text_error.copy()
                         );
                         if processed["ok"].copy() == false {
                             let exception: string = processed["exception"].copy();

@@ -29,6 +29,7 @@ use self::session;
 use self::task;
 use super::config::types;
 use super::proxy::pool;
+use super::proxy::request;
 use super::site::login;
 use xeh_fs;
 use xeh_system;
@@ -1024,6 +1025,83 @@ fn op_proxy_glyph_publish(store: Store, document: map) -> Step {
     code_step(next, err_no_error(), "{\"updated\":" + json::encode(updated) + "}")
 }
 
+fn string_list(document: map, name: string) -> [string] {
+    let mut out: [string] = [];
+    if document.has(name) && type(document[name].copy()) == "array" {
+        let raw: [string] = document[name].copy();
+        out = raw;
+    }
+    out
+}
+
+fn op_proxy_request(store: Store, document: map) -> Step {
+    let url = field_string(document.copy(), "url", "");
+    let method = field_string(document.copy(), "method", "GET");
+    let data = field_string(document.copy(), "data", "");
+    let stage = field_string(document.copy(), "stage", "");
+    let now = field_number(document.copy(), "now", 0.0);
+    let image = field_bool(document.copy(), "proxy_image", false);
+    let image_only = field_bool(document.copy(), "proxy_image_only", false);
+    let explicit = field_bool(document.copy(), "explicit_allow_redirects", false);
+    let text_budget: int = field_int(document.copy(), "text_budget", 0);
+    let names = string_list(document.copy(), "header_names");
+    let values = string_list(document.copy(), "header_values");
+    let result = request::execute(
+        pool_of(store.copy()),
+        now,
+        url.copy(),
+        method.copy(),
+        data.copy(),
+        names,
+        values,
+        stage.copy(),
+        image,
+        image_only,
+        explicit,
+        text_budget
+    );
+    let next = with_pool(store, result["state"].copy());
+    let ok: bool = result["ok"].copy();
+    let error: string = result["error"].copy();
+    let detail: string = result["detail"].copy();
+    let address: string = result["address"].copy();
+    let status: int = result["status"].copy();
+    let byte_length: int = result["byte_length"].copy();
+    let staged_ok: bool = result["staged_ok"].copy();
+    let staged_bytes: int = result["staged_bytes"].copy();
+    let staged_error: string = result["staged_error"].copy();
+    let glyph_s: string = result["glyph_s"].copy();
+    let epoch: int = result["epoch"].copy();
+    let sent_cookie: string = result["sent_cookie"].copy();
+    let logical_url: string = result["logical_url"].copy();
+    let final_url: string = result["final_url"].copy();
+    let real_url: string = result["real_url"].copy();
+    let route_kind: string = result["route_kind"].copy();
+    let value: string = "{\"ok\":" + json::encode(ok)
+        + ",\"error\":" + json::encode(error)
+        + ",\"detail\":" + json::encode(detail)
+        + ",\"address\":" + json::encode(address)
+        + ",\"status\":" + json::encode(status)
+        + ",\"byte_length\":" + json::encode(byte_length)
+        + ",\"staged_ok\":" + json::encode(staged_ok)
+        + ",\"staged_bytes\":" + json::encode(staged_bytes)
+        + ",\"staged_error\":" + json::encode(staged_error)
+        + ",\"glyph_s\":" + json::encode(glyph_s)
+        + ",\"epoch\":" + json::encode(epoch)
+        + ",\"sent_cookie\":" + json::encode(sent_cookie)
+        + ",\"logical_url\":" + json::encode(logical_url)
+        + ",\"final_url\":" + json::encode(final_url)
+        + ",\"real_url\":" + json::encode(real_url)
+        + ",\"route_kind\":" + json::encode(route_kind) + "}";
+    if ok => {
+        code_step(next, err_no_error(), value.copy())
+    } else => {
+        let mut step = error_step(next, error.copy());
+        step.value = value.copy();
+        step
+    }
+}
+
 fn op_prepare(store: Store, document: map) -> Step {
     let guid = field_string(document, "guid", "");
     if store_has_task(store.copy(), guid) == false => {
@@ -1934,6 +2012,8 @@ pub fn dispatch(control: Control, request: string) -> Control {
         op_proxy_glyph_read(store.copy(), document)
     } else if op == "proxy_glyph_publish" => {
         op_proxy_glyph_publish(store.copy(), document)
+    } else if op == "proxy_request" => {
+        op_proxy_request(store.copy(), document)
     } else if op == "event" => {
         op_event(store.copy(), document)
     } else if op == "snapshot" => {

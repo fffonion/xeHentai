@@ -1,6 +1,6 @@
 use std::future::poll_fn;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::task::Poll;
 
 use vm::{
@@ -50,6 +50,17 @@ pub fn compile_file_with_catalog(
     )
     .map_err(|error| HostError::compile(error.to_string()))?;
     Ok(compiled.program)
+}
+
+fn cached_program(path: &Path, catalog: &Arc<HostApiCatalog>) -> Result<Program, HostError> {
+    static COMPILED: OnceLock<Program> = OnceLock::new();
+    if let Some(program) = COMPILED.get() {
+        return Ok(program.clone());
+    }
+    let program = compile_file_with_catalog(path, Arc::clone(catalog))
+        .map_err(|error| HostError::compile(format!("proxy entry {}: {error}", path.display())))?;
+    let _ = COMPILED.set(program.clone());
+    Ok(program)
 }
 
 pub fn bind_vm(vm: &mut Vm, registry: &HostFunctionRegistry) -> Result<(), HostError> {
@@ -300,19 +311,18 @@ async fn run_proxy_scenario_async(
     let http = authorization_config(authorization)?;
     let catalog = crate::proxy_host::proxy_catalog();
     let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../app/proxy/entry.rss");
-    let program = compile_file_with_catalog(&entry, Arc::clone(&catalog))
-        .map_err(|error| HostError::compile(format!("proxy entry {}: {error}", entry.display())))?;
+    let program = cached_program(&entry, &catalog)?;
     let mut vm = Vm::try_new(program).map_err(HostError::from_vm)?;
     vm.set_jit_config(vm::JitConfig {
         enabled: false,
         ..Default::default()
     });
     let mut registry = crate::task_control::registry_with_task_hosts(&catalog)?;
-    let host = Arc::new(crate::proxy_host::ProxyHost {
+    let host = crate::proxy_host::ProxyHost::new(
+        root.to_path_buf(),
         http,
-        hooks: crate::dto::TransportHooks::default(),
-        session: crate::proxy_exchange::ProxySession::new(root.to_path_buf()),
-    });
+        crate::dto::TransportHooks::default(),
+    );
     crate::proxy_host::register_proxy(&mut registry, &catalog, host)?;
     bind_vm(&mut vm, &registry)?;
     attach_timer(&mut vm, Arc::new(EmbeddingTimer::new()));

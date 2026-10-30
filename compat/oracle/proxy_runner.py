@@ -185,7 +185,17 @@ def run_config(case):
         op = step.get("op", "update")
         entry = {"op": op, "ok": True, "error": "", "proxy": None}
         try:
-            obj.update_config(proxy=overlay.get("proxy", []), dir=existing)
+            if op == "proxy_trace":
+                if obj.proxy is None:
+                    raise RuntimeError("no pool")
+                run_trace(obj.proxy, step)
+            elif op == "proxy_has":
+                pool = obj.proxy
+                if pool is None:
+                    raise RuntimeError("no pool")
+                entry["available"] = bool(pool.has_available_proxies())
+            else:
+                obj.update_config(proxy=overlay.get("proxy", []), dir=existing)
         except Exception as exc:
             entry["ok"] = False
             entry["error"] = type(exc).__name__

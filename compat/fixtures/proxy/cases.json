@@ -331,6 +331,172 @@
         "/exception": "AttributeError",
         "/detail": "'NoneType' object has no attribute 'startswith'"
       }
+    },
+    {
+      "id": "proxy.pool.readd-resets-scores",
+      "suite": "proxy",
+      "kind": "pool",
+      "request": {
+        "operation": "pool",
+        "steps": [
+          {"op": "proxy_add", "address": "http://a.invalid:1"},
+          {"op": "proxy_add", "address": "http://b.invalid:2"},
+          {"op": "proxy_trace", "address": "http://a.invalid:1", "outcome": "success", "weight": 2, "now": 100.0},
+          {"op": "proxy_not_good", "address": "http://a.invalid:1", "weight": 5, "expire": 0.0, "now": 100.0},
+          {"op": "proxy_add", "address": "http://a.invalid:1"},
+          {"op": "proxy_select", "now": 100.0}
+        ]
+      },
+      "assertions": {
+        "/steps/4/proxy/order": ["http://a.invalid:1", "http://b.invalid:2"],
+        "/steps/4/proxy/counts": {"http://a.invalid:1": [0, 0], "http://b.invalid:2": [0, 0]},
+        "/steps/4/proxy/disabled": {"http://a.invalid:1": 100.0},
+        "/steps/5/address": "http://b.invalid:2"
+      }
+    },
+    {
+      "id": "proxy.pool.skip-disabled",
+      "suite": "proxy",
+      "kind": "pool",
+      "request": {
+        "operation": "pool",
+        "steps": [
+          {"op": "proxy_add", "address": "http://a.invalid:1"},
+          {"op": "proxy_add", "address": "http://b.invalid:2"},
+          {"op": "proxy_not_good", "address": "http://a.invalid:1", "weight": 5, "expire": 0.0, "now": 50.0},
+          {"op": "proxy_select", "now": 50.0},
+          {"op": "proxy_has", "now": 50.0}
+        ]
+      },
+      "assertions": {
+        "/steps/3/address": "http://b.invalid:2",
+        "/steps/4/value": "{\"value\":false}"
+      }
+    },
+    {
+      "id": "proxy.pool.inverted-available",
+      "suite": "proxy",
+      "kind": "pool",
+      "request": {
+        "operation": "pool",
+        "steps": [
+          {"op": "proxy_add", "address": "http://a.invalid:1"},
+          {"op": "proxy_has", "now": 1.0},
+          {"op": "proxy_trace", "address": "http://a.invalid:1", "outcome": "exception", "weight": 5, "exception_class": "ConnectionError", "detail": "down", "now": 1.0},
+          {"op": "proxy_has", "now": 1.0}
+        ]
+      },
+      "assertions": {
+        "/steps/1/value": "{\"value\":false}",
+        "/steps/3/value": "{\"value\":true}"
+      }
+    },
+    {
+      "id": "proxy.config.empty-retains-nonzero",
+      "suite": "proxy",
+      "kind": "config",
+      "request": {
+        "operation": "pool",
+        "steps": [
+          {"op": "update", "overlay": {"proxy": ["http://a.invalid:1"], "dir": "existing"}},
+          {"op": "proxy_trace", "address": "http://a.invalid:1", "outcome": "success", "weight": 2, "now": 10.0},
+          {"op": "update", "overlay": {"proxy": [], "dir": "existing"}}
+        ]
+      },
+      "assertions": {
+        "/steps/2/proxy/counts": {"http://a.invalid:1": [2, 0]},
+        "/steps/2/proxy/order": ["http://a.invalid:1"]
+      }
+    },
+    {
+      "id": "proxy.glype.raw-403",
+      "suite": "proxy",
+      "kind": "glype",
+      "request": {
+        "operation": "glype",
+        "session_headers": [{"name": "User-Agent", "value": "xeh-fixture/1"}, {"name": "Accept-Encoding", "value": "identity"}],
+        "targets": ["http://synthetic.invalid/denied"]
+      },
+      "glype": {
+        "path": "/browse.php?u=x&b=4",
+        "session_headers": [{"name": "User-Agent", "value": "xeh-fixture/1"}, {"name": "Accept-Encoding", "value": "identity"}],
+        "targets": ["http://synthetic.invalid/denied"],
+        "responses": [
+          {"status": 403, "headers": [["Content-Type", "text/html"]], "body_text": "denied"}
+        ]
+      },
+      "assertions": {
+        "/flows/0/status": 403,
+        "/flows/0/content": "denied",
+        "/flows/0/ok": true
+      }
+    },
+    {
+      "id": "proxy.glype.raw-429",
+      "suite": "proxy",
+      "kind": "glype",
+      "request": {
+        "operation": "glype",
+        "session_headers": [{"name": "User-Agent", "value": "xeh-fixture/1"}, {"name": "Accept-Encoding", "value": "identity"}],
+        "targets": ["http://synthetic.invalid/slow"]
+      },
+      "glype": {
+        "path": "/browse.php?u=x&b=4",
+        "session_headers": [{"name": "User-Agent", "value": "xeh-fixture/1"}, {"name": "Accept-Encoding", "value": "identity"}],
+        "targets": ["http://synthetic.invalid/slow"],
+        "responses": [
+          {"status": 429, "headers": [["Content-Type", "text/plain"]], "body_text": "slow"}
+        ]
+      },
+      "assertions": {
+        "/flows/0/status": 429,
+        "/flows/0/content": "slow"
+      }
+    },
+    {
+      "id": "proxy.glype.raw-500",
+      "suite": "proxy",
+      "kind": "glype",
+      "request": {
+        "operation": "glype",
+        "session_headers": [{"name": "User-Agent", "value": "xeh-fixture/1"}, {"name": "Accept-Encoding", "value": "identity"}],
+        "targets": ["http://synthetic.invalid/fail"]
+      },
+      "glype": {
+        "path": "/browse.php?u=x&b=4",
+        "session_headers": [{"name": "User-Agent", "value": "xeh-fixture/1"}, {"name": "Accept-Encoding", "value": "identity"}],
+        "targets": ["http://synthetic.invalid/fail"],
+        "responses": [
+          {"status": 500, "headers": [["Content-Type", "text/html"]], "body_text": "fail"}
+        ]
+      },
+      "assertions": {
+        "/flows/0/status": 500,
+        "/flows/0/content": "fail"
+      }
+    },
+    {
+      "id": "proxy.glype.raw-500-error-div",
+      "suite": "proxy",
+      "kind": "glype",
+      "request": {
+        "operation": "glype",
+        "session_headers": [{"name": "User-Agent", "value": "xeh-fixture/1"}, {"name": "Accept-Encoding", "value": "identity"}],
+        "targets": ["http://synthetic.invalid/err500"]
+      },
+      "glype": {
+        "path": "/browse.php?u=x&b=4",
+        "session_headers": [{"name": "User-Agent", "value": "xeh-fixture/1"}, {"name": "Accept-Encoding", "value": "identity"}],
+        "targets": ["http://synthetic.invalid/err500"],
+        "responses": [
+          {"status": 500, "headers": [["Content-Type", "text/html"]], "body_text": "<div id=\"error\">upstream</div>"}
+        ]
+      },
+      "assertions": {
+        "/ok": false,
+        "/exception": "PoolException",
+        "/detail": "glype returns: upstream"
+      }
     }
   ]
 }

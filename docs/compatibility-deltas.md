@@ -382,7 +382,29 @@
 - 状态：Task8 Glype 窄边界
 - 输入：无 `Content-Type` 的 200 响应；以及 text/* 但正文不是 UTF-8 的响应
 - 实测输出：缺失 MIME 时源码抛 `AttributeError: 'NoneType' object has no attribute 'startswith'`；RSS 返回相同 class/detail。非 UTF-8 文本在 Python 解码时抛 `UnicodeDecodeError`，RSS 以 `UnicodeDecodeError` 结束（detail 不声称 Python 文案完全一致）
-- 拟定合同：MIME 判定、错误类与链接/字节处理保持实测行为；二进制 MIME 保留原始 bytes，不进入文本改写。
+- 拟定合同：MIME 判定、错误类与链接/字节处理保持实测行为；二进制 MIME 保留原始 bytes，不进入文本改写。超过配置文本预算返回 `text_budget`，不并入 `UnicodeDecodeError`。非法 UTF-8 仍是 `invalid_utf8` / `UnicodeDecodeError`。
+
+## delta.proxy-worker-explicit-allow-redirects
+
+- 来源：`xeHentai/worker.py` Glype agreement 调用
+- 状态：Task8 实测保留的源缺陷
+- 输入：调用方已经传入 `allow_redirects`，warning 页再把同一关键字传给 agreement `session.request`
+- 实测输出：Python 在 agreement 请求前抛 `TypeError: got multiple values for keyword argument 'allow_redirects'`。helper 不传该关键字时可以成功。RSS `proxy_request` 在 `explicit_allow_redirects` 为真且命中 warning marker 时返回同一类/文案，并且不发出 agreement 请求
+- 拟定合同：保留该缺陷。不得把布尔值本身当成“调用方传了关键字”，也不得在 oracle 里丢掉 kwargs 来制造通过。
+
+## delta.proxy-body-lifetime
+
+- 来源：Task8 Glype/native body
+- 状态：Task8 实现记录（未标 accepted）
+- 内容：命名 native response/body 保持到文本处理或 `body_stage` 完成之后才 `body_close`。`body_inline` 只观察小于等于 65536 的夹具；拒绝不是空正文成功。超过该上限的图片由 stage 文件与独立输入字节比较，不把整图放进 VM 整数数组。失败/取消的 spool 与本次新建的不完整目标会被删除；已存在目标不被覆盖。
+
+## delta.proxy-redirect-600
+
+- 来源：`xeHentai/worker.py` redirect history
+- 状态：Task8 实测保留
+- 输入：同一逻辑请求连续超过 30 次 3xx
+- 实测输出：源在原 URL 返回 status 600 的假响应，不抛 `TooManyRedirects`。`_real_url` 是上一跳。每一跳重新做 proxy/pool 选择，该跳的 route 在提交后不变
+- 拟定合同：RSS 返回 status 600、空 error，保留 logical/wire/final URL。原生 admission 失败不是 SOCKS `InvalidSchema`。
 
 ## delta.proxy-unsupported-socks-suffix
 

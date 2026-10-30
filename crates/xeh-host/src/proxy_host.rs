@@ -23,7 +23,6 @@ use vm::{
 use crate::dto::{HeaderEntry, TransportHooks};
 use crate::net::{open_get_with_options, NativeProxyRoute, OpenOptions, ProxyKind};
 use crate::observe::Metrics;
-use crate::task_control::task_catalog;
 use crate::types::HostError;
 
 const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
@@ -34,10 +33,24 @@ pub struct ProxyHost {
     pub http: vm::HttpConfig,
     pub hooks: TransportHooks,
     pub session: std::sync::Arc<crate::proxy_exchange::ProxySession>,
+    pub live: std::sync::Arc<crate::proxy_exchange::LiveGeneration>,
 }
 
-pub fn proxy_catalog() -> Arc<HostApiCatalog> {
-    let standard = task_catalog();
+impl ProxyHost {
+    pub fn new(root: std::path::PathBuf, http: vm::HttpConfig, hooks: TransportHooks) -> Arc<Self> {
+        Arc::new(Self {
+            http,
+            hooks,
+            session: crate::proxy_exchange::ProxySession::new(root),
+            live: crate::proxy_exchange::LiveGeneration::new(),
+        })
+    }
+}
+
+/// Standard catalog plus task and proxy declarations. `task_catalog` and
+/// `proxy_catalog` both use this composition; neither calls the other.
+pub fn compose_application_catalog() -> Arc<HostApiCatalog> {
+    let standard = crate::catalog::standard_catalog();
     let mut builder = HostApiCatalog::builder();
     for function in standard.functions() {
         builder.function(function.clone());
@@ -48,6 +61,17 @@ pub fn proxy_catalog() -> Arc<HostApiCatalog> {
     for schema in standard.structs() {
         builder.named_struct(schema.clone());
     }
+    for schema in crate::os::fs_structs() {
+        builder.named_struct(schema);
+    }
+    for function in crate::os::fs_functions() {
+        builder.function(function);
+    }
+    builder.function(HostFunctionSchema::with_return(
+        "xeh_system::uuid_v4",
+        Vec::new(),
+        HostTypeSchema::String,
+    ));
     for schema in proxy_structs() {
         builder.named_struct(schema);
     }
@@ -63,7 +87,12 @@ pub fn proxy_catalog() -> Arc<HostApiCatalog> {
     for function in crate::proxy_exchange::exchange_functions() {
         builder.function(function);
     }
-    Arc::new(builder.build().expect("proxy catalog"))
+    builder.function(admit_function());
+    Arc::new(builder.build().expect("application host catalog"))
+}
+
+pub fn proxy_catalog() -> Arc<HostApiCatalog> {
+    compose_application_catalog()
 }
 
 pub fn register_proxy(
@@ -82,7 +111,86 @@ pub fn register_proxy(
         })
     })
     .map_err(|error| HostError::bind(error.to_string()))?;
-    crate::proxy_exchange::register_exchange(registry, catalog, host)
+    crate::proxy_exchange::register_exchange(registry, catalog, Arc::clone(&host))?;
+    register_admit(registry, catalog, host)
+}
+
+pub fn register_proxy_denied(
+    registry: &mut HostFunctionRegistry,
+    catalog: &HostApiCatalog,
+) -> Result<(), HostError> {
+    for name in [
+        "xeh_proxy::request",
+        "xeh_proxy::exchange",
+        "xeh_proxy::body_scan",
+        "xeh_proxy::body_text",
+        "xeh_proxy::body_inline",
+        "xeh_proxy::body_stage",
+        "xeh_proxy::body_close",
+        "xeh_proxy::admit",
+    ] {
+        let schema = catalog
+            .function(name)
+            .ok_or_else(|| HostError::bind(format!("missing application schema {name}")))?
+            .clone();
+        register_catalog_function(registry, catalog, name, schema, || Box::new(DenyFn))
+            .map_err(|error| HostError::bind(error.to_string()))?;
+    }
+    Ok(())
+}
+
+fn register_admit(
+    registry: &mut HostFunctionRegistry,
+    catalog: &HostApiCatalog,
+    host: Arc<ProxyHost>,
+) -> Result<(), HostError> {
+    let schema = catalog
+        .function("xeh_proxy::admit")
+        .ok_or_else(|| HostError::bind("missing application schema xeh_proxy::admit"))?
+        .clone();
+    register_catalog_function(registry, catalog, "xeh_proxy::admit", schema, move || {
+        Box::new(AdmitFn {
+            host: Arc::clone(&host),
+        })
+    })
+    .map_err(|error| HostError::bind(error.to_string()))
+}
+
+fn admit_function() -> HostFunctionSchema {
+    HostFunctionSchema::with_return(
+        "xeh_proxy::admit",
+        vec![HostParamSchema::value("url", HostTypeSchema::String)],
+        HostTypeSchema::String,
+    )
+    .with_description("Empty string when the fixed HTTP policy admits the URL")
+}
+
+struct AdmitFn {
+    host: Arc<ProxyHost>,
+}
+
+impl HostFunction for AdmitFn {
+    fn call(&mut self, _vm: &mut Vm, args: &[Value]) -> VmResult<CallOutcome> {
+        let url = match args.first() {
+            Some(Value::String(text)) => text.as_str(),
+            _ => "",
+        };
+        let result = match crate::proxy_exchange::admit_url(&self.host.http, url) {
+            Ok(()) => "",
+            Err(error) => error,
+        };
+        Ok(CallOutcome::Return(CallReturn::one(Value::string(
+            result.to_string(),
+        ))))
+    }
+}
+
+struct DenyFn;
+
+impl HostFunction for DenyFn {
+    fn call(&mut self, _vm: &mut Vm, _args: &[Value]) -> VmResult<CallOutcome> {
+        Err(vm::VmError::HostError("proxy_denied".to_string()))
+    }
 }
 
 fn proxy_structs() -> Vec<HostStructSchema> {
@@ -156,7 +264,7 @@ impl HostFunction for ProxyRequestFn {
     fn call(&mut self, vm: &mut Vm, args: &[Value]) -> VmResult<CallOutcome> {
         let parsed =
             parse_request(args).map_err(|error| vm::VmError::HostError(error.to_string()))?;
-        crate::proxy_exchange::ensure_lease(vm, &self.host.session)?;
+        crate::proxy_exchange::ensure_lease(vm, &self.host.live)?;
         let host = Arc::clone(&self.host);
         let future = async move {
             let response = execute(&host, parsed).await;
@@ -270,9 +378,8 @@ fn classify_error(code: &'static str) -> &'static str {
         "deadline" => "ConnectTimeout",
         "proxy_unsupported" => "ProxySchemeUnknown",
         "proxy_tls_failed" | "target_tls_failed" => "ConnectionError",
-        "policy_denied" | "header_rejected" | "route_invalid" | "method_rejected" => {
-            "InvalidSchema"
-        }
+        "policy_denied" => "policy_denied",
+        "header_rejected" | "route_invalid" | "method_rejected" => "InvalidSchema",
         "proxy_status" | "proxy_handshake_failed" | "proxy_auth_required" => "ProxyError",
         "redirect_limit" => "TooManyRedirects",
         "connect_failed"

@@ -255,7 +255,7 @@ fn worker_reselects_proxy_on_the_image_hop_without_fetching_it() {
     );
     assert_eq!(report["hops"][0]["proxied"], json!(false));
     assert_eq!(report["hops"][1]["proxied"], json!(true));
-    assert_eq!(report["hops"][1]["error_kind"], json!("InvalidSchema"));
+    assert_eq!(report["hops"][1]["error_kind"], json!("policy_denied"));
     assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 

@@ -1,0 +1,488 @@
+//! Production proxy exchange.
+//!
+//! One call selects a pool entry, prepares the Glype or native route, keeps the
+//! native body until it is staged or closed, and publishes the Glype session
+//! back to that same entry. A later call reads the published value. Re-add
+//! advances the entry epoch, so a stale publish cannot land.
+use xeh_proxy;
+
+use self::glype;
+use self::policy;
+use self::pool;
+use self::worker;
+
+fn header_maps(names: [string], values: [string]) -> [map] {
+    let mut headers: [map] = [];
+    let count: int = if names.length < values.length => { names.length } else => { values.length };
+    for index in 0..count {
+        let name: string = names[index].copy();
+        let value: string = values[index].copy();
+        headers[headers.length] = { name: name.copy(), value: value.copy() };
+    }
+    headers
+}
+
+fn split_headers(headers: [map]) -> map {
+    let mut names: [string] = [];
+    let mut values: [string] = [];
+    for index in 0..headers.length {
+        let item: map = headers[index].copy();
+        let name: string = item["name"].copy();
+        let value: string = item["value"].copy();
+        names[names.length] = name.copy();
+        values[values.length] = value.copy();
+    }
+    { names: names, values: values }
+}
+
+fn header_joined(names: [string], values: [string], wanted: string) -> string {
+    let needle: string = string_lower_ascii(wanted.copy());
+    let mut found: string = "";
+    let count: int = if names.length < values.length => { names.length } else => { values.length };
+    for index in 0..count {
+        let name: string = names[index].copy();
+        if string_lower_ascii(name.copy()) == needle {
+            let value: string = values[index].copy();
+            if found == "" {
+                found = value.copy();
+            } else {
+                found = found + ", " + value.copy();
+            }
+        }
+    }
+    found
+}
+
+fn sent_cookie(names: [string], values: [string]) -> string {
+    header_joined(names, values, "Cookie")
+}
+
+fn outcome(
+    ok: bool,
+    error: string,
+    detail: string,
+    state: map,
+    address: string,
+    status: int,
+    byte_length: int,
+    staged_ok: bool,
+    staged_bytes: int,
+    staged_error: string,
+    glyph_s: string,
+    epoch: int,
+    sent: string,
+    logical_url: string,
+    final_url: string,
+    real_url: string,
+    route_kind: string
+) -> map {
+    {
+        ok: ok,
+        error: error.copy(),
+        detail: detail.copy(),
+        state: state,
+        address: address.copy(),
+        status: status,
+        byte_length: byte_length,
+        staged_ok: staged_ok,
+        staged_bytes: staged_bytes,
+        staged_error: staged_error.copy(),
+        glyph_s: glyph_s.copy(),
+        epoch: epoch,
+        sent_cookie: sent.copy(),
+        logical_url: logical_url.copy(),
+        final_url: final_url.copy(),
+        real_url: real_url.copy(),
+        route_kind: route_kind.copy(),
+    }
+}
+
+fn failed(state: map, error: string, detail: string, logical_url: string) -> map {
+    outcome(
+        false,
+        error,
+        detail,
+        state,
+        "",
+        0,
+        0,
+        false,
+        0,
+        "",
+        "",
+        0,
+        "",
+        logical_url,
+        logical_url,
+        logical_url,
+        ""
+    )
+}
+
+fn location_of(names: [string], values: [string]) -> string {
+    let mut found = "";
+    for index in 0..names.length {
+        let name: string = names[index].copy();
+        if name == "Location" || name == "location" {
+            found = values[index].copy();
+            break;
+        }
+    }
+    found
+}
+
+/// Selects, exchanges, stages, and publishes on one retained pool snapshot.
+pub fn execute(
+    snapshot: map,
+    now: number,
+    url: string,
+    method: string,
+    data: string,
+    header_names: [string],
+    header_values: [string],
+    stage: string,
+    image: bool,
+    image_only: bool,
+    explicit_allow_redirects: bool,
+    text_budget: int
+) -> map {
+    let mut pool_state = snapshot.copy();
+    let mut current = url.copy();
+    let mut history: [string] = [url.copy()];
+    let mut stop = false;
+    let mut tried = 0;
+    let mut result = failed(pool_state.copy(), "", "", url.copy());
+    let session_headers = header_maps(header_names.copy(), header_values.copy());
+    while stop == false {
+        if history.length > 30 {
+            result = outcome(
+                true,
+                "",
+                "",
+                pool_state.copy(),
+                "",
+                600,
+                0,
+                false,
+                0,
+                "",
+                "",
+                0,
+                "",
+                url.copy(),
+                url.copy(),
+                history[history.length - 1].copy(),
+                ""
+            );
+            stop = true;
+        } else {
+            let proxied = policy::matches(image, image_only, current.copy());
+            let mut route_kind: string = "direct";
+            let mut route_host: string = "";
+            let mut route_port = 0;
+            let mut trusted = false;
+            let mut address: string = "";
+            let mut epoch = 0;
+            let mut glyph_s: string = "";
+            let mut wire = current.copy();
+            let mut names: [string] = header_names.copy();
+            let mut values: [string] = header_values.copy();
+            let mut prepare_error: string = "";
+            let mut prepare_detail: string = "";
+            if proxied {
+                let selected = pool::select(pool_state.copy(), now);
+                pool_state = selected["state"].copy();
+                if selected["ok"].copy() == false {
+                    prepare_error = selected["error"].copy();
+                    prepare_detail = selected["detail"].copy();
+                } else {
+                    address = selected["address"].copy();
+                    let route: map = selected["route"].copy();
+                    let kind: string = route["kind"].copy();
+                    route_kind = kind.copy();
+                    let read = pool::glyph_read(pool_state.copy(), address.copy());
+                    let read_s: string = read["s"].copy();
+                    let read_epoch: int = read["epoch"].copy();
+                    glyph_s = read_s.copy();
+                    epoch = read_epoch;
+                    if kind == "glype" {
+                        let parsed = glype::parse(address.copy());
+                        if parsed["ok"].copy() == false {
+                            prepare_error = parsed["error"].copy();
+                            prepare_detail = parsed["detail"].copy();
+                        } else {
+                            let prepared = glype::request_headers(
+                                parsed.copy(),
+                                current.copy(),
+                                session_headers.copy(),
+                                glyph_s.copy()
+                            );
+                            if prepared["ok"].copy() == false {
+                                prepare_error = prepared["error"].copy();
+                                prepare_detail = prepared["detail"].copy();
+                            } else {
+                                let split = split_headers(prepared["headers"].copy());
+                                let split_names: [string] = split["names"].copy();
+                                let split_values: [string] = split["values"].copy();
+                                names = split_names;
+                                values = split_values;
+                                wire = glype::mkurl(parsed.copy(), current.copy());
+                                route_kind = "direct";
+                                route_host = "";
+                                route_port = 0;
+                                trusted = false;
+                            }
+                        }
+                    } else {
+                        let host: string = route["host"].copy();
+                        let port: int = route["port"].copy();
+                        let remote_dns: bool = route["trusted_remote_dns"].copy();
+                        route_host = host.copy();
+                        route_port = port;
+                        trusted = remote_dns;
+                        wire = current.copy();
+                    }
+                }
+            }
+            if prepare_error != "" {
+                result = failed(pool_state.copy(), prepare_error.copy(), prepare_detail.copy(), url.copy());
+                stop = true;
+            } else {
+                let admitted = xeh_proxy::admit(wire.copy());
+                if admitted != "" {
+                    result = failed(pool_state.copy(), admitted.copy(), wire.copy(), url.copy());
+                    stop = true;
+                } else {
+                    let response = xeh_proxy::exchange(
+                        wire.copy(),
+                        method.copy(),
+                        names.copy(),
+                        values.copy(),
+                        data.copy(),
+                        route_kind.copy(),
+                        route_host.copy(),
+                        route_port,
+                        trusted,
+                        false,
+                        true,
+                        0
+                    );
+                    let status: int = response.status;
+                    let opened: string = response.url;
+                    let error_kind: string = response.error_kind;
+                    let error_detail: string = response.error_detail;
+                    let byte_length: int = response.byte_length;
+                    let response_names: [string] = response.header_names;
+                    let response_values: [string] = response.header_values;
+                    if error_kind != "" {
+                        let _closed = xeh_proxy::body_close(response.body);
+                        let mut traced_state = pool_state.copy();
+                        if address != "" {
+                            let traced = pool::trace(
+                                pool_state.copy(),
+                                address.copy(),
+                                "exception",
+                                1,
+                                false,
+                                true,
+                                error_kind.copy(),
+                                error_detail.copy()
+                            );
+                            traced_state = traced["state"].copy();
+                        }
+                        pool_state = traced_state;
+                        result = failed(pool_state.copy(), error_kind.copy(), error_detail.copy(), url.copy());
+                        stop = true;
+                    } else {
+                        let warned = xeh_proxy::body_scan(
+                            response.body,
+                            "<input type=\"hidden\" name=\"action\" value=\"sslagree\">"
+                        );
+                        if warned && explicit_allow_redirects {
+                            let _closed = xeh_proxy::body_close(response.body);
+                            result = failed(
+                                pool_state.copy(),
+                                "TypeError",
+                                "got multiple values for keyword argument 'allow_redirects'",
+                                url.copy()
+                            );
+                            stop = true;
+                        } else if warned && address != "" && route_kind == "direct" && proxied {
+                            let _closed = xeh_proxy::body_close(response.body);
+                            if tried == 2 {
+                                result = failed(
+                                    pool_state.copy(),
+                                    "PoolException",
+                                    "can't bypass glype https warning",
+                                    url.copy()
+                                );
+                                stop = true;
+                            } else {
+                                let parsed = glype::parse(address.copy());
+                                let agree_url = glype::sslagree_url(parsed.copy());
+                                let agree_admitted = xeh_proxy::admit(agree_url.copy());
+                                if agree_admitted != "" {
+                                    result = failed(pool_state.copy(), agree_admitted.copy(), agree_url.copy(), url.copy());
+                                    stop = true;
+                                } else {
+                                    let agreement = worker::hop(
+                                        agree_url.copy(),
+                                        "GET",
+                                        "",
+                                        names.copy(),
+                                        values.copy(),
+                                        "direct",
+                                        "",
+                                        0,
+                                        false
+                                    );
+                                    let agree_error: string = agreement["error_kind"].copy();
+                                    if agree_error != "" {
+                                        let agree_detail: string = agreement["error_detail"].copy();
+                                        result = failed(pool_state.copy(), agree_error.copy(), agree_detail.copy(), url.copy());
+                                        stop = true;
+                                    } else {
+                                        let agree_names: [string] = agreement["header_names"].copy();
+                                        let agree_values: [string] = agreement["header_values"].copy();
+                                        let set_cookie = header_joined(agree_names, agree_values, "Set-Cookie");
+                                        let prepared = glype::request_headers(
+                                            parsed.copy(),
+                                            current.copy(),
+                                            session_headers.copy(),
+                                            glyph_s.copy()
+                                        );
+                                        let cookie_state: map = prepared["cookie_state"].copy();
+                                        let applied = glype::apply_sslagree_cookie(cookie_state, set_cookie.copy());
+                                        let updated_s: string = applied["glyph_s"].copy();
+                                        let published = pool::glyph_publish(
+                                            pool_state.copy(),
+                                            address.copy(),
+                                            epoch,
+                                            updated_s.copy()
+                                        );
+                                        pool_state = published["state"].copy();
+                                        tried = tried + 1;
+                                    }
+                                }
+                            }
+                        } else if status > 300 && status < 400 {
+                            let _closed = xeh_proxy::body_close(response.body);
+                            history[history.length] = current.copy();
+                            let next_url = location_of(response_names.copy(), response_values.copy());
+                            if next_url == "" || history.length > 30 {
+                                result = outcome(
+                                    true,
+                                    "",
+                                    "",
+                                    pool_state.copy(),
+                                    address.copy(),
+                                    600,
+                                    0,
+                                    false,
+                                    0,
+                                    "",
+                                    glyph_s.copy(),
+                                    epoch,
+                                    sent_cookie(names.copy(), values.copy()),
+                                    url.copy(),
+                                    url.copy(),
+                                    history[history.length - 1].copy(),
+                                    route_kind.copy()
+                                );
+                                stop = true;
+                            } else {
+                                current = next_url.copy();
+                            }
+                        } else {
+                            let mut text_error: string = "";
+                            if text_budget > 0 {
+                                let viewed = xeh_proxy::body_text(response.body, text_budget);
+                                text_error = viewed.error.copy();
+                            }
+                            if text_error != "" {
+                                let _closed = xeh_proxy::body_close(response.body);
+                                result = failed(
+                                    pool_state.copy(),
+                                    text_error.copy(),
+                                    text_error.copy(),
+                                    url.copy()
+                                );
+                                stop = true;
+                            } else {
+                            let mut staged_ok = stage == "";
+                            let mut staged_bytes = 0;
+                            let mut staged_error: string = "";
+                            if stage != "" {
+                                let staged = xeh_proxy::body_stage(response.body, stage.copy());
+                                staged_ok = staged.ok;
+                                staged_bytes = staged.bytes;
+                                staged_error = staged.error;
+                            }
+                            let _closed = xeh_proxy::body_close(response.body);
+                            if staged_ok == false {
+                                result = outcome(
+                                    false,
+                                    staged_error.copy(),
+                                    stage.copy(),
+                                    pool_state.copy(),
+                                    address.copy(),
+                                    status,
+                                    byte_length,
+                                    false,
+                                    0,
+                                    staged_error.copy(),
+                                    glyph_s.copy(),
+                                    epoch,
+                                    sent_cookie(names.copy(), values.copy()),
+                                    url.copy(),
+                                    opened.copy(),
+                                    history[history.length - 1].copy(),
+                                    route_kind.copy()
+                                );
+                                stop = true;
+                            } else {
+                                if address != "" {
+                                    let traced = pool::trace(
+                                        pool_state.copy(),
+                                        address.copy(),
+                                        "success",
+                                        1,
+                                        false,
+                                        true,
+                                        "",
+                                        ""
+                                    );
+                                    pool_state = traced["state"].copy();
+                                }
+                                let published_s = pool::glyph_read(pool_state.copy(), address.copy());
+                                let final_s: string = published_s["s"].copy();
+                                result = outcome(
+                                    true,
+                                    "",
+                                    "",
+                                    pool_state.copy(),
+                                    address.copy(),
+                                    status,
+                                    byte_length,
+                                    staged_ok,
+                                    staged_bytes,
+                                    "",
+                                    final_s.copy(),
+                                    epoch,
+                                    sent_cookie(names.copy(), values.copy()),
+                                    url.copy(),
+                                    opened.copy(),
+                                    history[history.length - 1].copy(),
+                                    route_kind.copy()
+                                );
+                                stop = true;
+                            }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    result
+}

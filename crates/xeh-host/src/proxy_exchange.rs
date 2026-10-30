@@ -7,8 +7,8 @@
 
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -19,7 +19,7 @@ use vm::resource::{CloseProgress, HostResource, ResourceCloseReason};
 use vm::{
     register_catalog_function, CallOutcome, CallReturn, HostApiCatalog, HostFunction,
     HostFunctionRegistry, HostFunctionSchema, HostFutureOutput, HostParamPassing, HostParamSchema,
-    HostResourceType, HostStructField, HostStructSchema, HostTypeSchema, ResourceHandle,
+    HostResourceType, HostState, HostStructField, HostStructSchema, HostTypeSchema, ResourceHandle,
     ResourceTypeKey, ResourceTypeSchema, Value, Vm, VmResult,
 };
 
@@ -34,24 +34,67 @@ const LEASE_KEY: &str = "xeh.proxy.lease";
 const INLINE_LIMIT: usize = 64 * 1024;
 const CHUNK: usize = 8 * 1024;
 
+static OWNER_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// Per-VM live cancel token and driver owner.
+///
+/// The token and drivers are replaced when the previous generation is cancelled
+/// or the Core closes the lease. They are not a process-wide once-flag.
+pub struct LiveGeneration {
+    pub owner: u64,
+    generation: AtomicU64,
+    cancel: Mutex<CancellationToken>,
+    drivers: Mutex<Arc<DriverOwner>>,
+}
+
+impl LiveGeneration {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            owner: OWNER_SEQ.fetch_add(1, Ordering::AcqRel),
+            generation: AtomicU64::new(1),
+            cancel: Mutex::new(CancellationToken::new()),
+            drivers: Mutex::new(Arc::new(DriverOwner::new())),
+        })
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    pub fn cancel_current(&self) {
+        self.cancel.lock().expect("proxy generation").cancel();
+    }
+
+    fn current(&self) -> (CancellationToken, Arc<DriverOwner>, u64) {
+        let cancel = self.cancel.lock().expect("proxy generation").clone();
+        let drivers = Arc::clone(&self.drivers.lock().expect("proxy generation"));
+        (cancel, drivers, self.generation())
+    }
+
+    /// Replaces a cancelled generation. A still-live token is left alone so a
+    /// second call does not retire in-flight drivers.
+    fn refresh_if_cancelled(&self) -> bool {
+        let cancelled = self.cancel.lock().expect("proxy generation").is_cancelled();
+        if !cancelled {
+            return false;
+        }
+        *self.cancel.lock().expect("proxy generation") = CancellationToken::new();
+        *self.drivers.lock().expect("proxy generation") = Arc::new(DriverOwner::new());
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        true
+    }
+}
+
 pub struct ProxySession {
-    pub cancel: CancellationToken,
-    pub drivers: Arc<DriverOwner>,
-    pub generation: AtomicU64,
     pub root: PathBuf,
     spool_seq: AtomicU64,
-    lease_installed: AtomicBool,
 }
 
 impl ProxySession {
     pub fn new(root: PathBuf) -> Arc<Self> {
         Arc::new(Self {
-            cancel: CancellationToken::new(),
-            drivers: Arc::new(DriverOwner::new()),
-            generation: AtomicU64::new(1),
             root,
             spool_seq: AtomicU64::new(1),
-            lease_installed: AtomicBool::new(false),
         })
     }
 
@@ -65,7 +108,8 @@ pub struct BodyHandle {
     path: PathBuf,
     generation: u64,
     length: u64,
-    session: Arc<ProxySession>,
+    owner: u64,
+    live: Arc<LiveGeneration>,
     closed: bool,
 }
 
@@ -74,7 +118,10 @@ impl BodyHandle {
         if self.closed {
             return Err("closed");
         }
-        if self.generation != self.session.generation.load(Ordering::Acquire) {
+        if self.owner != self.live.owner {
+            return Err("wrong_owner");
+        }
+        if self.generation != self.live.generation() {
             return Err("stale");
         }
         Ok(())
@@ -102,8 +149,22 @@ impl HostResourceType for BodyHandle {
 }
 
 struct ProxyLease {
-    session: Arc<ProxySession>,
+    live: Arc<LiveGeneration>,
     reap: Option<Pin<Box<dyn std::future::Future<Output = bool> + Send>>>,
+}
+
+/// Remembers the lease handle for this VM. Reset closes the resource; the slot
+/// survives, so the next exchange detects a dead handle and installs a fresh one.
+struct LeaseSlot {
+    handle: u64,
+}
+
+impl HostState for LeaseSlot {
+    const KEY: &'static str = "xeh.proxy.lease-slot";
+
+    fn initialize() -> Result<Self, String> {
+        Ok(Self { handle: 0 })
+    }
 }
 
 impl HostResource for ProxyLease {
@@ -115,9 +176,9 @@ impl HostResource for ProxyLease {
         &mut self,
         _reason: ResourceCloseReason,
     ) -> vm::resource::ResourceResult<CloseProgress> {
-        self.session.generation.fetch_add(1, Ordering::AcqRel);
-        self.session.cancel.cancel();
-        let drivers = Arc::clone(&self.session.drivers);
+        self.live.cancel_current();
+        self.live.generation.fetch_add(1, Ordering::AcqRel);
+        let drivers = Arc::clone(&self.live.drivers.lock().expect("proxy generation"));
         let deadline = Instant::now() + Duration::from_secs(5);
         self.reap = Some(Box::pin(async move { drivers.reap(deadline).await }));
         Ok(CloseProgress::Pending)
@@ -150,17 +211,39 @@ impl HostResourceType for ProxyLease {
     const DESCRIPTION: &'static str = "Per-VM proxy cancel and driver owner";
 }
 
-pub fn ensure_lease(vm: &mut Vm, session: &Arc<ProxySession>) -> VmResult<()> {
-    if session.lease_installed.swap(true, Ordering::AcqRel) {
+pub fn ensure_lease(vm: &mut Vm, live: &Arc<LiveGeneration>) -> VmResult<()> {
+    let existing = vm
+        .host_context()
+        .host_state::<LeaseSlot>()
+        .map(|slot| slot.handle)
+        .unwrap_or(0);
+    let alive = ResourceHandle::from_raw(existing)
+        .ok()
+        .and_then(|handle| {
+            vm.host_context()
+                .borrow_resource::<ProxyLease>(handle)
+                .ok()
+                .map(|_| ())
+        })
+        .is_some();
+    let refreshed = live.refresh_if_cancelled();
+    if alive {
+        let _ = refreshed;
         return Ok(());
     }
-    vm.host_context()
+    let handle = vm
+        .host_context()
         .push_resource(ProxyLease {
-            session: Arc::clone(session),
+            live: Arc::clone(live),
             reap: None,
         })
-        .map(|_| ())
-        .map_err(|error| vm::VmError::HostError(error.to_string()))
+        .map_err(|error| vm::VmError::HostError(error.to_string()))?;
+    vm.host_context()
+        .set_host_state(LeaseSlot {
+            handle: handle.handle().raw(),
+        })
+        .map_err(|error| vm::VmError::HostError(error.to_string()))?;
+    Ok(())
 }
 
 struct ExchangeDone {
@@ -173,6 +256,7 @@ struct ExchangeDone {
     byte_length: u64,
     text_valid: bool,
     body_text: String,
+    text_error: String,
     generation: u64,
 }
 
@@ -230,6 +314,7 @@ fn exchange_fields() -> Vec<HostStructField> {
         HostStructField::new("byte_length", HostTypeSchema::Int),
         HostStructField::new("text_valid", HostTypeSchema::Bool),
         HostStructField::new("body_text", HostTypeSchema::String),
+        HostStructField::new("text_error", HostTypeSchema::String),
         HostStructField::new("body", body_type()),
     ]
 }
@@ -386,20 +471,25 @@ struct ExchangeFn {
 
 impl HostFunction for ExchangeFn {
     fn call(&mut self, vm: &mut Vm, args: &[Value]) -> VmResult<CallOutcome> {
-        ensure_lease(vm, &self.host.session)?;
+        ensure_lease(vm, &self.host.live)?;
         let parsed =
             parse_exchange(args).map_err(|error| vm::VmError::HostError(error.to_string()))?;
         let host = Arc::clone(&self.host);
+        let (cancel, drivers, generation) = host.live.current();
         let future = async move {
-            let done = run_exchange(&host, parsed).await;
+            let done = run_exchange(&host, parsed, cancel, drivers, generation).await;
             Ok(HostFutureOutput::complete(move |vm| {
+                if !done.error_kind.is_empty() {
+                    let _ = std::fs::remove_file(&done.path);
+                }
                 let token = vm
                     .host_context()
                     .push_resource(BodyHandle {
                         path: done.path.clone(),
                         generation: done.generation,
                         length: done.byte_length,
-                        session: Arc::clone(&host.session),
+                        owner: host.live.owner,
+                        live: Arc::clone(&host.live),
                         closed: false,
                     })
                     .map_err(|error| vm::VmError::HostError(error.to_string()))?;
@@ -443,27 +533,38 @@ fn exchange_value(done: &ExchangeDone, handle: ResourceHandle) -> Value {
             Value::string("body_text"),
             Value::string(done.body_text.clone()),
         ),
+        (
+            Value::string("text_error"),
+            Value::string(done.text_error.clone()),
+        ),
         (Value::string("body"), Value::Int(handle.raw() as i64)),
     ])
 }
 
-async fn run_exchange(host: &ProxyHost, request: ParsedExchange) -> ExchangeDone {
-    let generation = host.session.generation.load(Ordering::Acquire);
+async fn run_exchange(
+    host: &ProxyHost,
+    request: ParsedExchange,
+    cancel: CancellationToken,
+    drivers: Arc<DriverOwner>,
+    generation: u64,
+) -> ExchangeDone {
     let path = host.session.next_spool();
-    let fail = |kind: &str, detail: &str| ExchangeDone {
-        status: 0,
-        url: request.url.clone(),
-        headers: Vec::new(),
-        error_kind: kind.to_string(),
-        error_detail: detail.to_string(),
-        path: path.clone(),
-        byte_length: 0,
-        text_valid: false,
-        body_text: String::new(),
-        generation,
+    let fail = |kind: &str, detail: &str| {
+        let _ = std::fs::remove_file(&path);
+        ExchangeDone {
+            status: 0,
+            url: request.url.clone(),
+            headers: Vec::new(),
+            error_kind: kind.to_string(),
+            error_detail: detail.to_string(),
+            path: path.clone(),
+            byte_length: 0,
+            text_valid: false,
+            body_text: String::new(),
+            text_error: String::new(),
+            generation,
+        }
     };
-    let _ = std::fs::File::create(&path);
-    let cancel = host.session.cancel.child_token();
     let started = Instant::now();
     let mut opened = match open_get_with_options(
         &host.http,
@@ -472,7 +573,7 @@ async fn run_exchange(host: &ProxyHost, request: ParsedExchange) -> ExchangeDone
         &cancel,
         &Metrics::default(),
         &host.hooks,
-        &host.session.drivers,
+        &drivers,
         started,
         OpenOptions {
             route: request.route.as_ref(),
@@ -497,15 +598,19 @@ async fn run_exchange(host: &ProxyHost, request: ParsedExchange) -> ExchangeDone
         .await;
     let byte_length = match spooled {
         Ok(length) => length,
-        Err(code) => return fail("ConnectionError", code),
+        Err(code) => {
+            let _ = std::fs::remove_file(&path);
+            return fail("ConnectionError", code);
+        }
     };
-    let (text_valid, body_text) = if request.text_budget == 0 {
-        (false, String::new())
+    let (text_valid, body_text, text_error) = if request.text_budget == 0 {
+        (false, String::new(), String::new())
     } else {
         match read_text(&path, request.text_budget) {
-            Ok(view) => view,
-            Err("text_budget") => (false, String::new()),
-            Err(_) => (false, String::new()),
+            Ok((valid, text)) => (valid, text, String::new()),
+            Err("text_budget") => (false, String::new(), "text_budget".to_string()),
+            Err("invalid_utf8") => (false, String::new(), "invalid_utf8".to_string()),
+            Err(other) => (false, String::new(), other.to_string()),
         }
     };
     ExchangeDone {
@@ -518,6 +623,7 @@ async fn run_exchange(host: &ProxyHost, request: ParsedExchange) -> ExchangeDone
         byte_length,
         text_valid,
         body_text,
+        text_error,
         generation,
     }
 }
@@ -526,9 +632,8 @@ fn classify(code: &str) -> &'static str {
     match code {
         "deadline" => "ConnectTimeout",
         "proxy_unsupported" => "ProxySchemeUnknown",
-        "policy_denied" | "header_rejected" | "route_invalid" | "method_rejected" => {
-            "InvalidSchema"
-        }
+        "policy_denied" => "policy_denied",
+        "header_rejected" | "route_invalid" | "method_rejected" => "InvalidSchema",
         "proxy_status" | "proxy_handshake_failed" | "proxy_auth_required" => "ProxyError",
         "redirect_limit" => "TooManyRedirects",
         _ => "ConnectionError",
@@ -591,7 +696,7 @@ fn read_text(path: &Path, budget: usize) -> Result<(bool, String), &'static str>
     let bytes = std::fs::read(path).map_err(|_| "io_error")?;
     match std::str::from_utf8(&bytes) {
         Ok(text) => Ok((true, text.to_string())),
-        Err(_) => Ok((false, String::new())),
+        Err(_) => Err("invalid_utf8"),
     }
 }
 
@@ -659,7 +764,7 @@ impl HostFunction for ScanFn {
             _ => {
                 return Err(vm::VmError::HostError(
                     "needle must be a string".to_string(),
-                ))
+                ));
             }
         };
         let snap = snap_body(vm, args)?;
@@ -681,6 +786,7 @@ impl HostFunction for TextFn {
         let (valid, text, error) = match read_text(&snap.path, budget) {
             Ok((valid, text)) => (valid, text, String::new()),
             Err("text_budget") => (false, String::new(), "text_budget".to_string()),
+            Err("invalid_utf8") => (false, String::new(), "invalid_utf8".to_string()),
             Err(code) => (false, String::new(), code.to_string()),
         };
         Ok(CallOutcome::Return(CallReturn::one(Value::map(vec![
@@ -732,7 +838,7 @@ impl HostFunction for StageFn {
             _ => {
                 return Err(vm::VmError::HostError(
                     "relative path must be a string".to_string(),
-                ))
+                ));
             }
         };
         let snap = snap_body(vm, args)?;
@@ -754,8 +860,30 @@ fn stage_copy(spool: &Path, root: &Path, relative: &str) -> Result<u64, String> 
     if dest.exists() {
         return Err("target_exists".to_string());
     }
-    let bytes = std::fs::copy(spool, &dest).map_err(|_| "io_error".to_string())?;
-    Ok(bytes)
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&dest)
+        .map_err(|_| "io_error".to_string())?;
+    let copy_result = (|| {
+        let mut input = std::fs::File::open(spool).map_err(|_| "io_error".to_string())?;
+        let copied = std::io::copy(&mut input, &mut output).map_err(|_| "io_error".to_string())?;
+        output.sync_all().map_err(|_| "io_error".to_string())?;
+        let expected = std::fs::metadata(spool)
+            .map_err(|_| "io_error".to_string())?
+            .len();
+        if copied != expected {
+            return Err("short_copy".to_string());
+        }
+        Ok(copied)
+    })();
+    match copy_result {
+        Ok(bytes) => Ok(bytes),
+        Err(error) => {
+            let _ = std::fs::remove_file(&dest);
+            Err(error)
+        }
+    }
 }
 
 struct CloseFn;
@@ -853,9 +981,18 @@ fn parse_exchange(args: &[Value]) -> Result<ParsedExchange, &'static str> {
 }
 
 pub fn child_cancel(host: &ProxyHost) -> CancellationToken {
-    host.session.cancel.child_token()
+    host.live
+        .cancel
+        .lock()
+        .expect("proxy generation")
+        .child_token()
 }
 
 pub fn session_owner(host: &ProxyHost) -> Arc<DriverOwner> {
-    Arc::clone(&host.session.drivers)
+    Arc::clone(&host.live.drivers.lock().expect("proxy generation"))
+}
+
+pub fn admit_url(http: &vm::HttpConfig, url: &str) -> Result<(), &'static str> {
+    let parsed = url::Url::parse(url).map_err(|_| "policy_denied")?;
+    crate::net::policy::admit_remote_target(http, &parsed).map(|_| ())
 }

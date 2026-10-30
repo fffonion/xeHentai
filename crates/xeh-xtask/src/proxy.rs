@@ -15,8 +15,7 @@ use serde_json::{json, Map, Value};
 use crate::paths::{lease_tmp, python_executable, scripts_dir, workspace_root, UPSTREAM_APP_REV};
 use crate::site::verify_fixed_source;
 
-const AUTH_EMPTY: &str =
-    "{\"allowed_schemes\":[],\"allowed_hosts\":[],\"allowed_ports\":[],\"allow_private_ips\":false}";
+const AUTH_EMPTY: &str = "{\"allowed_schemes\":[],\"allowed_hosts\":[],\"allowed_ports\":[],\"allow_private_ips\":false}";
 
 fn stamp() -> u128 {
     SystemTime::now()
@@ -765,6 +764,29 @@ fn mutation_gates(
                 .pointer_mut("/flows/0/set_cookie")
                 .ok_or_else(|| "glype set-cookie is absent".to_string())?;
             *cookie = json!("mutated=1");
+            Ok(())
+        })?;
+        count += 1;
+    }
+    let status_id = "proxy.glype.raw-403";
+    if let (Some(expected), Some(actual)) = (expected.get(status_id), actual.get(status_id)) {
+        reject_mutant("glype-raw-status", expected, actual, |value| {
+            let status = value
+                .pointer_mut("/flows/0/status")
+                .ok_or_else(|| "glype raw status is absent".to_string())?;
+            *status = json!(status.as_i64().unwrap_or_default() + 1);
+            Ok(())
+        })?;
+        count += 1;
+    }
+    let readd_id = "proxy.pool.readd-resets-scores";
+    if let (Some(expected), Some(actual)) = (expected.get(readd_id), actual.get(readd_id)) {
+        reject_mutant("pool-readd-count", expected, actual, |value| {
+            let row = value
+                .pointer_mut("/steps/4/proxy/counts/http://a.invalid:1")
+                .and_then(Value::as_array_mut)
+                .ok_or_else(|| "re-add counts are absent".to_string())?;
+            row[0] = json!(row[0].as_i64().unwrap_or_default() + 1);
             Ok(())
         })?;
         count += 1;

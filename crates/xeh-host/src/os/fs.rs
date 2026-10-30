@@ -823,7 +823,7 @@ pub fn rename_atomic(state: &FsState, source: &Path, target: &Path) -> VmResult<
         None => {
             return Ok(AtomicOutcome::failed(
                 "xeh_fs rename target has no parent".to_string(),
-            ))
+            ));
         }
     };
     if let Err(error) = fs::rename(resolved_source.path(), resolved_target.path()) {
