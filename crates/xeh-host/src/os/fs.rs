@@ -517,18 +517,29 @@ impl Resolved {
     }
 }
 
-/// Resolves `requested` against the trusted download roots without following
-/// the final component.
+/// Resolves `requested` against the trusted download roots without replacing
+/// the final component of the operation path.
 ///
 /// A missing target is resolved through its nearest existing ancestor, so a
 /// not-yet-created scan target still answers `exists = false` without widening
-/// the root check. The final component is deliberately not canonicalized: a
-/// symlink is inspected/removed through the path the caller passed, exactly
-/// like upstream `os.stat` + `os.remove` (stat follows, remove unlinks the
-/// link). The metadata query still follows the link.
+/// the root check. The requested path remains the unlink/rename path. If its
+/// final component is a symlink, its canonical target must also be inside a
+/// trusted root before metadata follows it. A dangling, cyclic, or otherwise
+/// unresolved final symlink is conservatively refused as root-denied.
 fn resolve(state: &FsState, requested: &str) -> Result<Resolved, VmError> {
     let path = resolve_without_final_follow(requested)?;
     check_roots(&state.roots, &path)?;
+    match fs::symlink_metadata(&path) {
+        Ok(entry_metadata) if entry_metadata.file_type().is_symlink() => {
+            let target = fs::canonicalize(&path).map_err(|_| root_denied(&path))?;
+            check_roots(&state.roots, &target)?;
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(VmError::HostError(format!("xeh_fs stat failed: {error}")));
+        }
+    }
     let metadata = match fs::metadata(&path) {
         Ok(metadata) => Some(metadata),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,

@@ -729,6 +729,55 @@ fn failure_case(name: &str) -> Option<FailureCase> {
     }
 }
 
+/// Fixed session-diff fixture baseline for `outside_root`: a fresh owner has
+/// no tasks or ready queue, the default `nw=1` cookie, no header yet, no login,
+/// and an empty download root.
+fn outside_root_oracle_prestate() -> Value {
+    json!({
+        "tasks": [],
+        "queue": [],
+        "cookies": [["nw", "1"]],
+        "header": null,
+        "login": false,
+        "disk": []
+    })
+}
+
+/// Independent publication expected from the controlled `outside_root` input.
+/// The upstream loader publishes the one task and its queue/cookie projection;
+/// its scan finds no disk files. These values come from the literal case input
+/// and the pinned Task.from_dict / scan behavior, not the observed post-state.
+fn outside_root_oracle_poststate() -> Value {
+    json!({
+        "tasks": [{
+            "url": URL_A,
+            "gid": "123456",
+            "sethash": "0123456789",
+            "guid": "outside1",
+            "state": 10,
+            "failcode": 0,
+            "config": {
+                "dir": "/definitely-not-a-trusted-root",
+                "download_range": null
+            },
+            "meta": {
+                "filelist": {},
+                "finished": 0,
+                "title": "x",
+                "total": 1
+            },
+            "reload_map": {},
+            "duplicate_map": {},
+            "renamed_map": {}
+        }],
+        "queue": ["outside1"],
+        "cookies": [["nw", "1"]],
+        "header": "nw=1",
+        "login": false,
+        "disk": []
+    })
+}
+
 fn compare_cases(
     oracle: &Value,
     candidate: &Value,
@@ -822,38 +871,50 @@ fn compare_cases(
         if name == "outside_root" && rss_ok {
             failures.push(format!("{name}: RSS must refuse the untrusted root"));
         }
-        if !rss_ok {
-            if actual["class"] != json!(expectation.rss_class)
-                || actual["code"] != json!(expectation.rss_code)
-            {
-                failures.push(format!(
-                    "{name}: RSS class/code {:?}/{} is not the recorded {}/{:?}",
-                    actual["class"], actual["code"], expectation.rss_class, expectation.rss_code
-                ));
-            }
-            if name == "outside_root"
-                && !actual["value"]
-                    .as_str()
-                    .unwrap_or("")
-                    .contains(ROOT_DENIED_TAG)
-            {
-                failures.push(format!(
-                    "{name}: the failure is not an explicit root denial: {actual}"
-                ));
-            }
+        if actual["outcome"] != json!("failure") {
+            failures.push(format!(
+                "{name}.rss_outcome: {:?} is not the exact recorded failure outcome",
+                actual["outcome"]
+            ));
+        }
+        if actual["class"] != json!(expectation.rss_class)
+            || actual["code"] != json!(expectation.rss_code)
+        {
+            failures.push(format!(
+                "{name}: RSS class/code {:?}/{} is not the recorded {}/{:?}",
+                actual["class"], actual["code"], expectation.rss_class, expectation.rss_code
+            ));
+        }
+        if name == "outside_root"
+            && !actual["value"]
+                .as_str()
+                .unwrap_or("")
+                .contains(ROOT_DENIED_TAG)
+        {
+            failures.push(format!(
+                "{name}: the failure is not an explicit root denial: {actual}"
+            ));
         }
 
-        // The upstream post-state must equal its own pre-invocation baseline,
-        // except outside_root, whose recorded upstream behavior does publish.
+        // Upstream failure cases preserve their own baseline. The controlled
+        // outside_root exception is checked against a separately specified
+        // full publication projection, including the pre-invocation baseline.
         if name == "outside_root" {
-            let tasks = expected["tasks"].as_array().cloned().unwrap_or_default();
-            if tasks.len() != 1
-                || tasks[0]["guid"] != json!("outside1")
-                || tasks[0]["meta"]["finished"] != json!(0)
-            {
-                failures.push(format!(
-                    "{name}: upstream no longer publishes the recorded out-of-root task: {expected}"
-                ));
+            let expected_pre = outside_root_oracle_prestate();
+            let expected_post = outside_root_oracle_poststate();
+            for pointer in ["tasks", "queue", "cookies", "header", "login", "disk"] {
+                compare_value(
+                    &expected_pre[pointer],
+                    &expected["pre"][pointer],
+                    &format!("{name}.oracle_pre.{pointer}"),
+                    failures,
+                );
+                compare_value(
+                    &expected_post[pointer],
+                    &expected[pointer],
+                    &format!("{name}.oracle_post.{pointer}"),
+                    failures,
+                );
             }
         } else {
             for pointer in ["tasks", "queue", "cookies", "header", "login", "disk"] {
@@ -866,29 +927,26 @@ fn compare_cases(
             }
         }
         // RSS post-state must equal the independent pre-invocation baseline.
-        if !rss_ok {
-            for pointer in ["tasks", "queue", "cookies", "header", "login", "disk"] {
-                compare_value(
-                    &actual["pre"][pointer],
-                    &actual[pointer],
-                    &format!("{name}.rss_post.{pointer}"),
-                    failures,
-                );
-            }
+        for pointer in ["tasks", "queue", "cookies", "header", "login", "disk"] {
+            compare_value(
+                &actual["pre"][pointer],
+                &actual[pointer],
+                &format!("{name}.rss_post.{pointer}"),
+                failures,
+            );
         }
         let upstream = match expectation.oracle {
             OracleFailure::Exception(class) => format!("raises {class}"),
             OracleFailure::Return(code) => format!("returns {code}"),
         };
+        let oracle_post_description = if name == "outside_root" {
+            "upstream publication checked against the explicit outside_root projection"
+        } else {
+            "upstream post-state checked against the pre-invocation baseline"
+        };
         deltas.push(format!(
-            "{name}: upstream {upstream}; RSS {} {:?}; both post-states checked against the pre-invocation baseline{}",
-            expectation.rss_class,
-            expectation.rss_code,
-            if name == "outside_root" {
-                "; upstream publishes the out-of-root task, RSS refuses before publication"
-            } else {
-                ""
-            }
+            "{name}: upstream {upstream}; RSS {} {:?}; {oracle_post_description}; RSS post-state checked against the pre-invocation baseline",
+            expectation.rss_class, expectation.rss_code
         ));
     }
     compared
@@ -1028,6 +1086,110 @@ fn failure_negative_gates(oracle: &Value, candidate: &Value) -> [bool; 8] {
         "bad_json",
     );
     [class_code, code, task, cookie, queue, header, login, disk]
+}
+
+fn oracle_mutation_rejected(
+    oracle: &Value,
+    candidate: &Value,
+    name: &str,
+    mutate: impl Fn(&mut Value),
+    needle: &str,
+) -> bool {
+    let mutant = mutate_case(oracle, name, mutate);
+    let mut failures = Vec::new();
+    let mut ignored = Vec::new();
+    compare_cases(&mutant, candidate, &mut failures, &mut ignored);
+    failures.iter().any(|failure| failure.contains(needle))
+}
+
+fn outside_root_negative_gates(oracle: &Value, candidate: &Value) -> [bool; 10] {
+    let outcome_exception = mutation_rejected(
+        oracle,
+        candidate,
+        "outside_root",
+        |record| record["outcome"] = json!("exception"),
+        "outside_root.rss_outcome",
+    );
+    let outcome_null = mutation_rejected(
+        oracle,
+        candidate,
+        "outside_root",
+        |record| record["outcome"] = Value::Null,
+        "outside_root.rss_outcome",
+    );
+    let outcome_unknown = mutation_rejected(
+        oracle,
+        candidate,
+        "outside_root",
+        |record| record["outcome"] = json!("unknown"),
+        "outside_root.rss_outcome",
+    );
+    let outcome_missing = mutation_rejected(
+        oracle,
+        candidate,
+        "outside_root",
+        |record| {
+            record
+                .as_object_mut()
+                .expect("RSS record object")
+                .remove("outcome");
+        },
+        "outside_root.rss_outcome",
+    );
+    let task = oracle_mutation_rejected(
+        oracle,
+        candidate,
+        "outside_root",
+        |record| record["tasks"][0]["meta"]["title"] = json!("mutated"),
+        "outside_root.oracle_post.tasks",
+    );
+    let queue = oracle_mutation_rejected(
+        oracle,
+        candidate,
+        "outside_root",
+        |record| record["queue"] = json!(["outside1", "mutated"]),
+        "outside_root.oracle_post.queue",
+    );
+    let cookies = oracle_mutation_rejected(
+        oracle,
+        candidate,
+        "outside_root",
+        |record| record["cookies"][0][1] = json!("mutated"),
+        "outside_root.oracle_post.cookies",
+    );
+    let header = oracle_mutation_rejected(
+        oracle,
+        candidate,
+        "outside_root",
+        |record| record["header"] = json!("nw=mutated"),
+        "outside_root.oracle_post.header",
+    );
+    let login = oracle_mutation_rejected(
+        oracle,
+        candidate,
+        "outside_root",
+        |record| record["login"] = json!(true),
+        "outside_root.oracle_post.login",
+    );
+    let disk = oracle_mutation_rejected(
+        oracle,
+        candidate,
+        "outside_root",
+        |record| record["disk"] = json!([["unexpected.jpg", 1]]),
+        "outside_root.oracle_post.disk",
+    );
+    [
+        outcome_exception,
+        outcome_null,
+        outcome_unknown,
+        outcome_missing,
+        task,
+        queue,
+        cookies,
+        header,
+        login,
+        disk,
+    ]
 }
 
 fn negative_gates(oracle: &Value, candidate: &Value) -> (bool, bool, bool, bool) {
@@ -1274,6 +1436,7 @@ pub fn run_session_diff() -> Result<(), String> {
     let (task_rejected, cookie_rejected, scan_queue_rejected, return_rejected) =
         negative_gates(&oracle, &candidate);
     let failure_gates = failure_negative_gates(&oracle, &candidate);
+    let outside_root_gates = outside_root_negative_gates(&oracle, &candidate);
     let failure_names = [
         "class_code",
         "code",
@@ -1283,6 +1446,18 @@ pub fn run_session_diff() -> Result<(), String> {
         "header",
         "login",
         "disk",
+    ];
+    let outside_root_names = [
+        "rss_outcome_exception",
+        "rss_outcome_null",
+        "rss_outcome_unknown",
+        "rss_outcome_missing",
+        "oracle_task_content",
+        "oracle_queue",
+        "oracle_cookies",
+        "oracle_header",
+        "oracle_login",
+        "oracle_disk",
     ];
     if !task_rejected {
         failures.push("negative gate: a changed task guid was not rejected".to_string());
@@ -1303,6 +1478,13 @@ pub fn run_session_diff() -> Result<(), String> {
             ));
         }
     }
+    for (name, rejected) in outside_root_names.iter().zip(outside_root_gates.iter()) {
+        if !rejected {
+            failures.push(format!(
+                "outside_root negative gate: changed {name} was not rejected by the production comparator"
+            ));
+        }
+    }
     let report = json!({
         "ok": failures.is_empty(),
         "compared_cases": compared,
@@ -1316,6 +1498,11 @@ pub fn run_session_diff() -> Result<(), String> {
             "failure": failure_names
                 .iter()
                 .zip(failure_gates.iter())
+                .map(|(name, rejected)| ((*name).to_string(), Value::Bool(*rejected)))
+                .collect::<serde_json::Map<String, Value>>(),
+            "outside_root": outside_root_names
+                .iter()
+                .zip(outside_root_gates.iter())
                 .map(|(name, rejected)| ((*name).to_string(), Value::Bool(*rejected)))
                 .collect::<serde_json::Map<String, Value>>()
         }
@@ -1360,6 +1547,15 @@ pub fn run_session_diff() -> Result<(), String> {
         .collect::<Vec<_>>()
         .join(",");
     println!("negative_failure={failure_summary}");
+    let outside_root_summary = outside_root_names
+        .iter()
+        .zip(outside_root_gates.iter())
+        .map(|(name, rejected)| {
+            format!("{name}:{}", if *rejected { "rejected" } else { "accepted" })
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    println!("negative_outside_root={outside_root_summary}");
     for delta in &deltas {
         println!("delta={delta}");
     }

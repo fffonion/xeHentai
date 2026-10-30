@@ -897,6 +897,154 @@ fn load_prechecks_the_whole_epoch_budget_before_publishing_tasks() {
 }
 
 #[test]
+fn scan_budget_rejects_negative_and_cumulative_totals_before_mutation() {
+    let negative_fixture = Fixture::create();
+    fs::create_dir_all(negative_fixture.download_dir.join("partial")).unwrap();
+    fs::write(negative_fixture.download_dir.join("partial/1.jpg"), b"").unwrap();
+    let negative = task_record(
+        GALLERY_A,
+        "budget01",
+        10,
+        json!({"dir": negative_fixture.download_dir.to_string_lossy(), "download_range": null}),
+        json!({"total": -1, "title": "partial", "filelist": {}}),
+        json!({}),
+        json!({}),
+        json!({}),
+        json!(null),
+        json!(null),
+    );
+    seed_raw(
+        &negative_fixture,
+        &format!("{{\"tasks\":{{\"a\":{negative}}},\"cookies\":{{\"nw\":\"1\"}}}}"),
+    );
+    let small = negative_fixture
+        .options()
+        .with_limits(5, xeh_host::SESSION_READ_LIMIT_BYTES);
+    let mut negative_harness = Harness::open_options(&negative_fixture, &[], small);
+    let negative_before = negative_harness.snapshot();
+    let negative_report = negative_harness.load_session();
+    assert_eq!(
+        negative_report["session"]["error"],
+        json!("session:scan_budget")
+    );
+    assert_eq!(negative_report["session"]["code"], json!(null));
+    let negative_snapshot = negative_harness.snapshot();
+    assert_eq!(
+        negative_snapshot, negative_before,
+        "negative total leaves Root unchanged"
+    );
+    assert_eq!(negative_snapshot["tasks"], json!([]));
+    assert_eq!(negative_snapshot["queue"], json!([]));
+    assert_eq!(
+        negative_snapshot["cookies"],
+        json!([{"name": "nw", "value": "1"}])
+    );
+    assert_eq!(
+        fs::read(negative_fixture.download_dir.join("partial/1.jpg")).unwrap(),
+        b"",
+        "negative total must not reach zero-file cleanup"
+    );
+    assert_eq!(negative_harness.control.resource_count(), 0);
+
+    let cumulative_fixture = Fixture::create();
+    fs::create_dir_all(cumulative_fixture.download_dir.join("partial")).unwrap();
+    fs::write(cumulative_fixture.download_dir.join("partial/1.jpg"), b"").unwrap();
+    let first = task_record(
+        GALLERY_A,
+        "budget02",
+        10,
+        json!({"dir": cumulative_fixture.download_dir.to_string_lossy(), "download_range": null}),
+        json!({"total": 3, "title": "partial", "filelist": {}}),
+        json!({}),
+        json!({}),
+        json!({}),
+        json!(null),
+        json!(null),
+    );
+    let second = task_record(
+        GALLERY_B,
+        "budget03",
+        10,
+        json!({"dir": cumulative_fixture.download_dir.to_string_lossy(), "download_range": null}),
+        json!({"total": 3, "title": "partial", "filelist": {}}),
+        json!({}),
+        json!({}),
+        json!({}),
+        json!(null),
+        json!(null),
+    );
+    seed_raw(
+        &cumulative_fixture,
+        &format!("{{\"tasks\":{{\"a\":{first},\"b\":{second}}},\"cookies\":{{\"nw\":\"1\"}}}}"),
+    );
+    let small = cumulative_fixture
+        .options()
+        .with_limits(5, xeh_host::SESSION_READ_LIMIT_BYTES);
+    let mut cumulative_harness = Harness::open_options(&cumulative_fixture, &[], small);
+    let cumulative_before = cumulative_harness.snapshot();
+    let cumulative_report = cumulative_harness.load_session();
+    assert_eq!(
+        cumulative_report["session"]["error"],
+        json!("session:scan_budget")
+    );
+    assert_eq!(cumulative_report["session"]["code"], json!(null));
+    let cumulative_snapshot = cumulative_harness.snapshot();
+    assert_eq!(
+        cumulative_snapshot, cumulative_before,
+        "cumulative refusal leaves Root unchanged"
+    );
+    assert_eq!(cumulative_snapshot["tasks"], json!([]));
+    assert_eq!(cumulative_snapshot["queue"], json!([]));
+    assert_eq!(
+        fs::read(cumulative_fixture.download_dir.join("partial/1.jpg")).unwrap(),
+        b"",
+        "aggregate refusal must precede the first task scan"
+    );
+    assert_eq!(cumulative_harness.control.resource_count(), 0);
+
+    let exact_fixture = Fixture::create();
+    fs::create_dir_all(exact_fixture.download_dir.join("partial")).unwrap();
+    fs::write(exact_fixture.download_dir.join("partial/1.jpg"), b"").unwrap();
+    let first = task_record(
+        GALLERY_A,
+        "budget04",
+        10,
+        json!({"dir": exact_fixture.download_dir.to_string_lossy(), "download_range": null}),
+        json!({"total": 3, "title": "partial", "filelist": {}}),
+        json!({}),
+        json!({}),
+        json!({}),
+        json!(null),
+        json!(null),
+    );
+    let second = task_record(
+        GALLERY_B,
+        "budget05",
+        10,
+        json!({"dir": exact_fixture.download_dir.to_string_lossy(), "download_range": null}),
+        json!({"total": 3, "title": "partial", "filelist": {}}),
+        json!({}),
+        json!({}),
+        json!({}),
+        json!(null),
+        json!(null),
+    );
+    seed_raw(
+        &exact_fixture,
+        &format!("{{\"tasks\":{{\"a\":{first},\"b\":{second}}},\"cookies\":{{\"nw\":\"1\"}}}}"),
+    );
+    let exact = exact_fixture
+        .options()
+        .with_limits(6, xeh_host::SESSION_READ_LIMIT_BYTES);
+    let mut exact_harness = Harness::open_options(&exact_fixture, &[], exact);
+    let exact_report = exact_harness.load_session();
+    assert_eq!(exact_report["session"]["code"], json!(0), "{exact_report}");
+    assert_eq!(exact_report["tasks"].as_array().unwrap().len(), 2);
+    assert!(!exact_fixture.download_dir.join("partial/1.jpg").exists());
+    assert_eq!(exact_harness.control.resource_count(), 0);
+}
+
+#[test]
 fn save_failure_keeps_the_previous_session_bytes() {
     let fixture = Fixture::create();
     let old = b"{\"tasks\":{},\"cookies\":{\"nw\":\"1\"}}\n";
@@ -1360,6 +1508,123 @@ fn zero_byte_symlink_removes_the_link_and_keeps_the_target() {
     let removed = xeh_host::os::fs::remove_zero_file(&state, &plain).expect("plain zero file");
     assert!(removed.removed());
     assert!(!plain.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn final_symlink_target_requires_download_root_for_bound_stat_and_mutations() {
+    use std::os::unix::fs::symlink;
+
+    let target_payloads: [&[u8]; 2] = [b"", b"outside payload"];
+    for (index, payload) in target_payloads.into_iter().enumerate() {
+        let fixture = Fixture::create();
+        let target = fixture._root.path().join(format!("outside-{index}.bin"));
+        fs::write(&target, payload).unwrap();
+        let partial = fixture.download_dir.join("partial");
+        fs::create_dir_all(&partial).unwrap();
+        let link = partial.join("1.jpg");
+        symlink(&target, &link).unwrap();
+
+        let record = task_record(
+            GALLERY_A,
+            "link0001",
+            10,
+            json!({"dir": fixture.download_dir.to_string_lossy(), "download_range": null}),
+            json!({"total": 1, "title": "partial", "filelist": {}}),
+            json!({}),
+            json!({}),
+            json!({}),
+            json!(null),
+            json!(null),
+        );
+        seed_raw(
+            &fixture,
+            &format!("{{\"tasks\":{{\"a\":{record}}},\"cookies\":{{\"nw\":\"1\"}}}}"),
+        );
+        let mut harness = Harness::open(&fixture, &[]);
+        let report = harness.load_session();
+        assert!(
+            fs::symlink_metadata(&link).is_ok(),
+            "a refused stat must preserve the zero-byte link"
+        );
+        assert_eq!(
+            report["session"]["error"],
+            json!("session:host_failure"),
+            "bound xeh_fs::stat must deny external target: {report}"
+        );
+        assert!(
+            report["session"]["value"]
+                .as_str()
+                .unwrap_or("")
+                .contains(xeh_host::ROOT_DENIED_TAG),
+            "stat denial must carry the root-denied tag: {report}"
+        );
+        let snapshot = harness.snapshot();
+        assert_eq!(snapshot["tasks"], json!([]));
+        assert_eq!(snapshot["queue"], json!([]));
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&target).unwrap(), payload);
+
+        let state = xeh_host::os::fs::FsState::new(vec![fixture.download_dir.clone()], None, None);
+        let removed = xeh_host::os::fs::remove_zero_file(&state, &link);
+        let remove_error = match removed {
+            Err(error) => format!("{error:?}"),
+            Ok(_) => panic!("zero-file mutation accepted an external target"),
+        };
+        assert!(
+            remove_error.contains(xeh_host::ROOT_DENIED_TAG),
+            "zero-file denial must be root-denied: {remove_error}"
+        );
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&target).unwrap(), payload);
+
+        let moved = fixture.download_dir.join("moved.jpg");
+        let moved_result = xeh_host::os::fs::rename_atomic(&state, &link, &moved);
+        let moved_error = match moved_result {
+            Err(error) => format!("{error:?}"),
+            Ok(_) => panic!("rename accepted an external symlink source"),
+        };
+        assert!(
+            moved_error.contains(xeh_host::ROOT_DENIED_TAG),
+            "source denial must be root-denied: {moved_error}"
+        );
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(
+            !moved.exists(),
+            "denied source rename creates no destination"
+        );
+        assert_eq!(fs::read(&target).unwrap(), payload);
+
+        let source = fixture.download_dir.join("source.jpg");
+        fs::write(&source, b"source bytes").unwrap();
+        let destination_link = fixture.download_dir.join("destination-link.jpg");
+        symlink(&target, &destination_link).unwrap();
+        let destination_result =
+            xeh_host::os::fs::rename_atomic(&state, &source, &destination_link);
+        let destination_error = match destination_result {
+            Err(error) => format!("{error:?}"),
+            Ok(_) => panic!("rename accepted an external symlink destination"),
+        };
+        assert!(
+            destination_error.contains(xeh_host::ROOT_DENIED_TAG),
+            "destination denial must be root-denied: {destination_error}"
+        );
+        assert_eq!(fs::read(&source).unwrap(), b"source bytes");
+        assert!(fs::symlink_metadata(&destination_link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&target).unwrap(), payload);
+    }
 }
 
 #[test]
