@@ -1,0 +1,2396 @@
+{
+  "version": 1,
+  "note": "Every plan feature is listed; status never claims more than the two-round evidence proves.",
+  "cases": [
+    {
+      "id": "config.default.daemon",
+      "source": "xeHentai/config.py:daemon",
+      "target": "src/config.rs Config::default",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "daemon == False"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.default.dir",
+      "source": "xeHentai/config.py:dir",
+      "target": "src/config.rs Config::default",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "dir == '.'"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.default.download_ori",
+      "source": "xeHentai/config.py:download_ori",
+      "target": "src/config.rs Config::default",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "download_ori == False"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.default.jpn_title",
+      "source": "xeHentai/config.py:jpn_title",
+      "target": "src/config.rs Config::default",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "jpn_title == True"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.default.rename_ori",
+      "source": "xeHentai/config.py:rename_ori",
+      "target": "src/config.rs Config::default",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "rename_ori == False"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.default.proxy",
+      "source": "xeHentai/config.py:proxy",
+      "target": "src/config.rs Config::default",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "proxy == []"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.default.proxy_image",
+      "source": "xeHentai/config.py:proxy_image",
+      "target": "src/config.rs Config::default",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "proxy_image == True"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.default.proxy_image_only",
+      "source": "xeHentai/config.py:proxy_image_only",
+      "target": "src/config.rs Config::default",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "proxy_image_only == False"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.default.rpc_interface",
+      "source": "xeHentai/config.py:rpc_interface",
+      "target": "src/config.rs Config::default",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "rpc_interface == 'localhost'"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.default.rpc_port",
+      "source": "xeHentai/config.py:rpc_port",
+      "target": "src/config.rs Config::default",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "rpc_port == None"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.default.rpc_secret",
+      "source": "xeHentai/config.py:rpc_secret",
+      "target": "src/config.rs Config::default",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "rpc_secret == None"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.default.rpc_open_browser",
+      "source": "xeHentai/config.py:rpc_open_browser",
+      "target": "src/config.rs Config::default",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "rpc_open_browser == True"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.default.make_archive",
+      "source": "xeHentai/config.py:make_archive",
+      "target": "src/config.rs Config::default",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "make_archive == False"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.default.download_range",
+      "source": "xeHentai/config.py:download_range",
+      "target": "src/config.rs Config::default",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "download_range == None"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.default.scan_thread_cnt",
+      "source": "xeHentai/config.py:scan_thread_cnt",
+      "target": "src/config.rs Config::default",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "scan_thread_cnt == 1"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.default.download_thread_cnt",
+      "source": "xeHentai/config.py:download_thread_cnt",
+      "target": "src/config.rs Config::default",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "download_thread_cnt == 5"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.default.download_timeout",
+      "source": "xeHentai/config.py:download_timeout",
+      "target": "src/config.rs Config::default",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "download_timeout == 10"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.default.ignored_errors",
+      "source": "xeHentai/config.py:ignored_errors",
+      "target": "src/config.rs Config::default",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "ignored_errors == []"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.default.log_path",
+      "source": "xeHentai/config.py:log_path",
+      "target": "src/config.rs Config::default",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "log_path == 'eh.log'"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.default.log_verbose",
+      "source": "xeHentai/config.py:log_verbose",
+      "target": "src/config.rs Config::default",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "log_verbose == 2"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.default.save_tasks",
+      "source": "xeHentai/config.py:save_tasks",
+      "target": "src/config.rs Config::default",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "save_tasks == False"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.default.delete_task_files",
+      "source": "xeHentai/config.py:delete_task_files",
+      "target": "src/config.rs Config::default",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "delete_task_files == False"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.default.low_speed_threshold",
+      "source": "xeHentai/config.py:low_speed_threshold",
+      "target": "src/config.rs Config::default",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "low_speed_threshold == 10"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.default.auto_update",
+      "source": "xeHentai/config.py:auto_update",
+      "target": "src/config.rs Config::default",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "auto_update == 'download'"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.default.update_beta_channel",
+      "source": "xeHentai/config.py:update_beta_channel",
+      "target": "src/config.rs Config::default",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "update_beta_channel == False"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.import.overrides",
+      "source": "plan 4.1 fixture",
+      "target": "src/config.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "file values override defaults"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.import.expected-values",
+      "source": "plan 4.1 explicit fixture expectation",
+      "target": "src/config.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "independent expected dict equals oracle and candidate"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.import.quotes-comments",
+      "source": "util importer quote/comment cases",
+      "target": "src/config.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "quotes protect # and =; comments strip"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.import.multiline-arrays",
+      "source": "util importer multiline cases",
+      "target": "src/config.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "multi-line arrays and CRLF"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.import.empty-values",
+      "source": "util importer empty values",
+      "target": "src/config.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "false/0/empty string/empty array preserved"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.import.duplicate-key",
+      "source": "util importer duplicate key",
+      "target": "src/config.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "last assignment wins"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.import.rejects-out-of-subset",
+      "source": "plan 4.1 unsupported values",
+      "target": "src/config.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "float/None/tuple/dict/call/overflow rejected"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.import.unknown-key",
+      "source": "plan 4.1 strict known keys",
+      "target": "src/config.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "unknown key rejected"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.import.range-validation",
+      "source": "plan 4.1 field ranges",
+      "target": "src/config.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "rpc_port and thread/timeout ranges validated"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.import.input-budget",
+      "source": "plan 4.1 1 MiB import budget",
+      "target": "src/config.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "oversized input rejected"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.rss.roundtrip",
+      "source": "plan 4.1 RSS save/load",
+      "target": "src/config.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "all 25 fields survive encode/decode"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.rss.priority",
+      "source": "plan 4.1 priority",
+      "target": "src/config.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "existing config.rss wins"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.rss.open-audit",
+      "source": "plan 4.1 read audit",
+      "target": "src/config.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "only config.rss is opened"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.rss.no-python-fallback",
+      "source": "plan 4.1 no fallback",
+      "target": "src/config.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "bad RSS plus valid Python still fails"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.rss.first-import",
+      "source": "plan 4.1 first import",
+      "target": "src/config.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "config.py imported once into config.rss"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.rss.source-unchanged",
+      "source": "plan 4.1 source bytes",
+      "target": "src/config.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "config.py bytes untouched"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.rss.defaults-create",
+      "source": "plan 4.1 defaults",
+      "target": "src/config.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "no files creates config.rss from defaults"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.rss.no-partial-file",
+      "source": "plan 4.1 failure cleanup",
+      "target": "src/config.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "failed import leaves no config.rss"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.rss.save-atomic",
+      "source": "plan 4.1 save",
+      "target": "src/config.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "atomic replace and reload"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.rss.save-failure-preserves",
+      "source": "plan 4.1 save failure",
+      "target": "src/config.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "previous RSS preserved"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.rss.concurrent-create",
+      "source": "plan 4.1 item 7",
+      "target": "src/config.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "concurrent first create never clobbers a valid RSS"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.rss.invalid-shape",
+      "source": "plan 4.1 RSS errors",
+      "target": "src/config.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "compile/runtime/shape errors reported"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.rss.lifecycle",
+      "source": "plan 4.1 full migration",
+      "target": "src/config.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "migrate/load/modify/save/reload survives Python changes"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.rss.sdk-shape",
+      "source": "plan 4.1 typed export",
+      "target": "src/config.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "named struct with optional and array fields loads through the SDK"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "util.parse_cookie",
+      "source": "util/__init__.py:parse_cookie",
+      "target": "src/util/mod.rs",
+      "suite": "util",
+      "inputs": [],
+      "assertions": [
+        "ordered pairs, attribute skipping, duplicate overwrite, empty input"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "util.make_cookie",
+      "source": "util/__init__.py:make_cookie",
+      "target": "src/util/mod.rs",
+      "suite": "util",
+      "inputs": [],
+      "assertions": [
+        "ordered join with '=' values"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "util.make_ua",
+      "source": "util/__init__.py:make_ua",
+      "target": "src/util/mod.rs",
+      "suite": "util",
+      "inputs": [],
+      "assertions": [
+        "implicit None return preserved; no generated UA header"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "util.get_proxy_policy",
+      "source": "util/__init__.py:get_proxy_policy",
+      "target": "src/util/mod.rs",
+      "suite": "util",
+      "inputs": [],
+      "assertions": [
+        "proxy_image_only > proxy_image > webpage"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "util.parse_human_time",
+      "source": "util/__init__.py:parse_human_time",
+      "target": "src/util/mod.rs",
+      "suite": "util",
+      "inputs": [],
+      "assertions": [
+        "day/hour/minute patterns and missing-minute bonus"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "util.htmlescape",
+      "source": "util/__init__.py:htmlescape",
+      "target": "src/util/mod.rs",
+      "suite": "util",
+      "inputs": [],
+      "assertions": [
+        "named entities, one pass, invalid numeric error"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "util.legalpath.posix",
+      "source": "util/__init__.py:legalpath (posix)",
+      "target": "src/util/mod.rs",
+      "suite": "util",
+      "inputs": [],
+      "assertions": [
+        "remove / and :"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "util.legalpath.windows",
+      "source": "util/__init__.py:legalpath (nt)",
+      "target": "src/util/mod.rs",
+      "suite": "util",
+      "inputs": [],
+      "assertions": [
+        "remove windows set, trailing dots, rstrip"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "util.human_size",
+      "source": "util/__init__.py:human_size",
+      "target": "src/util/mod.rs",
+      "suite": "util",
+      "inputs": [],
+      "assertions": [
+        "1000/1024 boundaries, 2 decimals, UNL."
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "logger.levels",
+      "source": "util/logger.py:set_level",
+      "target": "src/util/logger.rs",
+      "suite": "util",
+      "inputs": [],
+      "assertions": [
+        "clamped levels disable VERB then DEBG then INFO"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "logger.stdout-format",
+      "source": "util/logger.py:log",
+      "target": "src/util/logger.rs",
+      "suite": "util",
+      "inputs": [],
+      "assertions": [
+        "'%-4s - [%X] %s\\n'"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "logger.file-format",
+      "source": "util/logger.py:log file",
+      "target": "src/util/logger.rs",
+      "suite": "util",
+      "inputs": [],
+      "assertions": [
+        "'[%b %d %X] %s\\n' in GMT+8"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "logger.tty-colors",
+      "source": "util/logger.py:posix colors",
+      "target": "src/util/logger.rs",
+      "suite": "util",
+      "inputs": [],
+      "assertions": [
+        "ANSI codes for ERROR/WARN and reset"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "i18n.locale-mapping",
+      "source": "i18n/__init__.py locale mapping",
+      "target": "src/i18n.rs / locales",
+      "suite": "i18n",
+      "inputs": [],
+      "assertions": [
+        "zh_CN/zh_SG -> zh_hans, zh_TW/zh_HK/zh_MO -> zh_hant, unknown -> en_us"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "i18n.keys.all",
+      "source": "i18n/*.py string keys",
+      "target": "src/i18n.rs / locales",
+      "suite": "i18n",
+      "inputs": [],
+      "assertions": [
+        "97 keys exist in all three YAML locales with exact text"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "i18n.interpolation",
+      "source": "i18n templates",
+      "target": "src/i18n.rs / locales",
+      "suite": "i18n",
+      "inputs": [],
+      "assertions": [
+        "converted positional interpolation reproduces the reference output"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "i18n.err_msg.all",
+      "source": "i18n/*.py err_msg",
+      "target": "src/i18n.rs / locales",
+      "suite": "i18n",
+      "inputs": [],
+      "assertions": [
+        "27 error messages and unknown-code fallback per locale"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "i18n.nomsg",
+      "source": "i18n ERR_NOMSG",
+      "target": "src/i18n.rs / locales",
+      "suite": "i18n",
+      "inputs": [],
+      "assertions": [
+        "localized undefined error message with numeric code"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "i18n.fallback",
+      "source": "rust-i18n fallback",
+      "target": "src/i18n.rs / locales",
+      "suite": "i18n",
+      "inputs": [],
+      "assertions": [
+        "missing key falls back to en_us, unknown key returns None"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "i18n.concurrent-isolation",
+      "source": "plan 4.3",
+      "target": "src/i18n.rs / locales",
+      "suite": "i18n",
+      "inputs": [],
+      "assertions": [
+        "explicit locale lookups are isolated across threads"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "i18n.available-locales",
+      "source": "locales/ resources",
+      "target": "src/i18n.rs / locales",
+      "suite": "i18n",
+      "inputs": [],
+      "assertions": [
+        "exactly en_us, zh_hans, zh_hant are compiled in"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "worker.single-persistent",
+      "source": "plan M0",
+      "target": "src/worker.rs",
+      "suite": "worker",
+      "inputs": [],
+      "assertions": [
+        "one task processes several items sequentially"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "worker.two-in-flight",
+      "source": "plan M0 local barrier",
+      "target": "src/worker.rs",
+      "suite": "worker",
+      "inputs": [],
+      "assertions": [
+        "two workers have requests in flight simultaneously"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "worker.cancel-join-connection",
+      "source": "plan M0 cancellation",
+      "target": "src/worker.rs",
+      "suite": "worker",
+      "inputs": [],
+      "assertions": [
+        "cancel waits for JoinHandle and closes the connection"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "main.config-init",
+      "source": "plan M0/M1",
+      "target": "src/main.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "entry point loads or creates config.rss and opens the log"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "main.honest-exit",
+      "source": "plan M0 honest report",
+      "target": "src/main.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "foundation build reports downloading not implemented"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "structure.src-rss-separation",
+      "source": "plan 2 + foundation contract",
+      "target": "src/main.rs / src/tests.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "no .rss under src/ and no .rs under rss/"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.state.paused",
+      "source": "xeHentai/const.py:TASK_STATE_PAUSED",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 0"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.state.waiting",
+      "source": "xeHentai/const.py:TASK_STATE_WAITING",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.state.get_meta",
+      "source": "xeHentai/const.py:TASK_STATE_GET_META",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 2"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.state.scan_page",
+      "source": "xeHentai/const.py:TASK_STATE_SCAN_PAGE",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 3"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.state.scan_img",
+      "source": "xeHentai/const.py:TASK_STATE_SCAN_IMG",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 4"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.state.scan_archive",
+      "source": "xeHentai/const.py:TASK_STATE_SCAN_ARCHIVE",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 5"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.state.download",
+      "source": "xeHentai/const.py:TASK_STATE_DOWNLOAD",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 10"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.state.make_archive",
+      "source": "xeHentai/const.py:TASK_STATE_MAKE_ARCHIVE",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 19"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.state.finished",
+      "source": "xeHentai/const.py:TASK_STATE_FINISHED",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 20"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.state.failed",
+      "source": "xeHentai/const.py:TASK_STATE_FAILED",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == -1"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.no_error",
+      "source": "xeHentai/const.py:ERR_NO_ERROR",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 0"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.url_not_recognized",
+      "source": "xeHentai/const.py:ERR_URL_NOT_RECOGNIZED",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1000"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.cant_download_exh",
+      "source": "xeHentai/const.py:ERR_CANT_DOWNLOAD_EXH",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1001"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.only_visible_exh",
+      "source": "xeHentai/const.py:ERR_ONLY_VISIBLE_EXH",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1002"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.malformed_hathdl",
+      "source": "xeHentai/const.py:ERR_MALFORMED_HATHDL",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1003"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.gallery_removed",
+      "source": "xeHentai/const.py:ERR_GALLERY_REMOVED",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1004"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.image_resampled",
+      "source": "xeHentai/const.py:ERR_IMAGE_RESAMPLED",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1005"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.quota_exceeded",
+      "source": "xeHentai/const.py:ERR_QUOTA_EXCEEDED",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1006"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.key_expired",
+      "source": "xeHentai/const.py:ERR_KEY_EXPIRED",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1007"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.no_pageurl_found",
+      "source": "xeHentai/const.py:ERR_NO_PAGEURL_FOUND",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1008"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.connection_error",
+      "source": "xeHentai/const.py:ERR_CONNECTION_ERROR",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1009"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.ip_banned",
+      "source": "xeHentai/const.py:ERR_IP_BANNED",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1010"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.hath_not_found",
+      "source": "xeHentai/const.py:ERR_HATH_NOT_FOUND",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1011"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.image_broken",
+      "source": "xeHentai/const.py:ERR_IMAGE_BROKEN",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1012"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.scan_regex_failed",
+      "source": "xeHentai/const.py:ERR_SCAN_REGEX_FAILED",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1013"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.stream_not_implemented",
+      "source": "xeHentai/const.py:ERR_STREAM_NOT_IMPLEMENTED",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1014"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.task_not_found",
+      "source": "xeHentai/const.py:ERR_TASK_NOT_FOUND",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1101"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.save_session_failed",
+      "source": "xeHentai/const.py:ERR_SAVE_SESSION_FAILED",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1103"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.task_level_undef",
+      "source": "xeHentai/const.py:ERR_TASK_LEVEL_UNDEF",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1104"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.delete_running_task",
+      "source": "xeHentai/const.py:ERR_DELETE_RUNNING_TASK",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1105"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.task_cannot_pause",
+      "source": "xeHentai/const.py:ERR_TASK_CANNOT_PAUSE",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1106"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.task_cannot_resume",
+      "source": "xeHentai/const.py:ERR_TASK_CANNOT_RESUME",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1107"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.rpc_unauthorized",
+      "source": "xeHentai/const.py:ERR_RPC_UNAUTHORIZED",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1200"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.cannot_create_dir",
+      "source": "xeHentai/const.py:ERR_CANNOT_CREATE_DIR",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1300"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.cannot_make_archive",
+      "source": "xeHentai/const.py:ERR_CANNOT_MAKE_ARCHIVE",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1301"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.not_range_format",
+      "source": "xeHentai/const.py:ERR_NOT_RANGE_FORMAT",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == 1302"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.rpc_parse_error",
+      "source": "xeHentai/const.py:ERR_RPC_PARSE_ERROR",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == -32700"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.rpc_invalid_request",
+      "source": "xeHentai/const.py:ERR_RPC_INVALID_REQUEST",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == -32600"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.rpc_method_not_found",
+      "source": "xeHentai/const.py:ERR_RPC_METHOD_NOT_FOUND",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == -32601"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.rpc_invalid_params",
+      "source": "xeHentai/const.py:ERR_RPC_INVALID_PARAMS",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == -32602"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.error.rpc_exec_error",
+      "source": "xeHentai/const.py:ERR_RPC_EXEC_ERROR",
+      "target": "src/const.rs",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "value == -32603"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "const.err-key-map",
+      "source": "xeHentai/i18n/*.py err_msg",
+      "target": "src/const.rs err_key",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "27 translatable codes map to symbolic keys; untranslated codes return None"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "delta.version-string",
+      "source": "approved migration difference",
+      "target": "src/",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "version is printed as 2.023-rss instead of 2.023"
+      ],
+      "status": "delta",
+      "delta": "version is printed as 2.023-rss instead of 2.023"
+    },
+    {
+      "id": "delta.python-import-subset",
+      "source": "approved migration difference",
+      "target": "src/",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "config.py import accepts only int/bool/string/array; None/float/calls reject"
+      ],
+      "status": "delta",
+      "delta": "config.py import accepts only int/bool/string/array; None/float/calls reject"
+    },
+    {
+      "id": "delta.htmlescape-numeric-error",
+      "source": "approved migration difference",
+      "target": "src/",
+      "suite": "util",
+      "inputs": [],
+      "assertions": [
+        "invalid numeric entity is a Rust error with the reference ValueError text"
+      ],
+      "status": "delta",
+      "delta": "invalid numeric entity is a Rust error with the reference ValueError text"
+    },
+    {
+      "id": "rpc.updateConfig",
+      "source": "xeHentai/rpc.py xeH.updateConfig(**cfg)",
+      "target": "src/rpc/ + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "success, error, missing param, token and HTTP behaviour compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.addTask",
+      "source": "xeHentai/rpc.py xeH.addTask(url, **task_cfg)",
+      "target": "src/rpc/ + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "success, error, missing param, token and HTTP behaviour compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.delTask",
+      "source": "xeHentai/rpc.py xeH.delTask(guid)",
+      "target": "src/rpc/ + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "success, error, missing param, token and HTTP behaviour compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.pauseTask",
+      "source": "xeHentai/rpc.py xeH.pauseTask(guid)",
+      "target": "src/rpc/ + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "success, error, missing param, token and HTTP behaviour compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.resumeTask",
+      "source": "xeHentai/rpc.py xeH.resumeTask(guid)",
+      "target": "src/rpc/ + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "success, error, missing param, token and HTTP behaviour compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.saveSession",
+      "source": "xeHentai/rpc.py xeH.saveSession()",
+      "target": "src/rpc/ + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "success, error, missing param, token and HTTP behaviour compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.loadSession",
+      "source": "xeHentai/rpc.py xeH.loadSession()",
+      "target": "src/rpc/ + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "success, error, missing param, token and HTTP behaviour compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.loginExhentai",
+      "source": "xeHentai/rpc.py xeH.loginExhentai(name, pwd)",
+      "target": "src/rpc/ + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "success, error, missing param, token and HTTP behaviour compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.setCookie",
+      "source": "xeHentai/rpc.py xeH.setCookie(cookie)",
+      "target": "src/rpc/ + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "success, error, missing param, token and HTTP behaviour compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.getInfo",
+      "source": "xeHentai/rpc.py xeH.getInfo()",
+      "target": "src/rpc/ + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "success, error, missing param, token and HTTP behaviour compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.getConfig",
+      "source": "xeHentai/rpc.py xeH.getConfig()",
+      "target": "src/rpc/ + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "success, error, missing param, token and HTTP behaviour compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.listTasks",
+      "source": "xeHentai/rpc.py xeH.listTasks(level=\"download\")",
+      "target": "src/rpc/ + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "success, error, missing param, token and HTTP behaviour compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.getImage",
+      "source": "xeHentai/rpc.py xeH.getImage(guid, request_range=null)",
+      "target": "src/rpc/ + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "success, error, missing param, token and HTTP behaviour compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.username",
+      "source": "xeHentai/cli.py option username",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.key",
+      "source": "xeHentai/cli.py option key",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.cookie",
+      "source": "xeHentai/cli.py option cookie",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.interactive",
+      "source": "xeHentai/cli.py option interactive",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.daemon",
+      "source": "xeHentai/cli.py option daemon",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.dir",
+      "source": "xeHentai/cli.py option dir",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.download_ori",
+      "source": "xeHentai/cli.py option download_ori",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.jpn_title",
+      "source": "xeHentai/cli.py option jpn_title",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.rename_ori",
+      "source": "xeHentai/cli.py option rename_ori",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.proxy",
+      "source": "xeHentai/cli.py option proxy",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.proxy_image",
+      "source": "xeHentai/cli.py option proxy_image",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.proxy_image_only",
+      "source": "xeHentai/cli.py option proxy_image_only",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.rpc_interface",
+      "source": "xeHentai/cli.py option rpc_interface",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.rpc_port",
+      "source": "xeHentai/cli.py option rpc_port",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.rpc_secret",
+      "source": "xeHentai/cli.py option rpc_secret",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.rpc_open_browser",
+      "source": "xeHentai/cli.py option rpc_open_browser",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.delete_task_files",
+      "source": "xeHentai/cli.py option delete_task_files",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.archive",
+      "source": "xeHentai/cli.py option archive",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.download_range",
+      "source": "xeHentai/cli.py option download_range",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.thread",
+      "source": "xeHentai/cli.py option thread",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.timeout",
+      "source": "xeHentai/cli.py option timeout",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.low_speed_threshold",
+      "source": "xeHentai/cli.py option low_speed_threshold",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.force",
+      "source": "xeHentai/cli.py option force",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.auto_update",
+      "source": "xeHentai/cli.py option auto_update",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.update_beta_channel",
+      "source": "xeHentai/cli.py option update_beta_channel",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.logpath",
+      "source": "xeHentai/cli.py option logpath",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.verbose",
+      "source": "xeHentai/cli.py option verbose",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.help",
+      "source": "xeHentai/cli.py option help",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.version",
+      "source": "xeHentai/cli.py option version",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "cli.urls",
+      "source": "xeHentai/cli.py option urls",
+      "target": "src/cli.rs",
+      "suite": "cli",
+      "inputs": [],
+      "assertions": [
+        "arguments, aliases, defaults and bool semantics compared"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "task.create-config-snapshot",
+      "source": "core.py:106-162 / task.py",
+      "target": "src/task.rs / src/core.rs",
+      "suite": "task",
+      "inputs": [],
+      "assertions": [
+        "14 base keys captured at Task creation"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "task.state-api",
+      "source": "core.py:106-162",
+      "target": "src/task.rs / src/core.rs",
+      "suite": "task",
+      "inputs": [],
+      "assertions": [
+        "add/del/pause/resume and public states"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "task.guid",
+      "source": "plan 5.1",
+      "target": "src/task.rs / src/core.rs",
+      "suite": "task",
+      "inputs": [],
+      "assertions": [
+        "UUID 8-char prefix and collision handling"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "task.session-save",
+      "source": "task.py:417-440",
+      "target": "src/task.rs / src/core.rs",
+      "suite": "task",
+      "inputs": [],
+      "assertions": [
+        "h.json tasks/cookies shape"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "task.session-load",
+      "source": "core.py:390-440",
+      "target": "src/task.rs / src/core.rs",
+      "suite": "task",
+      "inputs": [],
+      "assertions": [
+        "corrupt/missing/old cookie recovery"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "task.resume",
+      "source": "plan 5.2",
+      "target": "src/task.rs / src/core.rs",
+      "suite": "task",
+      "inputs": [],
+      "assertions": [
+        "half-finished queue restoration"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "task.files-scan-downloaded",
+      "source": "task.py:120-415",
+      "target": "src/task.rs / src/core.rs",
+      "suite": "task",
+      "inputs": [],
+      "assertions": [
+        "zero-byte and existing file counts"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "task.naming",
+      "source": "task.py:120-415",
+      "target": "src/task.rs / src/core.rs",
+      "suite": "task",
+      "inputs": [],
+      "assertions": [
+        "sequence, rename_ori and conflict naming"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "task.duplicates",
+      "source": "task.py:120-415",
+      "target": "src/task.rs / src/core.rs",
+      "suite": "task",
+      "inputs": [],
+      "assertions": [
+        "duplicate image accounting"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "task.archive",
+      "source": "task.py:120-415",
+      "target": "src/task.rs / src/core.rs",
+      "suite": "task",
+      "inputs": [],
+      "assertions": [
+        "STORE/ZIP64/entries/comments"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "filters.login",
+      "source": "filters.py login",
+      "target": "src/filters/ + rss/filters/match.rss",
+      "suite": "filters",
+      "inputs": [],
+      "assertions": [
+        "callback order, values and errors"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "filters.metadata",
+      "source": "filters.py metadata",
+      "target": "src/filters/ + rss/filters/match.rss",
+      "suite": "filters",
+      "inputs": [],
+      "assertions": [
+        "callback order, values and errors"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "filters.page",
+      "source": "filters.py page parse",
+      "target": "src/filters/ + rss/filters/match.rss",
+      "suite": "filters",
+      "inputs": [],
+      "assertions": [
+        "callback order, values and errors"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "filters.mpv",
+      "source": "filters.py MPV",
+      "target": "src/filters/ + rss/filters/match.rss",
+      "suite": "filters",
+      "inputs": [],
+      "assertions": [
+        "callback order, values and errors"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "filters.quota",
+      "source": "filters.py quota wrapper",
+      "target": "src/filters/ + rss/filters/match.rss",
+      "suite": "filters",
+      "inputs": [],
+      "assertions": [
+        "callback order, values and errors"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "filters.image-link",
+      "source": "filters.py image link",
+      "target": "src/filters/ + rss/filters/match.rss",
+      "suite": "filters",
+      "inputs": [],
+      "assertions": [
+        "callback order, values and errors"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "filters.download-response",
+      "source": "filters.py download response",
+      "target": "src/filters/ + rss/filters/match.rss",
+      "suite": "filters",
+      "inputs": [],
+      "assertions": [
+        "callback order, values and errors"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "filters.reset-quota",
+      "source": "filters.py reset_quota (no implementation upstream)",
+      "target": "src/filters/ + rss/filters/match.rss",
+      "suite": "filters",
+      "inputs": [],
+      "assertions": [
+        "callback order, values and errors"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "proxy.http",
+      "source": "proxy.py http",
+      "target": "src/proxy.rs",
+      "suite": "proxy",
+      "inputs": [],
+      "assertions": [
+        "protocol fixture, routing and failure counters"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "proxy.https",
+      "source": "proxy.py https",
+      "target": "src/proxy.rs",
+      "suite": "proxy",
+      "inputs": [],
+      "assertions": [
+        "protocol fixture, routing and failure counters"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "proxy.socks4",
+      "source": "proxy.py socks4",
+      "target": "src/proxy.rs",
+      "suite": "proxy",
+      "inputs": [],
+      "assertions": [
+        "protocol fixture, routing and failure counters"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "proxy.socks4a",
+      "source": "proxy.py socks4a",
+      "target": "src/proxy.rs",
+      "suite": "proxy",
+      "inputs": [],
+      "assertions": [
+        "protocol fixture, routing and failure counters"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "proxy.socks5",
+      "source": "proxy.py socks5",
+      "target": "src/proxy.rs",
+      "suite": "proxy",
+      "inputs": [],
+      "assertions": [
+        "protocol fixture, routing and failure counters"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "proxy.socks5h",
+      "source": "proxy.py socks5h",
+      "target": "src/proxy.rs",
+      "suite": "proxy",
+      "inputs": [],
+      "assertions": [
+        "protocol fixture, routing and failure counters"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "proxy.glype",
+      "source": "proxy.py glype",
+      "target": "src/proxy.rs",
+      "suite": "proxy",
+      "inputs": [],
+      "assertions": [
+        "protocol fixture, routing and failure counters"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "update.channel",
+      "source": "updater/github.py:17-35",
+      "target": "src/updater/ + rss/updater/",
+      "suite": "update",
+      "inputs": [],
+      "assertions": [
+        "real RSS decision changes requests and pending files"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "update.commit",
+      "source": "updater/github.py:17-35",
+      "target": "src/updater/ + rss/updater/",
+      "suite": "update",
+      "inputs": [],
+      "assertions": [
+        "real RSS decision changes requests and pending files"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "update.decision",
+      "source": "updater/updater.py:21-63",
+      "target": "src/updater/ + rss/updater/",
+      "suite": "update",
+      "inputs": [],
+      "assertions": [
+        "real RSS decision changes requests and pending files"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "update.package",
+      "source": "updater/updater.py:21-63",
+      "target": "src/updater/ + rss/updater/",
+      "suite": "update",
+      "inputs": [],
+      "assertions": [
+        "real RSS decision changes requests and pending files"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "update.apply",
+      "source": "xeH.py:14-42",
+      "target": "src/updater/ + rss/updater/",
+      "suite": "update",
+      "inputs": [],
+      "assertions": [
+        "real RSS decision changes requests and pending files"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "update.rollback",
+      "source": "plan 9.2",
+      "target": "src/updater/ + rss/updater/",
+      "suite": "update",
+      "inputs": [],
+      "assertions": [
+        "real RSS decision changes requests and pending files"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "webui.static",
+      "source": "frozen xeHentai-webui@4e3738ef",
+      "target": "src/rpc/server.rs + frozen UI assets",
+      "suite": "webui",
+      "inputs": [],
+      "assertions": [
+        "real browser flow and HTTP trace"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "webui.gallery",
+      "source": "rpc.py:431-435 gallery",
+      "target": "src/rpc/server.rs + frozen UI assets",
+      "suite": "webui",
+      "inputs": [],
+      "assertions": [
+        "real browser flow and HTTP trace"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    },
+    {
+      "id": "webui.browser",
+      "source": "plan 8.3 browser flow",
+      "target": "src/rpc/server.rs + frozen UI assets",
+      "suite": "webui",
+      "inputs": [],
+      "assertions": [
+        "real browser flow and HTTP trace"
+      ],
+      "status": "unimplemented",
+      "delta": null
+    }
+  ],
+  "oracle": {
+    "upstream_revision": "43fc55c0c662f195d048becf6276a26ce06b09d9",
+    "source_export": "tmp/xehentai-pyshape-20261031-f870b8ca/upstream",
+    "python": "CPython 3.14 (isolated subprocess, no site packages required)",
+    "source_patches": [],
+    "environment_simulations": [
+      "legalpath Windows branch: os.name='nt' plus the reference filename_filter regex"
+    ]
+  },
+  "notes": [
+    "Status implemented/delta means two fresh rounds produced passing evidence.",
+    "The en_us-only key z_test_fallback_probe is test-only and is excluded from key-set equality.",
+    "Rust make_ua intentionally reproduces the reference implicit None return."
+  ]
+}
