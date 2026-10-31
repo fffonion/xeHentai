@@ -19,7 +19,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use http::{HeaderValue, Method, Request, Uri};
-use http_body_util::{BodyExt, Full};
+use http_body_util::Full;
+use hyper::body::Body as _;
 use hyper::client::conn::http1;
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -536,12 +537,62 @@ pub struct AttemptRecord {
     pub error: Option<String>,
 }
 
+/// The hyper HTTP/1 connection driver is owned by the exchange or by the
+/// `StreamBody`; it is never spawned, so dropping the request/response drops
+/// the IO and closes the peer synchronously.
+type ConnectionFuture = Pin<Box<dyn Future<Output = Result<(), hyper::Error>> + Send>>;
+
 pub struct StreamBody {
     incoming: Option<hyper::body::Incoming>,
     timeout: Duration,
     read: i64,
     finished: bool,
-    connection: Option<JoinHandle<()>>,
+    connection: Option<ConnectionFuture>,
+    /// The hyper request sender stays alive while the response is being read;
+    /// dropping it early makes hyper cancel the pending body.
+    sender: Option<http1::SendRequest<Full<Bytes>>>,
+}
+
+/// Poll the body frame and the connection driver together. Hyper only makes
+/// progress on the socket while its `Connection` future is polled; the request
+/// and body futures therefore borrow the same owner.
+async fn next_body_data(
+    incoming: &mut hyper::body::Incoming,
+    connection: &mut Option<ConnectionFuture>,
+) -> Result<Option<Bytes>, String> {
+    loop {
+        let mut connection_error: Option<String> = None;
+        let next = std::future::poll_fn(|cx| {
+            if let Some(driver) = connection.as_mut()
+                && let Poll::Ready(result) = driver.as_mut().poll(cx)
+            {
+                *connection = None;
+                if let Err(error) = result {
+                    connection_error = Some(error.to_string());
+                }
+            }
+            Pin::new(&mut *incoming).poll_frame(cx)
+        })
+        .await;
+        match next {
+            Some(Ok(frame)) => match frame.into_data() {
+                Ok(data) => {
+                    if data.is_empty() {
+                        continue;
+                    }
+                    return Ok(Some(data));
+                }
+                Err(_) => continue,
+            },
+            Some(Err(error)) => return Err(error.to_string()),
+            None => {
+                return match connection_error {
+                    Some(error) => Err(error),
+                    None => Ok(None),
+                };
+            }
+        }
+    }
 }
 
 impl StreamBody {
@@ -549,59 +600,52 @@ impl StreamBody {
         if self.finished {
             return Ok(None);
         }
-        loop {
-            let Some(incoming) = self.incoming.as_mut() else {
-                self.finished = true;
-                self.finish_connection().await;
+        let Some(incoming) = self.incoming.as_mut() else {
+            self.release();
+            return Ok(None);
+        };
+        let frame = match tokio::time::timeout(
+            self.timeout,
+            next_body_data(incoming, &mut self.connection),
+        )
+        .await
+        {
+            Ok(Ok(Some(data))) => data,
+            Ok(Ok(None)) => {
+                self.release();
                 return Ok(None);
-            };
-            let frame = match tokio::time::timeout(self.timeout, BodyExt::frame(incoming)).await {
-                Ok(Some(Ok(frame))) => frame,
-                Ok(Some(Err(error))) => {
-                    self.finished = true;
-                    self.finish_connection().await;
-                    return Err(error.to_string());
-                }
-                Ok(None) => {
-                    self.finished = true;
-                    self.finish_connection().await;
-                    return Ok(None);
-                }
-                Err(_) => {
-                    self.finished = true;
-                    self.finish_connection().await;
-                    return Err("read timed out".into());
-                }
-            };
-            match frame.into_data() {
-                Ok(data) => {
-                    if data.is_empty() {
-                        continue;
-                    }
-                    self.read += data.len() as i64;
-                    return Ok(Some(data.to_vec()));
-                }
-                Err(_) => continue,
             }
-        }
+            Ok(Err(error)) => {
+                self.release();
+                return Err(error);
+            }
+            Err(_) => {
+                self.release();
+                return Err("read timed out".into());
+            }
+        };
+        self.read += frame.len() as i64;
+        Ok(Some(frame.to_vec()))
+    }
+
+    /// Drop the response body, the owned connection driver and the request
+    /// sender in one place. Any of these would keep the socket open.
+    fn release(&mut self) {
+        self.finished = true;
+        self.incoming.take();
+        self.connection.take();
+        self.sender.take();
     }
 
     pub fn bytes_read(&self) -> i64 {
         self.read
     }
 
-    async fn finish_connection(&mut self) {
-        if let Some(handle) = self.connection.take() {
-            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
-        }
-    }
-
-    /// Close without reading the rest of the body and wait for the connection
-    /// driver to finish.
+    /// Close without reading the rest of the body. The owned connection
+    /// future (and therefore the socket) is dropped here; no driver task is
+    /// left behind.
     pub async fn close(mut self) {
-        self.finished = true;
-        self.incoming.take();
-        self.finish_connection().await;
+        self.release();
     }
 }
 
@@ -1222,9 +1266,9 @@ impl Session {
                 .await
                 .map_err(|_| HttpError::Connect("handshake timed out".into()))?
                 .map_err(|error| HttpError::Protocol(error.to_string()))?;
-        let connection = tokio::spawn(async move {
-            let _ = connection.await;
-        });
+        // The connection future owns the socket and is polled locally: no
+        // spawned driver exists, so any return/drop below closes the peer.
+        let mut connection: ConnectionFuture = Box::pin(connection);
         let mut builder = Request::builder()
             .method(
                 Method::from_bytes(method.as_bytes())
@@ -1241,18 +1285,35 @@ impl Session {
         let request = builder
             .body(Full::new(Bytes::from(body)))
             .map_err(|error| HttpError::Protocol(error.to_string()))?;
-        let response =
-            match tokio::time::timeout(self.config.timeout, sender.send_request(request)).await {
-                Ok(Ok(response)) => response,
-                Ok(Err(error)) => {
-                    connection.abort();
-                    return Err(HttpError::Protocol(error.to_string()));
+        let mut sending = Box::pin(sender.send_request(request));
+        let response = match tokio::time::timeout(self.config.timeout, async {
+            tokio::select! {
+                biased;
+                result = &mut sending => {
+                    result.map_err(|error| HttpError::Protocol(error.to_string()))
                 }
-                Err(_) => {
-                    connection.abort();
-                    return Err(HttpError::Connect("request timed out".into()));
+                result = &mut connection => {
+                    // The connection future may complete in the same poll
+                    // that delivers a fully buffered response; give the
+                    // sender future its chance to yield that response before
+                    // reporting the connection as closed.
+                    match (&mut sending).await {
+                        Ok(response) => Ok(response),
+                        Err(error) => Err(HttpError::Protocol(match result {
+                            Ok(()) => format!("connection closed before the response: {error}"),
+                            Err(error) => error.to_string(),
+                        })),
+                    }
                 }
-            };
+            }
+        })
+        .await
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => return Err(error),
+            Err(_) => return Err(HttpError::Connect("request timed out".into())),
+        };
+        drop(sending);
         let status = response.status().as_u16() as i64;
         let headers = {
             let captured = capture.lock().unwrap().clone();
@@ -1280,6 +1341,7 @@ impl Session {
                     read: 0,
                     finished: false,
                     connection: Some(connection),
+                    sender: Some(sender),
                 }),
             });
         }
@@ -1287,10 +1349,9 @@ impl Session {
             incoming,
             self.config.timeout,
             self.config.control_limit,
-            Some(&connection),
+            Some(connection),
         )
         .await?;
-        let _ = tokio::time::timeout(Duration::from_secs(5), connection).await;
         let text = String::from_utf8_lossy(&body).into_owned();
         Ok(Exchange {
             status,
@@ -1398,22 +1459,23 @@ async fn read_bounded(
     mut incoming: hyper::body::Incoming,
     timeout: Duration,
     limit: usize,
-    _connection: Option<&JoinHandle<()>>,
+    mut connection: Option<ConnectionFuture>,
 ) -> Result<Vec<u8>, HttpError> {
     let mut body = Vec::new();
     loop {
-        let frame = match tokio::time::timeout(timeout, BodyExt::frame(&mut incoming)).await {
-            Ok(Some(Ok(frame))) => frame,
-            Ok(Some(Err(error))) => return Err(HttpError::Protocol(error.to_string())),
-            Ok(None) => return Ok(body),
-            Err(_) => return Err(HttpError::Connect("read timed out".into())),
-        };
-        if let Ok(data) = frame.into_data() {
-            if body.len() + data.len() > limit {
-                return Err(HttpError::BodyTooLarge { limit });
-            }
-            body.extend_from_slice(&data);
+        let frame =
+            match tokio::time::timeout(timeout, next_body_data(&mut incoming, &mut connection))
+                .await
+            {
+                Ok(Ok(Some(data))) => data,
+                Ok(Ok(None)) => return Ok(body),
+                Ok(Err(error)) => return Err(HttpError::Protocol(error)),
+                Err(_) => return Err(HttpError::Connect("read timed out".into())),
+            };
+        if body.len() + frame.len() > limit {
+            return Err(HttpError::BodyTooLarge { limit });
         }
+        body.extend_from_slice(&frame);
     }
 }
 

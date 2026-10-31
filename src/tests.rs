@@ -4589,7 +4589,11 @@ mod m3_transport {
             .request("GET", "http://gallery.test/page", None, false)
             .await
             .expect("proxied request");
-        assert_eq!(outcome.response.text, "proxied");
+        assert_eq!(
+            outcome.response.text, "proxied",
+            "status {} attempts {:?} headers {:?}",
+            outcome.response.status, outcome.attempts, outcome.response.headers
+        );
         assert_eq!(
             outcome.response.proxy,
             Some(format!("http://127.0.0.1:{proxy_port}"))
@@ -5159,6 +5163,408 @@ mod m3_transport {
             .await
             .expect("next request on the same session");
         assert_eq!(outcome.response.text, "fresh");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropped_stream_body_owns_and_closes_the_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel::<bool>();
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            read_headers(&mut first).await;
+            let mut response =
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 100000\r\n\r\n"
+                    .to_vec();
+            response.extend_from_slice(&[7u8; 1024]);
+            first.write_all(&response).await.unwrap();
+            let _ = ready_tx.send(());
+            let mut buffer = [0u8; 16];
+            let closed = matches!(
+                tokio::time::timeout(Duration::from_secs(1), first.read(&mut buffer)).await,
+                Ok(Ok(0))
+            );
+            let _ = closed_tx.send(closed);
+            let (mut second, _) = listener.accept().await.unwrap();
+            read_headers(&mut second).await;
+            respond_http(&mut second, "fresh", "200 OK").await;
+        });
+        let resolver = Arc::new(MapResolver::new(vec![(
+            "gallery.test".into(),
+            vec![SocketAddr::new("127.0.0.1".parse().unwrap(), port)],
+        )]));
+        let mut client = session(
+            None,
+            resolver,
+            FallbackMap::empty(),
+            TlsClient::production(),
+            ProxyPolicy::All,
+        );
+        client.config.timeout = Duration::from_secs(5);
+        let mut outcome = client
+            .request(
+                "GET",
+                &format!("http://gallery.test:{port}/stream"),
+                None,
+                true,
+            )
+            .await
+            .expect("streaming response");
+        let mut body = outcome.response.stream.take().unwrap_or_else(|| {
+            panic!(
+                "stream body: status {} attempts {:?} body {:?}",
+                outcome.response.status,
+                outcome.attempts,
+                String::from_utf8_lossy(&outcome.response.body)
+            )
+        });
+        let chunk = body.next_chunk().await.expect("chunk").expect("data");
+        assert_eq!(chunk.len(), 1024);
+        let _ = ready_rx.await;
+        drop(body);
+        let closed = tokio::time::timeout(Duration::from_secs(2), closed_rx)
+            .await
+            .expect("peer closure observation timed out")
+            .expect("closure notify");
+        assert!(
+            closed,
+            "dropping a partially read body must own and close the connection"
+        );
+        let next = client
+            .request(
+                "GET",
+                &format!("http://gallery.test:{port}/next"),
+                None,
+                false,
+            )
+            .await
+            .expect("next request");
+        assert_eq!(next.response.text, "fresh");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn control_response_closes_keep_alive_connection_promptly() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel::<bool>();
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            read_headers(&mut first).await;
+            first
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello",
+                )
+                .await
+                .unwrap();
+            let mut buffer = [0u8; 16];
+            let closed = matches!(
+                tokio::time::timeout(Duration::from_secs(1), first.read(&mut buffer)).await,
+                Ok(Ok(0))
+            );
+            let _ = closed_tx.send(closed);
+            let (mut second, _) = listener.accept().await.unwrap();
+            read_headers(&mut second).await;
+            respond_http(&mut second, "fresh", "200 OK").await;
+        });
+        let resolver = Arc::new(MapResolver::new(vec![(
+            "gallery.test".into(),
+            vec![SocketAddr::new("127.0.0.1".parse().unwrap(), port)],
+        )]));
+        let mut client = session(
+            None,
+            resolver,
+            FallbackMap::empty(),
+            TlsClient::production(),
+            ProxyPolicy::All,
+        );
+        client.config.timeout = Duration::from_secs(8);
+        let started = std::time::Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(3),
+            client.request(
+                "GET",
+                &format!("http://gallery.test:{port}/keepalive"),
+                None,
+                false,
+            ),
+        )
+        .await
+        .expect("a keep-alive peer must not hold the completed request open")
+        .expect("control response");
+        assert_eq!(outcome.response.text, "hello");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "completed control response took {:?}",
+            started.elapsed()
+        );
+        let closed = tokio::time::timeout(Duration::from_secs(2), closed_rx)
+            .await
+            .expect("peer closure observation timed out")
+            .expect("closure notify");
+        assert!(
+            closed,
+            "the response owner must close the idle keep-alive connection"
+        );
+        let next = client
+            .request(
+                "GET",
+                &format!("http://gallery.test:{port}/next"),
+                None,
+                false,
+            )
+            .await
+            .expect("next request");
+        assert_eq!(next.response.text, "fresh");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_request_before_headers_closes_peer_and_allows_fresh_work() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel::<()>();
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel::<bool>();
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            read_headers(&mut first).await;
+            let _ = seen_tx.send(());
+            let mut buffer = [0u8; 16];
+            let closed = matches!(
+                tokio::time::timeout(Duration::from_secs(1), first.read(&mut buffer)).await,
+                Ok(Ok(0))
+            );
+            let _ = closed_tx.send(closed);
+            let (mut second, _) = listener.accept().await.unwrap();
+            read_headers(&mut second).await;
+            respond_http(&mut second, "fresh", "200 OK").await;
+        });
+        let resolver = Arc::new(MapResolver::new(vec![(
+            "gallery.test".into(),
+            vec![SocketAddr::new("127.0.0.1".parse().unwrap(), port)],
+        )]));
+        let mut client = session(
+            None,
+            resolver,
+            FallbackMap::empty(),
+            TlsClient::production(),
+            ProxyPolicy::All,
+        );
+        client.config.timeout = Duration::from_secs(5);
+        let stall_url = format!("http://gallery.test:{port}/stall");
+        let mut request = Box::pin(client.request("GET", &stall_url, None, false));
+        tokio::select! {
+            _ = &mut request => panic!("the stalled server must not answer"),
+            _ = seen_rx => {}
+        }
+        drop(request);
+        let closed = tokio::time::timeout(Duration::from_secs(2), closed_rx)
+            .await
+            .expect("peer closure observation timed out")
+            .expect("closure notify");
+        assert!(
+            closed,
+            "cancelling before response headers must close the peer"
+        );
+        let next = client
+            .request(
+                "GET",
+                &format!("http://gallery.test:{port}/next"),
+                None,
+                false,
+            )
+            .await
+            .expect("next request");
+        assert_eq!(next.response.text, "fresh");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn control_body_overflow_closes_peer_and_allows_fresh_work() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel::<bool>();
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            read_headers(&mut first).await;
+            let mut response =
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 64\r\n\r\n"
+                    .to_vec();
+            response.extend_from_slice(&[b'x'; 64]);
+            first.write_all(&response).await.unwrap();
+            let mut buffer = [0u8; 16];
+            let closed = matches!(
+                tokio::time::timeout(Duration::from_secs(1), first.read(&mut buffer)).await,
+                Ok(Ok(0))
+            );
+            let _ = closed_tx.send(closed);
+            let (mut second, _) = listener.accept().await.unwrap();
+            read_headers(&mut second).await;
+            respond_http(&mut second, "fresh", "200 OK").await;
+        });
+        let resolver = Arc::new(MapResolver::new(vec![(
+            "gallery.test".into(),
+            vec![SocketAddr::new("127.0.0.1".parse().unwrap(), port)],
+        )]));
+        let mut client = session(
+            None,
+            resolver,
+            FallbackMap::empty(),
+            TlsClient::production(),
+            ProxyPolicy::All,
+        );
+        client.config.timeout = Duration::from_secs(5);
+        client.config.control_limit = 16;
+        let overflow_url = format!("http://gallery.test:{port}/overflow");
+        let error = match client.request("GET", &overflow_url, None, false).await {
+            Ok(_) => panic!("control body must stay bounded"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, HttpError::BodyTooLarge { limit: 16 }),
+            "{error}"
+        );
+        let closed = tokio::time::timeout(Duration::from_secs(2), closed_rx)
+            .await
+            .expect("peer closure observation timed out")
+            .expect("closure notify");
+        assert!(closed, "an oversized control body must close the peer");
+        let next = client
+            .request(
+                "GET",
+                &format!("http://gallery.test:{port}/next"),
+                None,
+                false,
+            )
+            .await
+            .expect("next request");
+        assert_eq!(next.response.text, "fresh");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_request_header_after_handshake_closes_peer() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel::<bool>();
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            let mut buffer = [0u8; 16];
+            let closed = matches!(
+                tokio::time::timeout(Duration::from_secs(1), first.read(&mut buffer)).await,
+                Ok(Ok(0))
+            );
+            let _ = closed_tx.send(closed);
+            let (mut second, _) = listener.accept().await.unwrap();
+            read_headers(&mut second).await;
+            respond_http(&mut second, "fresh", "200 OK").await;
+        });
+        let resolver = Arc::new(MapResolver::new(vec![(
+            "gallery.test".into(),
+            vec![SocketAddr::new("127.0.0.1".parse().unwrap(), port)],
+        )]));
+        let mut client = Session::new(
+            vec![
+                ("User-Agent".into(), Some("xeHentai-test".into())),
+                ("X-Bad".into(), Some("a\r\nInjected: 1".into())),
+            ],
+            None,
+            ProxyPolicy::All,
+            SessionConfig {
+                retry: 1,
+                timeout: Duration::from_secs(5),
+                tls: TlsClient::production(),
+                resolver,
+                fallback: FallbackMap::empty(),
+                clock: Arc::new(TestClock::new(0.0)),
+                ..SessionConfig::default()
+            },
+        );
+        let bad_url = format!("http://gallery.test:{port}/bad");
+        let error = match client.request("GET", &bad_url, None, false).await {
+            Ok(_) => panic!("a CR/LF header value must be refused"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, HttpError::Header(_)), "{error}");
+        let closed = tokio::time::timeout(Duration::from_secs(2), closed_rx)
+            .await
+            .expect("peer closure observation timed out")
+            .expect("closure notify");
+        assert!(
+            closed,
+            "a header-build error must close the handshaken peer"
+        );
+        client.set_header("X-Bad", None);
+        let next = client
+            .request(
+                "GET",
+                &format!("http://gallery.test:{port}/next"),
+                None,
+                false,
+            )
+            .await
+            .expect("next request");
+        assert_eq!(next.response.text, "fresh");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn early_eof_is_a_protocol_error_and_fresh_work_succeeds() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            read_headers(&mut first).await;
+            first
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 100\r\n\r\nshort",
+                )
+                .await
+                .unwrap();
+            first.shutdown().await.unwrap();
+            let (mut second, _) = listener.accept().await.unwrap();
+            read_headers(&mut second).await;
+            respond_http(&mut second, "fresh", "200 OK").await;
+        });
+        let resolver = Arc::new(MapResolver::new(vec![(
+            "gallery.test".into(),
+            vec![SocketAddr::new("127.0.0.1".parse().unwrap(), port)],
+        )]));
+        let mut client = session(
+            None,
+            resolver,
+            FallbackMap::empty(),
+            TlsClient::production(),
+            ProxyPolicy::All,
+        );
+        client.config.timeout = Duration::from_secs(5);
+        let outcome = client
+            .request(
+                "GET",
+                &format!("http://gallery.test:{port}/eof"),
+                None,
+                false,
+            )
+            .await
+            .expect("retryable protocol failure ends in the 600 boundary");
+        assert_eq!(outcome.response.status, 600);
+        let error = outcome.attempts[0].error.as_deref().unwrap_or("");
+        assert!(
+            error.contains("http protocol error"),
+            "early EOF must stay a protocol error: {error}"
+        );
+        let next = client
+            .request(
+                "GET",
+                &format!("http://gallery.test:{port}/next"),
+                None,
+                false,
+            )
+            .await
+            .expect("next request");
+        assert_eq!(next.response.text, "fresh");
         server.await.unwrap();
     }
 
