@@ -33,6 +33,7 @@ pub const BODY_KEY: &str = "xeh.proxy.body";
 const LEASE_KEY: &str = "xeh.proxy.lease";
 const INLINE_LIMIT: usize = 64 * 1024;
 const CHUNK: usize = 8 * 1024;
+const SPOOL_DIR: &str = ".xeh-spool";
 
 static OWNER_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -100,7 +101,29 @@ impl ProxySession {
 
     fn next_spool(&self) -> PathBuf {
         let seq = self.spool_seq.fetch_add(1, Ordering::AcqRel);
-        self.root.join(format!(".xeh-body-{seq}.spool"))
+        self.root.join(SPOOL_DIR).join(format!("{seq}.spool"))
+    }
+}
+
+/// Deletes the partial spool this operation created, unless the body was
+/// handed to a resource. A preexisting file is never armed, so drop cannot
+/// truncate or remove it.
+struct SpoolGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl SpoolGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SpoolGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -110,6 +133,7 @@ pub struct BodyHandle {
     length: u64,
     owner: u64,
     live: Arc<LiveGeneration>,
+    cancel: CancellationToken,
     closed: bool,
 }
 
@@ -258,6 +282,7 @@ struct ExchangeDone {
     body_text: String,
     text_error: String,
     generation: u64,
+    guard: SpoolGuard,
 }
 
 struct ParsedExchange {
@@ -477,11 +502,9 @@ impl HostFunction for ExchangeFn {
         let host = Arc::clone(&self.host);
         let (cancel, drivers, generation) = host.live.current();
         let future = async move {
-            let done = run_exchange(&host, parsed, cancel, drivers, generation).await;
+            let mut done = run_exchange(&host, parsed, cancel, drivers, generation).await;
             Ok(HostFutureOutput::complete(move |vm| {
-                if !done.error_kind.is_empty() {
-                    let _ = std::fs::remove_file(&done.path);
-                }
+                let handed = done.error_kind.is_empty();
                 let token = vm
                     .host_context()
                     .push_resource(BodyHandle {
@@ -490,9 +513,13 @@ impl HostFunction for ExchangeFn {
                         length: done.byte_length,
                         owner: host.live.owner,
                         live: Arc::clone(&host.live),
+                        cancel: host.live.current().0,
                         closed: false,
                     })
                     .map_err(|error| vm::VmError::HostError(error.to_string()))?;
+                if handed {
+                    done.guard.disarm();
+                }
                 Ok(CallReturn::one(exchange_value(&done, token.handle())))
             }))
         };
@@ -543,28 +570,41 @@ fn exchange_value(done: &ExchangeDone, handle: ResourceHandle) -> Value {
 
 async fn run_exchange(
     host: &ProxyHost,
-    request: ParsedExchange,
+    mut request: ParsedExchange,
     cancel: CancellationToken,
     drivers: Arc<DriverOwner>,
     generation: u64,
 ) -> ExchangeDone {
     let path = host.session.next_spool();
-    let fail = |kind: &str, detail: &str| {
-        let _ = std::fs::remove_file(&path);
-        ExchangeDone {
-            status: 0,
-            url: request.url.clone(),
-            headers: Vec::new(),
-            error_kind: kind.to_string(),
-            error_detail: detail.to_string(),
+    let fail = |kind: &str, detail: &str, armed: bool| ExchangeDone {
+        status: 0,
+        url: request.url.clone(),
+        headers: Vec::new(),
+        error_kind: kind.to_string(),
+        error_detail: detail.to_string(),
+        path: path.clone(),
+        byte_length: 0,
+        text_valid: false,
+        body_text: String::new(),
+        text_error: String::new(),
+        generation,
+        guard: SpoolGuard {
             path: path.clone(),
-            byte_length: 0,
-            text_valid: false,
-            body_text: String::new(),
-            text_error: String::new(),
-            generation,
-        }
+            armed,
+        },
     };
+    if let Some(route) = request.route.as_mut() {
+        match grant_remote_dns(&host.grants, route) {
+            Some(remote_dns) => route.trusted_remote_dns = remote_dns,
+            None => {
+                return fail(
+                    "proxy_not_granted",
+                    "proxy endpoint is not in the trusted grant",
+                    false,
+                );
+            }
+        }
+    }
     let started = Instant::now();
     let mut opened = match open_get_with_options(
         &host.http,
@@ -587,7 +627,14 @@ async fn run_exchange(
     .await
     {
         Ok(opened) => opened,
-        Err(code) => return fail(classify(code), code),
+        Err(code) => return fail(classify(code), code, false),
+    };
+    if let Err(code) = create_reserved_spool(&path) {
+        return fail("ConnectionError", code, false);
+    }
+    let guard = SpoolGuard {
+        path: path.clone(),
+        armed: true,
     };
     let deadline = started + host.http.request_timeout.min(host.http.max_stream_duration);
     let cap = host.http.max_stream_total_bytes;
@@ -598,15 +645,12 @@ async fn run_exchange(
         .await;
     let byte_length = match spooled {
         Ok(length) => length,
-        Err(code) => {
-            let _ = std::fs::remove_file(&path);
-            return fail("ConnectionError", code);
-        }
+        Err(code) => return fail("ConnectionError", code, false),
     };
     let (text_valid, body_text, text_error) = if request.text_budget == 0 {
         (false, String::new(), String::new())
     } else {
-        match read_text(&path, request.text_budget) {
+        match read_text(&path, request.text_budget, &cancel) {
             Ok((valid, text)) => (valid, text, String::new()),
             Err("text_budget") => (false, String::new(), "text_budget".to_string()),
             Err("invalid_utf8") => (false, String::new(), "invalid_utf8".to_string()),
@@ -619,13 +663,56 @@ async fn run_exchange(
         headers: opened.headers,
         error_kind: String::new(),
         error_detail: String::new(),
-        path,
+        path: path.clone(),
         byte_length,
         text_valid,
         body_text,
         text_error,
         generation,
+        guard,
     }
+}
+
+fn grant_remote_dns(
+    grants: &[crate::task_control::ProxyGrant],
+    route: &NativeProxyRoute,
+) -> Option<bool> {
+    for grant in grants {
+        let Some((kind, host, port)) = parse_grant(&grant.address) else {
+            continue;
+        };
+        if kind == route.kind && host == route.host && port == route.port {
+            return Some(grant.remote_dns);
+        }
+    }
+    None
+}
+
+fn parse_grant(address: &str) -> Option<(ProxyKind, String, u16)> {
+    let (scheme, rest) = address.split_once("://")?;
+    let kind = ProxyKind::from_code(scheme)?;
+    let (host, port_text) = rest.rsplit_once(':')?;
+    let port = port_text.parse().ok()?;
+    if host.is_empty() {
+        return None;
+    }
+    Some((kind, host.to_string(), port))
+}
+
+fn create_reserved_spool(path: &Path) -> Result<(), &'static str> {
+    let Some(parent) = path.parent() else {
+        return Err("io_error");
+    };
+    if parent.exists() && !parent.is_dir() {
+        return Err("io_error");
+    }
+    std::fs::create_dir_all(parent).map_err(|_| "io_error")?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|_| "io_error")?;
+    Ok(())
 }
 
 fn classify(code: &str) -> &'static str {
@@ -633,7 +720,10 @@ fn classify(code: &str) -> &'static str {
         "deadline" => "ConnectTimeout",
         "proxy_unsupported" => "ProxySchemeUnknown",
         "policy_denied" => "policy_denied",
-        "header_rejected" | "route_invalid" | "method_rejected" => "InvalidSchema",
+        "header_rejected" => "header_rejected",
+        "route_invalid" => "route_invalid",
+        "method_rejected" => "method_rejected",
+        "proxy_not_granted" => "proxy_not_granted",
         "proxy_status" | "proxy_handshake_failed" | "proxy_auth_required" => "ProxyError",
         "redirect_limit" => "TooManyRedirects",
         _ => "ConnectionError",
@@ -649,8 +739,6 @@ async fn spool_body(
 ) -> Result<u64, &'static str> {
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
         .open(path)
         .await
         .map_err(|_| "io_error")?;
@@ -688,10 +776,20 @@ async fn spool_body(
     Ok(total as u64)
 }
 
-fn read_text(path: &Path, budget: usize) -> Result<(bool, String), &'static str> {
+fn read_text(
+    path: &Path,
+    budget: usize,
+    cancel: &CancellationToken,
+) -> Result<(bool, String), &'static str> {
+    if cancel.is_cancelled() {
+        return Err("cancelled");
+    }
     let len = std::fs::metadata(path).map_err(|_| "io_error")?.len() as usize;
     if len > budget {
         return Err("text_budget");
+    }
+    if cancel.is_cancelled() {
+        return Err("cancelled");
     }
     let bytes = std::fs::read(path).map_err(|_| "io_error")?;
     match std::str::from_utf8(&bytes) {
@@ -700,7 +798,11 @@ fn read_text(path: &Path, budget: usize) -> Result<(bool, String), &'static str>
     }
 }
 
-pub fn scan_file(path: &Path, needle: &str) -> Result<bool, &'static str> {
+pub fn scan_file(
+    path: &Path,
+    needle: &str,
+    cancel: &CancellationToken,
+) -> Result<bool, &'static str> {
     if needle.is_empty() {
         return Ok(false);
     }
@@ -709,6 +811,9 @@ pub fn scan_file(path: &Path, needle: &str) -> Result<bool, &'static str> {
     let mut carry = Vec::new();
     let mut buf = vec![0u8; CHUNK];
     loop {
+        if cancel.is_cancelled() {
+            return Err("cancelled");
+        }
         let read = std::io::Read::read(&mut file, &mut buf).map_err(|_| "io_error")?;
         if read == 0 {
             return Ok(false);
@@ -737,6 +842,7 @@ fn decode_handle(value: Option<&Value>) -> VmResult<ResourceHandle> {
 struct BodySnap {
     path: PathBuf,
     length: u64,
+    cancel: CancellationToken,
 }
 
 fn snap_body(vm: &mut Vm, args: &[Value]) -> VmResult<BodySnap> {
@@ -752,6 +858,7 @@ fn snap_body(vm: &mut Vm, args: &[Value]) -> VmResult<BodySnap> {
     Ok(BodySnap {
         path: inner.path.clone(),
         length: inner.length,
+        cancel: inner.cancel.clone(),
     })
 }
 
@@ -768,7 +875,7 @@ impl HostFunction for ScanFn {
             }
         };
         let snap = snap_body(vm, args)?;
-        let found = scan_file(&snap.path, &needle)
+        let found = scan_file(&snap.path, &needle, &snap.cancel)
             .map_err(|error| vm::VmError::HostError(error.to_string()))?;
         Ok(CallOutcome::Return(CallReturn::one(Value::Bool(found))))
     }
@@ -783,7 +890,7 @@ impl HostFunction for TextFn {
             _ => return Err(vm::VmError::HostError("budget must be an int".to_string())),
         };
         let snap = snap_body(vm, args)?;
-        let (valid, text, error) = match read_text(&snap.path, budget) {
+        let (valid, text, error) = match read_text(&snap.path, budget, &snap.cancel) {
             Ok((valid, text)) => (valid, text, String::new()),
             Err("text_budget") => (false, String::new(), "text_budget".to_string()),
             Err("invalid_utf8") => (false, String::new(), "invalid_utf8".to_string()),
@@ -806,6 +913,13 @@ impl HostFunction for InlineFn {
             _ => return Err(vm::VmError::HostError("limit must be an int".to_string())),
         };
         let snap = snap_body(vm, args)?;
+        if snap.cancel.is_cancelled() {
+            return Ok(CallOutcome::Return(CallReturn::one(Value::map(vec![
+                (Value::string("ok"), Value::Bool(false)),
+                (Value::string("error"), Value::string("cancelled")),
+                (Value::string("bytes"), Value::array(Vec::new())),
+            ]))));
+        }
         let outcome = if snap.length as usize > limit {
             Err("inline_refused")
         } else {
@@ -842,7 +956,7 @@ impl HostFunction for StageFn {
             }
         };
         let snap = snap_body(vm, args)?;
-        let outcome = stage_copy(&snap.path, &self.root, &relative);
+        let outcome = stage_copy(&snap.path, &self.root, &relative, &snap.cancel);
         let (ok, error, bytes) = match outcome {
             Ok(bytes) => (true, String::new(), bytes as i64),
             Err(error) => (false, error, 0),
@@ -855,7 +969,18 @@ impl HostFunction for StageFn {
     }
 }
 
-fn stage_copy(spool: &Path, root: &Path, relative: &str) -> Result<u64, String> {
+fn stage_copy(
+    spool: &Path,
+    root: &Path,
+    relative: &str,
+    cancel: &CancellationToken,
+) -> Result<u64, String> {
+    if relative
+        .split(['/', '\\'])
+        .any(|part| part == SPOOL_DIR || part == "..")
+    {
+        return Err("stage_path".to_string());
+    }
     let dest = crate::net::resolve_inside(root, relative).map_err(|error| error.to_string())?;
     if dest.exists() {
         return Err("target_exists".to_string());
@@ -867,7 +992,21 @@ fn stage_copy(spool: &Path, root: &Path, relative: &str) -> Result<u64, String> 
         .map_err(|_| "io_error".to_string())?;
     let copy_result = (|| {
         let mut input = std::fs::File::open(spool).map_err(|_| "io_error".to_string())?;
-        let copied = std::io::copy(&mut input, &mut output).map_err(|_| "io_error".to_string())?;
+        let mut copied = 0u64;
+        let mut buf = vec![0u8; CHUNK];
+        loop {
+            if cancel.is_cancelled() {
+                return Err("cancelled".to_string());
+            }
+            let read =
+                std::io::Read::read(&mut input, &mut buf).map_err(|_| "io_error".to_string())?;
+            if read == 0 {
+                break;
+            }
+            std::io::Write::write_all(&mut output, &buf[..read])
+                .map_err(|_| "io_error".to_string())?;
+            copied += read as u64;
+        }
         output.sync_all().map_err(|_| "io_error".to_string())?;
         let expected = std::fs::metadata(spool)
             .map_err(|_| "io_error".to_string())?

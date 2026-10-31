@@ -148,11 +148,28 @@ impl ControlOptions {
 
 /// Trusted proxy connector for one control owner.
 ///
-/// The HTTP policy and spool root are fixed by the embedding. A dispatch
-/// request cannot widen them.
+/// The HTTP policy, spool root, and proxy grant are fixed by the embedding. A
+/// dispatch request cannot widen them. An endpoint or remote-DNS flag is usable
+/// only when this grant names it; a protocol name is not a grant.
+pub struct ProxyGrant {
+    pub address: String,
+    pub remote_dns: bool,
+}
+
 pub struct ProxyServices {
     pub root: PathBuf,
     pub http: vm::HttpConfig,
+    pub grants: Vec<ProxyGrant>,
+}
+
+/// Cloneable cancel handle for the owner's in-flight proxy exchange.
+#[derive(Clone)]
+pub struct ProxyCancel(Arc<crate::proxy_exchange::LiveGeneration>);
+
+impl ProxyCancel {
+    pub fn cancel(&self) {
+        self.0.cancel_current();
+    }
 }
 
 pub struct TaskControl {
@@ -162,6 +179,7 @@ pub struct TaskControl {
     dispatch: Value,
     report: Value,
     session: Option<SessionOptions>,
+    proxy_live: Option<Arc<crate::proxy_exchange::LiveGeneration>>,
 }
 
 impl TaskControl {
@@ -226,13 +244,17 @@ impl TaskControl {
             ..Default::default()
         });
         let mut registry = registry_with_task_hosts(&catalog)?;
+        let mut proxy_slot = None;
         if let Some(services) = proxy {
             let host = crate::proxy_host::ProxyHost::new(
                 services.root,
                 services.http,
                 crate::dto::TransportHooks::default(),
+                services.grants,
             );
+            let proxy_live = Arc::clone(&host.live);
             crate::proxy_host::register_proxy(&mut registry, &catalog, host)?;
+            proxy_slot = Some(proxy_live);
         } else {
             crate::proxy_host::register_proxy_denied(&mut registry, &catalog)?;
         }
@@ -270,7 +292,14 @@ impl TaskControl {
             dispatch,
             report,
             session: session.cloned(),
+            proxy_live: proxy_slot,
         })
+    }
+
+    /// Cancels the in-flight proxy exchange on this owner without dropping the
+    /// VM. The handle is cloneable so a test can cancel while `invoke` runs.
+    pub fn proxy_cancel(&self) -> Option<ProxyCancel> {
+        self.proxy_live.clone().map(ProxyCancel)
     }
 
     pub fn open_production() -> Result<Self, HostError> {

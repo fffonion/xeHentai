@@ -31,7 +31,8 @@ pub use runtime::{
     run_app, run_config_scenario, run_entry, run_proxy_scenario, run_site_scenario, stack_int,
 };
 pub use task_control::{
-    task_catalog, task_entry_path, ControlOptions, ProxyServices, SessionOptions, TaskControl,
+    task_catalog, task_entry_path, ControlOptions, ProxyCancel, ProxyGrant, ProxyServices,
+    SessionOptions, TaskControl,
 };
 pub use timer::EmbeddingTimer;
 pub use types::HostError;

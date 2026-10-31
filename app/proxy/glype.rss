@@ -370,6 +370,66 @@ fn response_map(
 }
 
 /// Processes one final response after the sslagree loop.
+pub fn response_decision(
+    parsed: map,
+    target: string,
+    status: int,
+    mime: string,
+    mime_present: bool,
+    body_text: string,
+    body_text_valid: bool,
+    text_error: string,
+    set_cookie_present: bool,
+    set_cookie_header: string
+) -> map {
+    let mut ok = true;
+    let mut exception: string = "";
+    let mut detail: string = "";
+    let mut content: string = "";
+    let mut content_type: string = "";
+    let mut set_cookie: string = "";
+    if mime_present == false {
+        ok = false;
+        exception = "AttributeError";
+        detail = "'NoneType' object has no attribute 'startswith'";
+    } else {
+        content_type = mime.copy();
+        if set_cookie_present {
+            set_cookie = unwrap_set_cookie(set_cookie_header.copy());
+        }
+        if re::match("^text", mime.copy()) {
+            if body_text_valid == false {
+                ok = false;
+                if text_error == "text_budget" {
+                    exception = "text_budget";
+                    detail = "text byte budget exceeded";
+                } else {
+                    exception = "UnicodeDecodeError";
+                    detail = "'utf-8' codec can't decode bytes";
+                }
+            } else {
+                let error_div = re::captures("^<div id=\"error\">(.*?)</div>", body_text.copy());
+                if error_div.length > 0 {
+                    ok = false;
+                    exception = "PoolException";
+                    detail = "glype returns: " + captured(error_div.copy(), 0);
+                } else {
+                    content = rewrite_links(parsed.copy(), body_text.copy());
+                }
+            }
+        }
+    }
+    {
+        ok: ok,
+        exception: exception,
+        detail: detail,
+        content: content,
+        url: target,
+        content_type: content_type,
+        set_cookie: set_cookie
+    }
+}
+
 pub fn process(
     parsed: map,
     target: string,

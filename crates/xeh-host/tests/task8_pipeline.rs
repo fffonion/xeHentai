@@ -130,6 +130,7 @@ fn one_owner_keeps_glype_session_and_stages_exact_bytes() {
         ProxyServices {
             root: root.clone(),
             http: http_config(port),
+            grants: Vec::new(),
         },
     )
     .expect("owner");
@@ -220,6 +221,7 @@ fn one_owner_keeps_glype_session_and_stages_exact_bytes() {
         ProxyServices {
             root: other_root,
             http: http_config(port),
+            grants: Vec::new(),
         },
     )
     .expect("second owner");
@@ -268,8 +270,11 @@ fn text_server() -> u16 {
             let request = String::from_utf8_lossy(&buf[..n]);
             let (kind, body) = if request.contains("bad-utf8") {
                 ("text/html", vec![0xff, 0xfe])
-            } else if request.contains("loop") {
-                let location = format!("Location: http://127.0.0.1:{port}/loop\r\n");
+            } else if request.contains(" /loop ") || request.contains(" /hop ") {
+                // The next hop is a different path, so a limit result that
+                // records the previous hop cannot accidentally equal the
+                // original URL.
+                let location = format!("Location: http://127.0.0.1:{port}/hop\r\n");
                 let response = http_bytes(302, &location, b"");
                 let _ = stream.write_all(&response);
                 continue;
@@ -293,6 +298,7 @@ fn text_budget_is_not_a_decode_error_and_invalid_utf8_stays_separate() {
         ProxyServices {
             root: root.clone(),
             http: http_config(port),
+            grants: Vec::new(),
         },
     )
     .expect("owner");
@@ -355,6 +361,7 @@ fn explicit_allow_redirects_raises_before_agreement() {
         ProxyServices {
             root,
             http: http_config(port),
+            grants: Vec::new(),
         },
     )
     .expect("owner");
@@ -391,6 +398,7 @@ fn more_than_thirty_redirects_return_status_600() {
         ProxyServices {
             root,
             http: http_config(port),
+            grants: Vec::new(),
         },
     )
     .expect("owner");
@@ -409,7 +417,9 @@ fn more_than_thirty_redirects_return_status_600() {
     assert_eq!(report["ok"], json!(true), "{report}");
     assert_eq!(value["status"], json!(600), "{value}");
     assert_eq!(value["error"], json!(""));
-    assert_eq!(value["logical_url"], json!(url));
+    assert_eq!(value["logical_url"], json!(url), "{value}");
+    assert_eq!(value["final_url"], json!(url), "{value}");
+    assert_eq!(value["real_url"], json!(url), "{value}");
 }
 
 #[test]
@@ -423,6 +433,7 @@ fn existing_stage_target_is_preserved_and_failed_exchange_leaves_no_spool() {
         ProxyServices {
             root: root.clone(),
             http: http_config(port),
+            grants: Vec::new(),
         },
     )
     .expect("owner");
@@ -468,6 +479,7 @@ fn existing_stage_target_is_preserved_and_failed_exchange_leaves_no_spool() {
         ProxyServices {
             root: root.clone(),
             http: http_config(closed_port),
+            grants: Vec::new(),
         },
     )
     .expect("failed owner");
@@ -497,4 +509,335 @@ fn existing_stage_target_is_preserved_and_failed_exchange_leaves_no_spool() {
     assert_eq!(recovered["ok"], json!(true), "{recovered}");
     assert_exact(&root.join("recovered.txt"), b"ok");
     assert_eq!(spool_count(&root), 0);
+}
+
+fn http_config_ports(ports: &[u16]) -> HttpConfig {
+    HttpConfig {
+        allowed_schemes: vec!["http".to_string()],
+        allowed_hosts: vec!["127.0.0.1".to_string()],
+        allowed_ports: ports.to_vec(),
+        allow_private_ips: true,
+        connect_timeout: Duration::from_secs(2),
+        request_timeout: Duration::from_secs(5),
+        stream_idle_timeout: Duration::from_secs(2),
+        max_stream_duration: Duration::from_secs(5),
+        ..HttpConfig::default()
+    }
+}
+
+fn owner_for(root: PathBuf, http: HttpConfig) -> TaskControl {
+    TaskControl::open_with_proxy(
+        &ControlOptions::fixture(&[], 0),
+        None,
+        ProxyServices {
+            root,
+            http,
+            grants: Vec::new(),
+        },
+    )
+    .expect("owner")
+}
+
+fn one_shot(
+    status: u16,
+    extra: &str,
+    body: &[u8],
+    seen: Arc<std::sync::Mutex<Vec<String>>>,
+) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let port = listener.local_addr().expect("port").port();
+    let extra = extra.to_string();
+    let body = body.to_vec();
+    std::thread::spawn(move || loop {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let mut buf = [0u8; 4096];
+        let n = stream.read(&mut buf).unwrap_or(0);
+        let request = String::from_utf8_lossy(&buf[..n]).to_string();
+        seen.lock().expect("seen").push(request);
+        let _ = stream.write_all(&http_bytes(status, &extra, &body));
+    });
+    port
+}
+
+const ERROR_DIV: &str = "<div id=\"error\">upstream</div>";
+
+#[test]
+fn glype_500_error_div_is_pool_exception_not_staged_success() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let port = one_shot(
+        500,
+        "Content-Type: text/html\r\n",
+        ERROR_DIV.as_bytes(),
+        seen,
+    );
+    let root = lease_root("task8-r3-error-div");
+    let mut owner = owner_for(root.clone(), http_config(port));
+    let address = format!("http://127.0.0.1:{port}/browse.php?u=x&b=4");
+    assert_eq!(
+        invoke(&mut owner, json!({"op": "proxy_add", "address": address}))["ok"],
+        json!(true)
+    );
+    let report = invoke(
+        &mut owner,
+        json!({
+            "op": "proxy_request",
+            "url": format!("http://127.0.0.1:{port}/err500"),
+            "method": "GET",
+            "stage": "err.bin",
+            "header_names": ["User-Agent"],
+            "header_values": ["xeh-fixture/1"],
+            "proxy_image": true,
+            "now": 1.0
+        }),
+    );
+    let value = value_of(&report);
+    assert_eq!(report["ok"], json!(false), "{report}");
+    assert_eq!(value["error"], json!("PoolException"), "{value}");
+    assert_eq!(
+        value["detail"],
+        json!(format!("glype returns: {ERROR_DIV}")),
+        "{value}"
+    );
+    assert!(
+        !root.join("err.bin").exists(),
+        "error div must not be staged"
+    );
+}
+
+#[test]
+fn unauthorized_logical_target_is_refused_when_glype_endpoint_is_granted() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let port = one_shot(200, "Content-Type: text/plain\r\n", b"secret", seen.clone());
+    let root = lease_root("task8-r3-logical");
+    let mut owner = owner_for(root, http_config(port));
+    let address = format!("http://127.0.0.1:{port}/browse.php?u=x&b=4");
+    assert_eq!(
+        invoke(&mut owner, json!({"op": "proxy_add", "address": address}))["ok"],
+        json!(true)
+    );
+    let report = invoke(
+        &mut owner,
+        json!({
+            "op": "proxy_request",
+            "url": "http://evil.example/page",
+            "method": "GET",
+            "proxy_image": true,
+            "now": 1.0
+        }),
+    );
+    let value = value_of(&report);
+    assert_eq!(report["ok"], json!(false), "{report}");
+    assert_eq!(value["error"], json!("policy_denied"), "{value}");
+    assert!(
+        seen.lock().expect("seen").is_empty(),
+        "rewriting the logical URL must not reach the granted Glype endpoint"
+    );
+}
+
+#[test]
+fn proxy_endpoint_outside_trusted_grant_fails_before_connect() {
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let proxy_port = listener.local_addr().expect("port").port();
+    let seen = accepts.clone();
+    std::thread::spawn(move || loop {
+        let Ok((stream, _)) = listener.accept() else {
+            return;
+        };
+        seen.fetch_add(1, Ordering::SeqCst);
+        drop(stream);
+    });
+    let http_port = one_shot(
+        200,
+        "Content-Type: text/plain\r\n",
+        b"direct",
+        Arc::new(std::sync::Mutex::new(Vec::new())),
+    );
+    let root = lease_root("task8-r3-grant");
+    let mut owner = owner_for(root, http_config_ports(&[http_port]));
+    let address = format!("socks5://127.0.0.1:{proxy_port}");
+    assert_eq!(
+        invoke(&mut owner, json!({"op": "proxy_add", "address": address}))["ok"],
+        json!(true)
+    );
+    let report = invoke(
+        &mut owner,
+        json!({
+            "op": "proxy_request",
+            "url": format!("http://127.0.0.1:{http_port}/a.jpg"),
+            "method": "GET",
+            "proxy_image": true,
+            "now": 1.0
+        }),
+    );
+    let value = value_of(&report);
+    assert_eq!(report["ok"], json!(false), "{report}");
+    assert_eq!(value["error"], json!("proxy_not_granted"), "{value}");
+    assert_ne!(value["error"], json!("InvalidSchema"));
+    assert_eq!(accepts.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn cross_origin_redirect_does_not_forward_cookie_or_authorization() {
+    let second_seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let second = one_shot(
+        200,
+        "Content-Type: text/plain\r\n",
+        b"landed",
+        second_seen.clone(),
+    );
+    let first_seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let location = format!("Location: http://127.0.0.1:{second}/landed\r\n");
+    let first = one_shot(302, &location, b"", first_seen);
+    let root = lease_root("task8-r3-redirect-headers");
+    let mut owner = owner_for(root, http_config_ports(&[first, second]));
+    let report = invoke(
+        &mut owner,
+        json!({
+            "op": "proxy_request",
+            "url": format!("http://127.0.0.1:{first}/start"),
+            "method": "GET",
+            "header_names": ["Cookie", "Authorization", "User-Agent"],
+            "header_values": ["session=keep", "Bearer secret", "xeh-fixture/1"],
+            "proxy_image": false,
+            "now": 1.0
+        }),
+    );
+    assert_eq!(report["ok"], json!(true), "{report}");
+    let landed = second_seen.lock().expect("seen");
+    assert_eq!(landed.len(), 1, "{landed:?}");
+    let request = landed[0].to_ascii_lowercase();
+    assert!(!request.contains("cookie:"), "{request}");
+    assert!(!request.contains("authorization:"), "{request}");
+    assert!(request.contains("user-agent:"), "{request}");
+}
+
+#[test]
+fn missing_location_stays_original_3xx() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let port = one_shot(302, "Content-Type: text/plain\r\n", b"", seen);
+    let root = lease_root("task8-r3-missing-location");
+    let mut owner = owner_for(root, http_config(port));
+    let url = format!("http://127.0.0.1:{port}/stay");
+    let report = invoke(
+        &mut owner,
+        json!({
+            "op": "proxy_request",
+            "url": url,
+            "method": "GET",
+            "proxy_image": false,
+            "now": 1.0
+        }),
+    );
+    let value = value_of(&report);
+    assert_eq!(report["ok"], json!(true), "{report}");
+    assert_eq!(value["status"], json!(302), "{value}");
+    assert_eq!(value["final_url"], json!(url), "{value}");
+    assert_eq!(value["real_url"], json!(url), "{value}");
+}
+
+#[test]
+fn header_rejection_does_not_change_proxy_score_or_report_invalid_schema() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let port = one_shot(200, "Content-Type: text/plain\r\n", b"ok", seen.clone());
+    let root = lease_root("task8-r3-header");
+    let mut owner = owner_for(root, http_config(port));
+    let address = format!("http://127.0.0.1:{port}/browse.php?u=x&b=4");
+    assert_eq!(
+        invoke(&mut owner, json!({"op": "proxy_add", "address": address}))["ok"],
+        json!(true)
+    );
+    let report = invoke(
+        &mut owner,
+        json!({
+            "op": "proxy_request",
+            "url": format!("http://127.0.0.1:{port}/page"),
+            "method": "GET",
+            "header_names": ["Connection"],
+            "header_values": ["keep-alive"],
+            "proxy_image": true,
+            "now": 1.0
+        }),
+    );
+    let value = value_of(&report);
+    assert_eq!(report["ok"], json!(false), "{report}");
+    assert_eq!(value["error"], json!("header_rejected"), "{value}");
+    assert_ne!(value["error"], json!("InvalidSchema"));
+    assert_eq!(
+        report["proxy"]["counts"][&address],
+        json!([0, 0]),
+        "{report}"
+    );
+    assert!(
+        seen.lock().expect("seen").is_empty(),
+        "header rejection connects"
+    );
+}
+
+#[test]
+fn dropped_exchange_removes_only_its_partial_spool() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let port = listener.local_addr().expect("port").port();
+    std::thread::spawn(move || loop {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let mut buf = [0u8; 1024];
+        let _ = stream.read(&mut buf);
+        let header = b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nContent-Type: application/octet-stream\r\n\r\n";
+        let _ = stream.write_all(header);
+        let _ = stream.write_all(b"x");
+        std::thread::sleep(Duration::from_secs(30));
+    });
+    let root = lease_root("task8-r3-cancel");
+    std::fs::write(root.join("artifact.bin"), b"keep-me").expect("artifact");
+    std::fs::write(root.join(".xeh-body-1.spool"), b"preexisting").expect("old spool name");
+    let mut owner = owner_for(root.clone(), http_config(port));
+    let cancel = owner.proxy_cancel().expect("cancel handle");
+    let report = std::thread::scope(|scope| {
+        let handle = scope.spawn(|| {
+            invoke(
+                &mut owner,
+                json!({
+                    "op": "proxy_request",
+                    "url": format!("http://127.0.0.1:{port}/slow.bin"),
+                    "method": "GET",
+                    "stage": "slow.bin",
+                    "proxy_image": false,
+                    "now": 1.0
+                }),
+            )
+        });
+        let spool_dir = root.join(".xeh-spool");
+        let started = std::time::Instant::now();
+        while started.elapsed() < Duration::from_secs(5) && !spool_dir.exists() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            spool_dir.exists(),
+            "exchange did not create its reserved spool"
+        );
+        cancel.cancel();
+        handle.join().expect("invoke")
+    });
+    assert_eq!(report["ok"], json!(false), "{report}");
+    assert_eq!(
+        std::fs::read(root.join("artifact.bin")).expect("artifact"),
+        b"keep-me"
+    );
+    assert_eq!(
+        std::fs::read(root.join(".xeh-body-1.spool")).expect("preexisting"),
+        b"preexisting"
+    );
+    assert_eq!(spool_count(&root), 1, "preexisting spool name changed");
+    let reserved = root.join(".xeh-spool");
+    if reserved.exists() {
+        let left = std::fs::read_dir(&reserved).expect("reserved").count();
+        assert_eq!(left, 0, "cancelled exchange left a partial spool");
+    }
+    assert!(!root.join("slow.bin").exists());
 }

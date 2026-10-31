@@ -5,6 +5,7 @@
 //! back to that same entry. A later call reads the published value. Re-add
 //! advances the entry epoch, so a stale publish cannot land.
 use xeh_proxy;
+use re;
 
 use self::glype;
 use self::policy;
@@ -55,6 +56,76 @@ fn header_joined(names: [string], values: [string], wanted: string) -> string {
 
 fn sent_cookie(names: [string], values: [string]) -> string {
     header_joined(names, values, "Cookie")
+}
+
+fn header_present(names: [string], wanted: string) -> bool {
+    let needle: string = string_lower_ascii(wanted.copy());
+    let mut found = false;
+    for index in 0..names.length {
+        let name: string = names[index].copy();
+        if string_lower_ascii(name.copy()) == needle {
+            found = true;
+        }
+    }
+    found
+}
+
+fn admission_error(kind: string) -> bool {
+    kind == "header_rejected" || kind == "route_invalid" || kind == "method_rejected" || kind == "proxy_not_granted"
+}
+
+fn origin_of(url: string) -> string {
+    let groups = re::captures("^(https*://[^/]+)", url.copy());
+    let mut found: string = "";
+    if groups.length > 0 {
+        let value: string = groups[0].copy();
+        found = value.copy();
+    }
+    found
+}
+
+fn strip_sensitive(names: [string], values: [string]) -> map {
+    let mut next_names: [string] = [];
+    let mut next_values: [string] = [];
+    let count: int = if names.length < values.length => { names.length } else => { values.length };
+    for index in 0..count {
+        let name: string = names[index].copy();
+        let lower: string = string_lower_ascii(name.copy());
+        if lower != "cookie" && lower != "authorization" && lower != "proxy-authorization" {
+            next_names[next_names.length] = name.copy();
+            next_values[next_values.length] = values[index].copy();
+        }
+    }
+    { names: next_names, values: next_values }
+}
+
+fn glype_page(
+    address: string,
+    current: string,
+    status: int,
+    names: [string],
+    values: [string],
+    body_text: string,
+    text_valid: bool,
+    text_error: string
+) -> map {
+    let parsed = glype::parse(address.copy());
+    let mime_present = header_present(names.copy(), "Content-Type");
+    let mime = header_joined(names.copy(), values.copy(), "Content-Type");
+    let set_cookie_present = header_present(names.copy(), "Set-Cookie");
+    let set_cookie_header = header_joined(names.copy(), values.copy(), "Set-Cookie");
+    glype::response_decision(
+        parsed.copy(),
+        current.copy(),
+        status,
+        mime.copy(),
+        mime_present,
+        body_text.copy(),
+        text_valid,
+        text_error.copy(),
+        set_cookie_present,
+        set_cookie_header.copy()
+    )
 }
 
 fn outcome(
@@ -171,7 +242,7 @@ pub fn execute(
                 "",
                 url.copy(),
                 url.copy(),
-                history[history.length - 1].copy(),
+                history[0].copy(),
                 ""
             );
             stop = true;
@@ -182,11 +253,19 @@ pub fn execute(
             let mut route_port = 0;
             let mut trusted = false;
             let mut address: string = "";
+            let mut glype_hop = false;
             let mut epoch = 0;
             let mut glyph_s: string = "";
             let mut wire = current.copy();
             let mut names: [string] = header_names.copy();
             let mut values: [string] = header_values.copy();
+            if origin_of(current.copy()) != origin_of(url.copy()) {
+                let stripped = strip_sensitive(header_names.copy(), header_values.copy());
+                let stripped_names: [string] = stripped["names"].copy();
+                let stripped_values: [string] = stripped["values"].copy();
+                names = stripped_names;
+                values = stripped_values;
+            }
             let mut prepare_error: string = "";
             let mut prepare_detail: string = "";
             if proxied {
@@ -206,6 +285,11 @@ pub fn execute(
                     glyph_s = read_s.copy();
                     epoch = read_epoch;
                     if kind == "glype" {
+                        let logical = xeh_proxy::admit(current.copy());
+                        if logical != "" {
+                            prepare_error = logical.copy();
+                            prepare_detail = current.copy();
+                        } else {
                         let parsed = glype::parse(address.copy());
                         if parsed["ok"].copy() == false {
                             prepare_error = parsed["error"].copy();
@@ -227,11 +311,13 @@ pub fn execute(
                                 names = split_names;
                                 values = split_values;
                                 wire = glype::mkurl(parsed.copy(), current.copy());
+                                glype_hop = true;
                                 route_kind = "direct";
                                 route_host = "";
                                 route_port = 0;
                                 trusted = false;
                             }
+                        }
                         }
                     } else {
                         let host: string = route["host"].copy();
@@ -241,6 +327,13 @@ pub fn execute(
                         route_port = port;
                         trusted = remote_dns;
                         wire = current.copy();
+                        if origin_of(current.copy()) != origin_of(url.copy()) {
+                            let stripped = strip_sensitive(header_names.copy(), header_values.copy());
+                            let stripped_names: [string] = stripped["names"].copy();
+                            let stripped_values: [string] = stripped["values"].copy();
+                            names = stripped_names;
+                            values = stripped_values;
+                        }
                     }
                 }
             }
@@ -253,7 +346,11 @@ pub fn execute(
                     result = failed(pool_state.copy(), admitted.copy(), wire.copy(), url.copy());
                     stop = true;
                 } else {
-                    let response = xeh_proxy::exchange(
+                        let mut read_budget = 0;
+                        if glype_hop {
+                            read_budget = 262144;
+                        }
+                        let response = xeh_proxy::exchange(
                         wire.copy(),
                         method.copy(),
                         names.copy(),
@@ -265,19 +362,22 @@ pub fn execute(
                         trusted,
                         false,
                         true,
-                        0
+                        read_budget
                     );
                     let status: int = response.status;
                     let opened: string = response.url;
                     let error_kind: string = response.error_kind;
                     let error_detail: string = response.error_detail;
                     let byte_length: int = response.byte_length;
+                    let body_text: string = response.body_text;
+                    let text_valid: bool = response.text_valid;
+                    let exchange_text_error: string = response.text_error;
                     let response_names: [string] = response.header_names;
                     let response_values: [string] = response.header_values;
                     if error_kind != "" {
                         let _closed = xeh_proxy::body_close(response.body);
                         let mut traced_state = pool_state.copy();
-                        if address != "" {
+                        if address != "" && admission_error(error_kind.copy()) == false {
                             let traced = pool::trace(
                                 pool_state.copy(),
                                 address.copy(),
@@ -366,10 +466,33 @@ pub fn execute(
                                 }
                             }
                         } else if status > 300 && status < 400 {
+                            let next_url = location_of(response_names.copy(), response_values.copy());
+                            if next_url == "" {
+                                let _closed = xeh_proxy::body_close(response.body);
+                                result = outcome(
+                                    true,
+                                    "",
+                                    "",
+                                    pool_state.copy(),
+                                    address.copy(),
+                                    status,
+                                    byte_length,
+                                    false,
+                                    0,
+                                    "",
+                                    glyph_s.copy(),
+                                    epoch,
+                                    sent_cookie(names.copy(), values.copy()),
+                                    url.copy(),
+                                    current.copy(),
+                                    history[0].copy(),
+                                    route_kind.copy()
+                                );
+                                stop = true;
+                            } else {
                             let _closed = xeh_proxy::body_close(response.body);
                             history[history.length] = current.copy();
-                            let next_url = location_of(response_names.copy(), response_values.copy());
-                            if next_url == "" || history.length > 30 {
+                            if history.length > 30 {
                                 result = outcome(
                                     true,
                                     "",
@@ -385,13 +508,27 @@ pub fn execute(
                                     epoch,
                                     sent_cookie(names.copy(), values.copy()),
                                     url.copy(),
-                                    url.copy(),
-                                    history[history.length - 1].copy(),
+                                    history[0].copy(),
+                                    history[0].copy(),
                                     route_kind.copy()
                                 );
                                 stop = true;
                             } else {
+                                if address != "" {
+                                    let traced = pool::trace(
+                                        pool_state.copy(),
+                                        address.copy(),
+                                        "success",
+                                        1,
+                                        false,
+                                        true,
+                                        "",
+                                        ""
+                                    );
+                                    pool_state = traced["state"].copy();
+                                }
                                 current = next_url.copy();
+                            }
                             }
                         } else {
                             let mut text_error: string = "";
@@ -408,6 +545,38 @@ pub fn execute(
                                     url.copy()
                                 );
                                 stop = true;
+                            } else {
+                            let mut page_content: string = "";
+                            let mut page_type: string = "";
+                            let mut page_cookie: string = "";
+                            let mut page_url: string = opened.copy();
+                            let mut glype_failed = false;
+                            if glype_hop {
+                                let decision = glype_page(
+                                    address.copy(),
+                                    current.copy(),
+                                    status,
+                                    response_names.copy(),
+                                    response_values.copy(),
+                                    body_text.copy(),
+                                    text_valid,
+                                    exchange_text_error.copy()
+                                );
+                                if decision["ok"].copy() == false {
+                                    glype_failed = true;
+                                    stop = true;
+                                    let exception: string = decision["exception"].copy();
+                                    let decision_detail: string = decision["detail"].copy();
+                                    result = failed(pool_state.copy(), exception.copy(), decision_detail.copy(), url.copy());
+                                } else {
+                                    page_content = decision["content"].copy();
+                                    page_type = decision["content_type"].copy();
+                                    page_cookie = decision["set_cookie"].copy();
+                                    page_url = decision["url"].copy();
+                                }
+                            }
+                            if glype_failed {
+                                let _closed = xeh_proxy::body_close(response.body);
                             } else {
                             let mut staged_ok = stage == "";
                             let mut staged_bytes = 0;
@@ -471,11 +640,15 @@ pub fn execute(
                                     epoch,
                                     sent_cookie(names.copy(), values.copy()),
                                     url.copy(),
-                                    opened.copy(),
+                                    page_url.copy(),
                                     history[history.length - 1].copy(),
                                     route_kind.copy()
                                 );
+                                result["content"] = page_content.copy();
+                                result["content_type"] = page_type.copy();
+                                result["set_cookie"] = page_cookie.copy();
                                 stop = true;
+                            }
                             }
                             }
                         }

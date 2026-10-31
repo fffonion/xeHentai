@@ -441,6 +441,22 @@ fn field_bool(document: map, name: string, fallback: bool) -> bool {
     }
 }
 
+fn join_field(base: string, name: string, encoded: string) -> string {
+    let prefix = base + ",\"";
+    let named = prefix + name;
+    let marked = named + "\":";
+    marked + encoded
+}
+
+fn optional_string(document: map, name: string) -> string {
+    if document.has(name) && type(document[name].copy()) == "string" => {
+        let typed: string = document[name].copy();
+        typed
+    } else => {
+        ""
+    }
+}
+
 fn field_map(document: map, name: string) -> map {
     if document.has(name) && type(document[name].copy()) == "map" => {
         let typed: map = document[name].copy();
@@ -1077,22 +1093,28 @@ fn op_proxy_request(store: Store, document: map) -> Step {
     let final_url: string = result["final_url"].copy();
     let real_url: string = result["real_url"].copy();
     let route_kind: string = result["route_kind"].copy();
-    let value: string = "{\"ok\":" + json::encode(ok)
-        + ",\"error\":" + json::encode(error)
-        + ",\"detail\":" + json::encode(detail)
-        + ",\"address\":" + json::encode(address)
-        + ",\"status\":" + json::encode(status)
-        + ",\"byte_length\":" + json::encode(byte_length)
-        + ",\"staged_ok\":" + json::encode(staged_ok)
-        + ",\"staged_bytes\":" + json::encode(staged_bytes)
-        + ",\"staged_error\":" + json::encode(staged_error)
-        + ",\"glyph_s\":" + json::encode(glyph_s)
-        + ",\"epoch\":" + json::encode(epoch)
-        + ",\"sent_cookie\":" + json::encode(sent_cookie)
-        + ",\"logical_url\":" + json::encode(logical_url)
-        + ",\"final_url\":" + json::encode(final_url)
-        + ",\"real_url\":" + json::encode(real_url)
-        + ",\"route_kind\":" + json::encode(route_kind) + "}";
+    let mut value = "{\"" + "ok";
+    value = value + "\":";
+    value = value + json::encode(ok);
+    value = join_field(value.copy(), "error", json::encode(error));
+    value = join_field(value.copy(), "detail", json::encode(detail));
+    value = join_field(value.copy(), "address", json::encode(address));
+    value = join_field(value.copy(), "status", json::encode(status));
+    value = join_field(value.copy(), "byte_length", json::encode(byte_length));
+    value = join_field(value.copy(), "staged_ok", json::encode(staged_ok));
+    value = join_field(value.copy(), "staged_bytes", json::encode(staged_bytes));
+    value = join_field(value.copy(), "staged_error", json::encode(staged_error));
+    value = join_field(value.copy(), "glyph_s", json::encode(glyph_s));
+    value = join_field(value.copy(), "epoch", json::encode(epoch));
+    value = join_field(value.copy(), "sent_cookie", json::encode(sent_cookie));
+    value = join_field(value.copy(), "logical_url", json::encode(logical_url));
+    value = join_field(value.copy(), "final_url", json::encode(final_url));
+    value = join_field(value.copy(), "real_url", json::encode(real_url));
+    value = join_field(value.copy(), "content", json::encode(optional_string(result.copy(), "content")));
+    value = join_field(value.copy(), "content_type", json::encode(optional_string(result.copy(), "content_type")));
+    value = join_field(value.copy(), "set_cookie", json::encode(optional_string(result.copy(), "set_cookie")));
+    value = join_field(value.copy(), "route_kind", json::encode(route_kind));
+    value = value + "}";
     if ok => {
         code_step(next, err_no_error(), value.copy())
     } else => {

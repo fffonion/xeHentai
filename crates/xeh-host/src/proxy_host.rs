@@ -34,15 +34,22 @@ pub struct ProxyHost {
     pub hooks: TransportHooks,
     pub session: std::sync::Arc<crate::proxy_exchange::ProxySession>,
     pub live: std::sync::Arc<crate::proxy_exchange::LiveGeneration>,
+    pub grants: Vec<crate::task_control::ProxyGrant>,
 }
 
 impl ProxyHost {
-    pub fn new(root: std::path::PathBuf, http: vm::HttpConfig, hooks: TransportHooks) -> Arc<Self> {
+    pub fn new(
+        root: std::path::PathBuf,
+        http: vm::HttpConfig,
+        hooks: TransportHooks,
+        grants: Vec<crate::task_control::ProxyGrant>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             http,
             hooks,
             session: crate::proxy_exchange::ProxySession::new(root),
             live: crate::proxy_exchange::LiveGeneration::new(),
+            grants,
         })
     }
 }
@@ -379,7 +386,10 @@ fn classify_error(code: &'static str) -> &'static str {
         "proxy_unsupported" => "ProxySchemeUnknown",
         "proxy_tls_failed" | "target_tls_failed" => "ConnectionError",
         "policy_denied" => "policy_denied",
-        "header_rejected" | "route_invalid" | "method_rejected" => "InvalidSchema",
+        "header_rejected" => "header_rejected",
+        "route_invalid" => "route_invalid",
+        "method_rejected" => "method_rejected",
+        "proxy_not_granted" => "proxy_not_granted",
         "proxy_status" | "proxy_handshake_failed" | "proxy_auth_required" => "ProxyError",
         "redirect_limit" => "TooManyRedirects",
         "connect_failed"

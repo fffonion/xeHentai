@@ -322,6 +322,7 @@ async fn run_proxy_scenario_async(
         root.to_path_buf(),
         http,
         crate::dto::TransportHooks::default(),
+        Vec::new(),
     );
     crate::proxy_host::register_proxy(&mut registry, &catalog, host)?;
     bind_vm(&mut vm, &registry)?;
