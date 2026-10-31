@@ -18,8 +18,8 @@
         "/decisions/0": "slots:separated",
         "/queues/metadata": [],
         "/queues/list": [],
-        "/queues/scan/0": "https://e-hentai.org/s/aaaaaaaaaa/1-1",
-        "/queues/download/0": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "/queues/scan": [],
+        "/queues/download": [],
         "/slots/metadata": 1,
         "/slots/list": 1,
         "/slots/scan": 2,
@@ -637,7 +637,7 @@
         "/observable/spawned_scan": 0,
         "/observable/spawned_download": 3,
         "/queues/scan": [],
-        "/queues/download/0": "https://cdn.example/a.jpg",
+        "/queues/download": [],
         "/observable/public_has_list_q": false,
         "/observable/public_has_metadata_q": false
       }
@@ -816,21 +816,19 @@
         "total": 40,
         "thumbnail_cnt": 20,
         "page_q": ["https://decoy.example/page-not-enqueued"],
-        "img_q": ["https://cdn.example/scheduled-by-walk.jpg"]
+        "img_q": ["https://decoy.example/image-not-enqueued"]
       },
       "assertions": {
         "/decisions/0": "slots:separated",
         "/queues/metadata": [],
         "/queues/list": [],
         "/queues/scan": [],
-        "/queues/download/0": "https://cdn.example/scheduled-by-walk.jpg",
+        "/queues/download": [],
         "/slots/scan": 0,
         "/slots/download": 3,
         "/observable/spawned_scan": 0,
         "/observable/spawned_download": 3,
-        "/observable/page_q/0": "https://decoy.example/page-not-enqueued",
-        "/observable/worker_names/0": "down-1",
-        "/observable/worker_names/3": "scan-1"
+        "/observable/worker_names": ["down-1", "down-2", "down-3"]
       }
     },
     {

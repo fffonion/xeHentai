@@ -139,24 +139,16 @@ fn run_slots(request: map) -> string {
     let img_q = strings(request, "img_q");
     let mut state = initial;
     let mut exit = 0;
-    let mut monitor_started = false;
     let mut requested: [string] = [];
     let mut names: [string] = [];
     let mut spawned_scan = 0;
     let mut spawned_download = 0;
+    let mut scan_q: [string] = [];
+    let mut download_q: [string] = [];
     if state == 1 {
         state = 2;
     }
     while exit < 2 && state < 20 {
-        if state >= 4 && monitor_started == false {
-            for index in 0..download_count {
-                names[names.length] = "down-" + decimal_text(index + 1);
-            }
-            for index in 0..scan_count {
-                names[names.length] = "scan-" + decimal_text(index + 1);
-            }
-            monitor_started = true;
-        }
         if state == 2 {
             requested[requested.length] = url.copy();
             exit = 2;
@@ -169,11 +161,17 @@ fn run_slots(request: map) -> string {
                 }
             }
         } else if state == 4 {
+            for index in 0..scan_count {
+                names[names.length] = "scan-" + decimal_text(index + 1);
+            }
             spawned_scan = scan_count;
             state = 9;
         } else if state == 5 {
             state = 9;
         } else if state == 10 {
+            for index in 0..download_count {
+                names[names.length] = "down-" + decimal_text(index + 1);
+            }
             spawned_download = download_count;
             break;
         }
@@ -185,12 +183,8 @@ fn run_slots(request: map) -> string {
     } else if initial == 3 {
         queues["list"] = requested.copy();
     }
-    if spawned_scan > 0 {
-        queues["scan"] = page_q.copy();
-    }
-    if spawned_download > 0 {
-        queues["download"] = img_q.copy();
-    }
+    queues["scan"] = scan_q;
+    queues["download"] = download_q;
     let mut slots = empty_slots();
     slots["scan"] = spawned_scan;
     slots["download"] = spawned_download;

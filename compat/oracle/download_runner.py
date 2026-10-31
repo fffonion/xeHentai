@@ -88,6 +88,21 @@ def queue_items(queue):
     return list(queue.queue)
 
 
+def enqueued_during(before, after):
+    before = list(before)
+    after = list(after)
+    if after[: len(before)] == before:
+        return after[len(before) :]
+    remaining = list(before)
+    fresh = []
+    for item in after:
+        if item in remaining:
+            remaining.remove(item)
+        else:
+            fresh.append(item)
+    return fresh
+
+
 def public_flags(task):
     exported = task.to_dict()
     return {
@@ -228,23 +243,23 @@ def run_slots(request, root, task_mod, core_mod, worker_mod):
     def no_start(self):
         monitors.append(self)
 
+    before_page = queue_items(task.page_q)
+    before_img = queue_items(task.img_q)
     worker_mod.Monitor.start = no_start
     try:
         core._do_task(task.guid)
     finally:
         worker_mod.Monitor.start = original_start
-    names = list(monitors[0].thread_last_seen.keys()) if monitors else []
-    spawned_scan = sum(1 for worker in created if str(worker.name).startswith("scan-"))
-    spawned_download = sum(1 for worker in created if str(worker.name).startswith("down-"))
+    names = [worker.name for worker in created]
+    spawned_scan = sum(1 for worker in created if worker.task_queue is task.page_q)
+    spawned_download = sum(1 for worker in created if worker.task_queue is task.img_q)
     queues = empty_queues()
     if initial_state == 2:
         queues["metadata"] = list(requested)
     elif initial_state == 3:
         queues["list"] = list(requested)
-    if spawned_scan:
-        queues["scan"] = queue_items(task.page_q)
-    if spawned_download:
-        queues["download"] = queue_items(task.img_q)
+    queues["scan"] = enqueued_during(before_page, queue_items(task.page_q))
+    queues["download"] = enqueued_during(before_img, queue_items(task.img_q))
     slots = empty_slots()
     slots["scan"] = spawned_scan
     slots["download"] = spawned_download
