@@ -12,7 +12,6 @@ use super::proxy::pool;
 use super::proxy::policy;
 use super::proxy::request;
 use super::rules::download;
-use super::site::image;
 use super::site::support;
 
 fn text(value: map, key: string, fallback: string) -> string {
@@ -130,79 +129,6 @@ fn public_has_queue(name: string) -> bool {
     name == "page_q" || name == "img_q"
 }
 
-fn contains_text(items: [string], target: string) -> bool {
-    let mut found = false;
-    for index in 0..items.length {
-        if items[index].copy() == target {
-            found = true;
-        }
-    }
-    found
-}
-
-fn drop_first(items: [string], target: string) -> [string] {
-    let mut next: [string] = [];
-    let mut dropped = false;
-    for index in 0..items.length {
-        let item = items[index].copy();
-        if dropped == false && item == target {
-            dropped = true;
-        } else {
-            next[next.length] = item;
-        }
-    }
-    next
-}
-
-fn consumed_pages(before: [string], after: [string]) -> [string] {
-    let mut remaining = after.copy();
-    let mut popped: [string] = [];
-    for index in 0..before.length {
-        let item = before[index].copy();
-        let next = drop_first(remaining.copy(), item.copy());
-        if next.length == remaining.length {
-            popped[popped.length] = item;
-        } else {
-            remaining = next;
-        }
-    }
-    popped
-}
-
-fn scan_callback(page: string, body: string) -> string {
-    if body == "" => {
-        ""
-    } else => {
-        let suc_returns: [string] = [];
-        let fail_returns: [string] = [];
-        let extracted = image::extract(
-            body.copy(),
-            page.copy(),
-            page.copy(),
-            false,
-            suc_returns,
-            fail_returns
-        );
-        let callbacks: [map] = extracted["callbacks"].copy();
-        if callbacks.length == 0 => {
-            ""
-        } else => {
-            let event: map = callbacks[0].copy();
-            let kind: string = event["kind"].copy();
-            if kind != "suc" => {
-                ""
-            } else => {
-                let value: [string] = event["value"].copy();
-                if value.length == 0 => {
-                    ""
-                } else => {
-                    value[0].copy()
-                }
-            }
-        }
-    }
-}
-
 fn run_slots(request: map) -> string {
     let walked = xeh_slots::walk(
         whole(request, "state", 1),
@@ -212,7 +138,8 @@ fn run_slots(request: map) -> string {
         whole(request, "total", 0),
         whole(request, "thumbnail_cnt", 20),
         strings(request, "page_q"),
-        strings(request, "img_q")
+        strings(request, "img_q"),
+        text(request, "page_body", "")
     );
     let names: [string] = walked.worker_names.copy();
     let metadata_q: [string] = walked.metadata_urls.copy();
@@ -221,24 +148,14 @@ fn run_slots(request: map) -> string {
     let download_q: [string] = walked.download_urls.copy();
     let pending: [string] = walked.pending_list_urls.copy();
     let page_q: [string] = walked.public_page_q.copy();
-    let mut img_q: [string] = walked.public_img_q.copy();
+    let img_q: [string] = walked.public_img_q.copy();
     let spawned_scan: int = walked.spawned_scan;
     let spawned_download: int = walked.spawned_download;
-    let mut download_listed: [string] = download_q.copy();
-    let body = text(request, "page_body", "");
-    let popped = consumed_pages(strings(request, "page_q"), page_q.copy());
-    for index in 0..popped.length {
-        let src = scan_callback(popped[index].copy(), body.copy());
-        if src != "" && contains_text(img_q.copy(), src.copy()) == false {
-            img_q[img_q.length] = src.copy();
-            download_listed[download_listed.length] = src.copy();
-        }
-    }
     let mut queues = empty_queues();
     queues["metadata"] = metadata_q;
     queues["list"] = list_q;
     queues["scan"] = scan_q;
-    queues["download"] = download_listed;
+    queues["download"] = download_q;
     let mut slots = empty_slots();
     slots["scan"] = spawned_scan;
     slots["download"] = spawned_download;

@@ -1,0 +1,38 @@
+//! Scan worker body. Runs on the spawned scan thread and calls image::extract.
+use super::site::image;
+
+pub fn run(text: string, page: string) -> string {
+    if text == "" => {
+        ""
+    } else => {
+        let suc_returns: [string] = [];
+        let fail_returns: [string] = [];
+        let extracted = image::extract(
+            text.copy(),
+            page.copy(),
+            page.copy(),
+            false,
+            suc_returns,
+            fail_returns
+        );
+        let callbacks: [map] = extracted["callbacks"].copy();
+        if callbacks.length == 0 => {
+            ""
+        } else => {
+            let event: map = callbacks[0].copy();
+            let kind: string = event["kind"].copy();
+            if kind != "suc" => {
+                ""
+            } else => {
+                let value: [string] = event["value"].copy();
+                if value.length == 0 => {
+                    ""
+                } else => {
+                    value[0].copy()
+                }
+            }
+        }
+    }
+}
+
+0;

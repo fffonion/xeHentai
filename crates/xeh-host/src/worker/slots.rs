@@ -8,20 +8,22 @@
 //! returns `Ok`. A spawn error has no handle, so it contributes no name and
 //! stops further starts of that kind. Every handle is joined before the report
 //! is read. Scan workers consume a page, including a token that contains
-//! digits, and do not invent an image URL. The RSS scan callback calls
-//! `image::extract` on the response body and enqueues the src it returns.
+//! digits. The spawned scan body calls `app/site/image.rss` `extract`
+//! on the response body and pushes the returned src onto the image
+//! queue before the thread returns.
 //! Download success pops the image it acknowledges. Queue URLs reported as
 //! enqueued are only those added during the walk; request decoys already
 //! present are not copied in.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 
 use vm::{
-    CallOutcome, CallReturn, HostApiCatalog, HostFunction, HostFunctionRegistry,
-    HostFunctionSchema, HostParamSchema, HostStructField, HostStructSchema, HostTypeSchema, Value,
-    Vm, VmError, VmResult, register_catalog_function,
+    register_catalog_function, CallOutcome, CallReturn, HostApiCatalog, HostFunction,
+    HostFunctionRegistry, HostFunctionSchema, HostParamSchema, HostStructField, HostStructSchema,
+    HostTypeSchema, JitConfig, Program, Value, Vm, VmError, VmResult, VmStatus,
 };
 
 use crate::types::HostError;
@@ -69,6 +71,7 @@ struct WalkInput {
     thumbnail_cnt: i64,
     page_q: Vec<String>,
     img_q: Vec<String>,
+    page_body: String,
 }
 
 struct WalkReport {
@@ -102,6 +105,7 @@ pub fn functions() -> Vec<HostFunctionSchema> {
                 "img_q",
                 HostTypeSchema::Array(Box::new(HostTypeSchema::String)),
             ),
+            HostParamSchema::value("page_body", HostTypeSchema::String),
         ],
         named("SlotWalk", walk_fields()),
     )
@@ -175,6 +179,7 @@ fn parse_walk(args: &[Value]) -> Result<WalkInput, VmError> {
         thumbnail_cnt: int_arg(args, 5, "thumbnail_cnt")?,
         page_q: strings_arg(args, 6, "page_q")?,
         img_q: strings_arg(args, 7, "img_q")?,
+        page_body: string_arg(args, 8, "page_body")?,
     })
 }
 
@@ -248,6 +253,7 @@ fn walk_started(
     let queues = Arc::new(Mutex::new(SlotQueues {
         page: input.page_q.iter().cloned().collect(),
         image: input.img_q.iter().cloned().collect(),
+        page_body: input.page_body.clone(),
     }));
     let before_page = input.page_q.clone();
     let before_img = input.img_q.clone();
@@ -375,6 +381,7 @@ type SharedQueues = Arc<Mutex<SlotQueues>>;
 struct SlotQueues {
     page: VecDeque<String>,
     image: VecDeque<String>,
+    page_body: String,
 }
 
 #[derive(Clone, Copy)]
@@ -386,7 +393,7 @@ struct WorkerCallbacks {
 
 fn default_callbacks() -> WorkerCallbacks {
     WorkerCallbacks {
-        scan_success: ignore_callback,
+        scan_success: enqueue_extracted,
         download_success: acknowledge_download,
         download_failure: ignore_callback,
     }
@@ -414,6 +421,88 @@ fn run_worker(kind: SlotKind, queues: SharedQueues, callbacks: WorkerCallbacks) 
             }
         }
     }
+}
+
+fn enqueue_extracted(page: &str, queues: &mut SlotQueues) {
+    let src = extract_page_src(page, &queues.page_body);
+    if src.is_empty() || queues.image.iter().any(|item| item == &src) {
+        return;
+    }
+    queues.image.push_back(src);
+}
+
+fn extract_page_src(page: &str, body: &str) -> String {
+    if body.is_empty() {
+        return String::new();
+    }
+    match extract_page_src_vm(page, body) {
+        Ok(src) => src,
+        Err(error) => {
+            eprintln!("scan extract failed: {error}");
+            String::new()
+        }
+    }
+}
+
+struct ScanBody {
+    catalog: Arc<HostApiCatalog>,
+    program: Program,
+}
+
+fn scan_body() -> &'static ScanBody {
+    static BODY: OnceLock<ScanBody> = OnceLock::new();
+    BODY.get_or_init(|| {
+        let catalog = crate::catalog::standard_catalog();
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../app/download/scan_body.rss");
+        let program = crate::runtime::compile_file_with_catalog(&path, Arc::clone(&catalog))
+            .unwrap_or_else(|error| panic!("scan body did not compile: {error}"));
+        ScanBody { catalog, program }
+    })
+}
+
+fn extract_page_src_vm(page: &str, body: &str) -> Result<String, String> {
+    let prepared = scan_body();
+    let mut vm = Vm::try_new(prepared.program.clone()).map_err(|error| format!("{error:?}"))?;
+    vm.set_jit_config(JitConfig {
+        enabled: false,
+        ..Default::default()
+    });
+    let registry =
+        crate::catalog::open_registry(&prepared.catalog).map_err(|error| error.to_string())?;
+    crate::runtime::bind_vm(&mut vm, &registry).map_err(|error| error.to_string())?;
+    crate::runtime::attach_timer(&mut vm, Arc::new(crate::timer::EmbeddingTimer::new()));
+    halt_vm(&mut vm)?;
+    let callable = vm
+        .resolve_exported_callable("run")
+        .map_err(|error| format!("{error:?}"))?;
+    match vm
+        .invoke_callable(
+            callable,
+            &[
+                Value::string(body.to_string()),
+                Value::string(page.to_string()),
+            ],
+        )
+        .map_err(|error| format!("{error:?}"))?
+    {
+        Value::String(text) => Ok(text.as_str().to_string()),
+        other => Err(format!("scan body returned {other:?}, not a string")),
+    }
+}
+
+fn halt_vm(vm: &mut Vm) -> Result<(), String> {
+    let mut status = vm.run().map_err(|error| format!("{error:?}"))?;
+    for _ in 0..10_000 {
+        match status {
+            VmStatus::Halted => return Ok(()),
+            VmStatus::Yielded => {
+                status = vm.resume().map_err(|error| format!("{error:?}"))?;
+            }
+            VmStatus::Waiting(_) => return Err("scan extract waited on a host op".to_string()),
+        }
+    }
+    Err("scan extract exceeded the step limit".to_string())
 }
 
 fn acknowledge_download(image: &str, queues: &mut SlotQueues) {
@@ -504,6 +593,7 @@ mod tests {
             thumbnail_cnt: 20,
             page_q: vec!["https://decoy.example/page-not-enqueued".to_string()],
             img_q: vec!["https://decoy.example/image-not-enqueued".to_string()],
+            page_body: String::new(),
         }
     }
 
@@ -566,16 +656,25 @@ mod tests {
         sample.download_count = 1;
         sample.page_q = vec!["https://e-hentai.org/s/0123456789/9-4".to_string()];
         sample.img_q = vec!["https://decoy.example/image-not-extracted".to_string()];
+        sample.page_body = "<img src=\"https://img.test/path/file.jpg?keystamp=stamp\" style=\"x\"></a></div><div>file.jpg :: x :: y</di class=\"mr\" x <a href=\"https://img.test/original.jpg\" >Download original return nl('nonce-123')".to_string();
         let report = walk(sample);
         assert!(report.public_page_q.is_empty());
-        assert!(report.download_urls.is_empty());
-        assert!(report.public_img_q.is_empty());
-        assert!(
-            report
-                .download_urls
-                .iter()
-                .chain(report.public_img_q.iter())
-                .all(|url| !url.contains("cdn.example"))
+        assert_eq!(
+            report.download_urls,
+            ["https://img.test/path/file.jpg?keystamp=stamp"]
         );
+        assert_eq!(
+            report.public_img_q,
+            ["https://img.test/path/file.jpg?keystamp=stamp"]
+        );
+        assert!(!report
+            .public_img_q
+            .iter()
+            .any(|url| url.contains("image-not-extracted")));
+        assert!(report
+            .download_urls
+            .iter()
+            .chain(report.public_img_q.iter())
+            .all(|url| !url.contains("cdn.example")));
     }
 }
