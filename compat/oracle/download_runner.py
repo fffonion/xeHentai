@@ -400,6 +400,13 @@ class Clock(object):
         self.stop_after = 0
         self.refresh = None
         self.warnings = None
+        self.after_slow = ""
+        self.task = None
+        self.worker = None
+        self.slow_handled = False
+        self.release_workers = False
+        self.bumped = False
+        self.sleeps_after_bump = 0
 
     def time(self):
         return self.now
@@ -407,17 +414,59 @@ class Clock(object):
     def sleep(self, _seconds):
         self.iterations += 1
         self.now += self.step
+        if not self.slow_handled and self._saw_slow():
+            self.slow_handled = True
+            if self.after_slow == "progress" and self.task is not None:
+                self.task.meta["finished"] = int(self.task.meta.get("finished", 0)) + 1
+                self.bumped = True
+            elif self.after_slow == "stuck" and self.worker is not None:
+                self.worker.stream_speed = None
+            else:
+                self.release_workers = True
+        if self.bumped:
+            self.sleeps_after_bump += 1
+            if self.sleeps_after_bump >= 11:
+                self.release_workers = True
         if self.refresh is not None:
-            for name in list(self.refresh.thread_last_seen):
-                self.refresh.thread_last_seen[name] = self.now
-        if self.warnings is not None and any(
-            "slow" in str(message) or "stuck" in str(message) for message in self.warnings
-        ):
-            raise StopIteration()
+            if self.release_workers:
+                for name in list(self.refresh.thread_last_seen):
+                    self.refresh.thread_last_seen[name] = self.now - 10**9
+                if self.worker is not None:
+                    self.worker.is_alive = lambda: False
+            else:
+                for name in list(self.refresh.thread_last_seen):
+                    self.refresh.thread_last_seen[name] = self.now
         if self.stop_after and self.iterations >= self.stop_after:
             raise StopIteration()
-        if self.iterations > 500:
-            raise StopIteration()
+
+    def _saw_slow(self):
+        for message in self.warnings or []:
+            text = str(message)
+            if "slow" in text and "stuck" not in text:
+                return True
+        return False
+
+
+def monitor_steps(warnings, request, task, initial_finished):
+    steps = []
+    for message in warnings:
+        text = str(message)
+        if "stuck" in text:
+            steps.append("stuck")
+        elif "slow" in text:
+            steps.append("slow")
+    if request.get("after_slow") == "progress" and int(task.meta["finished"]) > initial_finished:
+        placed = []
+        inserted = False
+        for step in steps:
+            placed.append(step)
+            if step == "slow" and not inserted:
+                placed.append("progress")
+                inserted = True
+        if not inserted:
+            placed.append("progress")
+        steps = placed
+    return steps
 
 
 def run_speed(request, worker_mod):
@@ -516,6 +565,10 @@ def run_monitor(request, root, task_mod, worker_mod, const):
     task.meta["total"] = max(task.meta["finished"] + 1, int(request.get("total", task.meta["finished"] + 1)))
     clock = Clock(0, int(request.get("clock_step", 10)))
     clock.refresh = monitor
+    clock.after_slow = request.get("after_slow") or ""
+    clock.task = task
+    clock.worker = worker
+    initial_finished = int(task.meta["finished"])
     original = worker_mod.time.time
     original_sleep = worker_mod.time.sleep
     worker_mod.time.time = clock.time
@@ -541,6 +594,7 @@ def run_monitor(request, root, task_mod, worker_mod, const):
         "task_state": task.state,
         "stopped": stuck,
         "votes": {},
+        "steps": monitor_steps(warnings, request, task, initial_finished),
     })
 
 

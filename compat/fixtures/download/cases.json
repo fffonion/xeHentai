@@ -803,6 +803,145 @@
         "/observable/status": 200,
         "/route_kind": "http"
       }
+    },
+    {
+      "id": "download.slots.walk-past-archive",
+      "suite": "download",
+      "request": {
+        "operation": "slots",
+        "state": 9,
+        "scan_thread_cnt": 2,
+        "download_thread_cnt": 3,
+        "url": "https://e-hentai.org/g/9/aaaaaaaaaa/",
+        "total": 40,
+        "thumbnail_cnt": 20,
+        "page_q": ["https://decoy.example/page-not-enqueued"],
+        "img_q": ["https://cdn.example/scheduled-by-walk.jpg"]
+      },
+      "assertions": {
+        "/decisions/0": "slots:separated",
+        "/queues/metadata": [],
+        "/queues/list": [],
+        "/queues/scan": [],
+        "/queues/download/0": "https://cdn.example/scheduled-by-walk.jpg",
+        "/slots/scan": 0,
+        "/slots/download": 3,
+        "/observable/spawned_scan": 0,
+        "/observable/spawned_download": 3,
+        "/observable/page_q/0": "https://decoy.example/page-not-enqueued",
+        "/observable/worker_names/0": "down-1",
+        "/observable/worker_names/3": "scan-1"
+      }
+    },
+    {
+      "id": "download.monitor.slow-then-progress",
+      "suite": "download",
+      "request": {
+        "operation": "monitor",
+        "kind": "slow",
+        "timeout": 10000,
+        "retry": 0,
+        "clock_step": 10,
+        "finished": 1,
+        "total": 10,
+        "total_speed": 2048,
+        "state": 10,
+        "name": "down-1",
+        "after_slow": "progress"
+      },
+      "assertions": {
+        "/decisions/0": "monitor:slow",
+        "/observable/reason": "slow",
+        "/observable/stopped": false,
+        "/observable/task_state": 10,
+        "/observable/steps/0": "slow",
+        "/observable/steps/1": "progress"
+      }
+    },
+    {
+      "id": "download.monitor.slow-then-stuck",
+      "suite": "download",
+      "request": {
+        "operation": "monitor",
+        "kind": "slow",
+        "timeout": 10000,
+        "retry": 0,
+        "clock_step": 10,
+        "finished": 1,
+        "total": 10,
+        "total_speed": 2048,
+        "state": 10,
+        "name": "down-1",
+        "after_slow": "stuck"
+      },
+      "assertions": {
+        "/decisions/0": "monitor:stuck",
+        "/observable/reason": "stuck",
+        "/observable/stopped": true,
+        "/observable/task_state": 10,
+        "/observable/steps/0": "slow",
+        "/observable/steps/1": "stuck"
+      }
+    },
+    {
+      "id": "download.lifecycle.unstarted-permit",
+      "suite": "download",
+      "request": {
+        "operation": "lifecycle",
+        "state": 1,
+        "download_thread_cnt": 2,
+        "steps": ["start", "exit"],
+        "finished": 0
+      },
+      "assertions": {
+        "/decisions/0": "lifecycle:no-double-submit",
+        "/submit_count": 0,
+        "/permits_end": 0,
+        "/observable/permit_trace/0": 0,
+        "/observable/permit_trace/1": 0
+      }
+    },
+    {
+      "id": "download.lifecycle.second-start-held",
+      "suite": "download",
+      "request": {
+        "operation": "lifecycle",
+        "state": 10,
+        "download_thread_cnt": 2,
+        "steps": ["start", "start", "exit"],
+        "finished": 0,
+        "total": 10
+      },
+      "assertions": {
+        "/decisions/0": "lifecycle:no-double-submit",
+        "/submit_ids/0": "down-1",
+        "/submit_ids/1": "down-2",
+        "/submit_count": 2,
+        "/permits_end": 0,
+        "/observable/permit_trace/0": 2,
+        "/observable/permit_trace/1": 2,
+        "/observable/permit_trace/2": 0
+      }
+    },
+    {
+      "id": "download.lifecycle.exit-reaps",
+      "suite": "download",
+      "request": {
+        "operation": "lifecycle",
+        "state": 10,
+        "download_thread_cnt": 2,
+        "steps": ["start", "exit"],
+        "finished": 0,
+        "total": 10
+      },
+      "assertions": {
+        "/decisions/0": "lifecycle:no-double-submit",
+        "/submit_count": 2,
+        "/permits_end": 0,
+        "/observable/permit_trace/0": 2,
+        "/observable/permit_trace/1": 0,
+        "/observable/exit_after_pause": true
+      }
     }
   ]
 }

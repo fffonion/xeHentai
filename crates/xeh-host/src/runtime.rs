@@ -560,7 +560,7 @@ async fn run_download_scenario_async(
         &mut vm,
         crate::os::fs::FsState::new(vec![root.to_path_buf()], None, None),
     );
-    crate::worker::permits::install(&mut vm);
+    crate::worker::permits::install(&mut vm, root.to_path_buf());
     attach_timer(&mut vm, Arc::new(EmbeddingTimer::new()));
     drive_to_halt(&mut vm).await?;
     let callable = vm
@@ -589,7 +589,10 @@ async fn run_download_scenario_async(
             Err(error) => return Poll::Ready(Err(HostError::from_vm(error))),
         }
     })
-    .await?;
+    .await;
+    drop(invocation);
+    crate::worker::permits::shutdown(&mut vm);
+    let value = value?;
     match value {
         Value::String(text) => Ok(text.as_str().to_string()),
         other => Err(HostError::runtime(format!(
