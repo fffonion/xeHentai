@@ -116,4 +116,4 @@ RSS 池状态由 `app/domain/state.rss` 的 Store 持有（`proxy: map?`），`a
 
 ## Task 9 下载槽位 worker 记录
 
-`app/download/entry.rss` 的 slots 报告不再按 `scan_thread_cnt` / `download_thread_cnt` 拼 `scan-N` / `down-N`。锁定的 Core 没有“构造并保存应用 worker 记录，启动失败时只返回已保存名字”的 host。`xeh_slots::walk` 在本项目 `crates/xeh-host/src/worker/slots.rs`：每个成功启动的 scan/download worker 保存一条记录，报告名字只从该记录读出。`fail_download_start` 使第 N 个下载 worker 的 `start` 失败，该记录不保留，后续下载启动停止。scan/download 队列只含 walk 期间新入队的 URL；请求里预先放入的 `page_q` / `img_q` 诱饵留在公开队列。RSS 只把该返回值抄进报告。
+`app/download/entry.rss` 的 slots 报告不再按 `scan_thread_cnt` / `download_thread_cnt` 拼 `scan-N` / `down-N`。锁定的 Core 没有“spawn 命名线程，并在 spawn 失败时只返回已创建 handle 名字”的 host。`xeh_slots::walk` 在本项目 `crates/xeh-host/src/worker/slots.rs`：每个 scan/download worker 调用 `std::thread::Builder::name(...).spawn(...)`。报告名字只在 spawn 返回 `Ok` 之后从 `JoinHandle::thread().name()` 读出。spawn 失败没有 handle，不记名字，并停止该队列后续启动。函数返回前 join 全部 handle。scan/download 队列只含 walk 期间新入队的 URL；请求里预先放入的 `page_q` / `img_q` 诱饵留在公开队列。RSS 只把该返回值抄进报告。

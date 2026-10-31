@@ -138,8 +138,7 @@ fn run_slots(request: map) -> string {
         whole(request, "total", 0),
         whole(request, "thumbnail_cnt", 20),
         strings(request, "page_q"),
-        strings(request, "img_q"),
-        whole(request, "fail_download_start", 0)
+        strings(request, "img_q")
     );
     let names: [string] = walked.worker_names.copy();
     let metadata_q: [string] = walked.metadata_urls.copy();

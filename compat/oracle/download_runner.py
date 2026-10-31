@@ -230,20 +230,11 @@ def run_slots(request, root, task_mod, core_mod, worker_mod):
     core._get_httpreq = lambda policy: RecordingReq()
     created = []
     real_get = core_mod.xeHentai._get_httpworker
-    fail_at = int(request.get("fail_download_start") or 0)
-    download_started = {"n": 0}
-
-    class DownloadStartFailed(Exception):
-        pass
 
     def wrapped(self, tid, task_q, *args, **kwargs):
         worker = real_get(self, tid, task_q, *args, **kwargs)
 
         def start():
-            if task_q is task.img_q:
-                download_started["n"] += 1
-                if fail_at and download_started["n"] == fail_at:
-                    raise DownloadStartFailed()
             created.append(worker)
 
         worker.start = start
@@ -260,10 +251,7 @@ def run_slots(request, root, task_mod, core_mod, worker_mod):
     before_img = queue_items(task.img_q)
     worker_mod.Monitor.start = no_start
     try:
-        try:
-            core._do_task(task.guid)
-        except DownloadStartFailed:
-            pass
+        core._do_task(task.guid)
     finally:
         worker_mod.Monitor.start = original_start
     names = [worker.name for worker in created]

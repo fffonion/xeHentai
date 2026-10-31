@@ -1,17 +1,20 @@
-//! Slot walk worker records.
+//! Slot walk threads.
 //!
-//! Upstream `core._do_task` stores a worker name on the `HttpWorker` it
-//! constructs, then calls `start`. A matching list of formatted strings is not
-//! that creation. This host creates one record per worker that starts, and the
-//! report reads the name stored on that record. A start that fails drops the
-//! record, so its name cannot be reported. Scan and download queue URLs are
-//! only those enqueued during the walk; request decoys already present are not
-//! copied in.
+//! Upstream `core._do_task` constructs an `HttpWorker`, stores it, then calls
+//! `start`. A formatted name list is not that start. This host calls
+//! `std::thread::Builder::spawn` for each scan or download worker. A reported
+//! name is read from `JoinHandle::thread().name()` only after spawn returns
+//! `Ok`. A spawn error has no handle, so it contributes no name and stops
+//! further starts of that kind. Every handle is joined before the host
+//! function returns. Scan and download queue URLs are only those enqueued
+//! during the walk; request decoys already present are not copied in.
+
+use std::thread::JoinHandle;
 
 use vm::{
-    register_catalog_function, CallOutcome, CallReturn, HostApiCatalog, HostFunction,
-    HostFunctionRegistry, HostFunctionSchema, HostParamSchema, HostStructField, HostStructSchema,
-    HostTypeSchema, Value, Vm, VmError, VmResult,
+    CallOutcome, CallReturn, HostApiCatalog, HostFunction, HostFunctionRegistry,
+    HostFunctionSchema, HostParamSchema, HostStructField, HostStructSchema, HostTypeSchema, Value,
+    Vm, VmError, VmResult, register_catalog_function,
 };
 
 use crate::types::HostError;
@@ -31,55 +34,22 @@ enum SlotKind {
     Download,
 }
 
-struct StartFault;
-
-/// Name is written once, when the record is constructed, and is read back
-/// after a successful start. Callers do not receive a separately formatted list.
-struct WorkerRecord {
-    name: String,
-    kind: SlotKind,
+struct LiveWorkers {
+    names: Vec<String>,
+    handles: Vec<JoinHandle<()>>,
 }
 
-impl WorkerRecord {
-    fn create(kind: SlotKind, ordinal: i64) -> Self {
-        let prefix = match kind {
-            SlotKind::Scan => "scan",
-            SlotKind::Download => "down",
-        };
-        Self {
-            name: format!("{prefix}-{ordinal}"),
-            kind,
+impl LiveWorkers {
+    fn join(&mut self) {
+        for handle in self.handles.drain(..) {
+            let _ = handle.join();
         }
     }
-
-    fn start(&self, download_ordinal: i64, fail_download_start: i64) -> Result<(), StartFault> {
-        if self.kind == SlotKind::Download
-            && fail_download_start > 0
-            && download_ordinal == fail_download_start
-        {
-            return Err(StartFault);
-        }
-        Ok(())
-    }
 }
 
-struct StartedWorkers {
-    records: Vec<WorkerRecord>,
-}
-
-impl StartedWorkers {
-    fn names(&self) -> Vec<String> {
-        self.records
-            .iter()
-            .map(|record| record.name.clone())
-            .collect()
-    }
-
-    fn count(&self, kind: SlotKind) -> i64 {
-        self.records
-            .iter()
-            .filter(|record| record.kind == kind)
-            .count() as i64
+impl Drop for LiveWorkers {
+    fn drop(&mut self) {
+        self.join();
     }
 }
 
@@ -92,7 +62,6 @@ struct WalkInput {
     thumbnail_cnt: i64,
     page_q: Vec<String>,
     img_q: Vec<String>,
-    fail_download_start: i64,
 }
 
 struct WalkReport {
@@ -126,12 +95,11 @@ pub fn functions() -> Vec<HostFunctionSchema> {
                 "img_q",
                 HostTypeSchema::Array(Box::new(HostTypeSchema::String)),
             ),
-            HostParamSchema::value("fail_download_start", HostTypeSchema::Int),
         ],
         named("SlotWalk", walk_fields()),
     )
     .with_description(
-        "Create one worker record per started scan or download worker and return stored names plus URLs enqueued during the walk",
+        "Spawn one named thread per scan or download worker and return names read from the live handles plus URLs enqueued during the walk",
     )]
 }
 
@@ -200,7 +168,6 @@ fn parse_walk(args: &[Value]) -> Result<WalkInput, VmError> {
         thumbnail_cnt: int_arg(args, 5, "thumbnail_cnt")?,
         page_q: strings_arg(args, 6, "page_q")?,
         img_q: strings_arg(args, 7, "img_q")?,
-        fail_download_start: int_arg(args, 8, "fail_download_start")?,
     })
 }
 
@@ -241,6 +208,17 @@ fn strings_arg(args: &[Value], index: usize, name: &str) -> Result<Vec<String>, 
 }
 
 fn walk(input: WalkInput) -> WalkReport {
+    walk_started(input, start_named)
+}
+
+fn start_named(name: String) -> std::io::Result<JoinHandle<()>> {
+    std::thread::Builder::new().name(name).spawn(|| {})
+}
+
+fn walk_started(
+    input: WalkInput,
+    mut start: impl FnMut(String) -> std::io::Result<JoinHandle<()>>,
+) -> WalkReport {
     let initial = input.state;
     let mut state = input.state;
     let mut exit = 0i64;
@@ -249,7 +227,12 @@ fn walk(input: WalkInput) -> WalkReport {
     let img_q = input.img_q.clone();
     let before_page = page_q.clone();
     let before_img = img_q.clone();
-    let mut started = StartedWorkers { records: Vec::new() };
+    let mut live = LiveWorkers {
+        names: Vec::new(),
+        handles: Vec::new(),
+    };
+    let mut spawned_scan = 0i64;
+    let mut spawned_download = 0i64;
     if state == WAITING {
         state = GET_META;
     }
@@ -266,16 +249,16 @@ fn walk(input: WalkInput) -> WalkReport {
                 }
             }
         } else if state == SCAN_IMG {
-            spawn(SlotKind::Scan, input.scan_count, 0, &mut started);
+            spawned_scan = spawn_workers(SlotKind::Scan, input.scan_count, &mut live, &mut start);
             state = DOWNLOAD - 1;
         } else if state == SCAN_ARCHIVE {
             state = DOWNLOAD - 1;
         } else if state == DOWNLOAD {
-            spawn(
+            spawned_download = spawn_workers(
                 SlotKind::Download,
                 input.download_count,
-                input.fail_download_start,
-                &mut started,
+                &mut live,
+                &mut start,
             );
             break;
         }
@@ -291,10 +274,10 @@ fn walk(input: WalkInput) -> WalkReport {
     } else {
         Vec::new()
     };
-    WalkReport {
-        worker_names: started.names(),
-        spawned_scan: started.count(SlotKind::Scan),
-        spawned_download: started.count(SlotKind::Download),
+    let report = WalkReport {
+        worker_names: live.names.clone(),
+        spawned_scan,
+        spawned_download,
         metadata_urls,
         list_urls: list_urls.clone(),
         scan_urls: enqueued_during(&before_page, &page_q),
@@ -306,24 +289,42 @@ fn walk(input: WalkInput) -> WalkReport {
         },
         public_page_q: page_q,
         public_img_q: img_q,
-    }
+    };
+    live.join();
+    report
 }
 
-fn spawn(kind: SlotKind, count: i64, fail_download_start: i64, started: &mut StartedWorkers) {
-    let mut download_ordinal = 0i64;
+fn worker_name(kind: SlotKind, ordinal: i64) -> String {
+    let prefix = match kind {
+        SlotKind::Scan => "scan",
+        SlotKind::Download => "down",
+    };
+    format!("{prefix}-{ordinal}")
+}
+
+fn spawn_workers(
+    kind: SlotKind,
+    count: i64,
+    live: &mut LiveWorkers,
+    start: &mut impl FnMut(String) -> std::io::Result<JoinHandle<()>>,
+) -> i64 {
+    let mut spawned = 0i64;
     for index in 0..count.max(0) {
-        let record = WorkerRecord::create(kind, index + 1);
-        let ordinal = if kind == SlotKind::Download {
-            download_ordinal += 1;
-            download_ordinal
-        } else {
-            0
-        };
-        if record.start(ordinal, fail_download_start).is_err() {
-            break;
+        let requested = worker_name(kind, index + 1);
+        match start(requested) {
+            Ok(handle) => {
+                let Some(reported) = handle.thread().name() else {
+                    live.handles.push(handle);
+                    break;
+                };
+                live.names.push(reported.to_string());
+                live.handles.push(handle);
+                spawned += 1;
+            }
+            Err(_) => break,
         }
-        started.records.push(record);
     }
+    spawned
 }
 
 fn enqueued_during(before: &[String], after: &[String]) -> Vec<String> {
@@ -348,7 +349,10 @@ fn report_value(report: &WalkReport) -> Value {
             Value::string("worker_names"),
             string_values(&report.worker_names),
         ),
-        (Value::string("spawned_scan"), Value::Int(report.spawned_scan)),
+        (
+            Value::string("spawned_scan"),
+            Value::Int(report.spawned_scan),
+        ),
         (
             Value::string("spawned_download"),
             Value::Int(report.spawned_download),
@@ -391,7 +395,7 @@ fn string_values(items: &[String]) -> Value {
 mod tests {
     use super::*;
 
-    fn input(state: i64, fail_download_start: i64) -> WalkInput {
+    fn input(state: i64) -> WalkInput {
         WalkInput {
             state,
             scan_count: 2,
@@ -401,17 +405,24 @@ mod tests {
             thumbnail_cnt: 20,
             page_q: vec!["https://decoy.example/page-not-enqueued".to_string()],
             img_q: vec!["https://decoy.example/image-not-enqueued".to_string()],
-            fail_download_start,
         }
     }
 
     #[test]
-    fn failed_third_download_start_returns_two_stored_names() {
-        let report = walk(input(9, 3));
-        assert_eq!(report.worker_names, ["down-1", "down-2"]);
-        assert_ne!(
-            report.worker_names,
-            ["down-1".to_string(), "down-2".to_string(), "down-3".to_string()]
+    fn failed_third_download_spawn_returns_only_live_handle_names() {
+        let report = walk_started(input(9), |requested| {
+            let mut builder = std::thread::Builder::new().name(format!("live-{requested}"));
+            if requested == "down-3" {
+                builder = builder.stack_size(usize::MAX);
+            }
+            builder.spawn(|| {})
+        });
+        assert_eq!(report.worker_names, ["live-down-1", "live-down-2"]);
+        assert!(
+            !report
+                .worker_names
+                .iter()
+                .any(|name| name.contains("down-3"))
         );
         assert_eq!(report.spawned_scan, 0);
         assert_eq!(report.spawned_download, 2);
@@ -428,8 +439,17 @@ mod tests {
     }
 
     #[test]
-    fn stored_names_follow_records_that_started() {
-        let report = walk(input(4, 0));
+    fn spawn_error_leaves_no_handle_to_name() {
+        let failed = std::thread::Builder::new()
+            .name("down-3".to_string())
+            .stack_size(usize::MAX)
+            .spawn(|| {});
+        assert!(failed.is_err());
+    }
+
+    #[test]
+    fn live_handle_names_follow_workers_that_spawned() {
+        let report = walk(input(4));
         assert_eq!(
             report.worker_names,
             ["scan-1", "scan-2", "down-1", "down-2", "down-3"]

@@ -828,35 +828,7 @@
         "/slots/download": 3,
         "/observable/spawned_scan": 0,
         "/observable/spawned_download": 3,
-        "/observable/worker_names": ["down-1", "down-2", "down-3"]
-      }
-    },
-    {
-      "id": "download.slots.download-start-failed",
-      "suite": "download",
-      "request": {
-        "operation": "slots",
-        "state": 9,
-        "scan_thread_cnt": 2,
-        "download_thread_cnt": 3,
-        "fail_download_start": 3,
-        "url": "https://e-hentai.org/g/9/aaaaaaaaaa/",
-        "total": 40,
-        "thumbnail_cnt": 20,
-        "page_q": ["https://decoy.example/page-not-enqueued"],
-        "img_q": ["https://decoy.example/image-not-enqueued"]
-      },
-      "assertions": {
-        "/decisions/0": "slots:separated",
-        "/queues/metadata": [],
-        "/queues/list": [],
-        "/queues/scan": [],
-        "/queues/download": [],
-        "/slots/scan": 0,
-        "/slots/download": 2,
-        "/observable/spawned_scan": 0,
-        "/observable/spawned_download": 2,
-        "/observable/worker_names": ["down-1", "down-2"],
+        "/observable/worker_names": ["down-1", "down-2", "down-3"],
         "/observable/page_q/0": "https://decoy.example/page-not-enqueued",
         "/observable/img_q/0": "https://decoy.example/image-not-enqueued"
       }
