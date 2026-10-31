@@ -21,6 +21,35 @@ pub const SRC_UPDATE_FILE: &str = "src.zip";
 pub const SRC_UPDATE_VERSION: u32 = 1;
 
 pub const DEFAULT_MAX_REDIRECTS: usize = 30;
+
+/// `const.py` fallback addresses for the fixed package mounts. These are only
+/// used when no proxy is selected, and only for these exact hosts.
+pub const FALLBACK_IP_MAP: &[(&str, &[&str])] = &[
+    (
+        "e-hentai.org",
+        &["104.20.134.21", "104.20.135.21", "172.67.0.127"],
+    ),
+    (
+        "forums.e-hentai.org",
+        &[
+            "94.100.18.243",
+            "104.20.134.21",
+            "104.20.135.21",
+            "172.67.0.127",
+        ],
+    ),
+    (
+        "exhentai.org",
+        &[
+            "178.175.129.254",
+            "178.175.128.252",
+            "178.175.132.20",
+            "178.175.129.252",
+            "178.175.128.254",
+            "178.175.132.22",
+        ],
+    ),
+];
 pub const QUOTA_EXCEEDED_CONTENT_LENGTHS: [u64; 5] = [925, 28658, 144, 210, 1009];
 
 pub const XEH_STATE_RUNNING: i64 = 0;

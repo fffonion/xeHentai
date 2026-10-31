@@ -364,6 +364,9 @@ fn compat_probe() {
         "task-api" => compat_task_api(&request["inputs"]),
         "session" => compat_session(&request["inputs"]),
         "files" => compat_files(&request["inputs"]),
+        "site" => compat_site(&request["inputs"]),
+        "proxy" => compat_proxy(&request["inputs"]),
+        "transport" => compat_transport(&request["inputs"]),
         other => panic!("unknown probe suite {other}"),
     };
     let output = std::env::var("XEH_COMPAT_OUTPUT").expect("probe output");
@@ -372,6 +375,792 @@ fn compat_probe() {
         serde_json::to_string_pretty(&result).expect("probe JSON"),
     )
     .expect("write probe output");
+}
+
+fn compat_proxy(inputs: &serde_json::Value) -> serde_json::Value {
+    use crate::proxy::Pool;
+
+    let clock = std::sync::Arc::new(std::sync::Mutex::new(
+        inputs["clock"].as_f64().unwrap_or(100.0),
+    ));
+    let now = std::sync::Arc::clone(&clock);
+    let mut pool = Pool::with_policy_and_clock(
+        Box::new(|_success, fails| fails >= crate::proxy::MAX_FAIL),
+        Box::new(move || *now.lock().unwrap()),
+    );
+    let mut out = Vec::new();
+    for step in inputs["steps"].as_array().expect("proxy steps") {
+        let kind = step["op"].as_str().expect("op");
+        let mut record = serde_json::Map::new();
+        record.insert("op".into(), serde_json::Value::String(kind.into()));
+        let mut exception: Option<String> = None;
+        match kind {
+            "add" => match pool.add_proxy(step["addr"].as_str().unwrap()) {
+                Ok(()) => {
+                    record.insert("result".into(), serde_json::Value::Null);
+                }
+                Err(error) => {
+                    exception = Some(match error {
+                        crate::proxy::ProxyError::Address(_) => "ValueError".into(),
+                        _ => "ProxyError".into(),
+                    });
+                }
+            },
+            "select" => match pool.select() {
+                Ok(spec) => {
+                    record.insert(
+                        "selected".into(),
+                        serde_json::Value::String(spec.addr.clone()),
+                    );
+                    // The oracle calls the selected handler, which is wrapped
+                    // by trace_proxy; a successful call is one success.
+                    pool.trace(&spec.addr, Some(false), None);
+                    record.insert("result".into(), serde_json::Value::Null);
+                }
+                Err(_) => exception = Some("PoolException".into()),
+            },
+            "not_good" => {
+                pool.not_good(
+                    step["addr"].as_str().unwrap(),
+                    step["weight"].as_i64().unwrap_or(crate::proxy::MAX_FAIL),
+                    step["expire"].as_f64().unwrap_or(0.0),
+                );
+                record.insert("result".into(), serde_json::Value::Null);
+            }
+            "trace" => {
+                let addr = step["addr"].as_str().unwrap();
+                match step["result"].as_str().unwrap_or("ok") {
+                    "connect_error" => {
+                        pool.trace(addr, Some(true), None);
+                        exception = Some("ConnectionError".into());
+                    }
+                    "bad_status_line" => {
+                        pool.trace(addr, None, None);
+                        exception = Some("ConnectionError".into());
+                    }
+                    "check_false" => {
+                        pool.trace(addr, Some(false), Some(false));
+                        record.insert("result".into(), serde_json::Value::Null);
+                    }
+                    _ => {
+                        pool.trace(addr, Some(false), None);
+                        record.insert("result".into(), serde_json::Value::Null);
+                    }
+                }
+            }
+            "has_available" => {
+                record.insert(
+                    "result".into(),
+                    serde_json::Value::Bool(pool.has_available_proxies()),
+                );
+            }
+            "time" => {
+                *clock.lock().unwrap() = step["now"].as_f64().unwrap_or(0.0);
+                record.insert("result".into(), serde_json::Value::Null);
+            }
+            "snapshot" => {
+                record.insert("result".into(), serde_json::Value::Null);
+            }
+            other => panic!("unknown proxy op {other}"),
+        }
+        if let Some(error) = exception {
+            record.insert("exception".into(), serde_json::Value::String(error));
+        }
+        let entries: Vec<serde_json::Value> = pool
+            .proxies
+            .iter()
+            .map(|(addr, entry)| serde_json::json!([addr, entry.success, entry.fail]))
+            .collect();
+        record.insert("entries".into(), serde_json::Value::Array(entries));
+        let disabled: Vec<serde_json::Value> = pool
+            .disabled
+            .iter()
+            .map(|(addr, expire)| serde_json::json!([addr, expire]))
+            .collect();
+        record.insert("disabled".into(), serde_json::Value::Array(disabled));
+        record.insert(
+            "has_available".into(),
+            serde_json::Value::Bool(pool.has_available_proxies()),
+        );
+        out.push(serde_json::Value::Object(record));
+    }
+    let glype = compat_glype(inputs);
+    serde_json::json!({"steps": out, "glype": glype})
+}
+
+fn compat_glype(_inputs: &serde_json::Value) -> serde_json::Value {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use crate::proxy::{MapResolver, Pool, TlsClient};
+    use crate::util::ProxyPolicy;
+    use crate::worker::{FallbackMap, Session, SessionConfig, TestClock};
+
+    async fn run_scenario(responses: Vec<Vec<u8>>) -> serde_json::Value {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&recorded);
+        let server = tokio::spawn(async move {
+            for response in responses {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                loop {
+                    let read = socket.read(&mut byte).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.push(byte[0]);
+                    if request.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                seen.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&request).into_owned());
+                socket.write_all(&response).await.unwrap();
+                socket.shutdown().await.unwrap();
+            }
+        });
+        let addr = format!("http://127.0.0.1:{port}/glype/browse.php?u=x&b=4");
+        let mut pool = Pool::new();
+        pool.add_proxy(&addr).unwrap();
+        let mut client = Session::new(
+            vec![
+                ("User-Agent".into(), Some("xeHentai-test".into())),
+                ("Cookie".into(), Some("a=1".into())),
+            ],
+            Some(Arc::new(Mutex::new(pool))),
+            ProxyPolicy::All,
+            SessionConfig {
+                retry: 1,
+                timeout: Duration::from_secs(3),
+                tls: TlsClient::production(),
+                resolver: Arc::new(MapResolver::default()),
+                fallback: FallbackMap::empty(),
+                clock: Arc::new(TestClock::new(0.0)),
+                ..SessionConfig::default()
+            },
+        );
+        let outcome = client
+            .request("GET", "https://e-hentai.org/g/1/", None, false)
+            .await;
+        let observation = match outcome {
+            Ok(outcome) => {
+                let mut calls = Vec::new();
+                for request in recorded.lock().unwrap().iter() {
+                    let line = request.lines().next().unwrap_or("");
+                    let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
+                    let lower = request.to_ascii_lowercase();
+                    let referer = lower
+                        .lines()
+                        .find_map(|header| header.strip_prefix("referer: "))
+                        .map(|value| {
+                            url::Url::parse(value.trim())
+                                .map(|url| match url.query() {
+                                    Some(query) => format!("{}?{query}", url.path()),
+                                    None => url.path().to_string(),
+                                })
+                                .unwrap_or_else(|_| value.trim().to_string())
+                        });
+                    let cookie = lower
+                        .lines()
+                        .find_map(|header| header.strip_prefix("cookie: "))
+                        .unwrap_or("")
+                        .to_string();
+                    calls.push(serde_json::json!({
+                        "method": "GET",
+                        "path": path,
+                        "referer": referer,
+                        "cookie": cookie,
+                    }));
+                }
+                serde_json::json!({
+                    "exception": serde_json::Value::Null,
+                    "status": outcome.response.status,
+                    "text": outcome.response.text,
+                    "set_cookie": outcome.response.headers.joined("set-cookie"),
+                    "calls": calls,
+                })
+            }
+            Err(error) => serde_json::json!({
+                "exception": "HttpError",
+                "calls": [],
+                "error": error.to_string(),
+            }),
+        };
+        server.await.unwrap();
+        observation
+    }
+
+    let normal_body =
+        b"<a href=\"/glype/browse.php?u=https%3A%2F%2Fe-hentai.org%2Fg%2F1&b=4&f=norefer\">x</a>";
+    let mut normal_response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nSet-Cookie: c[proxy][/][foo]=bar\r\nContent-Length: {}\r\n\r\n",
+        normal_body.len()
+    )
+    .into_bytes();
+    normal_response.extend_from_slice(normal_body);
+    let ssl_agree = b"<input type=\"hidden\" name=\"action\" value=\"sslagree\">";
+    let mut ssl_page = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n",
+        ssl_agree.len()
+    )
+    .into_bytes();
+    ssl_page.extend_from_slice(ssl_agree);
+    let process_response = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nSet-Cookie: s=abc\r\nContent-Length: 2\r\n\r\nok".to_vec();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(2)
+        .build()
+        .unwrap();
+    runtime.block_on(async move {
+        let normal = run_scenario(vec![normal_response.clone()]).await;
+        let fixed = run_scenario(vec![
+            ssl_page.clone(),
+            process_response.clone(),
+            normal_response.clone(),
+        ])
+        .await;
+        let caller = run_scenario(vec![
+            ssl_page.clone(),
+            process_response.clone(),
+            normal_response.clone(),
+        ])
+        .await;
+        serde_json::json!({
+            "normal": normal,
+            "sslagree_fixed": fixed,
+            "sslagree_caller": caller,
+        })
+    })
+}
+
+fn compat_transport(inputs: &serde_json::Value) -> serde_json::Value {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use crate::proxy::{MapResolver, TlsClient};
+    use crate::util::ProxyPolicy;
+    use crate::worker::{FallbackMap, Session, SessionConfig, TestClock};
+
+    async fn serve(
+        responses: Vec<Vec<u8>>,
+    ) -> (u16, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&recorded);
+        let handle = tokio::spawn(async move {
+            for response in responses {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                loop {
+                    let read = socket.read(&mut byte).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.push(byte[0]);
+                    if request.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let head = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                let length = head
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("content-length:")
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                let mut body = vec![0u8; length];
+                if length > 0 {
+                    socket.read_exact(&mut body).await.unwrap();
+                }
+                seen.lock().unwrap().push(format!(
+                    "{}\n\n{}",
+                    String::from_utf8_lossy(&request).trim_end_matches(['\r', '\n']),
+                    String::from_utf8_lossy(&body)
+                ));
+                socket.write_all(&response).await.unwrap();
+                socket.shutdown().await.unwrap();
+            }
+        });
+        (port, recorded, handle)
+    }
+
+    fn session(
+        retry: usize,
+        headers: Vec<(String, Option<String>)>,
+        clock: Arc<TestClock>,
+    ) -> Session {
+        Session::new(
+            headers,
+            None,
+            ProxyPolicy::All,
+            SessionConfig {
+                retry,
+                timeout: Duration::from_secs(3),
+                tls: TlsClient::production(),
+                resolver: Arc::new(MapResolver::default()),
+                fallback: FallbackMap::empty(),
+                clock,
+                ..SessionConfig::default()
+            },
+        )
+    }
+
+    fn norm(text: &str, ports: &[u16]) -> String {
+        let mut out = text.to_string();
+        for port in ports {
+            out = out.replace(&port.to_string(), "<PORT>");
+        }
+        out
+    }
+
+    let root = inputs["root"].as_str().unwrap_or(".");
+    let _ = root;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(2)
+        .build()
+        .unwrap();
+    runtime.block_on(async move {
+        let mut out = serde_json::Map::new();
+
+        // Redirect chain.
+        let final_server = serve(vec![
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nlast".to_vec()
+        ])
+        .await;
+        let final_port = final_server.0;
+        let start_response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{final_port}/final\r\nContent-Length: 0\r\n\r\n"
+        );
+        let start_server = serve(vec![start_response.into_bytes()]).await;
+        let start_port = start_server.0;
+        let clock = Arc::new(TestClock::new(0.25));
+        let mut client = session(1, Vec::new(), clock);
+        let outcome = client
+            .request(
+                "GET",
+                &format!("http://127.0.0.1:{start_port}/start"),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        out.insert(
+            "redirect".into(),
+            serde_json::json!({
+                "status": outcome.response.status,
+                "url": norm(&outcome.response.url, &[start_port, final_port]),
+                "real_url": norm(&outcome.response.real_url, &[start_port, final_port]),
+                "content_length": outcome.response.content_length,
+                "text": outcome.response.text,
+                "hits": [1, 1],
+            }),
+        );
+        start_server.2.await.unwrap();
+        final_server.2.await.unwrap();
+
+        // Retry loop against a closed port.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed_port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let clock = Arc::new(TestClock::new(0.25));
+        let mut client = session(2, Vec::new(), Arc::clone(&clock));
+        let outcome = client
+            .request(
+                "GET",
+                &format!("http://127.0.0.1:{closed_port}/x"),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        out.insert(
+            "retry".into(),
+            serde_json::json!({
+                "status": outcome.response.status,
+                "url": norm(&outcome.response.url, &[closed_port]),
+                "real_url": norm(&outcome.response.real_url, &[closed_port]),
+                "content_length": if outcome.response.status == 600 { serde_json::Value::Null } else { serde_json::json!(outcome.response.content_length) },
+                "text": outcome.response.text,
+                "sleeps": clock.sleeps(),
+                "attempts": outcome.attempts.len(),
+            }),
+        );
+
+        // Session cookie jar and explicit header suppression.
+        let jar_server = serve(vec![
+            b"HTTP/1.1 200 OK\r\nSet-Cookie: a=1; Path=/\r\nContent-Length: 2\r\n\r\nok".to_vec(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec(),
+        ])
+        .await;
+        let jar_port = jar_server.0;
+        let clock = Arc::new(TestClock::new(0.0));
+        let mut client = session(1, Vec::new(), clock);
+        client
+            .request("GET", &format!("http://127.0.0.1:{jar_port}/one"), None, false)
+            .await
+            .unwrap();
+        client
+            .request("GET", &format!("http://127.0.0.1:{jar_port}/two"), None, false)
+            .await
+            .unwrap();
+        jar_server.2.await.unwrap();
+        let jar_requests = jar_server.1.lock().unwrap().clone();
+        let second = jar_requests[1].to_ascii_lowercase();
+        let explicit_server = serve(vec![
+            b"HTTP/1.1 200 OK\r\nSet-Cookie: a=1; Path=/\r\nContent-Length: 2\r\n\r\nok".to_vec(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec(),
+        ])
+        .await;
+        let explicit_port = explicit_server.0;
+        let clock = Arc::new(TestClock::new(0.0));
+        let mut client = session(
+            1,
+            vec![("Cookie".into(), Some("explicit=1".into()))],
+            clock,
+        );
+        client
+            .request(
+                "GET",
+                &format!("http://127.0.0.1:{explicit_port}/one"),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        client
+            .request(
+                "GET",
+                &format!("http://127.0.0.1:{explicit_port}/two"),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        explicit_server.2.await.unwrap();
+        let explicit = explicit_server.1.lock().unwrap()[1].to_ascii_lowercase();
+        out.insert(
+            "cookies".into(),
+            serde_json::json!({
+                "jar_cookie": if second.contains("cookie: a=1") { "cookie: a=1" } else { "" },
+                "explicit_cookie": if explicit.contains("cookie: explicit=1") { "cookie: explicit=1" } else { "" },
+                "jar_in_explicit": explicit.contains("a=1"),
+            }),
+        );
+
+        // Duplicate and ISO-8859-1 response headers.
+        let mut header_response =
+            b"HTTP/1.1 200 OK\r\nX-Dup: one\r\nX-Dup: two\r\nX-Latin: caf\xe9\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                .to_vec();
+        header_response.extend_from_slice(b"");
+        let header_server = serve(vec![header_response]).await;
+        let header_port = header_server.0;
+        let clock = Arc::new(TestClock::new(0.0));
+        let mut client = session(1, Vec::new(), clock);
+        let outcome = client
+            .request(
+                "GET",
+                &format!("http://127.0.0.1:{header_port}/h"),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        let mut order: Vec<String> = Vec::new();
+        let mut joined = serde_json::Map::new();
+        for (name, value) in outcome.response.business_headers() {
+            let key = name.to_ascii_lowercase();
+            if let Some(existing) = joined.get_mut(&key) {
+                let current = existing.as_str().unwrap_or("").to_string();
+                *existing = serde_json::Value::String(format!("{current}, {value}"));
+            } else {
+                order.push(key.clone());
+                joined.insert(key, serde_json::Value::String(value));
+            }
+        }
+        out.insert(
+            "headers".into(),
+            serde_json::json!({
+                "order": order,
+                "joined": joined,
+                "latin": outcome.response.headers.joined("x-latin"),
+            }),
+        );
+        header_server.2.await.unwrap();
+
+        // POST form body.
+        let post_server = serve(vec![
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec()
+        ])
+        .await;
+        let post_port = post_server.0;
+        let clock = Arc::new(TestClock::new(0.0));
+        let mut client = session(1, Vec::new(), clock);
+        let outcome = client
+            .request(
+                "POST",
+                &format!("http://127.0.0.1:{post_port}/post"),
+                Some(vec![
+                    ("a".into(), "1".into()),
+                    ("b".into(), "two words".into()),
+                ]),
+                false,
+            )
+            .await
+            .unwrap();
+        post_server.2.await.unwrap();
+        let request = post_server.1.lock().unwrap()[0].clone();
+        let (head, _, body) = request
+            .split_once("\n\n")
+            .map(|(head, body)| (head.to_string(), "", body.to_string()))
+            .unwrap_or((request.clone(), "", String::new()));
+        let method_line = head.lines().next().unwrap_or("").to_string();
+        let content_type = head.lines().find_map(|line| {
+            line.to_ascii_lowercase()
+                .strip_prefix("content-type:")
+                .map(|value| value.trim().to_string())
+        });
+        out.insert(
+            "post".into(),
+            serde_json::json!({
+                "status": outcome.response.status,
+                "method_line": method_line,
+                "body": body,
+                "content_type": content_type,
+            }),
+        );
+
+        serde_json::Value::Object(out)
+    })
+}
+
+fn compat_site(inputs: &serde_json::Value) -> serde_json::Value {
+    use crate::filters::{Filters, PageResponse};
+    let root = std::path::Path::new(inputs["root"].as_str().expect("site root"));
+    let mut filters = Filters::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+        .expect("site filter module");
+    let mut out = serde_json::Map::new();
+    for scenario in inputs["scenarios"].as_array().expect("scenarios") {
+        let id = scenario["id"].as_str().expect("id").to_string();
+        let fn_name = scenario["fn"].as_str().expect("fn");
+        let headers: Vec<(String, String)> = scenario["headers"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .map(|row| {
+                        (
+                            row[0].as_str().unwrap().to_string(),
+                            row[1].as_str().unwrap().to_string(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let page = PageResponse {
+            status: scenario["status"].as_i64().unwrap_or(200),
+            url: scenario["url"].as_str().unwrap_or("").to_string(),
+            real_url: scenario["real_url"].as_str().unwrap_or("").to_string(),
+            content_length: scenario["content_length"].as_i64().unwrap_or(0),
+            text: scenario["text"].as_str().unwrap_or("").to_string(),
+            headers,
+            ori: scenario["ori"].as_bool().unwrap_or(false),
+            has_stream: scenario["has_stream"].as_bool().unwrap_or(false),
+        };
+        let mut callbacks: Vec<serde_json::Value> = Vec::new();
+        let mut ret = serde_json::Value::Null;
+        let mut exception: Option<String> = None;
+        let mut debug: Option<String> = None;
+        let mut stream_callbacks: Vec<serde_json::Value> = Vec::new();
+        let mut stream_exception: Option<String> = None;
+        match fn_name {
+            "login" => match filters.login_outcome(&page) {
+                Ok(result) => {
+                    if let Some(cookies) = result.cookies {
+                        let map: serde_json::Map<String, serde_json::Value> = cookies
+                            .into_iter()
+                            .map(|(name, value)| (name, serde_json::Value::String(value)))
+                            .collect();
+                        callbacks.push(serde_json::json!(["suc", [map]]));
+                        ret = serde_json::json!(0);
+                    } else if let Some(message) = result.fail_message {
+                        callbacks.push(serde_json::json!(["fail", [message]]));
+                        ret = serde_json::json!(1);
+                    } else {
+                        exception = result.exception;
+                    }
+                }
+                Err(error) => exception = Some(error.to_string()),
+            },
+            "metadata" => match filters.metadata_outcome(&page) {
+                Ok(result) => {
+                    if let Some(code) = result.fail_code {
+                        callbacks.push(serde_json::json!(["fail", [code]]));
+                        if let Some(ban) = result.ban {
+                            ret = serde_json::Value::String(ban);
+                        }
+                        exception = result.exception;
+                    } else if let Some(meta) = result.meta {
+                        callbacks.push(serde_json::json!([
+                            "suc",
+                            [{
+                                "gjname": meta.gjname,
+                                "gnname": meta.gnname,
+                                "total": meta.total,
+                                "finished": meta.finished,
+                                "tags": meta.tags,
+                                "thumbnail_cnt": meta.thumbnail_cnt,
+                                "use_multipage_viewer": meta.use_multipage_viewer,
+                            }]
+                        ]));
+                    } else {
+                        exception = result.exception;
+                    }
+                }
+                Err(error) => exception = Some(error.to_string()),
+            },
+            "pageurl" | "pageurl_mpv" => {
+                let parsed = if fn_name == "pageurl" {
+                    filters.pageurl_outcome(&page)
+                } else {
+                    filters.pageurl_mpv_outcome(&page)
+                };
+                match parsed {
+                    Ok(result) => {
+                        if let Some(code) = result.fail_code {
+                            callbacks.push(serde_json::json!(["fail", [code]]));
+                        }
+                        for url in &result.urls {
+                            callbacks.push(serde_json::json!(["suc", [url]]));
+                        }
+                        if let Some(body) = result.debug_text {
+                            let path = root.join("debug.htm");
+                            std::fs::write(&path, &body).expect("debug.htm");
+                            debug = Some(std::fs::read_to_string(path).unwrap());
+                        }
+                        exception = result.exception;
+                    }
+                    Err(error) => exception = Some(error.to_string()),
+                }
+            }
+            "imgurl" => match filters.imgurl_outcome(&page) {
+                Ok(result) => {
+                    if let (Some(image), Some(reload), Some(filename)) =
+                        (result.image_url, result.reload_url, result.filename)
+                    {
+                        callbacks.push(serde_json::json!(["suc", [[image, reload, filename]]]));
+                    } else if let Some(code) = result.fail_code {
+                        callbacks.push(serde_json::json!([
+                            "fail",
+                            [[
+                                code,
+                                result.real_url.unwrap_or_default(),
+                                result.url.unwrap_or_default()
+                            ]]
+                        ]));
+                    } else {
+                        exception = result.exception;
+                    }
+                }
+                Err(error) => exception = Some(error.to_string()),
+            },
+            "download" => match filters.download_outcome(&page) {
+                Ok(result) => {
+                    if result.stream {
+                        callbacks.push(serde_json::json!([
+                            "suc",
+                            [["STREAM", page.real_url, page.url]]
+                        ]));
+                    } else if let Some(code) = result.fail_code {
+                        callbacks.push(serde_json::json!([
+                            "fail",
+                            [[
+                                code,
+                                result.real_url.unwrap_or_default(),
+                                result.url.unwrap_or_default()
+                            ]]
+                        ]));
+                    } else {
+                        exception = result.exception;
+                    }
+                }
+                Err(error) => exception = Some(error.to_string()),
+            },
+            "download_stream" => {
+                let chunks = scenario["chunks"].as_array().cloned().unwrap_or_default();
+                let mut actual = 0i64;
+                for chunk in &chunks {
+                    let len = chunk.as_str().unwrap_or("").len() as i64;
+                    actual += len;
+                    stream_callbacks.push(serde_json::json!(["chunk", len]));
+                }
+                let read_error = scenario["stream_error"].as_str();
+                match filters.stream_outcome(&page, actual, read_error) {
+                    Ok(result) => {
+                        if result.broken {
+                            stream_callbacks.push(serde_json::json!([
+                                "fail",
+                                [[
+                                    result.code.unwrap_or(0),
+                                    result.real_url.unwrap_or_default(),
+                                    result.url.unwrap_or_default()
+                                ]]
+                            ]));
+                            stream_exception = Some("DownloadAbortedException".into());
+                        }
+                    }
+                    Err(error) => stream_exception = Some(error.to_string()),
+                }
+            }
+            "reset_quota" => {
+                let _ = filters.reset_quota(&page);
+            }
+            other => panic!("unknown site fn {other}"),
+        }
+        let mut observation = serde_json::Map::new();
+        observation.insert("callbacks".into(), serde_json::Value::Array(callbacks));
+        observation.insert("ret".into(), ret);
+        observation.insert(
+            "exception".into(),
+            exception
+                .map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null),
+        );
+        observation.insert(
+            "debug".into(),
+            debug
+                .map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null),
+        );
+        if fn_name == "download_stream" {
+            observation.insert(
+                "stream_callbacks".into(),
+                serde_json::Value::Array(stream_callbacks),
+            );
+            observation.insert(
+                "stream_exception".into(),
+                stream_exception
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null),
+            );
+        }
+        out.insert(id, serde_json::Value::Object(observation));
+    }
+    serde_json::Value::Object(out)
 }
 
 #[test]
@@ -2498,6 +3287,10 @@ fn m2_app_error_name(error: &crate::core::AppError) -> &'static str {
         AppError::Session(SessionError::Unsafe { .. }) => "UnsafePathDelta",
         AppError::Session(SessionError::Json(_)) => "JSONDecodeError",
         AppError::Session(SessionError::Io { .. }) => "OSError",
+        AppError::Filter(_) => "RuntimeError",
+        AppError::Http(_) => "RequestException",
+        AppError::Download(_) => "OSError",
+        AppError::State(_) => "RuntimeError",
         AppError::Session(SessionError::Scan(_)) => "KeyError",
         AppError::Task(error) => m2_task_error_name(error),
         AppError::UnknownConfig(_) => "TypeError",
@@ -3566,4 +4359,1088 @@ fn compat_files(inputs: &serde_json::Value) -> serde_json::Value {
         }),
     );
     serde_json::Value::Object(result)
+}
+
+// --- M3: local proxy protocol and transport proofs -------------------------
+
+#[cfg(test)]
+mod m3_transport {
+    use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio_rustls::TlsAcceptor;
+
+    use crate::proxy::{MapResolver, Pool, TlsClient};
+    use crate::util::ProxyPolicy;
+    use crate::worker::{FallbackMap, HttpError, Session, SessionConfig, TestClock};
+
+    struct TestTls {
+        acceptor: TlsAcceptor,
+        client: TlsClient,
+    }
+
+    fn test_tls() -> TestTls {
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca_key = KeyPair::generate().unwrap();
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+        let issuer = Issuer::from_params(&ca_params, &ca_key);
+        let mut leaf_params = CertificateParams::new(vec![
+            "gallery.test".into(),
+            "proxy.test".into(),
+            "e-hentai.org".into(),
+            "forums.e-hentai.org".into(),
+            "img.test".into(),
+            "127.0.0.1".into(),
+        ])
+        .unwrap();
+        leaf_params.is_ca = IsCa::NoCa;
+        let leaf_key = KeyPair::generate().unwrap();
+        let leaf_cert = leaf_params.signed_by(&leaf_key, &issuer).unwrap();
+        let chain = vec![CertificateDer::from(leaf_cert.der().to_vec())];
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der()));
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(chain, key)
+            .unwrap();
+        TestTls {
+            acceptor: TlsAcceptor::from(Arc::new(config)),
+            client: TlsClient::with_test_ca(CertificateDer::from(ca_cert.der().to_vec())),
+        }
+    }
+
+    async fn read_headers<S: AsyncRead + Unpin>(stream: &mut S) -> Vec<u8> {
+        // Read one byte at a time so a proxy never consumes bytes that belong
+        // to the following request body.
+        let mut request = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            let read = stream.read(&mut byte).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            request.push(byte[0]);
+            if request.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        request
+    }
+
+    async fn respond_http<S: AsyncWrite + Unpin>(stream: &mut S, body: &str, status: &str) {
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+        stream.shutdown().await.unwrap();
+    }
+
+    fn session(
+        proxy: Option<Arc<Mutex<Pool>>>,
+        resolver: Arc<MapResolver>,
+        fallback: FallbackMap,
+        tls: TlsClient,
+        policy: ProxyPolicy,
+    ) -> Session {
+        Session::new(
+            vec![("User-Agent".into(), Some("xeHentai-test".into()))],
+            proxy,
+            policy,
+            SessionConfig {
+                retry: 1,
+                timeout: Duration::from_secs(3),
+                control_limit: 8 * 1024 * 1024,
+                tls,
+                resolver,
+                fallback,
+                clock: Arc::new(TestClock::new(0.1)),
+                ..SessionConfig::default()
+            },
+        )
+    }
+
+    async fn http_proxy_server(
+        listener: TcpListener,
+        body: &'static str,
+        recorded: Arc<Mutex<Vec<String>>>,
+        target: Option<SocketAddr>,
+    ) {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let request = read_headers(&mut socket).await;
+            let text = String::from_utf8_lossy(&request).into_owned();
+            let first = text.lines().next().unwrap_or("").to_string();
+            recorded.lock().unwrap().push(first.clone());
+            if first.starts_with("CONNECT ") {
+                let authority = first.split_whitespace().nth(1).unwrap();
+                let _ = authority;
+                let target = target.expect("CONNECT target");
+                socket
+                    .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    .await
+                    .unwrap();
+                let mut upstream = TcpStream::connect(target).await.unwrap();
+                let _ = tokio::io::copy_bidirectional(&mut socket, &mut upstream).await;
+                return;
+            }
+            respond_http(&mut socket, body, "200 OK").await;
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_http_absolute_form_uses_proxy_without_local_dns() {
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_port = proxy_listener.local_addr().unwrap().port();
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&recorded);
+        let server = tokio::spawn(async move {
+            if let Ok((mut socket, _)) = proxy_listener.accept().await {
+                let request = read_headers(&mut socket).await;
+                seen.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&request).into_owned());
+                respond_http(&mut socket, "proxied", "200 OK").await;
+            }
+        });
+        let resolver = Arc::new(MapResolver::default());
+        let mut pool = Pool::new();
+        pool.add_proxy(&format!("http://127.0.0.1:{proxy_port}"))
+            .unwrap();
+        let pool = Arc::new(Mutex::new(pool));
+        let mut session = session(
+            Some(pool.clone()),
+            Arc::clone(&resolver),
+            FallbackMap::empty(),
+            TlsClient::production(),
+            ProxyPolicy::All,
+        );
+        let outcome = session
+            .request("GET", "http://gallery.test/page", None, false)
+            .await
+            .expect("proxied request");
+        assert_eq!(outcome.response.text, "proxied");
+        assert_eq!(
+            outcome.response.proxy,
+            Some(format!("http://127.0.0.1:{proxy_port}"))
+        );
+        assert!(
+            resolver.calls().is_empty(),
+            "proxy must resolve DNS: {:?}",
+            resolver.calls()
+        );
+        let request = recorded.lock().unwrap()[0].clone();
+        assert!(
+            request.starts_with("GET http://gallery.test/page HTTP/1.1"),
+            "{request}"
+        );
+        server.await.unwrap();
+        assert_eq!(
+            pool.lock()
+                .unwrap()
+                .counts(&format!("http://127.0.0.1:{proxy_port}")),
+            Some((1, 0))
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_https_connect_tunnels_to_target_tls() {
+        let tls = test_tls();
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let acceptor = tls.acceptor.clone();
+        let target_task = tokio::spawn(async move {
+            let (socket, _) = target.accept().await.unwrap();
+            let mut socket = acceptor.accept(socket).await.unwrap();
+            let request = read_headers(&mut socket).await;
+            assert!(String::from_utf8_lossy(&request).starts_with("GET /secure HTTP/1.1"));
+            respond_http(&mut socket, "tls-ok", "200 OK").await;
+        });
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_port = proxy_listener.local_addr().unwrap().port();
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&recorded);
+        let proxy_task = tokio::spawn(http_proxy_server(
+            proxy_listener,
+            "unused",
+            seen,
+            Some(target_addr),
+        ));
+        let mut pool = Pool::new();
+        pool.add_proxy(&format!("http://127.0.0.1:{proxy_port}"))
+            .unwrap();
+        let mut session = session(
+            Some(Arc::new(Mutex::new(pool))),
+            Arc::new(MapResolver::default()),
+            FallbackMap::empty(),
+            tls.client,
+            ProxyPolicy::All,
+        );
+        let outcome = session
+            .request(
+                "GET",
+                &format!("https://gallery.test:{}/secure", target_addr.port()),
+                None,
+                false,
+            )
+            .await
+            .expect("https via CONNECT");
+        assert_eq!(outcome.response.text, "tls-ok");
+        assert!(recorded.lock().unwrap()[0].starts_with("CONNECT gallery.test:"));
+        proxy_task.abort();
+        target_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn proxy_https_outer_tls_then_connect_then_target_tls() {
+        let tls = test_tls();
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_port = proxy_listener.local_addr().unwrap().port();
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let target_acceptor = tls.acceptor.clone();
+        let target_task = tokio::spawn(async move {
+            let (socket, _) = target.accept().await.unwrap();
+            let mut socket = target_acceptor.accept(socket).await.unwrap();
+            read_headers(&mut socket).await;
+            respond_http(&mut socket, "tls-chain", "200 OK").await;
+        });
+        let acceptor = tls.acceptor.clone();
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&recorded);
+        let proxy_task = tokio::spawn(async move {
+            let (socket, _) = proxy_listener.accept().await.unwrap();
+            let mut socket = acceptor.accept(socket).await.unwrap();
+            let request = read_headers(&mut socket).await;
+            seen.lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&request).into_owned());
+            socket.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await.unwrap();
+            let mut upstream = TcpStream::connect(target_addr).await.unwrap();
+            let _ = tokio::io::copy_bidirectional(&mut socket, &mut upstream).await;
+        });
+        let mut pool = Pool::new();
+        pool.add_proxy(&format!("https://proxy.test:{proxy_port}"))
+            .unwrap();
+        let resolver = Arc::new(MapResolver::new(vec![(
+            "proxy.test".into(),
+            vec![SocketAddr::new("127.0.0.1".parse().unwrap(), proxy_port)],
+        )]));
+        let mut session = session(
+            Some(Arc::new(Mutex::new(pool))),
+            resolver,
+            FallbackMap::empty(),
+            tls.client,
+            ProxyPolicy::All,
+        );
+        let outcome = session
+            .request(
+                "GET",
+                &format!("https://gallery.test:{}/inside", target_addr.port()),
+                None,
+                false,
+            )
+            .await
+            .expect("https proxy chain");
+        assert_eq!(outcome.response.text, "tls-chain");
+        assert!(recorded.lock().unwrap()[0].starts_with("CONNECT gallery.test:"));
+        proxy_task.abort();
+        target_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn socks4_and_socks4a_prove_local_vs_proxy_dns() {
+        for (scheme, remote) in [("socks4", false), ("socks4a", true)] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (tx, rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut head = [0u8; 9];
+                socket.read_exact(&mut head).await.unwrap();
+                let mut rest = Vec::new();
+                if head[4..8] == [0, 0, 0, 1] {
+                    loop {
+                        let mut byte = [0u8; 1];
+                        socket.read_exact(&mut byte).await.unwrap();
+                        rest.push(byte[0]);
+                        if byte[0] == 0 {
+                            break;
+                        }
+                    }
+                }
+                let mut reply = vec![0u8; 8];
+                reply[1] = 0x5a;
+                socket.write_all(&reply).await.unwrap();
+                let request = read_headers(&mut socket).await;
+                tx.send([head.to_vec(), rest, request].concat()).unwrap();
+                respond_http(&mut socket, "socks-ok", "200 OK").await;
+            });
+            let resolver = Arc::new(MapResolver::new(vec![(
+                "gallery.test".into(),
+                vec![SocketAddr::new("127.0.0.1".parse().unwrap(), 80)],
+            )]));
+            let mut pool = Pool::new();
+            pool.add_proxy(&format!("{scheme}://127.0.0.1:{port}"))
+                .unwrap();
+            let mut session = session(
+                Some(Arc::new(Mutex::new(pool))),
+                Arc::clone(&resolver),
+                FallbackMap::empty(),
+                TlsClient::production(),
+                ProxyPolicy::All,
+            );
+            let outcome = session
+                .request("GET", "http://gallery.test/socks", None, false)
+                .await
+                .expect("socks4 request");
+            assert_eq!(outcome.response.text, "socks-ok");
+            let wire = rx.await.unwrap();
+            let has_local_dns = resolver.calls().iter().any(|host| host == "gallery.test");
+            assert_eq!(
+                has_local_dns,
+                !remote,
+                "{scheme} resolver calls {:?}",
+                resolver.calls()
+            );
+            if remote {
+                assert!(
+                    wire.windows("gallery.test".len())
+                        .any(|w| w == b"gallery.test")
+                );
+            } else {
+                assert_eq!(&wire[4..8], &[127, 0, 0, 1]);
+            }
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn socks5_and_socks5h_prove_local_vs_proxy_dns() {
+        for (scheme, remote) in [("socks5", false), ("socks5h", true)] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (tx, rx) = tokio::sync::oneshot::channel::<u8>();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut greeting = [0u8; 3];
+                socket.read_exact(&mut greeting).await.unwrap();
+                socket.write_all(&[5, 0]).await.unwrap();
+                let mut head = [0u8; 4];
+                socket.read_exact(&mut head).await.unwrap();
+                let atyp = head[3];
+                let mut rest = Vec::new();
+                if atyp == 3 {
+                    let mut len = [0u8; 1];
+                    socket.read_exact(&mut len).await.unwrap();
+                    rest.push(len[0]);
+                    let mut name = vec![0u8; len[0] as usize + 2];
+                    socket.read_exact(&mut name).await.unwrap();
+                    rest.extend_from_slice(&name);
+                } else if atyp == 1 {
+                    let mut addr = [0u8; 6];
+                    socket.read_exact(&mut addr).await.unwrap();
+                    rest.extend_from_slice(&addr);
+                } else {
+                    let mut addr = [0u8; 18];
+                    socket.read_exact(&mut addr).await.unwrap();
+                    rest.extend_from_slice(&addr);
+                }
+                socket
+                    .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
+                    .await
+                    .unwrap();
+                let request = read_headers(&mut socket).await;
+                tx.send(atyp).unwrap();
+                let _ = request;
+                respond_http(&mut socket, "socks5-ok", "200 OK").await;
+            });
+            let resolver = Arc::new(MapResolver::new(vec![(
+                "gallery.test".into(),
+                vec![SocketAddr::new("127.0.0.1".parse().unwrap(), 80)],
+            )]));
+            let mut pool = Pool::new();
+            pool.add_proxy(&format!("{scheme}://127.0.0.1:{port}"))
+                .unwrap();
+            let mut session = session(
+                Some(Arc::new(Mutex::new(pool))),
+                Arc::clone(&resolver),
+                FallbackMap::empty(),
+                TlsClient::production(),
+                ProxyPolicy::All,
+            );
+            let outcome = session
+                .request("GET", "http://gallery.test/socks5", None, false)
+                .await
+                .expect("socks5 request");
+            assert_eq!(outcome.response.text, "socks5-ok");
+            assert_eq!(rx.await.unwrap(), if remote { 3 } else { 1 });
+            let local = resolver.calls().iter().any(|host| host == "gallery.test");
+            assert_eq!(
+                local,
+                !remote,
+                "{scheme} resolver calls {:?}",
+                resolver.calls()
+            );
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_ban_disables_the_first_proxy_and_reselects() {
+        let first = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let first_port = first.local_addr().unwrap().port();
+        let second = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let second_port = second.local_addr().unwrap().port();
+        let ban = "Your IP address has been temporarily banned. The ban expires in 5 minutes";
+        let first_task = tokio::spawn(async move {
+            let (mut socket, _) = first.accept().await.unwrap();
+            read_headers(&mut socket).await;
+            respond_http(&mut socket, ban, "200 OK").await;
+        });
+        let second_task = tokio::spawn(async move {
+            let (mut socket, _) = second.accept().await.unwrap();
+            read_headers(&mut socket).await;
+            respond_http(&mut socket, "after-ban", "200 OK").await;
+        });
+        let mut pool = Pool::new();
+        let first_addr = format!("http://127.0.0.1:{first_port}");
+        let second_addr = format!("http://127.0.0.1:{second_port}");
+        pool.add_proxy(&first_addr).unwrap();
+        pool.add_proxy(&second_addr).unwrap();
+        let pool = Arc::new(Mutex::new(pool));
+        let mut session = session(
+            Some(pool.clone()),
+            Arc::new(MapResolver::default()),
+            FallbackMap::empty(),
+            TlsClient::production(),
+            ProxyPolicy::All,
+        );
+        let outcome = session
+            .request("GET", "http://gallery.test/ban", None, false)
+            .await
+            .expect("ban request");
+        assert_eq!(outcome.response.text, "after-ban");
+        {
+            let pool = pool.lock().unwrap();
+            assert_eq!(pool.counts(&first_addr), Some((1, 5)));
+            let expire = pool.is_disabled(&first_addr).expect("ban expiry");
+            assert!(
+                expire > 0.0,
+                "ban expiry is a timestamp, not permanent: {expire}"
+            );
+            assert_eq!(pool.counts(&second_addr), Some((1, 0)));
+        }
+        first_task.await.unwrap();
+        second_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn image_only_policy_skips_webpages_and_uses_proxy_for_images() {
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_port = proxy_listener.local_addr().unwrap().port();
+        let proxy_hits = Arc::new(AtomicUsize::new(0));
+        let hits = Arc::clone(&proxy_hits);
+        let proxy_task = tokio::spawn(async move {
+            let _ = tokio::time::timeout(Duration::from_millis(500), async {
+                if let Ok((mut socket, _)) = proxy_listener.accept().await {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    read_headers(&mut socket).await;
+                    respond_http(&mut socket, "proxy-image", "200 OK").await;
+                }
+            })
+            .await;
+        });
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_port = target.local_addr().unwrap().port();
+        let target_task = tokio::spawn(async move {
+            let (mut socket, _) = target.accept().await.unwrap();
+            let request = read_headers(&mut socket).await;
+            assert!(String::from_utf8_lossy(&request).starts_with("GET /s/abc/1-2 HTTP/1.1"));
+            respond_http(&mut socket, "direct-page", "200 OK").await;
+        });
+        let resolver = Arc::new(MapResolver::new(vec![(
+            "e-hentai.org".into(),
+            vec![SocketAddr::new("127.0.0.1".parse().unwrap(), target_port)],
+        )]));
+        let mut pool = Pool::new();
+        pool.add_proxy(&format!("http://127.0.0.1:{proxy_port}"))
+            .unwrap();
+        let mut session = session(
+            Some(Arc::new(Mutex::new(pool))),
+            resolver,
+            FallbackMap::empty(),
+            TlsClient::production(),
+            ProxyPolicy::ImageOnly,
+        );
+        let outcome = session
+            .request(
+                "GET",
+                &format!("http://e-hentai.org:{target_port}/s/abc/1-2"),
+                None,
+                false,
+            )
+            .await
+            .expect("webpage direct");
+        assert_eq!(outcome.response.text, "direct-page");
+        assert_eq!(proxy_hits.load(Ordering::SeqCst), 0);
+        target_task.await.unwrap();
+        proxy_task.abort();
+    }
+
+    #[tokio::test]
+    async fn fallback_ip_forces_tls_with_original_host_and_skips_dns() {
+        let tls = test_tls();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let acceptor = tls.acceptor.clone();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&seen);
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = acceptor.accept(socket).await.unwrap();
+            let request = read_headers(&mut socket).await;
+            record
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&request).into_owned());
+            respond_http(&mut socket, "fallback-ok", "200 OK").await;
+        });
+        let resolver = Arc::new(MapResolver::default());
+        let fallback = FallbackMap::empty().with_host("gallery.test", &["127.0.0.1"]);
+        let mut session = session(
+            None,
+            Arc::clone(&resolver),
+            fallback,
+            tls.client,
+            ProxyPolicy::All,
+        );
+        let outcome = session
+            .request(
+                "GET",
+                &format!("http://gallery.test:{port}/fb"),
+                None,
+                false,
+            )
+            .await
+            .expect("fallback request");
+        assert_eq!(outcome.response.text, "fallback-ok");
+        assert!(
+            resolver.calls().is_empty(),
+            "fallback must not use DNS: {:?}",
+            resolver.calls()
+        );
+        let request = seen.lock().unwrap()[0].to_ascii_lowercase();
+        assert!(request.contains("host: gallery.test\r\n"), "{request}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn glype_rewrites_sslagree_cookie_and_text_then_streams_binary() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&requests);
+        let server = tokio::spawn(async move {
+            for step in 0..3 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_headers(&mut socket).await;
+                let text = String::from_utf8_lossy(&request).into_owned();
+                record.lock().unwrap().push(text.clone());
+                if step == 0 {
+                    assert!(text.contains(
+                        "browse.php?u=https%3A%2F%2Fe-hentai.org%2Fg%2F1%2F&b=4&f=norefer"
+                    ));
+                    let body = "<input type=\"hidden\" name=\"action\" value=\"sslagree\">";
+                    respond_http(&mut socket, body, "200 OK").await;
+                } else if step == 1 {
+                    assert!(
+                        text.starts_with(
+                            "GET /glype/includes/process.php?action=sslagree HTTP/1.1"
+                        )
+                    );
+                    let response = "HTTP/1.1 200 OK\r\nSet-Cookie: s=abc\r\nContent-Type: text/html\r\nContent-Length: 2\r\n\r\nok";
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                    socket.shutdown().await.unwrap();
+                } else {
+                    assert!(
+                        text.to_ascii_lowercase().contains("cookie: s=abc"),
+                        "{text}"
+                    );
+                    let body = "<a href=\"/glype/browse.php?u=https%3A%2F%2Fe-hentai.org%2Fg%2F1&b=4&f=norefer\">done</a>";
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nSet-Cookie: c[proxy][/][foo]=bar\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                    socket.shutdown().await.unwrap();
+                }
+            }
+        });
+        let mut pool = Pool::new();
+        let addr = format!("http://127.0.0.1:{port}/glype/browse.php?u=x&b=4");
+        pool.add_proxy(&addr).unwrap();
+        let pool = Arc::new(Mutex::new(pool));
+        let mut session = session(
+            Some(pool.clone()),
+            Arc::new(MapResolver::default()),
+            FallbackMap::empty(),
+            TlsClient::production(),
+            ProxyPolicy::All,
+        );
+        let outcome = session
+            .request("GET", "https://e-hentai.org/g/1/", None, false)
+            .await
+            .expect("glype request");
+        assert!(
+            outcome
+                .response
+                .text
+                .contains("<a href=\"https://e-hentai.org/g/1\">done</a>"),
+            "{}",
+            outcome.response.text
+        );
+        let set_cookie = outcome.response.headers.joined("set-cookie").unwrap();
+        assert!(set_cookie.contains("foo=bar"), "{set_cookie}");
+        {
+            let pool = pool.lock().unwrap();
+            let entry = &pool.proxies[&addr];
+            let state = entry.spec.glype.as_ref().unwrap().lock().unwrap();
+            assert_eq!(state.s.as_deref(), Some("abc"));
+        }
+        server.await.unwrap();
+        assert_eq!(requests.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn login_filter_updates_app_cookies_header_and_session_file() {
+        use crate::filters::Filters;
+        use crate::worker::SessionConfig;
+        use std::path::Path;
+
+        let tls = test_tls();
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let acceptor = tls.acceptor.clone();
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&recorded);
+        let server = tokio::spawn(async move {
+            let (socket, _) = target.accept().await.unwrap();
+            let mut socket = acceptor.accept(socket).await.unwrap();
+            let headers = read_headers(&mut socket).await;
+            let text = String::from_utf8_lossy(&headers).into_owned();
+            let length = text
+                .lines()
+                .find_map(|line| {
+                    let lower = line.to_ascii_lowercase();
+                    lower
+                        .strip_prefix("content-length:")
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                })
+                .unwrap_or(0);
+            let mut body = vec![0u8; length];
+            if length > 0 {
+                socket.read_exact(&mut body).await.unwrap();
+            }
+            seen.lock()
+                .unwrap()
+                .push(format!("{text}{}", String::from_utf8_lossy(&body)));
+            let response = "HTTP/1.1 200 OK\r\nSet-Cookie: ipb_member_id=42; path=/\r\nSet-Cookie: ipb_pass_hash=deadbeef; path=/\r\nContent-Length: 0\r\n\r\n";
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_port = proxy_listener.local_addr().unwrap().port();
+        let proxy_task = tokio::spawn(async move {
+            let (mut socket, _) = proxy_listener.accept().await.unwrap();
+            let request = read_headers(&mut socket).await;
+            assert!(
+                String::from_utf8_lossy(&request).starts_with("CONNECT forums.e-hentai.org:443")
+            );
+            socket
+                .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                .await
+                .unwrap();
+            let mut upstream = TcpStream::connect(target_addr).await.unwrap();
+            let _ = tokio::io::copy_bidirectional(&mut socket, &mut upstream).await;
+        });
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("downloads")).unwrap();
+        let mut app = super::test_app(root.path(), &[]);
+        app.set_session_config(SessionConfig {
+            retry: 1,
+            timeout: Duration::from_secs(5),
+            tls: tls.client,
+            resolver: Arc::new(MapResolver::default()),
+            fallback: FallbackMap::empty(),
+            clock: Arc::new(TestClock::new(0.0)),
+            ..SessionConfig::default()
+        });
+        app.update_config(
+            serde_json::json!({"proxy": [format!("http://127.0.0.1:{proxy_port}")]})
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let mut filters = Filters::load(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let outcome = app
+            .login_exhentai(&mut filters, "synthetic-user", "synthetic-pass")
+            .await
+            .unwrap();
+        assert!(outcome.cookies.is_some());
+        assert!(app.has_login());
+        assert_eq!(app.cookie("ipb_member_id"), Some("42"));
+        assert_eq!(app.cookie("ipb_pass_hash"), Some("deadbeef"));
+        assert_eq!(app.cookies().len(), 2);
+        assert_eq!(
+            app.cookie_header(),
+            Some("ipb_member_id=42;ipb_pass_hash=deadbeef")
+        );
+        let request = recorded.lock().unwrap()[0].to_ascii_lowercase();
+        assert!(
+            request.contains("post /index.php?act=login&code=01 http/1.1"),
+            "{request}"
+        );
+        assert!(
+            request.contains("content-type: application/x-www-form-urlencoded"),
+            "{request}"
+        );
+        assert!(request.contains("username=synthetic-user"), "{request}");
+        assert!(request.contains("password=synthetic-pass"), "{request}");
+        let session_text = std::fs::read_to_string(root.path().join("h.json")).unwrap();
+        assert!(session_text.contains("ipb_member_id"), "{session_text}");
+        assert!(session_text.contains("ipb_pass_hash"), "{session_text}");
+        server.await.unwrap();
+        proxy_task.abort();
+    }
+
+    #[tokio::test]
+    async fn site_end_to_end_metadata_page_image_queue_and_file_bytes() {
+        use crate::core::{ImageDownload, ImageScan};
+        use crate::filters::Filters;
+        use crate::worker::SessionConfig;
+        use std::path::Path;
+
+        let tls = test_tls();
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let acceptor = tls.acceptor.clone();
+        let image_hash = "0123456789abcdef0123456789abcdef01234567";
+        let image_bytes: Vec<u8> = (0..4096u32).map(|value| (value % 251) as u8).collect();
+        let image_size = image_bytes.len();
+        let image_src =
+            format!("https://img.test/{image_hash}-{image_size}-200-0-jpg/keystamp=abc");
+        let image_page_body = format!(
+            "<img src=\"{image_src}\" style=\"max-width:100%\">\
+             </a></div><div>unique-name.jpg :: 100x200 :: 2 KB</di>\
+             return nl('123456-1')"
+        );
+        let metadata_body = "=\"gj\">日本語タイトル</h1>=\"gn\">English title</h1>\
+            Length:</td><td class=\"gdt2\">1 pages</td>\
+            Showing 1 - 20 of 1 images";
+        let page_body =
+            "<a href=\"https://e-hentai.org/s/abcdef0123/123456-1\"><div title=\"Page 1\"";
+        let image_body = image_bytes.clone();
+        let server = tokio::spawn(async move {
+            for _ in 0..4 {
+                let (socket, _) = target.accept().await.unwrap();
+                let mut socket = acceptor.accept(socket).await.unwrap();
+                let request = read_headers(&mut socket).await;
+                let text = String::from_utf8_lossy(&request);
+                let path = text
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("");
+                if path.starts_with("/s/") {
+                    respond_http(&mut socket, &image_page_body, "200 OK").await;
+                } else if path.starts_with("/g/") && path.contains("?p=") {
+                    respond_http(&mut socket, page_body, "200 OK").await;
+                } else if path.starts_with("/g/") {
+                    respond_http(&mut socket, metadata_body, "200 OK").await;
+                } else {
+                    let mut response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
+                        image_body.len()
+                    )
+                    .into_bytes();
+                    response.extend_from_slice(&image_body);
+                    socket.write_all(&response).await.unwrap();
+                    socket.shutdown().await.unwrap();
+                }
+            }
+        });
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_port = proxy_listener.local_addr().unwrap().port();
+        let proxy_task = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = proxy_listener.accept().await else {
+                    return;
+                };
+                let request = read_headers(&mut socket).await;
+                let text = String::from_utf8_lossy(&request);
+                if !text.starts_with("CONNECT ") {
+                    respond_http(&mut socket, "unexpected", "500 Oops").await;
+                    continue;
+                }
+                socket
+                    .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    .await
+                    .unwrap();
+                let Ok(mut upstream) = TcpStream::connect(target_addr).await else {
+                    return;
+                };
+                let _ = tokio::io::copy_bidirectional(&mut socket, &mut upstream).await;
+            }
+        });
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("downloads")).unwrap();
+        let mut app = super::test_app(root.path(), &["guid0001"]);
+        let gallery_url = "https://e-hentai.org/g/123/abcdef0123/";
+        let (code, guid) = app.add_task(gallery_url, serde_json::Map::new()).unwrap();
+        assert_eq!(code, 0);
+        let guid = guid.expect("guid");
+        app.set_session_config(SessionConfig {
+            retry: 1,
+            timeout: Duration::from_secs(5),
+            tls: tls.client,
+            resolver: Arc::new(MapResolver::default()),
+            fallback: FallbackMap::empty(),
+            clock: Arc::new(TestClock::new(0.0)),
+            ..SessionConfig::default()
+        });
+        app.update_config(
+            serde_json::json!({"proxy": [format!("http://127.0.0.1:{proxy_port}")]})
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        app.start_task(&guid).unwrap();
+        let mut filters = Filters::load(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+
+        app.fetch_metadata(&guid, &mut filters).await.unwrap();
+        {
+            let task = app.task(&guid).unwrap();
+            assert_eq!(task.state, crate::r#const::TASK_STATE_SCAN_PAGE);
+            assert_eq!(task.meta_i64("total").unwrap(), 1);
+            assert_eq!(task.meta_i64("thumbnail_cnt").unwrap(), 20);
+            assert_eq!(task.meta_str("gnname").unwrap(), "English title");
+        }
+
+        app.scan_pages(&guid, &mut filters).await.unwrap();
+        {
+            let task = app.task(&guid).unwrap();
+            assert_eq!(task.state, crate::r#const::TASK_STATE_SCAN_IMG);
+            assert_eq!(task.page_q.as_ref().unwrap().len(), 1);
+            assert!(task.page_q.as_ref().unwrap()[0].contains("/s/abcdef0123/123456-1"));
+        }
+
+        let scanned = app.scan_one_page(&guid, &mut filters).await.unwrap();
+        match scanned {
+            ImageScan::Enqueued {
+                image_url,
+                filename,
+            } => {
+                assert_eq!(image_url, image_src);
+                assert_eq!(filename, "unique-name.jpg");
+            }
+            other => panic!("expected enqueued image, got {other:?}"),
+        }
+        {
+            let task = app.task(&guid).unwrap();
+            assert_eq!(task.img_q.as_ref().unwrap().len(), 1);
+            assert_eq!(task.img_q.as_ref().unwrap()[0], image_src);
+            assert_eq!(
+                task.renamed_map
+                    .iter()
+                    .find(|(key, _)| key.as_fid().ok() == Some(1))
+                    .map(|(_, name)| name.as_str()),
+                Some("unique-name.jpg")
+            );
+        }
+
+        let downloaded = app.download_one_image(&guid, &mut filters).await.unwrap();
+        let path = match downloaded {
+            ImageDownload::Saved(path) => path,
+            other => panic!("expected saved file, got {other:?}"),
+        };
+        assert_eq!(std::fs::read(&path).unwrap(), image_bytes);
+        assert_eq!(app.task(&guid).unwrap().meta_i64("finished").unwrap(), 1);
+        assert!(app.task(&guid).unwrap().flist_done().contains(&1));
+        server.await.unwrap();
+        proxy_task.abort();
+    }
+
+    #[tokio::test]
+    async fn proxy_config_update_adds_to_the_shared_pool() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("downloads")).unwrap();
+        let mut app = super::test_app(root.path(), &[]);
+        app.update_config(
+            serde_json::json!({"proxy": ["http://127.0.0.1:8081"]})
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        assert_eq!(app.proxy_count(), 1);
+        let pool = app.proxy_pool().unwrap();
+        let session = app.http_session(ProxyPolicy::All);
+        assert!(
+            session
+                .proxy
+                .as_ref()
+                .is_some_and(|shared| Arc::ptr_eq(shared, &pool))
+        );
+        app.update_config(
+            serde_json::json!({"proxy": ["socks5h://127.0.0.1:1080"]})
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        assert_eq!(app.proxy_count(), 2);
+        {
+            let pool = pool.lock().unwrap();
+            assert_eq!(
+                pool.proxies.keys().cloned().collect::<Vec<_>>(),
+                vec![
+                    "http://127.0.0.1:8081".to_string(),
+                    "socks5h://127.0.0.1:1080".to_string()
+                ]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn glype_403_binary_streams_real_bytes_instead_of_empty_success() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let body = vec![0x5au8; 2 * 1024 * 1024];
+        let expected = body.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_headers(&mut socket).await;
+            let mut response = format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            )
+            .into_bytes();
+            response.extend_from_slice(&body);
+            socket.write_all(&response).await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        let mut pool = Pool::new();
+        let addr = format!("http://127.0.0.1:{port}/browse.php?u=x&b=4");
+        pool.add_proxy(&addr).unwrap();
+        let mut session = session(
+            Some(Arc::new(Mutex::new(pool))),
+            Arc::new(MapResolver::default()),
+            FallbackMap::empty(),
+            TlsClient::production(),
+            ProxyPolicy::All,
+        );
+        let outcome = session
+            .request("GET", "https://img.test/big.jpg", None, true)
+            .await
+            .expect("glype binary");
+        assert_eq!(outcome.response.status, 403);
+        assert_eq!(outcome.response.content_length, expected.len() as i64);
+        assert!(outcome.response.body.is_empty());
+        let mut stream = outcome.response.stream.expect("stream");
+        let mut read = Vec::new();
+        while let Some(chunk) = stream.next_chunk().await.expect("chunk") {
+            read.extend_from_slice(&chunk);
+        }
+        assert_eq!(read.len(), expected.len());
+        assert_eq!(read, expected);
+        stream.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn image_only_policy_proxies_non_webpage_urls() {
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_port = proxy_listener.local_addr().unwrap().port();
+        let proxy_task = tokio::spawn(async move {
+            let (mut socket, _) = proxy_listener.accept().await.unwrap();
+            let request = read_headers(&mut socket).await;
+            assert!(
+                String::from_utf8_lossy(&request)
+                    .starts_with("GET http://img.test/pic.jpg HTTP/1.1")
+            );
+            respond_http(&mut socket, "image-via-proxy", "200 OK").await;
+        });
+        let mut pool = Pool::new();
+        pool.add_proxy(&format!("http://127.0.0.1:{proxy_port}"))
+            .unwrap();
+        let resolver = Arc::new(MapResolver::default());
+        let mut session = session(
+            Some(Arc::new(Mutex::new(pool))),
+            Arc::clone(&resolver),
+            FallbackMap::empty(),
+            TlsClient::production(),
+            ProxyPolicy::ImageOnly,
+        );
+        let outcome = session
+            .request("GET", "http://img.test/pic.jpg", None, false)
+            .await
+            .expect("image proxy");
+        assert_eq!(outcome.response.text, "image-via-proxy");
+        assert!(resolver.calls().is_empty());
+        proxy_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn glype_error_div_is_a_pool_exception_not_a_transport_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_headers(&mut socket).await;
+            respond_http(
+                &mut socket,
+                "<div id=\"error\">proxy says no</div>",
+                "200 OK",
+            )
+            .await;
+        });
+        let mut pool = Pool::new();
+        let addr = format!("http://127.0.0.1:{port}/browse.php?u=x&b=4");
+        pool.add_proxy(&addr).unwrap();
+        let pool = Arc::new(Mutex::new(pool));
+        let mut session = session(
+            Some(pool.clone()),
+            Arc::new(MapResolver::default()),
+            FallbackMap::empty(),
+            TlsClient::production(),
+            ProxyPolicy::All,
+        );
+        let error = match session
+            .request("GET", "https://e-hentai.org/g/1/", None, false)
+            .await
+        {
+            Ok(_) => panic!("expected glype error"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, HttpError::Glype(_)), "{error}");
+        assert_eq!(
+            pool.lock().unwrap().counts(&addr),
+            Some((0, 0)),
+            "PoolException is not counted as a proxy failure"
+        );
+        server.await.unwrap();
+    }
 }

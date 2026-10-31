@@ -397,6 +397,99 @@ NATIVE_CASE_MAP = {
             "i18n.keys.all"
         ],
     },
+    "transport": {
+        "worker::tests::transport_get_preserves_header_order_duplicates_and_cookies": [
+            "worker.header-bytes",
+            "worker.session-cookies",
+        ],
+        "worker::tests::transport_manual_redirects_keep_real_url_history": [
+            "worker.redirects"
+        ],
+        "worker::tests::transport_retries_use_random_plus_0618_backoff": [
+            "worker.retry-backoff"
+        ],
+        "tests::m3_transport::site_end_to_end_metadata_page_image_queue_and_file_bytes": [
+            "worker.redirects"
+        ],
+    },
+    "proxy": {
+        "proxy::tests::pool_selects_first_inserted_available_proxy": [
+            "proxy.pool-order",
+            "proxy.has-available",
+        ],
+        "proxy::tests::max_fail_disables_permanently_and_reports_inverted_availability": [
+            "proxy.fail-policy",
+            "proxy.has-available",
+        ],
+        "proxy::tests::expired_ban_returns_the_proxy_to_the_first_available_slot": [
+            "proxy.ban-expiry",
+        ],
+        "proxy::tests::add_replaces_counts_but_keeps_insertion_position": [
+            "proxy.pool-order",
+            "proxy.add-validation",
+        ],
+        "proxy::tests::addresses_are_classified_in_the_reference_order": [
+            "proxy.add-validation"
+        ],
+        "tests::m3_transport::proxy_http_absolute_form_uses_proxy_without_local_dns": [
+            "proxy.http"
+        ],
+        "tests::m3_transport::proxy_https_connect_tunnels_to_target_tls": [
+            "proxy.https"
+        ],
+        "tests::m3_transport::proxy_https_outer_tls_then_connect_then_target_tls": [
+            "proxy.https"
+        ],
+        "tests::m3_transport::socks4_and_socks4a_prove_local_vs_proxy_dns": [
+            "proxy.socks4",
+            "proxy.socks4a",
+        ],
+        "tests::m3_transport::socks5_and_socks5h_prove_local_vs_proxy_dns": [
+            "proxy.socks5",
+            "proxy.socks5h",
+        ],
+        "tests::m3_transport::glype_rewrites_sslagree_cookie_and_text_then_streams_binary": [
+            "proxy.glype"
+        ],
+        "tests::m3_transport::glype_403_binary_streams_real_bytes_instead_of_empty_success": [
+            "proxy.glype"
+        ],
+        "tests::m3_transport::glype_error_div_is_a_pool_exception_not_a_transport_failure": [
+            "proxy.glype"
+        ],
+        "tests::m3_transport::fallback_ip_forces_tls_with_original_host_and_skips_dns": [
+            "proxy.fallback-ip"
+        ],
+        "tests::m3_transport::image_only_policy_skips_webpages_and_uses_proxy_for_images": [
+            "proxy.policy"
+        ],
+        "tests::m3_transport::image_only_policy_proxies_non_webpage_urls": [
+            "proxy.policy"
+        ],
+        "tests::m3_transport::proxy_config_update_adds_to_the_shared_pool": [
+            "proxy.pool-order"
+        ],
+    },
+    "site": {
+        "filters::tests::login_parses_cookie_header_and_reports_callback_events": ["filters.login"],
+        "filters::tests::metadata_reads_reference_fields_and_status_branches": ["filters.metadata"],
+        "filters::tests::pageurl_returns_every_reference_url_and_debug_body": ["filters.page"],
+        "filters::tests::mpv_parses_imagelist_keys_in_order": ["filters.mpv"],
+        "filters::tests::imgurl_matches_keystamp_style_and_original_branches": ["filters.image-link"],
+        "filters::tests::quota_wrapper_keeps_reference_order_and_codes": ["filters.quota"],
+        "filters::tests::download_wrapper_distinguishes_404_length_and_stream": ["filters.download-response"],
+        "filters::tests::reset_quota_is_a_real_no_op": ["filters.reset-quota"],
+        "filters::tests::sdk_compiles_binds_and_calls_exported_filter_functions": [
+            "filters.login",
+            "filters.metadata",
+            "filters.page",
+            "filters.mpv",
+            "filters.quota",
+            "filters.image-link",
+            "filters.download-response",
+            "filters.reset-quota",
+        ],
+    },
     "task-api": {},
     "session": {},
     "files": {},
@@ -432,6 +525,19 @@ NATIVE_COMMANDS = {
         ["cargo", "test", "--bin", "xeHentai", "tests::session_"],
         ["cargo", "test", "--bin", "xeHentai", "tests::legacy_"],
         ["cargo", "test", "--bin", "xeHentai", "tests::mixed_"],
+    ],
+    "site": [["cargo", "test", "--bin", "xeHentai", "filters::"]],
+    "proxy": [
+        ["cargo", "test", "--bin", "xeHentai", "proxy::"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m3_transport::proxy_"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m3_transport::socks"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m3_transport::glype_"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m3_transport::fallback_"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m3_transport::image_only_"],
+    ],
+    "transport": [
+        ["cargo", "test", "--bin", "xeHentai", "transport_"],
+        ["cargo", "test", "--bin", "xeHentai", "site_end_to_end"],
     ],
     "files": [
         ["cargo", "test", "--bin", "xeHentai", "tests::scan_"],
@@ -480,6 +586,71 @@ SESSION_CASES = {
     ],
     "task.session-dir-authorization": ["isolation", "isolation_legacy"],
 }
+TRANSPORT_CASES = {
+    "worker.redirects": ["redirect"],
+    "worker.retry-backoff": ["retry"],
+    "worker.session-cookies": ["cookies"],
+    "worker.header-bytes": ["headers"],
+    "worker.post-form": ["post"],
+}
+
+PROXY_CASES = {
+    "proxy.pool-order": ["steps"],
+    "proxy.fail-policy": ["steps"],
+    "proxy.ban-expiry": ["steps"],
+    "proxy.add-validation": ["steps"],
+    "proxy.has-available": ["steps"],
+    "proxy.glype-runtime": ["glype.normal", "glype.sslagree-fixed"],
+}
+
+SITE_CASES = {
+    "filters.login": [
+        "login.ok",
+        "login.postcolor",
+        "login.empty-cookie",
+        "login.missing-header",
+    ],
+    "filters.metadata": [
+        "metadata.ok",
+        "metadata.404",
+        "metadata.600",
+        "metadata.pining",
+        "metadata.ip-ban",
+        "metadata.ip-ban-no-time",
+        "metadata.missing-gj",
+    ],
+    "filters.page": ["pageurl.ok", "pageurl.none"],
+    "filters.mpv": ["mpv.ok", "mpv.invalid", "mpv.missing-key"],
+    "filters.image-link": [
+        "imgurl.keystamp",
+        "imgurl.style",
+        "imgurl.image-php",
+        "imgurl.original",
+        "imgurl.invalid-page",
+        "imgurl.no-src",
+    ],
+    "filters.quota": [
+        "quota.403",
+        "quota.600",
+        "quota.509",
+        "quota.length-925",
+        "quota.gif",
+        "quota.small-text",
+        "quota.small-text-no-type",
+    ],
+    "filters.download-response": [
+        "download.stream",
+        "download.404",
+        "download.zero",
+        "download.size-mismatch",
+        "download.no-stream",
+        "download.stream-ok",
+        "download.stream-short",
+        "download.stream-error",
+    ],
+    "filters.reset-quota": ["reset.no-op"],
+}
+
 FILES_CASES = {
     "task.files-scan-downloaded": ["scan", "scan_markers"],
     "task.duplicates": ["duplicates"],
@@ -662,6 +833,12 @@ def oracle_main(args):
         result = oracle_session_fixture(upstream, request)
     elif args.oracle == "files":
         result = oracle_files(upstream, request)
+    elif args.oracle == "site":
+        result = oracle_site(upstream, request)
+    elif args.oracle == "proxy":
+        result = oracle_proxy(upstream, request)
+    elif args.oracle == "transport":
+        result = oracle_transport(upstream, request)
     else:
         raise CompatError(f"unknown oracle suite {args.oracle}")
     output.write_text(
@@ -772,6 +949,933 @@ TASK_BASE_KEYS = [
     "delete_task_files",
     "low_speed_threshold",
 ]
+
+
+
+def site_scenarios():
+    """Controlled response fixtures shared by the Python oracle and Rust probe."""
+    hash40 = "0123456789abcdef0123456789abcdef01234567"
+
+    def page(fn, **kwargs):
+        text = kwargs.pop("text", "")
+        scenario = {
+            "id": kwargs.pop("id"),
+            "fn": fn,
+            "status": kwargs.pop("status", 200),
+            "url": kwargs.pop("url", "https://e-hentai.org/s/abcdef0123/123456-7"),
+            "real_url": kwargs.pop("real_url", "https://e-hentai.org/s/abcdef0123/123456-7"),
+            "text": text,
+            "headers": kwargs.pop("headers", [["Content-Type", "text/html; charset=utf-8"]]),
+            "content_length": kwargs.pop("content_length", len(text.encode("utf-8"))),
+            "ori": kwargs.pop("ori", False),
+            "has_stream": kwargs.pop("has_stream", False),
+        }
+        if "chunks" in kwargs:
+            scenario["chunks"] = kwargs.pop("chunks")
+        if "stream_error" in kwargs:
+            scenario["stream_error"] = kwargs.pop("stream_error")
+        return scenario
+
+    metadata_text = (
+        '="gj">日本語 &amp; 表題</h1>="gn">English &amp; title</h1>'
+        'Length:</td><td class="gdt2">12 pages</td>'
+        "toggle_tagmenu('tag a' toggle_tagmenu('tag b'"
+        "Showing 1 - 20 of 234 images"
+        '<a href="https://e-hentai.org/mpv/123/abcdef0123/#page2"><div title="Page'
+    )
+    page_text = (
+        '<a href="https://e-hentai.org/s/abcdef0123/123456-1"><div title="Page 1"'
+        '<a href="https://exhentai.org/s/0123456789/123456-2"><img alt="2" title="Page 2"'
+    )
+    image_text = (
+        f'<img src="https://img.example/{hash40}-100-200-0-jpg/keystamp=abc" style="max-width:100%">'
+        '</a></div><div>pretty name.jpg :: 100x200 :: 2 KB</di>'
+        '<a href="https://img.example/original/name.jpg">Download original 100 x 200 2 KB source</a>'
+        "return nl('123456-7')"
+    )
+    style_text = (
+        f'<img src="https://img.example/{hash40}-100-200-0-jpg/" style="x">'
+        '</a></div><div>style name.jpg :: 100x200 :: 2 KB</di>'
+        "return nl('123456-7')"
+    )
+    image_php_text = (
+        f'<img src="https://img.example/{hash40}-100-200-0-jpg/image.php?n=real-name.png" style="x">'
+        '</a></div><div>image.php :: 100x200 :: 2 KB</di>'
+        "return nl('123456-7')"
+    )
+    image_url = f"https://img.example/{hash40}-100-200-0-jpg/"
+    download_url = f"https://img.example/{hash40}-100-200-0-jpg/"
+    stream_url = f"https://img.example/{hash40}-10-200-0-jpg/"
+    username_headers = [
+        ["Set-Cookie", "ipb_member_id=42; expires=Wed; ipb_pass_hash=deadbeef; path=/"]
+    ]
+
+    scenarios = [
+        page("login", id="login.ok", headers=username_headers),
+        page(
+            "login",
+            id="login.postcolor",
+            text='<span class="postcolor">bad password</span>',
+            headers=[["Set-Cookie", "other=1; path=/"]],
+        ),
+        page(
+            "login",
+            id="login.empty-cookie",
+            headers=[["Set-Cookie", "other=1; path=/"]],
+        ),
+        page("login", id="login.missing-header", headers=[]),
+        page("metadata", id="metadata.ok", text=metadata_text),
+        page("metadata", id="metadata.404", status=404),
+        page("metadata", id="metadata.600", status=600),
+        page(
+            "metadata",
+            id="metadata.pining",
+            text="This gallery is pining for the fjords",
+        ),
+        page(
+            "metadata",
+            id="metadata.ip-ban",
+            text="Your IP address has been temporarily banned. The ban expires in 5 minutes",
+        ),
+        page(
+            "metadata",
+            id="metadata.ip-ban-no-time",
+            text="Your IP address has been temporarily banned",
+        ),
+        page("metadata", id="metadata.missing-gj", text='="gn">only</h1>'),
+        page("pageurl", id="pageurl.ok", text=page_text),
+        page("pageurl", id="pageurl.none", text="no links here"),
+        page(
+            "pageurl_mpv",
+            id="mpv.ok",
+            real_url="https://e-hentai.org/mpv/123/abcdef0123",
+            text='imagelist = [{"k":"aaaa"},{"k":"bbbb"}];',
+        ),
+        page(
+            "pageurl_mpv",
+            id="mpv.invalid",
+            real_url="https://e-hentai.org/mpv/123/abcdef0123",
+            text="imagelist = nope;",
+        ),
+        page(
+            "pageurl_mpv",
+            id="mpv.missing-key",
+            real_url="https://e-hentai.org/mpv/123/abcdef0123",
+            text='imagelist = [{"k":"aaaa"},{"v":"bbbb"}];',
+        ),
+        page("imgurl", id="imgurl.keystamp", text=image_text, content_length=5000),
+        page("imgurl", id="imgurl.style", text=style_text, content_length=5000),
+        page("imgurl", id="imgurl.image-php", text=image_php_text, content_length=5000),
+        page(
+            "imgurl",
+            id="imgurl.original",
+            text=image_text,
+            content_length=5000,
+            ori=True,
+        ),
+        page("imgurl", id="imgurl.invalid-page", text="Invalid page"),
+        page("imgurl", id="imgurl.no-src", text="nothing"),
+        page(
+            "imgurl",
+            id="quota.403",
+            status=403,
+            url=image_url,
+            real_url=image_url,
+            content_length=12,
+        ),
+        page(
+            "imgurl",
+            id="quota.600",
+            status=600,
+            url=image_url,
+            real_url=image_url,
+            content_length=0,
+        ),
+        page(
+            "imgurl",
+            id="quota.509",
+            status=509,
+            url=image_url,
+            real_url=image_url,
+            content_length=12,
+        ),
+        page(
+            "imgurl",
+            id="quota.length-925",
+            url=image_url,
+            real_url=image_url,
+            content_length=925,
+        ),
+        page(
+            "imgurl",
+            id="quota.gif",
+            url="https://img.example/509.gif",
+            real_url="https://img.example/509.gif",
+            content_length=100,
+        ),
+        page(
+            "imgurl",
+            id="quota.small-text",
+            url=image_url,
+            real_url=image_url,
+            content_length=42,
+            text="You have exceeded your image viewing limits",
+            headers=[["Content-Type", "text/html; charset=utf-8"]],
+        ),
+        page(
+            "imgurl",
+            id="quota.small-text-no-type",
+            url=image_url,
+            real_url=image_url,
+            content_length=42,
+            text="You have exceeded your image viewing limits",
+            headers=[],
+        ),
+        page(
+            "download",
+            id="download.stream",
+            url=stream_url,
+            real_url=stream_url,
+            content_length=100,
+            has_stream=True,
+        ),
+        page("download", id="download.404", status=404, url=stream_url, real_url=stream_url),
+        page(
+            "download",
+            id="download.zero",
+            url=stream_url,
+            real_url=stream_url,
+            content_length=0,
+        ),
+        page(
+            "download",
+            id="download.size-mismatch",
+            url=stream_url,
+            real_url=stream_url,
+            content_length=99,
+        ),
+        page(
+            "download",
+            id="download.no-stream",
+            url=stream_url,
+            real_url=stream_url,
+            content_length=100,
+            has_stream=False,
+        ),
+        page(
+            "download_stream",
+            id="download.stream-ok",
+            url=stream_url,
+            real_url=stream_url,
+            content_length=10,
+            chunks=["12345", "67890"],
+        ),
+        page(
+            "download_stream",
+            id="download.stream-short",
+            url=stream_url,
+            real_url=stream_url,
+            content_length=10,
+            chunks=["12345"],
+        ),
+        page(
+            "download_stream",
+            id="download.stream-error",
+            url=stream_url,
+            real_url=stream_url,
+            content_length=10,
+            chunks=[],
+            stream_error="connection",
+        ),
+        page("reset_quota", id="reset.no-op"),
+    ]
+    return scenarios
+
+
+class _SiteFakeResponse:
+    def __init__(self, scenario):
+        self.status_code = scenario["status"]
+        self.url = scenario["url"]
+        self._real_url = scenario["real_url"]
+        self._text = scenario["text"]
+        self.content = self._text.encode("utf-8")
+        self.content_length = scenario["content_length"]
+        joined = {}
+        order = []
+        for name, value in scenario["headers"]:
+            key = name.lower()
+            if key in joined:
+                joined[key] += ", " + value
+            else:
+                joined[key] = value
+                order.append(key)
+        self.headers = joined
+        self._chunks = [chunk.encode("utf-8") for chunk in scenario.get("chunks", [])]
+        self._stream_error = scenario.get("stream_error")
+        if scenario["fn"] == "download" or "chunks" in scenario:
+            self.iter_content_cb = None
+
+    @property
+    def text(self):
+        return self._text
+
+    def iter_content(self, chunk_size):
+        if self._stream_error == "connection":
+            from requests.exceptions import ConnectionError
+
+            raise ConnectionError("synthetic stream reset")
+        for chunk in self._chunks:
+            yield chunk
+
+
+def _site_norm(value):
+    if isinstance(value, dict):
+        return {key: _site_norm(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_site_norm(item) for item in value]
+    if callable(value):
+        return "STREAM"
+    return value
+
+
+def oracle_site(upstream, request):
+    sys.path.insert(0, str(upstream))
+    import xeHentai.filters as filters
+    from xeHentai.const import DownloadAbortedException
+
+    out = {}
+    for scenario in request["scenarios"]:
+        fn = scenario["fn"]
+        response = _SiteFakeResponse(scenario)
+        callbacks = []
+        stream_callbacks = []
+
+        def suc(value, callbacks=callbacks):
+            callbacks.append(["suc", [_site_norm(value)]])
+
+        def fail(value, callbacks=callbacks):
+            callbacks.append(["fail", [_site_norm(value)]])
+
+        exception = None
+        ret = None
+        debug = None
+        stream_exception = None
+        try:
+            if fn == "login":
+                ret = filters.login_exhentai(response, suc, fail)
+            elif fn == "metadata":
+                ret = filters.flt_metadata(response, suc, fail)
+            elif fn == "pageurl":
+                ret = filters.flt_pageurl(response, suc, fail)
+            elif fn == "pageurl_mpv":
+                ret = filters.flt_pageurl_mpv(response, suc, fail)
+            elif fn == "imgurl":
+                import xeHentai.filters as filters_module
+
+                wrapper = filters_module.flt_imgurl_wrapper(scenario.get("ori", False))
+                ret = wrapper(response, suc, fail)
+            elif fn == "download":
+                ret = filters.download_file_wrapper(".")(response, suc, fail)
+                if callbacks and callbacks[0][0] == "suc":
+                    callbacks[0][1] = [["STREAM", response._real_url, response.url]]
+            elif fn == "download_stream":
+                wrapper = filters.download_file_wrapper(".")
+                captured = []
+
+                def stream_suc(value):
+                    captured.append(value)
+
+                wrapper(response, stream_suc, fail)
+                callbacks.clear()
+                if captured:
+                    response.iter_content_cb = lambda chunk: stream_callbacks.append(
+                        ["chunk", len(chunk)]
+                    )
+                    try:
+                        for _ in captured[0][0]():
+                            pass
+                    except DownloadAbortedException:
+                        stream_exception = "DownloadAbortedException"
+                stream_callbacks.extend(callbacks)
+                callbacks.clear()
+            elif fn == "reset_quota":
+                ret = filters.reset_quota(response, suc, fail)
+            else:
+                raise RuntimeError(f"unknown site fn {fn}")
+            debug_path = os.path.join(os.getcwd(), "debug.htm")
+            if os.path.exists(debug_path):
+                with open(debug_path, encoding="utf-8") as handle:
+                    debug = handle.read()
+                os.unlink(debug_path)
+        except Exception as error:  # noqa: BLE001 - record the reference exception
+            exception = type(error).__name__
+
+        observation = {
+            "callbacks": callbacks,
+            "ret": _site_norm(ret),
+            "exception": exception,
+            "debug": debug,
+        }
+        if fn == "download_stream":
+            observation["stream_callbacks"] = stream_callbacks
+            observation["stream_exception"] = stream_exception
+        out[scenario["id"]] = observation
+    return out
+
+
+
+def proxy_scenarios():
+    a = "http://127.0.0.1:8081"
+    b = "socks5h://127.0.0.1:1080"
+    c = "socks4a://127.0.0.1:1082"
+    return {
+        "clock": 100.0,
+        "glype_addr": "http://proxy.test/glype/browse.php?u=x&b=4",
+        "glype_target": "https://e-hentai.org/g/1/",
+        "steps": [
+            {"op": "add", "addr": a},
+            {"op": "add", "addr": b},
+            {"op": "add", "addr": c},
+            {"op": "select"},
+            {"op": "not_good", "addr": a, "weight": 5, "expire": 0},
+            {"op": "select"},
+            {"op": "trace", "addr": b, "result": "connect_error"},
+            {"op": "trace", "addr": b, "result": "connect_error"},
+            {"op": "trace", "addr": b, "result": "connect_error"},
+            {"op": "trace", "addr": b, "result": "connect_error"},
+            {"op": "trace", "addr": b, "result": "ok"},
+            {"op": "trace", "addr": b, "result": "ok"},
+            {"op": "select"},
+            {"op": "has_available"},
+            {"op": "snapshot"},
+            {"op": "time", "now": 106.0},
+            {"op": "not_good", "addr": c, "weight": 5, "expire": 3},
+            {"op": "has_available"},
+            {"op": "time", "now": 120.0},
+            {"op": "select"},
+            {"op": "add", "addr": "http://bad/path"},
+            {"op": "add", "addr": "https://127.0.0.1:8443"},
+            {"op": "add", "addr": "socks4://127.0.0.1:1083"},
+            {"op": "add", "addr": "socks5h://127.0.0.1:1084"},
+            {"op": "add", "addr": "socks5://127.0.0.1:1085"},
+            {"op": "snapshot"},
+        ],
+    }
+
+
+def oracle_proxy(upstream, request):
+    sys.path.insert(0, str(upstream))
+    import xeHentai.proxy as proxy_module
+    from requests.exceptions import ConnectionError as RequestsConnectionError
+
+    clock = {"now": request["clock"]}
+    proxy_module.time.time = lambda: clock["now"]
+
+    class DummySession:
+        def request(self, *args, **kwargs):
+            return kwargs.get("proxies", {})
+
+    pool = proxy_module.Pool()
+    session = DummySession()
+    out = []
+    for step in request["steps"]:
+        kind = step["op"]
+        record = {"op": kind}
+        try:
+            if kind == "add":
+                pool.add_proxy(step["addr"])
+                record["result"] = None
+            elif kind == "select":
+                handler, not_good = pool.proxied_request(session)
+                record["selected"] = handler("GET", "http://example/")["http"]
+                record["result"] = None
+            elif kind == "not_good":
+                pool.not_good(step["addr"])(step["weight"], step["expire"])
+                record["result"] = None
+            elif kind == "trace":
+                result = step["result"]
+                if result == "connect_error":
+                    def operation():
+                        raise RequestsConnectionError("synthetic connect error")
+
+                    pool.trace_proxy(step["addr"])(operation)()
+                elif result == "ok":
+                    pool.trace_proxy(step["addr"])(lambda: "ok")()
+                elif result == "check_false":
+                    pool.trace_proxy(
+                        step["addr"], check_func=lambda value: False
+                    )(lambda: "bad")()
+                elif result == "bad_status_line":
+                    def operation():
+                        raise RequestsConnectionError("BadStatusLine: junk")
+
+                    pool.trace_proxy(step["addr"])(operation)()
+                record["result"] = None
+            elif kind == "has_available":
+                record["result"] = pool.has_available_proxies()
+            elif kind == "time":
+                clock["now"] = step["now"]
+                record["result"] = None
+            elif kind == "snapshot":
+                record["result"] = None
+            else:
+                raise RuntimeError(f"unknown proxy op {kind}")
+        except Exception as error:  # noqa: BLE001
+            record["exception"] = type(error).__name__
+        record["entries"] = [
+            [addr, entry[1], entry[2]] for addr, entry in pool.proxies.items()
+        ]
+        record["disabled"] = [[addr, expire] for addr, expire in pool.disabled.items()]
+        record["has_available"] = pool.has_available_proxies()
+        out.append(record)
+    out = {"steps": out}
+    out["glype"] = _oracle_glype(request, upstream)
+    return out
+
+
+def _oracle_glype(request, upstream):
+    sys.path.insert(0, str(upstream))
+    import xeHentai.proxy as proxy_module
+    from xeHentai import util
+
+    class FakeResponse:
+        def __init__(self, body, headers=None, status=200):
+            self.status_code = status
+            self.url = request["glype_target"]
+            self._real_url = request["glype_target"]
+            self.headers = dict(headers or {"content-type": "text/html; charset=utf-8"})
+            self._content = body.encode("utf-8")
+
+        @property
+        def content(self):
+            return self._content
+
+        @property
+        def text(self):
+            return self._content.decode("utf-8")
+
+    class FakeSession:
+        def __init__(self, responses):
+            self.headers = {
+                "User-Agent": "xeHentai-test",
+                "Cookie": "a=1",
+            }
+            self.responses = list(responses)
+            self.calls = []
+
+        def request(self, *args, **kwargs):
+            headers = {
+                key.lower(): value for key, value in kwargs.get("headers", {}).items()
+            }
+            self.calls.append(
+                {
+                    "method": args[0],
+                    "url": args[1],
+                    "referer": headers.get("referer"),
+                    "cookie": headers.get("cookie", ""),
+                }
+            )
+            return self.responses.pop(0)
+
+    def run(responses, with_caller_kwargs):
+        session = FakeSession(responses)
+        handler = proxy_module.glype_proxy(
+            request["glype_addr"], lambda addr, **kwargs: (lambda fn: fn)
+        )
+        fn = handler(session)
+        kwargs = {"stream": False, "data": None, "timeout": 3}
+        if with_caller_kwargs:
+            kwargs["allow_redirects"] = False
+        from urllib.parse import urlsplit
+
+        def norm_calls(calls):
+            out_calls = []
+            for call in calls:
+                parsed = urlsplit(call["url"])
+                path = parsed.path + (("?" + parsed.query) if parsed.query else "")
+                referer = call.get("referer")
+                if referer:
+                    referer = urlsplit(referer).path
+                out_calls.append(
+                    {
+                        "method": call["method"],
+                        "path": path,
+                        "referer": referer,
+                        "cookie": call.get("cookie", ""),
+                    }
+                )
+            return out_calls
+
+        try:
+            result = fn("GET", request["glype_target"], **kwargs)
+            return {
+                "exception": None,
+                "status": result.status_code,
+                "text": result._content.decode("utf-8"),
+                "set_cookie": result.headers.get("set-cookie"),
+                "calls": norm_calls(session.calls),
+            }
+        except Exception as error:  # noqa: BLE001
+            return {
+                "exception": type(error).__name__,
+                "calls": norm_calls(session.calls),
+            }
+
+    normal_body = '<a href="/glype/browse.php?u=https%3A%2F%2Fe-hentai.org%2Fg%2F1&b=4&f=norefer">x</a>'
+    normal = run(
+        [
+            FakeResponse(
+                normal_body,
+                {
+                    "content-type": "text/html; charset=utf-8",
+                    "set-cookie": "c[proxy][/][foo]=bar",
+                },
+            )
+        ],
+        True,
+    )
+    ssl_agree = '<input type="hidden" name="action" value="sslagree">'
+    ssl_responses = [
+        lambda: FakeResponse(ssl_agree),
+        lambda: FakeResponse("ok", {"content-type": "text/html", "set-cookie": "s=abc"}),
+        lambda: FakeResponse(
+            normal_body,
+            {
+                "content-type": "text/html; charset=utf-8",
+                "set-cookie": "c[proxy][/][foo]=bar",
+            },
+        ),
+    ]
+    fixed = run([factory() for factory in ssl_responses], False)
+    caller = run([factory() for factory in ssl_responses], True)
+    return {"normal": normal, "sslagree_fixed": fixed, "sslagree_caller": caller}
+
+
+def compare_proxy(cases, oracle, candidate):
+    # Source quirk: CPython raises RuntimeError when `for d in self.disabled`
+    # deletes the current entry, so the reference aborts the first request that
+    # would clean an expired ban. The candidate performs the same cleanup
+    # safely. Both complete states are asserted here; only this step is
+    # excluded from the generic diff and recorded as a delta case.
+    oracle_steps = copy.deepcopy(oracle["steps"])
+    candidate_steps = copy.deepcopy(candidate["steps"])
+    expiry_ok = False
+    if len(oracle_steps) > 19 and len(candidate_steps) > 19:
+        o = oracle_steps[19]
+        c = candidate_steps[19]
+        expiry_ok = (
+            o.get("exception") == "RuntimeError"
+            and o.get("op") == "select"
+            and "selected" not in o
+            and o.get("disabled") == [["socks4a://127.0.0.1:1082", 109.0]]
+            and c.get("op") == "select"
+            and c.get("selected") == "http://127.0.0.1:8081"
+            and c.get("disabled") == [["http://127.0.0.1:8081", 0.0]]
+            and c.get("entries")
+            == [
+                ["http://127.0.0.1:8081", 2, 5],
+                ["socks5h://127.0.0.1:1080", 4, 4],
+                ["socks4a://127.0.0.1:1082", 0, 5],
+            ]
+        )
+        oracle_steps.pop(19)
+        candidate_steps.pop(19)
+        if expiry_ok:
+            # The documented delta changes the subsequent pool snapshot; keep
+            # comparing every later operation result while taking the candidate
+            # state as the post-delta reference.
+            for oracle_step, candidate_step in zip(
+                oracle_steps[19:], candidate_steps[19:]
+            ):
+                oracle_step["entries"] = candidate_step["entries"]
+                oracle_step["disabled"] = candidate_step["disabled"]
+                oracle_step["has_available"] = candidate_step["has_available"]
+    cases["delta.proxy-expiry-cleanup-crash"] = expiry_ok
+    oracle_glype = copy.deepcopy(oracle.get("glype", {}))
+    candidate_glype = copy.deepcopy(candidate.get("glype", {}))
+    glype_normal_oracle = oracle_glype.pop("normal", None)
+    glype_normal_candidate = candidate_glype.pop("normal", None)
+    glype_fixed_oracle = oracle_glype.pop("sslagree_fixed", None)
+    glype_fixed_candidate = candidate_glype.pop("sslagree_fixed", None)
+    glype_caller_oracle = oracle_glype.pop("sslagree_caller", {})
+    glype_caller_candidate = candidate_glype.pop("sslagree_caller", {})
+    diffs, flags = _compare_scenarios(
+        {"steps": oracle_steps}, {"steps": candidate_steps}, "proxy"
+    )
+    glype_flags = {}
+    for name, expected, actual in (
+        ("glype.normal", glype_normal_oracle, glype_normal_candidate),
+        ("glype.sslagree-fixed", glype_fixed_oracle, glype_fixed_candidate),
+    ):
+        section = compare(expected, actual, f"proxy.{name}")
+        diffs.extend(section)
+        glype_flags[name] = not section
+    flags.update(glype_flags)
+    # Reference quirk: the real glype handler passes allow_redirects twice to
+    # its own sslagree follow-up, so CPython raises TypeError after the first
+    # request. The candidate fixes that crash; both complete states are
+    # asserted and the success state must equal the no-caller-kwargs flow.
+    caller_delta_ok = (
+        glype_caller_oracle.get("exception") == "TypeError"
+        and len(glype_caller_oracle.get("calls", [])) == 1
+        and "status" not in glype_caller_oracle
+        and glype_caller_candidate.get("exception") is None
+        and glype_caller_candidate.get("status") == glype_fixed_candidate.get("status")
+        and glype_caller_candidate.get("text") == glype_fixed_candidate.get("text")
+        and glype_caller_candidate.get("calls") == glype_fixed_candidate.get("calls")
+    )
+    cases["delta.proxy-glype-allow-redirects-crash"] = caller_delta_ok
+    _mark_cases(cases, PROXY_CASES, flags)
+    return diffs
+
+
+
+def _transport_norm_port(text, port):
+    return text.replace(str(port), "<PORT>")
+
+
+class _LocalResponseServer:
+    def __init__(self, responses):
+        import socket
+        import threading
+
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.socket.bind(("127.0.0.1", 0))
+        self.socket.listen(len(responses))
+        self.port = self.socket.getsockname()[1]
+        self.requests = []
+        self.thread = threading.Thread(
+            target=self._serve, args=(responses,), daemon=True
+        )
+        self.thread.start()
+
+    def _serve(self, responses):
+        for response in responses:
+            connection, _ = self.socket.accept()
+            request = b""
+            while b"\r\n\r\n" not in request:
+                chunk = connection.recv(4096)
+                if not chunk:
+                    break
+                request += chunk
+            head, _, body = request.partition(b"\r\n\r\n")
+            length = 0
+            for line in head.split(b"\r\n")[1:]:
+                if line.lower().startswith(b"content-length:"):
+                    length = int(line.split(b":", 1)[1].strip())
+            while len(body) < length:
+                chunk = connection.recv(4096)
+                if not chunk:
+                    break
+                body += chunk
+            self.requests.append(head.decode("latin-1") + "\n\n" + body.decode("latin-1"))
+            if b"connection:" not in response.split(b"\r\n\r\n", 1)[0].lower():
+                response = response.replace(
+                    b"\r\n\r\n", b"\r\nConnection: close\r\n\r\n", 1
+                )
+            connection.sendall(response)
+            connection.close()
+
+    def close(self):
+        self.socket.close()
+
+
+def _transport_fake_logger():
+    class Logger:
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: None
+
+    return Logger()
+
+
+def _transport_observe(response, port):
+    return {
+        "status": response.status_code,
+        "url": _transport_norm_port(response.url, port),
+        "real_url": _transport_norm_port(response._real_url, port),
+        "content_length": getattr(response, "content_length", None),
+        "text": getattr(response, "text", "") or "",
+    }
+
+
+def _transport_joined_headers(response):
+    seen = {}
+    order = []
+    for name, value in response.headers.items():
+        key = name.lower()
+        if key not in seen:
+            order.append(key)
+            seen[key] = value
+        else:
+            seen[key] += ", " + value
+    return {"order": order, "joined": seen}
+
+
+def oracle_transport(upstream, request):
+    sys.path.insert(0, str(upstream))
+    from xeHentai import worker as worker_module
+
+    sleeps = []
+    worker_module.time.sleep = lambda seconds: sleeps.append(seconds)
+    worker_module.random.random = lambda: 0.25
+    logger = _transport_fake_logger()
+    out = {}
+
+    def make(retry=1, headers=None):
+        return worker_module.HttpReq(
+            headers or {},
+            proxy=None,
+            proxy_policy=None,
+            retry=retry,
+            timeout=3,
+            logger=logger,
+            tname="compat",
+        )
+
+    # Redirect chain.
+    final_body = "last"
+    final = _LocalResponseServer(
+        [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nlast",
+        ]
+    )
+    start = _LocalResponseServer(
+        [
+            (
+                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:%d/final\r\n"
+                "Content-Length: 0\r\n\r\n" % final.port
+            ).encode("ascii"),
+        ]
+    )
+    response = make().request(
+        "GET", "http://127.0.0.1:%d/start" % start.port, lambda r, suc, fail: r, None, None
+    )
+    redirect = _transport_observe(response, start.port)
+    redirect["url"] = redirect["url"].replace(str(final.port), "<PORT>")
+    redirect["real_url"] = redirect["real_url"].replace(str(final.port), "<PORT>")
+    redirect["hits"] = [1, 1]
+    out["redirect"] = redirect
+
+    # Retry loop with a closed port.
+    import socket
+
+    closed = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    closed.bind(("127.0.0.1", 0))
+    closed_port = closed.getsockname()[1]
+    closed.close()
+    sleeps.clear()
+    response = make(retry=2).request(
+        "GET",
+        "http://127.0.0.1:%d/x" % closed_port,
+        lambda r, suc, fail: r,
+        None,
+        None,
+    )
+    retry = _transport_observe(response, closed_port)
+    retry["sleeps"] = sleeps[:]
+    retry["attempts"] = 2
+    out["retry"] = retry
+
+    # Cookie jar attaches to a second request; explicit Cookie suppresses it.
+    jar = _LocalResponseServer(
+        [
+            b"HTTP/1.1 200 OK\r\nSet-Cookie: a=1; Path=/\r\nContent-Length: 2\r\n\r\nok",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+        ]
+    )
+    req = make()
+    req.request(
+        "GET", "http://127.0.0.1:%d/one" % jar.port, lambda r, suc, fail: r, None, None
+    )
+    req.request(
+        "GET", "http://127.0.0.1:%d/two" % jar.port, lambda r, suc, fail: r, None, None
+    )
+    jar_request = jar.requests[1].lower()
+    cookie_jar = "cookie: a=1" if "cookie: a=1" in jar_request else ""
+    explicit_server = _LocalResponseServer(
+        [
+            b"HTTP/1.1 200 OK\r\nSet-Cookie: a=1; Path=/\r\nContent-Length: 2\r\n\r\nok",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+        ]
+    )
+    req = make(headers={"Cookie": "explicit=1"})
+    req.request(
+        "GET",
+        "http://127.0.0.1:%d/one" % explicit_server.port,
+        lambda r, suc, fail: r,
+        None,
+        None,
+    )
+    req.request(
+        "GET",
+        "http://127.0.0.1:%d/two" % explicit_server.port,
+        lambda r, suc, fail: r,
+        None,
+        None,
+    )
+    explicit_request = explicit_server.requests[1].lower()
+    out["cookies"] = {
+        "jar_cookie": cookie_jar,
+        "explicit_cookie": (
+            "cookie: explicit=1" if "cookie: explicit=1" in explicit_request else ""
+        ),
+        "jar_in_explicit": "a=1" in explicit_request,
+    }
+
+    # Duplicate and ISO-8859-1 header bytes through the requests view.
+    header_server = _LocalResponseServer(
+        [
+            b"HTTP/1.1 200 OK\r\nX-Dup: one\r\nX-Dup: two\r\nX-Latin: caf\xe9\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok",
+        ]
+    )
+    response = make().request(
+        "GET",
+        "http://127.0.0.1:%d/h" % header_server.port,
+        lambda r, suc, fail: r,
+        None,
+        None,
+    )
+    headers = _transport_joined_headers(response)
+    headers["latin"] = response.headers.get("x-latin")
+    out["headers"] = headers
+
+    # POST form data.
+    post_server = _LocalResponseServer(
+        [b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"]
+    )
+    response = make().request(
+        "POST",
+        "http://127.0.0.1:%d/post" % post_server.port,
+        lambda r, suc, fail: r,
+        None,
+        None,
+        data={"a": "1", "b": "two words"},
+    )
+    post_request = post_server.requests[0]
+    post_head, _, post_body = post_request.partition("\n\n")
+    out["post"] = {
+        "status": response.status_code,
+        "method_line": post_head.splitlines()[0],
+        "body": post_body,
+        "content_type": next(
+            (
+                line.split(":", 1)[1].strip()
+                for line in post_head.splitlines()
+                if line.lower().startswith("content-type:")
+            ),
+            None,
+        ),
+    }
+    for server in (final, start, jar, explicit_server, header_server, post_server):
+        server.close()
+    return out
+
+
+def compare_transport(cases, oracle, candidate):
+    diffs, flags = _compare_scenarios(oracle, candidate, "transport")
+    _mark_cases(cases, TRANSPORT_CASES, flags)
+    return diffs
 
 
 def _load_upstream(upstream):
@@ -2072,6 +3176,12 @@ def _mark_cases(cases, mapping, flags):
         cases[case_id] = all(flags.get(scenario, False) for scenario in scenarios)
 
 
+def compare_site(cases, oracle, candidate):
+    diffs, flags = _compare_scenarios(oracle, candidate, "site")
+    _mark_cases(cases, SITE_CASES, flags)
+    return diffs
+
+
 def compare_task_api(cases, oracle, candidate):
     diffs, flags = _compare_scenarios(oracle, candidate, "task-api")
     _mark_cases(cases, TASK_API_CASES, flags)
@@ -2393,6 +3503,94 @@ def self_check(suite, oracle, candidate):
                 ),
             )
         )
+    elif suite == "transport":
+        mutated = copy.deepcopy(candidate)
+        mutated["redirect"]["real_url"] = "mutated"
+        cases = {}
+        compare_transport(cases, oracle, mutated)
+        checks.append(("redirect-history", not cases["worker.redirects"]))
+        mutated = copy.deepcopy(candidate)
+        mutated["retry"]["sleeps"] = [0.618]
+        cases = {}
+        compare_transport(cases, oracle, mutated)
+        checks.append(("retry-backoff", not cases["worker.retry-backoff"]))
+        mutated = copy.deepcopy(candidate)
+        mutated["cookies"]["jar_cookie"] = ""
+        cases = {}
+        compare_transport(cases, oracle, mutated)
+        checks.append(("cookie-jar", not cases["worker.session-cookies"]))
+        mutated = copy.deepcopy(candidate)
+        mutated["headers"]["joined"]["x-dup"] = "one"
+        cases = {}
+        compare_transport(cases, oracle, mutated)
+        checks.append(("duplicate-header", not cases["worker.header-bytes"]))
+        mutated = copy.deepcopy(candidate)
+        mutated["post"]["body"] = "a=1&b=two+words+mutated"
+        cases = {}
+        compare_transport(cases, oracle, mutated)
+        checks.append(("post-body", not cases["worker.post-form"]))
+    elif suite == "proxy":
+        mutated = copy.deepcopy(candidate)
+        mutated["steps"][3]["selected"] = "http://127.0.0.1:8082"
+        cases = {}
+        compare_proxy(cases, oracle, mutated)
+        checks.append(("selection-order", not cases["proxy.pool-order"]))
+        mutated = copy.deepcopy(candidate)
+        mutated["steps"][14]["entries"][0][2] = 0
+        cases = {}
+        compare_proxy(cases, oracle, mutated)
+        checks.append(("failure-count", not cases["proxy.fail-policy"]))
+        mutated = copy.deepcopy(candidate)
+        mutated["steps"][17]["disabled"] = []
+        cases = {}
+        compare_proxy(cases, oracle, mutated)
+        checks.append(("ban-expiry", not cases["proxy.ban-expiry"]))
+        mutated = copy.deepcopy(candidate)
+        mutated["steps"][20]["exception"] = None
+        cases = {}
+        compare_proxy(cases, oracle, mutated)
+        checks.append(("invalid-address", not cases["proxy.add-validation"]))
+        mutated = copy.deepcopy(candidate)
+        mutated["steps"][13]["has_available"] = not mutated["steps"][13]["has_available"]
+        cases = {}
+        compare_proxy(cases, oracle, mutated)
+        checks.append(("inverted-availability", not cases["proxy.has-available"]))
+        mutated = copy.deepcopy(candidate)
+        mutated["glype"]["sslagree_fixed"]["text"] = "mutated"
+        cases = {}
+        compare_proxy(cases, oracle, mutated)
+        checks.append(("glype-rewrite", not cases["proxy.glype-runtime"]))
+    elif suite == "site":
+        mutated = copy.deepcopy(candidate)
+        mutated["login.ok"]["callbacks"] = []
+        cases = {}
+        compare_site(cases, oracle, mutated)
+        checks.append(("callback", not cases["filters.login"]))
+        mutated = copy.deepcopy(candidate)
+        mutated["metadata.ok"]["callbacks"][0][1][0]["total"] = 13
+        cases = {}
+        compare_site(cases, oracle, mutated)
+        checks.append(("metadata-field", not cases["filters.metadata"]))
+        mutated = copy.deepcopy(candidate)
+        mutated["imgurl.invalid-page"]["callbacks"][0][1][0][0] = 1006
+        cases = {}
+        compare_site(cases, oracle, mutated)
+        checks.append(("status-code", not cases["filters.image-link"]))
+        mutated = copy.deepcopy(candidate)
+        mutated["pageurl.none"]["debug"] = "mutated"
+        cases = {}
+        compare_site(cases, oracle, mutated)
+        checks.append(("debug-file", not cases["filters.page"]))
+        mutated = copy.deepcopy(candidate)
+        mutated["download.stream-short"]["stream_exception"] = None
+        cases = {}
+        compare_site(cases, oracle, mutated)
+        checks.append(("stream-abort", not cases["filters.download-response"]))
+        mutated = copy.deepcopy(candidate)
+        mutated["mpv.missing-key"]["callbacks"] = []
+        cases = {}
+        compare_site(cases, oracle, mutated)
+        checks.append(("partial-callbacks", not cases["filters.mpv"]))
     elif suite == "files":
         mutated = copy.deepcopy(candidate)
         mutated["scan"]["tree"][0]["text"] = "mutated"
@@ -2521,6 +3719,74 @@ def run_suite(suite, output_root, upstream, target_dir):
                 diffs = compare_task_api(cases, oracle, candidate)
             else:
                 diffs = compare_files(cases, oracle, candidate)
+        elif suite == "site":
+            oracle_root = root / "oracle-work"
+            candidate_root = root / "candidate-work"
+            oracle_root.mkdir()
+            candidate_root.mkdir()
+            scenarios = site_scenarios()
+            oracle = run_oracle(
+                "site",
+                {"scenarios": scenarios},
+                root,
+                upstream,
+                root / "oracle-site.log",
+                cwd=oracle_root,
+            )
+            candidate = run_probe(
+                "site",
+                {"root": str(candidate_root), "scenarios": scenarios},
+                root,
+                target_dir,
+                root / "probe.log",
+            )
+            cases = {}
+            diffs = compare_site(cases, oracle, candidate)
+        elif suite == "transport":
+            oracle_root = root / "oracle-work"
+            candidate_root = root / "candidate-work"
+            oracle_root.mkdir()
+            candidate_root.mkdir()
+            oracle = run_oracle(
+                "transport",
+                {},
+                root,
+                upstream,
+                root / "oracle-transport.log",
+                cwd=oracle_root,
+            )
+            candidate = run_probe(
+                "transport",
+                {"root": str(candidate_root)},
+                root,
+                target_dir,
+                root / "probe.log",
+            )
+            cases = {}
+            diffs = compare_transport(cases, oracle, candidate)
+        elif suite == "proxy":
+            oracle_root = root / "oracle-work"
+            candidate_root = root / "candidate-work"
+            oracle_root.mkdir()
+            candidate_root.mkdir()
+            scenarios = proxy_scenarios()
+            oracle = run_oracle(
+                "proxy",
+                scenarios,
+                root,
+                upstream,
+                root / "oracle-proxy.log",
+                cwd=oracle_root,
+            )
+            candidate = run_probe(
+                "proxy",
+                scenarios,
+                root,
+                target_dir,
+                root / "probe.log",
+            )
+            cases = {}
+            diffs = compare_proxy(cases, oracle, candidate)
         elif suite == "session":
             # Each side gets its own reference-written fixture tree so absolute
             # paths inside h.json stay valid; the candidate never writes these
@@ -2684,7 +3950,7 @@ def suite_command(args):
         raise CompatError(f"invalid upstream tree: {upstream_path}")
 
     suites = (
-        ["config", "util", "i18n", "worker", "task-api", "session", "files"]
+        ["config", "util", "i18n", "worker", "task-api", "session", "files", "site", "proxy", "transport"]
         if args.suite == "all"
         else [args.suite]
     )
@@ -2737,6 +4003,9 @@ def main(argv=None):
             "task-api",
             "session",
             "files",
+            "site",
+            "proxy",
+            "transport",
             "all",
         ],
     )
@@ -2754,6 +4023,9 @@ def main(argv=None):
             "session",
             "session-fixture",
             "files",
+            "site",
+            "proxy",
+            "transport",
         ],
     )
     parser.add_argument("--locale")

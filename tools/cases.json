@@ -2273,180 +2273,240 @@
       "id": "filters.login",
       "source": "filters.py login",
       "target": "src/filters/ + rss/filters/match.rss",
-      "suite": "filters",
-      "inputs": [],
-      "assertions": [
-        "callback order, values and errors"
+      "suite": "site",
+      "inputs": [
+        "login.ok",
+        "login.postcolor",
+        "login.empty-cookie",
+        "login.missing-header"
       ],
-      "status": "unimplemented",
+      "assertions": [
+        "Callback trace and return for Set-Cookie success, postcolor failure, empty and missing header."
+      ],
+      "status": "implemented",
       "delta": null
     },
     {
       "id": "filters.metadata",
       "source": "filters.py metadata",
       "target": "src/filters/ + rss/filters/match.rss",
-      "suite": "filters",
-      "inputs": [],
-      "assertions": [
-        "callback order, values and errors"
+      "suite": "site",
+      "inputs": [
+        "metadata.ok",
+        "metadata.404",
+        "metadata.600",
+        "metadata.pining",
+        "metadata.ip-ban",
+        "metadata.ip-ban-no-time",
+        "metadata.missing-gj"
       ],
-      "status": "unimplemented",
+      "assertions": [
+        "Status branches, title entities, tags, counts, MPV flag, ban return and errors."
+      ],
+      "status": "implemented",
       "delta": null
     },
     {
       "id": "filters.page",
       "source": "filters.py page parse",
       "target": "src/filters/ + rss/filters/match.rss",
-      "suite": "filters",
-      "inputs": [],
-      "assertions": [
-        "callback order, values and errors"
+      "suite": "site",
+      "inputs": [
+        "pageurl.ok",
+        "pageurl.none"
       ],
-      "status": "unimplemented",
+      "assertions": [
+        "All page URLs in order, debug.htm body on failure, fail code."
+      ],
+      "status": "implemented",
       "delta": null
     },
     {
       "id": "filters.mpv",
       "source": "filters.py MPV",
       "target": "src/filters/ + rss/filters/match.rss",
-      "suite": "filters",
-      "inputs": [],
-      "assertions": [
-        "callback order, values and errors"
+      "suite": "site",
+      "inputs": [
+        "mpv.ok",
+        "mpv.invalid",
+        "mpv.missing-key"
       ],
-      "status": "unimplemented",
+      "assertions": [
+        "Imagelist order, URL construction, invalid JSON and partial-callback KeyError."
+      ],
+      "status": "implemented",
       "delta": null
     },
     {
       "id": "filters.quota",
       "source": "filters.py quota wrapper",
       "target": "src/filters/ + rss/filters/match.rss",
-      "suite": "filters",
-      "inputs": [],
-      "assertions": [
-        "callback order, values and errors"
+      "suite": "site",
+      "inputs": [
+        "quota.403",
+        "quota.600",
+        "quota.509",
+        "quota.length-925",
+        "quota.gif",
+        "quota.small-text",
+        "quota.small-text-no-type"
       ],
-      "status": "unimplemented",
+      "assertions": [
+        "Status/size/509.gif/small-text decision order and (code,real_url,url) tuple."
+      ],
+      "status": "implemented",
       "delta": null
     },
     {
       "id": "filters.image-link",
       "source": "filters.py image link",
       "target": "src/filters/ + rss/filters/match.rss",
-      "suite": "filters",
-      "inputs": [],
-      "assertions": [
-        "callback order, values and errors"
+      "suite": "site",
+      "inputs": [
+        "imgurl.keystamp",
+        "imgurl.style",
+        "imgurl.image-php",
+        "imgurl.original",
+        "imgurl.invalid-page",
+        "imgurl.no-src"
       ],
-      "status": "unimplemented",
+      "assertions": [
+        "keystamp/style fallback, image.php n=, original redirect URLs, invalid page and regex failure."
+      ],
+      "status": "implemented",
       "delta": null
     },
     {
       "id": "filters.download-response",
       "source": "filters.py download response",
       "target": "src/filters/ + rss/filters/match.rss",
-      "suite": "filters",
-      "inputs": [],
-      "assertions": [
-        "callback order, values and errors"
+      "suite": "site",
+      "inputs": [
+        "download.stream",
+        "download.404",
+        "download.zero",
+        "download.size-mismatch",
+        "download.no-stream",
+        "download.stream-ok",
+        "download.stream-short",
+        "download.stream-error"
       ],
-      "status": "unimplemented",
+      "assertions": [
+        "Pre-stream size/404/stream checks and post-stream length/error abort callbacks."
+      ],
+      "status": "implemented",
       "delta": null
     },
     {
       "id": "filters.reset-quota",
       "source": "filters.py reset_quota (no implementation upstream)",
       "target": "src/filters/ + rss/filters/match.rss",
-      "suite": "filters",
-      "inputs": [],
-      "assertions": [
-        "callback order, values and errors"
+      "suite": "site",
+      "inputs": [
+        "reset.no-op"
       ],
-      "status": "unimplemented",
+      "assertions": [
+        "No-op: no callbacks and no fabricated quota recovery."
+      ],
+      "status": "implemented",
       "delta": null
     },
     {
       "id": "proxy.http",
-      "source": "proxy.py http",
-      "target": "src/proxy.rs",
+      "source": "proxy.py http_proxy + worker fixup",
+      "target": "src/proxy.rs + src/worker.rs",
       "suite": "proxy",
-      "inputs": [],
-      "assertions": [
-        "protocol fixture, routing and failure counters"
+      "inputs": [
+        "native m3_transport"
       ],
-      "status": "unimplemented",
+      "assertions": [
+        "http absolute-form request through local proxy; target DNS stays at proxy."
+      ],
+      "status": "implemented",
       "delta": null
     },
     {
       "id": "proxy.https",
-      "source": "proxy.py https",
+      "source": "proxy.py http_proxy CONNECT",
       "target": "src/proxy.rs",
       "suite": "proxy",
-      "inputs": [],
-      "assertions": [
-        "protocol fixture, routing and failure counters"
+      "inputs": [
+        "native m3_transport"
       ],
-      "status": "unimplemented",
+      "assertions": [
+        "HTTPS proxy TLS + CONNECT + target TLS, including https:// outer proxy."
+      ],
+      "status": "implemented",
       "delta": null
     },
     {
       "id": "proxy.socks4",
-      "source": "proxy.py socks4",
+      "source": "proxy.py socks_proxy socks4",
       "target": "src/proxy.rs",
       "suite": "proxy",
-      "inputs": [],
-      "assertions": [
-        "protocol fixture, routing and failure counters"
+      "inputs": [
+        "native m3_transport"
       ],
-      "status": "unimplemented",
+      "assertions": [
+        "Real SOCKS4 handshake with locally resolved IPv4 address."
+      ],
+      "status": "implemented",
       "delta": null
     },
     {
       "id": "proxy.socks4a",
-      "source": "proxy.py socks4a",
+      "source": "proxy.py socks_proxy socks4a",
       "target": "src/proxy.rs",
       "suite": "proxy",
-      "inputs": [],
-      "assertions": [
-        "protocol fixture, routing and failure counters"
+      "inputs": [
+        "native m3_transport"
       ],
-      "status": "unimplemented",
+      "assertions": [
+        "Real SOCKS4a handshake carrying the hostname; local resolver not called."
+      ],
+      "status": "implemented",
       "delta": null
     },
     {
       "id": "proxy.socks5",
-      "source": "proxy.py socks5",
+      "source": "proxy.py socks_proxy socks5",
       "target": "src/proxy.rs",
       "suite": "proxy",
-      "inputs": [],
-      "assertions": [
-        "protocol fixture, routing and failure counters"
+      "inputs": [
+        "native m3_transport"
       ],
-      "status": "unimplemented",
+      "assertions": [
+        "Real SOCKS5 no-auth handshake with locally resolved address."
+      ],
+      "status": "implemented",
       "delta": null
     },
     {
       "id": "proxy.socks5h",
-      "source": "proxy.py socks5h",
+      "source": "proxy.py socks_proxy socks5h",
       "target": "src/proxy.rs",
       "suite": "proxy",
-      "inputs": [],
-      "assertions": [
-        "protocol fixture, routing and failure counters"
+      "inputs": [
+        "native m3_transport"
       ],
-      "status": "unimplemented",
+      "assertions": [
+        "Real SOCKS5h handshake carrying the hostname; local resolver not called."
+      ],
+      "status": "implemented",
       "delta": null
     },
     {
       "id": "proxy.glype",
-      "source": "proxy.py glype",
-      "target": "src/proxy.rs",
+      "source": "proxy.py glype_proxy",
+      "target": "src/proxy.rs + rss/filters/match.rss",
       "suite": "proxy",
-      "inputs": [],
-      "assertions": [
-        "protocol fixture, routing and failure counters"
+      "inputs": [
+        "native m3_transport"
       ],
-      "status": "unimplemented",
+      "assertions": [
+        "Glype URL encoding/referer/cookies/sslagree/text rewrite/error div/403 binary stream."
+      ],
+      "status": "implemented",
       "delta": null
     },
     {
@@ -2736,6 +2796,216 @@
         "client_impact": "one tampered task no longer fails startup or drops cookies; a legal external per-task root from a previous run must still be selected in config at startup because h.json cannot grant authority",
         "regression": "session_skips_an_unauthorized_task_and_keeps_the_valid_state; session_boundary_checks_use_components_and_canonical_paths; session_isolates_an_unsafe_task_and_preserves_every_legal_field; session_legacy_cookie_and_legal_tasks_survive_an_unsafe_task; entry_point_skips_an_unsafe_session_task"
       }
+    },
+    {
+      "id": "proxy.pool-order",
+      "source": "proxy.py Pool",
+      "target": "src/proxy.rs",
+      "suite": "proxy",
+      "inputs": [
+        "scripts"
+      ],
+      "assertions": [
+        "Insertion order, first-available selection and add replacement/reset counts."
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "proxy.fail-policy",
+      "source": "proxy.py Pool",
+      "target": "src/proxy.rs",
+      "suite": "proxy",
+      "inputs": [
+        "scripts"
+      ],
+      "assertions": [
+        "trace weights, MAX_FAIL=5 disable policy and permanent disabled marker."
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "proxy.ban-expiry",
+      "source": "proxy.py Pool",
+      "target": "src/proxy.rs",
+      "suite": "proxy",
+      "inputs": [
+        "scripts"
+      ],
+      "assertions": [
+        "not_good expire timestamps, disabled snapshots and has_available inverse meaning."
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "proxy.add-validation",
+      "source": "proxy.py Pool",
+      "target": "src/proxy.rs",
+      "suite": "proxy",
+      "inputs": [
+        "scripts"
+      ],
+      "assertions": [
+        "socks4/4a/5/5h, http/https and glype address classification plus ValueError."
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "proxy.has-available",
+      "source": "proxy.py Pool",
+      "target": "src/proxy.rs",
+      "suite": "proxy",
+      "inputs": [
+        "scripts"
+      ],
+      "assertions": [
+        "has_available_proxies returns true only when the pool is empty of usable proxies."
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "delta.proxy-expiry-cleanup-crash",
+      "source": "proxy.py Pool",
+      "target": "src/proxy.rs",
+      "suite": "proxy",
+      "inputs": [
+        "scripts"
+      ],
+      "assertions": [
+        "CPython mutating-dict RuntimeError on ban-expiry cleanup vs safe candidate recovery; both full states asserted."
+      ],
+      "status": "delta",
+      "delta": "Reference raises RuntimeError when expired disabled entries are deleted during dict iteration; candidate removes them safely. Full reference failure state and candidate recovery state are separately asserted."
+    },
+    {
+      "id": "proxy.fallback-ip",
+      "source": "const.py FALLBACK_IP_MAP + worker.py FallbackIpAdapter",
+      "target": "src/worker.rs",
+      "suite": "proxy",
+      "inputs": [
+        "native m3_transport"
+      ],
+      "assertions": [
+        "Fallback IP connects over TLS with original Host/SNI and skips DNS."
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "proxy.policy",
+      "source": "util.get_proxy_policy",
+      "target": "src/worker.rs + src/util/mod.rs",
+      "suite": "proxy",
+      "inputs": [
+        "native m3_transport"
+      ],
+      "assertions": [
+        "proxy_image_only/image policy selects per-hop route; image-only proxies images, not webpages."
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "worker.redirects",
+      "source": "worker.py HttpReq.request manual redirects",
+      "target": "src/worker.rs",
+      "suite": "transport",
+      "inputs": [
+        "native m3_transport"
+      ],
+      "assertions": [
+        "302 chain: final/real URL history and no automatic follow."
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "worker.retry-backoff",
+      "source": "worker.py HttpReq.request retry/backoff",
+      "target": "src/worker.rs",
+      "suite": "transport",
+      "inputs": [
+        "native m3_transport"
+      ],
+      "assertions": [
+        "Two connection attempts, random+0.618 sleeps and _FakeResponse 600."
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "worker.session-cookies",
+      "source": "worker.py requests.Session cookie semantics",
+      "target": "src/worker.rs",
+      "suite": "transport",
+      "inputs": [
+        "native m3_transport"
+      ],
+      "assertions": [
+        "Set-Cookie jar joins a later request; explicit Cookie header suppresses jar."
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "worker.header-bytes",
+      "source": "requests response header view",
+      "target": "src/worker.rs",
+      "suite": "transport",
+      "inputs": [
+        "native m3_transport"
+      ],
+      "assertions": [
+        "Duplicate header join order and ISO-8859-1 header bytes retained."
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "worker.post-form",
+      "source": "worker.py HttpReq.request data form",
+      "target": "src/worker.rs",
+      "suite": "transport",
+      "inputs": [
+        "native m3_transport"
+      ],
+      "assertions": [
+        "POST form body, method line and content type."
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "proxy.glype-runtime",
+      "source": "proxy.py glype_proxy",
+      "target": "src/proxy.rs + src/worker.rs",
+      "suite": "proxy",
+      "inputs": [
+        "glype scenarios"
+      ],
+      "assertions": [
+        "URL encoding, Referer, c[site] cookies, sslagree retry/cookie and text rewrite."
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "delta.proxy-glype-allow-redirects-crash",
+      "source": "proxy.py glype_proxy",
+      "target": "src/proxy.rs + src/worker.rs",
+      "suite": "proxy",
+      "inputs": [
+        "glype scenarios"
+      ],
+      "assertions": [
+        "Both complete caller-shaped states asserted separately."
+      ],
+      "status": "delta",
+      "delta": "Reference glype sslagree follow-up passes allow_redirects twice and raises TypeError after the first request; candidate omits the duplicate and completes with the same cookie/text state as the no-kwargs flow."
     }
   ],
   "oracle": {

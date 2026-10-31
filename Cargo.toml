@@ -14,13 +14,26 @@ path = "src/main.rs"
 pd-vm = { git = "https://github.com/rustscript-lang/rustscript.git", rev = "cdb0b798d631cd7ffab6dfed3fe4b69381ed3340", default-features = false, features = ["runtime"] }
 regex = "1"
 rust-i18n = "4"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "io-util", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "io-util", "time", "fs"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 indexmap = "2"
 uuid = { version = "1", features = ["v4"] }
 zip = { version = "2.4", default-features = false }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+http = "1"
+bytes = "1"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12", "logging"] }
+webpki-roots = "1"
+url = "2"
+fastrand = "2"
+httparse = "1"
+percent-encoding = "2"
 
 [dev-dependencies]
 tempfile = "3"
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }

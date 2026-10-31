@@ -1,0 +1,690 @@
+use json;
+
+// Page filters from the fixed Python reference (`xeHentai/filters.py:15-268`).
+//
+// Every branch below is a direct migration of the reference function. Native
+// Rust supplies the response view, the regex/JSON primitives and the Task/file
+// side effects named by the returned result; it does not pre-parse pages.
+
+struct PageResponse {
+    status: int,
+    url: string,
+    real_url: string,
+    content_length: int,
+    text: string,
+    headers: [[string]],
+    ori: bool,
+    has_stream: bool,
+}
+
+struct Meta {
+    gjname: string,
+    gnname: string,
+    total: int,
+    finished: int,
+    tags: [string],
+    thumbnail_cnt: int,
+    use_multipage_viewer: bool,
+}
+
+struct LoginResult {
+    outcome: string,
+    cookies: [[string]],
+    message: string?,
+    exception: string?,
+}
+
+struct MetadataResult {
+    outcome: string,
+    fail_code: int?,
+    ban: string?,
+    meta: Meta?,
+    exception: string?,
+}
+
+struct PageResult {
+    outcome: string,
+    urls: [string],
+    fail_code: int?,
+    debug_text: string?,
+    exception: string?,
+}
+
+struct ImgResult {
+    outcome: string,
+    code: int?,
+    real_url: string?,
+    url: string?,
+    image_url: string?,
+    reload_url: string?,
+    filename: string?,
+    exception: string?,
+}
+
+struct DownloadResult {
+    outcome: string,
+    code: int?,
+    real_url: string?,
+    url: string?,
+    exception: string?,
+}
+
+struct StreamResult {
+    outcome: string,
+    code: int?,
+    real_url: string?,
+    url: string?,
+}
+
+// --- fixed reference constants -------------------------------------------
+
+fn restr_site() -> string {
+    "https*://(?:[g.]*e-|ex)hentai\\.org"
+}
+
+fn re_index() -> string {
+    ".+/(\\d+)/([^/]+)/*"
+}
+
+fn re_imghash() -> string {
+    "/([a-f0-9]{40})-(\\d+)-(\\d+)-(\\d+)-([a-z]{0,4})"
+}
+
+// --- small language helpers ----------------------------------------------
+
+fn digit_value(text: string) -> int {
+    match text {
+        "0" => 0,
+        "1" => 1,
+        "2" => 2,
+        "3" => 3,
+        "4" => 4,
+        "5" => 5,
+        "6" => 6,
+        "7" => 7,
+        "8" => 8,
+        "9" => 9,
+        _ => -1,
+    }
+}
+
+fn digit_int(text: string) -> int {
+    let mut out = 0;
+    let mut index = 0;
+    while index < text.length {
+        let digit = digit_value(text[index:(index + 1)]);
+        if digit < 0 {
+            out = 0;
+            index = text.length;
+        } else {
+            out = out * 10 + digit;
+            index = index + 1;
+        }
+    }
+    out
+}
+
+fn contains(text: string, needle: string) -> bool {
+    let needle_len = needle.length;
+    let text_len = text.length;
+    let mut found = false;
+    if needle_len == 0 {
+        found = true;
+    } else if text_len >= needle_len {
+        let limit = text_len - needle_len + 1;
+        let mut index = 0;
+        while index < limit {
+            if text[index:(index + needle_len)] == needle {
+                found = true;
+                break;
+            }
+            index = index + 1;
+        }
+    }
+    found
+}
+
+fn starts_with(text: string, prefix: string) -> bool {
+    let mut out = false;
+    if text.length >= prefix.length {
+        if text[0:prefix.length] == prefix {
+            out = true;
+        }
+    }
+    out
+}
+
+fn header_value(headers: [[string]], name: string) -> string {
+    let value = flt::header_get(headers, name);
+    let out = match value {
+        null => "",
+        _ => value.unwrap_or(""),
+    };
+    out
+}
+
+fn header_present(headers: [[string]], name: string) -> bool {
+    let value = flt::header_get(headers, name);
+    let out = match value {
+        null => false,
+        _ => true,
+    };
+    out
+}
+
+// `%d` conversion used by the reference MPV URL format.
+fn str_of_int(value: int) -> string {
+    json::encode(value)
+}
+
+// --- login ----------------------------------------------------------------
+
+fn login_cookie(pattern: string, header: string) -> string {
+    let found = flt::find_all(pattern, header);
+    let mut out = "";
+    if found.length > 0 {
+        let row = &found[0];
+        out = row[1];
+    }
+    out
+}
+
+pub fn flt_login(page: PageResponse) -> LoginResult {
+    let raw = flt::header_get(page.headers, "set-cookie");
+    let mut outcome = "ok";
+    let mut cookies: [[string]] = [];
+    let mut message: string? = null;
+    let mut exception: string? = null;
+    if raw == null {
+        outcome = "exception";
+        exception = "TypeError";
+        message = "'NoneType' object is not iterable";
+    } else {
+            let header = raw.unwrap_or("");
+            let member = login_cookie("ipb_member_id=(.*?);", header);
+            let password = login_cookie("ipb_pass_hash=(.*?);", header);
+            if member.length == 0 || password.length == 0 {
+                let errors = flt::find_all("<span class=\"postcolor\">([^<]+)</span>", page.text);
+                outcome = "fail";
+                if errors.length > 0 {
+                    let row = &errors[0];
+                    message = row[1];
+                } else {
+                    message = "ex: list index out of range";
+                }
+            } else {
+                cookies[cookies.length] = ["ipb_member_id", member];
+                cookies[cookies.length] = ["ipb_pass_hash", password];
+            }
+    }
+    {
+        outcome: outcome,
+        cookies: cookies,
+        message: message,
+        exception: exception,
+    }
+}
+
+// --- metadata -------------------------------------------------------------
+
+fn find_first(pattern: string, text: string) -> string {
+    let found = flt::find_all(pattern, text);
+    let mut out = "";
+    if found.length > 0 {
+        let row = &found[0];
+        out = row[1];
+    }
+    out
+}
+
+pub fn flt_metadata(page: PageResponse) -> MetadataResult {
+    let mut outcome = "ok";
+    let mut fail_code: int? = null;
+    let mut ban: string? = null;
+    let mut exception: string? = null;
+    let mut meta: Meta? = null;
+
+    if page.status == 600 {
+        outcome = "fail";
+        fail_code = 1009;
+    } else if page.status == 404 {
+        outcome = "fail";
+        fail_code = 1004;
+    } else if flt::match_prefix("This gallery is pining for the fjords", page.text) {
+        outcome = "fail";
+        fail_code = 1002;
+    } else if flt::match_prefix("Your IP address has been temporarily banned", page.text) {
+        outcome = "fail";
+        fail_code = 1010;
+        let expires = find_first("The ban expires in (.+)", page.text);
+        if expires.length == 0 {
+            exception = "IndexError";
+        } else {
+            ban = expires;
+        }
+    } else {
+        let gjname = find_first("=\"gj\">(.*?)</h1>", page.text);
+        if gjname.length == 0 {
+            outcome = "exception";
+            exception = "IndexError";
+        } else {
+            let gnname = find_first("=\"gn\">(.*?)</h1>", page.text);
+            if gnname.length == 0 {
+                outcome = "exception";
+                exception = "IndexError";
+            } else {
+                let total_text = find_first("Length:</td><td class=\"gdt2\">(\\d+)\\s+page", page.text);
+                if total_text.length == 0 {
+                    outcome = "exception";
+                    exception = "IndexError";
+                } else {
+                    let showing_groups = flt::find_all(
+                        "Showing (\\d+) - (\\d+) of ([\\d,]+) images",
+                        page.text
+                    );
+                    if showing_groups.length == 0 {
+                        outcome = "exception";
+                        exception = "IndexError";
+                    } else {
+                        let showing_row = &showing_groups[0];
+                        let tags_found = flt::find_all("toggle_tagmenu\\('([^']+)'", page.text);
+                        let mut tags: [string] = [];
+                        for index in 0..tags_found.length {
+                            let row = &tags_found[index];
+                            tags[tags.length] = row[1];
+                        }
+                        let mpv_pattern = "<a href=\"(" + restr_site()
+                            + "/mpv/(\\d+)/[a-f0-9]{10})/#page\\d+\">(?:<div|<img alt=\"\\d+\") title=\"Page";
+                        let mpv_urls = flt::find_all(mpv_pattern, page.text);
+                        let use_mpv = mpv_urls.length > 0;
+                        let meta_value = {
+                            gjname: flt::html_escape(gjname),
+                            gnname: flt::html_escape(gnname),
+                            total: digit_int(total_text),
+                            finished: 0,
+                            tags: tags,
+                            thumbnail_cnt: digit_int(showing_row[2]) - digit_int(showing_row[1]) + 1,
+                            use_multipage_viewer: use_mpv,
+                        };
+                        meta = meta_value;
+                    }
+                }
+            }
+        }
+    }
+    {
+        outcome: outcome,
+        fail_code: fail_code,
+        ban: ban,
+        meta: meta,
+        exception: exception,
+    }
+}
+
+// --- page URLs ------------------------------------------------------------
+
+fn page_pattern() -> string {
+    "<a href=\"(" + restr_site()
+        + "/./[a-f0-9]{10}/\\d+-\\d+)\">(?:<div>)?(?:<div|<img alt=\"\\d+\") title=\"Page"
+}
+
+pub fn flt_pageurl(page: PageResponse) -> PageResult {
+    let picpage = flt::find_all(page_pattern(), page.text);
+    let mut urls: [string] = [];
+    for index in 0..picpage.length {
+        let row = &picpage[index];
+        urls[urls.length] = row[1];
+    }
+    let mut debug_text: string? = null;
+    let mut outcome = "ok";
+    let mut fail_code: int? = null;
+    if picpage.length == 0 {
+        outcome = "fail";
+        fail_code = 1008;
+        debug_text = page.text;
+    }
+    {
+        outcome: outcome,
+        urls: urls,
+        fail_code: fail_code,
+        debug_text: debug_text,
+        exception: null,
+    }
+}
+
+pub fn flt_pageurl_mpv(page: PageResponse) -> PageResult {
+    let imagelists = flt::find_all("imagelist\\s=\\s([^;]+)", page.text);
+    let mut outcome = "ok";
+    let mut urls: [string] = [];
+    let mut fail_code: int? = null;
+    let mut exception: string? = null;
+
+    if imagelists.length == 0 {
+        outcome = "exception";
+        fail_code = 1008;
+        exception = "IndexError";
+    } else {
+        let imagelist_row = &imagelists[0];
+        let parsed = flt::json_parse(imagelist_row[1]);
+        let mut entries: [map<string>] = [];
+        let mut parsed_ok = false;
+        if parsed == null {
+            parsed_ok = false;
+        } else {
+            entries = parsed.unwrap_or([]);
+            parsed_ok = true;
+        }
+        if !parsed_ok {
+            outcome = "exception";
+            fail_code = 1008;
+            exception = "TypeError";
+        } else {
+            let base_matches = flt::find_all("https?://[^/]+", page.real_url);
+            let mut base_url = "";
+            if base_matches.length > 0 {
+                let base_row = &base_matches[0];
+                base_url = base_row[0];
+            }
+            if base_url.length == 0 {
+                outcome = "exception";
+                exception = "IndexError";
+            } else {
+                let index_matches = flt::find_all(re_index(), page.real_url);
+                if index_matches.length == 0 {
+                    outcome = "exception";
+                    exception = "IndexError";
+                } else {
+                    let index_row = &index_matches[0];
+                    let gid = index_row[1];
+                    let mut emitted = 0;
+                    let mut failed = false;
+                    for index in 0..entries.length {
+                        let entry = &entries[index];
+                        if entry.has("k") {
+                            urls[urls.length] = base_url + "/s/" + entry["k"] + "/" + gid
+                                + "-" + str_of_int(index + 1);
+                            emitted = emitted + 1;
+                        } else {
+                            failed = true;
+                            break;
+                        }
+                    }
+                    if failed {
+                        outcome = "exception";
+                        exception = "KeyError";
+                    }
+                }
+            }
+        }
+    }
+    {
+        outcome: outcome,
+        urls: urls,
+        fail_code: fail_code,
+        debug_text: null,
+        exception: exception,
+    }
+}
+
+// --- quota wrapper --------------------------------------------------------
+
+fn image_size(url: string) -> int? {
+    let found = flt::find_all(re_imghash(), url);
+    let mut out: int? = null;
+    if found.length > 0 {
+        let row = &found[found.length - 1];
+        if row.length > 2 {
+            out = digit_int(row[2]);
+        }
+    }
+    out
+}
+
+fn quota_content_length(content_length: int) -> bool {
+    content_length == 925 || content_length == 28658 || content_length == 144
+        || content_length == 210 || content_length == 1009
+}
+
+// Returns 0 to continue, otherwise the reference quota error code.
+fn quota_code(page: PageResponse) -> int {
+    let size = image_size(page.url);
+    let mut size_differs = true;
+    if size == null {
+        size_differs = true;
+    } else {
+        size_differs = size.unwrap_or(0) != page.content_length;
+    }
+    let mut out = 0;
+    if page.status == 600 {
+        out = 1009;
+    } else if page.status == 403 {
+        out = 1007;
+    } else if page.status == 509
+        || (size_differs
+            && (quota_content_length(page.content_length)
+                || contains(page.url, "/509.gif")
+                || contains(page.real_url, "/509.gif"))) {
+        out = 1006;
+    } else if page.content_length < 200
+        && header_present(page.headers, "content-type")
+        && starts_with(header_value(page.headers, "content-type"), "text")
+        && flt::find_all("exceeded your image viewing limits", page.text).length > 0 {
+        out = 1006;
+    }
+    out
+}
+
+fn img_fail(code: int, page: PageResponse) -> ImgResult {
+    {
+        outcome: "fail",
+        code: code,
+        real_url: page.real_url,
+        url: page.url,
+        image_url: null,
+        reload_url: null,
+        filename: null,
+        exception: null,
+    }
+}
+
+// --- image URL ------------------------------------------------------------
+
+fn img_ok(image_url: string, reload_url: string, filename: string) -> ImgResult {
+    {
+        outcome: "ok",
+        code: null,
+        real_url: null,
+        url: null,
+        image_url: image_url,
+        reload_url: reload_url,
+        filename: filename,
+        exception: null,
+    }
+}
+
+pub fn flt_imgurl(page: PageResponse) -> ImgResult {
+    let quota = quota_code(page);
+    if quota != 0 => {
+        img_fail(quota, page)
+    } else if flt::match_prefix("Invalid page", page.text) => {
+        img_fail(1005, page)
+    } else => {
+        let src_keystamp = flt::find_all("src=\"([^\"]+keystamp[^\"]+)\"", page.text);
+        let mut src = "";
+        if src_keystamp.length > 0 {
+            let row = &src_keystamp[0];
+            src = row[1];
+        } else {
+            let src_style = flt::find_all("src=\"([^\"]+)\"\\s+style=\"", page.text);
+            if src_style.length > 0 {
+                let row = &src_style[0];
+                src = row[1];
+            }
+        }
+        if src.length == 0 => {
+            img_fail(1013, page)
+        } else => {
+            let picurl = flt::html_escape(src);
+            let filename_found = flt::find_all(
+                "</a></div><div>(.*?) ::.+::.+</di",
+                page.text
+            );
+            let mut filename = "";
+            if filename_found.length > 0 {
+                let row = &filename_found[0];
+                filename = row[1];
+            }
+            if filename.length == 0 => {
+                img_fail(1013, page)
+            } else => {
+                if contains(filename, "image.php") {
+                    let name_found = flt::find_all("n=(.+)", picurl);
+                    if name_found.length > 0 {
+                        let row = &name_found[0];
+                        filename = row[1];
+                    }
+                }
+                let fmt_found = flt::find_all(".*?\\.([a-zA-Z]+)", filename);
+                let index_found = flt::find_all(".+/(\\d+)-(\\d*)", page.real_url);
+                let nl_found = flt::find_all("return nl\\('([a-zA-Z\\d\\-]+)'\\)", page.text);
+                if fmt_found.length == 0 || index_found.length == 0 || nl_found.length == 0 => {
+                    img_fail(1013, page)
+                } else => {
+                    let nl_row = &nl_found[0];
+                    let js_nl = nl_row[1];
+                    let full_found = flt::find_all(
+                        "class=\"mr\".+<a href=\"(.+)\"\\s*>Download original",
+                        page.text
+                    );
+                    let mut fullurl = picurl;
+                    if full_found.length > 0 {
+                        let row = &full_found[0];
+                        fullurl = flt::html_escape(row[1]);
+                    }
+                    let reload_separator = if contains(page.real_url, "?") => {
+                        "&"
+                    } else => {
+                        "?"
+                    };
+                    let reload_url = page.real_url + reload_separator + "nl=" + js_nl;
+                    if page.ori => {
+                        let full_separator = if contains(fullurl, "?") => {
+                            "&"
+                        } else => {
+                            "?"
+                        };
+                        let full_redirect = fullurl + full_separator + "redirect=" + page.url;
+                        let reload_separator2 = if contains(reload_url, "?") => {
+                            "&"
+                        } else => {
+                            "?"
+                        };
+                        let reload_redirect = reload_url + reload_separator2 + "redirect="
+                            + page.url;
+                        img_ok(full_redirect, reload_redirect, filename)
+                    } else => {
+                        img_ok(picurl, reload_url, filename)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// --- download response ----------------------------------------------------
+
+fn download_fail(code: int, page: PageResponse) -> DownloadResult {
+    {
+        outcome: "fail",
+        code: code,
+        real_url: page.real_url,
+        url: page.url,
+        exception: null,
+    }
+}
+
+pub fn flt_download(page: PageResponse) -> DownloadResult {
+    let quota = quota_code(page);
+    if quota != 0 => {
+        download_fail(quota, page)
+    } else if page.status == 404 => {
+        download_fail(1011, page)
+    } else => {
+        let found = flt::find_all(re_imghash(), page.url);
+        let mut size_mismatch = false;
+        if found.length > 0 {
+            let row = &found[found.length - 1];
+            if row.length > 2 {
+                if digit_int(row[2]) != page.content_length {
+                    size_mismatch = true;
+                }
+            }
+        }
+        if page.content_length == 0 || size_mismatch => {
+            download_fail(1012, page)
+        } else if !page.has_stream => {
+            download_fail(1014, page)
+        } else => {
+            {
+                outcome: "stream",
+                code: null,
+                real_url: null,
+                url: null,
+                exception: null,
+            }
+        }
+    }
+}
+
+// After the native body ends, decide whether the observed byte count/read
+// error makes the file broken and aborts the staging file.
+pub fn flt_stream_result(input: PageResponse, actual_length: int, read_error: string) -> StreamResult {
+    let mut broken = false;
+    if read_error.length > 0 {
+        broken = true;
+    }
+    if actual_length != input.content_length {
+        broken = true;
+    }
+    if broken => {
+        {
+            outcome: "broken",
+            code: 1012,
+            real_url: input.real_url,
+            url: input.url,
+        }
+    } else => {
+        {
+            outcome: "ok",
+            code: null,
+            real_url: null,
+            url: null,
+        }
+    }
+}
+
+pub fn dbg_json(text: string) -> string {
+    let parsed = flt::json_parse(text);
+    let mut out = "null";
+    if parsed == null {
+        out = "null";
+    } else {
+        let list: [map<string>] = parsed.unwrap_or([]);
+        let mut joined = "";
+        for index in 0..list.length {
+            let entry = &list[index];
+            if entry.has("k") {
+                joined = joined + entry["k"];
+            }
+        }
+        out = joined;
+    }
+    out
+}
+
+pub fn flt_reset_quota(page: PageResponse) -> bool {
+    // filters.py:265-268 is a no-op; no quota state is fabricated.
+    false
+}
+
+0;

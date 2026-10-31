@@ -477,21 +477,29 @@ pub(super) fn open_new_file(path: &Path) -> Result<File, TaskError> {
         })
 }
 
+/// A response body staged in the task directory, before publish.
+pub struct StagedSave {
+    pub stage: PathBuf,
+    pub dest: PathBuf,
+    fid: i64,
+    fpath: PathBuf,
+}
+
+/// Result of the pre-stream save checks.
+pub enum SaveStart {
+    AlreadyDone(PathBuf),
+    Staged(StagedSave),
+}
+
 impl Task {
-    /// Reference `save_file`: stream the response to a staging file, then
-    /// publish it and its pending duplicate copies. The stream and the
-    /// cancellation callback run while the file lock is free.
-    pub fn save_file<F, C>(
+    /// Reference `save_file` pre-stream half: resolve the destination and
+    /// create a same-filesystem staging file. Shared by the synchronous test
+    /// helper and the real async transport consumer.
+    pub fn begin_staged_save(
         &mut self,
         imgurl: &str,
         redirect_url: &str,
-        mut chunks: F,
-        cancel: C,
-    ) -> Result<Option<PathBuf>, TaskError>
-    where
-        F: FnMut() -> Option<Vec<u8>>,
-        C: Fn() -> bool,
-    {
+    ) -> Result<SaveStart, TaskError> {
         let fpath = self.get_fpath()?;
         let img_hash = {
             let _guard = self.files.lock();
@@ -516,46 +524,25 @@ impl Task {
             .files
             .child_file(&fpath, &self.get_fidpad(fid, "jpg")?)?;
         if path_exists(&dest)? && file_size(&dest)? > 0 {
-            return Ok(Some(dest));
+            return Ok(SaveStart::AlreadyDone(dest));
         }
-
         let stage = create_stage(&fpath)?;
-        let streamed = (|| -> Result<bool, TaskError> {
-            let mut file = File::options()
-                .write(true)
-                .truncate(true)
-                .open(&stage)
-                .map_err(|source| TaskError::Io {
-                    path: stage.clone(),
-                    source,
-                })?;
-            while let Some(chunk) = chunks() {
-                if cancel() {
-                    return Ok(false);
-                }
-                file.write_all(&chunk).map_err(|source| TaskError::Io {
-                    path: stage.clone(),
-                    source,
-                })?;
-            }
-            file.flush().map_err(|source| TaskError::Io {
-                path: stage.clone(),
-                source,
-            })?;
-            Ok(true)
-        })();
-        match streamed {
-            Ok(true) => {}
-            Ok(false) => {
-                let _ = fs::remove_file(&stage);
-                return Ok(None);
-            }
-            Err(error) => {
-                let _ = fs::remove_file(&stage);
-                return Err(error);
-            }
-        }
+        Ok(SaveStart::Staged(StagedSave {
+            stage,
+            dest,
+            fid,
+            fpath,
+        }))
+    }
 
+    /// Publish a fully written staging file and its pending duplicate copies.
+    pub fn commit_staged_save(&mut self, staged: StagedSave) -> Result<PathBuf, TaskError> {
+        let StagedSave {
+            stage,
+            dest,
+            fid,
+            fpath,
+        } = staged;
         let published = {
             let files = Arc::clone(&self.files);
             let _guard = files.lock();
@@ -582,7 +569,68 @@ impl Task {
             let _ = fs::remove_file(&stage);
             return Err(error);
         }
-        Ok(Some(dest))
+        Ok(dest)
+    }
+
+    /// Remove a staging file without publishing.
+    pub fn abort_staged_save(staged: StagedSave) {
+        let _ = fs::remove_file(&staged.stage);
+    }
+
+    /// Reference `save_file`: stream the response to a staging file, then
+    /// publish it and its pending duplicate copies. The stream and the
+    /// cancellation callback run while the file lock is free.
+    pub fn save_file<F, C>(
+        &mut self,
+        imgurl: &str,
+        redirect_url: &str,
+        mut chunks: F,
+        cancel: C,
+    ) -> Result<Option<PathBuf>, TaskError>
+    where
+        F: FnMut() -> Option<Vec<u8>>,
+        C: Fn() -> bool,
+    {
+        let staged = match self.begin_staged_save(imgurl, redirect_url)? {
+            SaveStart::AlreadyDone(dest) => return Ok(Some(dest)),
+            SaveStart::Staged(staged) => staged,
+        };
+        let streamed = (|| -> Result<bool, TaskError> {
+            let mut file = File::options()
+                .write(true)
+                .truncate(true)
+                .open(&staged.stage)
+                .map_err(|source| TaskError::Io {
+                    path: staged.stage.clone(),
+                    source,
+                })?;
+            while let Some(chunk) = chunks() {
+                if cancel() {
+                    return Ok(false);
+                }
+                file.write_all(&chunk).map_err(|source| TaskError::Io {
+                    path: staged.stage.clone(),
+                    source,
+                })?;
+            }
+            file.flush().map_err(|source| TaskError::Io {
+                path: staged.stage.clone(),
+                source,
+            })?;
+            Ok(true)
+        })();
+        match streamed {
+            Ok(true) => {}
+            Ok(false) => {
+                Self::abort_staged_save(staged);
+                return Ok(None);
+            }
+            Err(error) => {
+                Self::abort_staged_save(staged);
+                return Err(error);
+            }
+        }
+        self.commit_staged_save(staged).map(Some)
     }
 
     /// Reference `rename_fname`, including the reference collision counter

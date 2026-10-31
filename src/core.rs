@@ -11,19 +11,24 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use indexmap::IndexMap;
 use regex::Regex;
 use serde::Serialize;
 use serde::ser::{SerializeMap, Serializer};
 use serde_json::{Map as JsonMap, Value};
+use tokio::io::AsyncWriteExt;
 
 use crate::config::Config;
 use crate::r#const as consts;
-use crate::task::{Task, TaskConfig, TaskError, TaskLoadError};
+use crate::filters::{self, Filters, PageResponse};
+use crate::proxy::Pool;
+use crate::task::{SaveStart, Task, TaskConfig, TaskError, TaskLoadError};
 use crate::task::{boundary_path, normalize, path_within, resolve_dir};
 use crate::util;
 use crate::util::logger::Logger;
+use crate::worker::{FetchedResponse, Session, SessionConfig};
 
 pub const SESSION_FILE: &str = "h.json";
 pub const LEGACY_COOKIE_FILE: &str = ".ehentai.cookie";
@@ -80,6 +85,10 @@ pub enum AppError {
     UnknownConfig(String),
     Unavailable(&'static str),
     Session(SessionError),
+    Filter(String),
+    Http(String),
+    Download(String),
+    State(String),
 }
 
 impl std::fmt::Display for AppError {
@@ -89,6 +98,10 @@ impl std::fmt::Display for AppError {
             Self::UnknownConfig(key) => write!(f, "unknown global configuration key {key}"),
             Self::Unavailable(what) => write!(f, "not implemented in this milestone: {what}"),
             Self::Session(error) => write!(f, "{error}"),
+            Self::Filter(message) => write!(f, "filter error: {message}"),
+            Self::Http(message) => write!(f, "http error: {message}"),
+            Self::Download(message) => write!(f, "download error: {message}"),
+            Self::State(message) => write!(f, "task state error: {message}"),
         }
     }
 }
@@ -170,6 +183,44 @@ pub struct App {
     /// arguments. A value read from h.json never extends this set.
     trusted_roots: Vec<PathBuf>,
     guid_source: Box<dyn GuidSource>,
+    /// Shared proxy pool, created on the first non-empty proxy update.
+    proxy: Option<Arc<Mutex<Pool>>>,
+    /// The native session reused by task steps; a header/login change drops it
+    /// so the next request is prepared from the updated App headers.
+    session: Option<Session>,
+    /// Transport settings used when a session is created. Production keeps the
+    /// default; local protocol tests inject their test CA/DNS mapping here.
+    session_config: SessionConfig,
+}
+
+#[derive(Debug)]
+pub enum ImageScan {
+    Empty,
+    Enqueued {
+        image_url: String,
+        filename: String,
+    },
+    Failed {
+        fail_code: i64,
+        real_url: String,
+        url: String,
+    },
+    Exception {
+        kind: String,
+    },
+}
+
+#[derive(Debug)]
+pub enum ImageDownload {
+    Empty,
+    AlreadyDone(PathBuf),
+    Saved(PathBuf),
+    Failed {
+        fail_code: i64,
+        real_url: String,
+        url: String,
+    },
+    Aborted,
 }
 
 impl std::fmt::Debug for App {
@@ -184,6 +235,8 @@ impl std::fmt::Debug for App {
             .field("base_dir", &self.base_dir)
             .field("authorized_dir", &self.authorized_dir)
             .field("trusted_roots", &self.trusted_roots)
+            .field("proxy", &self.proxy)
+            .field("session", &self.session.is_some())
             .finish()
     }
 }
@@ -242,6 +295,9 @@ impl App {
             authorized_dir,
             trusted_roots: vec![base_root],
             guid_source,
+            proxy: None,
+            session: None,
+            session_config: SessionConfig::default(),
         };
         // The configured download root is an explicit user choice, so it may
         // be an external absolute directory. A directory read from h.json is
@@ -397,6 +453,7 @@ impl App {
         }
         self.set_cookie_header();
         self.update_login_flag();
+        self.session = None;
         (consts::ERR_NO_ERROR, None)
     }
 
@@ -405,11 +462,6 @@ impl App {
     /// milestone), and it refuses proxy/RPC side effects instead of faking
     /// them.
     pub fn update_config(&mut self, patch: JsonMap<String, Value>) -> Result<(), AppError> {
-        if let Some(Value::Array(proxy)) = patch.get("proxy")
-            && !proxy.is_empty()
-        {
-            return Err(AppError::Unavailable("proxy pool"));
-        }
         if let Some(value) = patch.get("rpc_port")
             && !value.is_null()
             && crate::task::value_truthy(value)
@@ -428,10 +480,26 @@ impl App {
                     let items = value.as_array().ok_or_else(|| {
                         AppError::UnknownConfig(format!("{key} must be an array"))
                     })?;
-                    if !items.is_empty() {
-                        return Err(AppError::Unavailable("proxy pool"));
+                    let mut addresses = Vec::with_capacity(items.len());
+                    for item in items {
+                        let address = item.as_str().ok_or_else(|| {
+                            AppError::UnknownConfig("proxy entries must be strings".into())
+                        })?;
+                        addresses.push(address.to_string());
                     }
-                    self.cfg.proxy = Vec::new();
+                    self.cfg.proxy = addresses.clone();
+                    if !addresses.is_empty() {
+                        let pool = self
+                            .proxy
+                            .get_or_insert_with(|| Arc::new(Mutex::new(Pool::new())));
+                        let mut pool = pool.lock().unwrap();
+                        for address in &addresses {
+                            if let Err(error) = pool.add_proxy(address) {
+                                let message = format!("proxy {address}: {error}");
+                                let _ = self.logger.warning(&message);
+                            }
+                        }
+                    }
                 }
                 "proxy_image" => self.cfg.proxy_image = as_bool(key, value)?,
                 "proxy_image_only" => self.cfg.proxy_image_only = as_bool(key, value)?,
@@ -614,6 +682,564 @@ impl App {
         task.state = task.state.max(consts::TASK_STATE_WAITING);
         self.tasks.push_back(guid.to_string());
         Ok((consts::ERR_NO_ERROR, Some(String::new())))
+    }
+
+    /// Replace the settings used for the next native session. Local protocol
+    /// tests use this to inject a test CA/DNS map; production does not call it.
+    pub fn set_session_config(&mut self, config: SessionConfig) {
+        self.session_config = config;
+        self.session = None;
+    }
+
+    /// Enter the first real task state (`_do_task`'s WAITING -> GET_META)
+    /// without bringing up the M4 scheduler.
+    pub fn start_task(&mut self, guid: &str) -> Result<(), AppError> {
+        self.ensure_task_queues(guid)?;
+        let task = self
+            .all_tasks
+            .get_mut(guid)
+            .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
+        if task.state == consts::TASK_STATE_WAITING {
+            task.state = consts::TASK_STATE_GET_META;
+        }
+        Ok(())
+    }
+
+    /// The shared proxy pool once configuration supplied at least one proxy.
+    pub fn proxy_pool(&self) -> Option<Arc<Mutex<Pool>>> {
+        self.proxy.clone()
+    }
+
+    /// Health/test access: number of pooled proxies and whether any is
+    /// available (the reference's inverted `has_available_proxies` lives on
+    /// [`Pool`] itself).
+    pub fn proxy_count(&self) -> usize {
+        self.proxy
+            .as_ref()
+            .map(|pool| pool.lock().unwrap().proxies.len())
+            .unwrap_or(0)
+    }
+
+    /// The one native session reused across task steps. Header/login changes
+    /// drop it first, which is exactly when the reference would construct a
+    /// new `HttpReq`.
+    pub fn http_session(&mut self, policy: util::ProxyPolicy) -> &mut Session {
+        if self.session.is_none() {
+            let headers = self
+                .headers
+                .iter()
+                .map(|header| (header.name.clone(), header.value.clone()))
+                .collect();
+            self.session = Some(Session::new(
+                headers,
+                self.proxy.clone(),
+                policy,
+                self.session_config.clone(),
+            ));
+        }
+        let session = self.session.as_mut().expect("session");
+        session.proxy_policy = policy;
+        session
+    }
+
+    pub fn ensure_task_queues(&mut self, guid: &str) -> Result<(), AppError> {
+        let task = self
+            .all_tasks
+            .get_mut(guid)
+            .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
+        if task.page_q.is_none() {
+            task.page_q = Some(VecDeque::new());
+        }
+        if task.img_q.is_none() {
+            task.img_q = Some(VecDeque::new());
+        }
+        Ok(())
+    }
+
+    fn page_view(response: &FetchedResponse, ori: bool, has_stream: bool) -> PageResponse {
+        PageResponse {
+            status: response.status,
+            url: response.url.clone(),
+            real_url: response.real_url.clone(),
+            content_length: response.content_length,
+            text: response.text.clone(),
+            headers: response.business_headers(),
+            ori,
+            has_stream,
+        }
+    }
+
+    /// Synthetic login against the real login endpoint. The RSS filter parses
+    /// the Set-Cookie header; only its typed outcome updates App state.
+    pub async fn login_exhentai(
+        &mut self,
+        filters: &mut Filters,
+        username: &str,
+        password: &str,
+    ) -> Result<filters::LoginOutcome, AppError> {
+        if self.has_login {
+            return Ok(filters::LoginOutcome {
+                cookies: Some(self.cookies.clone()),
+                ..Default::default()
+            });
+        }
+        let data = vec![
+            ("UserName".to_string(), username.to_string()),
+            ("returntype".to_string(), "8".to_string()),
+            ("CookieDate".to_string(), "1".to_string()),
+            ("b".to_string(), "d".to_string()),
+            ("bt".to_string(), "pone".to_string()),
+            ("PassWord".to_string(), password.to_string()),
+        ];
+        let policy = util::get_proxy_policy(self.cfg.proxy_image_only, self.cfg.proxy_image);
+        let session = self.http_session(policy);
+        let outcome = session
+            .request(
+                "POST",
+                "https://forums.e-hentai.org/index.php?act=Login&CODE=01",
+                Some(data),
+                false,
+            )
+            .await
+            .map_err(|error| AppError::Http(error.to_string()))?;
+        let view = Self::page_view(&outcome.response, false, false);
+        let login = filters
+            .login_outcome(&view)
+            .map_err(|error| AppError::Filter(error.to_string()))?;
+        if let Some(cookies) = &login.cookies {
+            self.cookies = cookies.clone();
+            self.set_cookie_header();
+            self.update_login_flag();
+            self.session = None;
+            let _ = self.save_session();
+            let message = format!("login ok: {}", self.has_login);
+            let _ = self.logger.info(&message);
+        } else if let Some(message) = &login.fail_message {
+            let _ = self.logger.warning(message);
+        } else if let Some(kind) = &login.exception {
+            return Err(AppError::Filter(format!("login raised {kind}")));
+        }
+        Ok(login)
+    }
+
+    /// One `TASK_STATE_GET_META` step: real request -> RSS metadata -> the
+    /// existing `Task::update_meta`/`set_fail` effects.
+    pub async fn fetch_metadata(
+        &mut self,
+        guid: &str,
+        filters: &mut Filters,
+    ) -> Result<bool, AppError> {
+        let (url, state, policy) = {
+            let task = self
+                .all_tasks
+                .get(guid)
+                .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
+            (
+                task.url.clone(),
+                task.state,
+                util::get_proxy_policy(task.config.proxy_image_only, task.config.proxy_image),
+            )
+        };
+        if state != consts::TASK_STATE_GET_META {
+            return Err(AppError::State(format!("task {guid} is not in GET_META")));
+        }
+        let session = self.http_session(policy);
+        let outcome = session
+            .request("GET", &url, None, false)
+            .await
+            .map_err(|error| AppError::Http(error.to_string()))?;
+        let view = Self::page_view(&outcome.response, false, false);
+        let parsed = filters
+            .metadata_outcome(&view)
+            .map_err(|error| AppError::Filter(error.to_string()))?;
+        let task = self
+            .all_tasks
+            .get_mut(guid)
+            .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
+        if let Some(code) = parsed.fail_code {
+            task.set_fail(code);
+            if let Some(ban) = parsed.ban {
+                let message = format!("ip banned for {ban}; task {guid}");
+                let _ = self.logger.warning(&message);
+            }
+        } else if let Some(kind) = parsed.exception {
+            return Err(AppError::Filter(format!("metadata raised {kind}")));
+        } else if let Some(meta) = parsed.meta {
+            let mut map = JsonMap::new();
+            map.insert("gjname".into(), Value::String(meta.gjname));
+            map.insert("gnname".into(), Value::String(meta.gnname));
+            map.insert("total".into(), Value::Number(meta.total.into()));
+            map.insert("finished".into(), Value::Number(meta.finished.into()));
+            map.insert(
+                "tags".into(),
+                Value::Array(meta.tags.into_iter().map(Value::String).collect()),
+            );
+            map.insert(
+                "thumbnail_cnt".into(),
+                Value::Number(meta.thumbnail_cnt.into()),
+            );
+            map.insert(
+                "use_multipage_viewer".into(),
+                Value::Bool(meta.use_multipage_viewer),
+            );
+            task.update_meta(map)?;
+            task.state = consts::TASK_STATE_SCAN_PAGE;
+        }
+        Ok(true)
+    }
+
+    /// One `TASK_STATE_SCAN_PAGE` step. This performs the reference's page
+    /// loop for this state (the parallel worker wrapper remains milestone M4).
+    pub async fn scan_pages(&mut self, guid: &str, filters: &mut Filters) -> Result<(), AppError> {
+        let (url, state, policy) = {
+            let task = self
+                .all_tasks
+                .get(guid)
+                .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
+            (
+                task.url.clone(),
+                task.state,
+                util::get_proxy_policy(task.config.proxy_image_only, task.config.proxy_image),
+            )
+        };
+        if state != consts::TASK_STATE_SCAN_PAGE {
+            return Err(AppError::State(format!("task {guid} is not in SCAN_PAGE")));
+        }
+        {
+            let task = self
+                .all_tasks
+                .get_mut(guid)
+                .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
+            task.scan_downloaded()?;
+            if task.state == consts::TASK_STATE_FINISHED {
+                return Ok(());
+            }
+        }
+        let (use_mpv, total, thumbnails, finished, mpv_url) = {
+            let task = self
+                .all_tasks
+                .get(guid)
+                .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
+            (
+                task.meta
+                    .get("use_multipage_viewer")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                task.meta_i64("total")?,
+                task.meta_i64("thumbnail_cnt")?,
+                task.meta_i64("finished")?,
+                task.mpv_url(),
+            )
+        };
+        let mut failed = false;
+        if !use_mpv {
+            if thumbnails <= 0 {
+                return Err(AppError::State("thumbnail_cnt must be positive".into()));
+            }
+            let pages = (total + thumbnails - 1) / thumbnails;
+            for page_index in 0..pages {
+                let page_url = format!("{url}/?p={page_index}");
+                let session = self.http_session(policy);
+                let outcome = session
+                    .request("GET", &page_url, None, false)
+                    .await
+                    .map_err(|error| AppError::Http(error.to_string()))?;
+                let view = Self::page_view(&outcome.response, false, false);
+                let parsed = filters
+                    .pageurl_outcome(&view)
+                    .map_err(|error| AppError::Filter(error.to_string()))?;
+                if let Some(body) = &parsed.debug_text {
+                    // The reference writes debug.htm in the process cwd and
+                    // swallows write errors. base_dir is the authorized root.
+                    let _ = fs::write(self.base_dir.join("debug.htm"), body);
+                }
+                {
+                    let task = self
+                        .all_tasks
+                        .get_mut(guid)
+                        .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
+                    for page in &parsed.urls {
+                        task.put_page_queue(page)?;
+                    }
+                    if let Some(code) = parsed.fail_code {
+                        task.set_fail(code);
+                        failed = true;
+                    }
+                }
+                if parsed.exception.is_some() || failed {
+                    break;
+                }
+            }
+        } else if finished < total {
+            let session = self.http_session(policy);
+            let outcome = session
+                .request("GET", &mpv_url, None, false)
+                .await
+                .map_err(|error| AppError::Http(error.to_string()))?;
+            let view = Self::page_view(&outcome.response, false, false);
+            let parsed = filters
+                .pageurl_mpv_outcome(&view)
+                .map_err(|error| AppError::Filter(error.to_string()))?;
+            let task = self
+                .all_tasks
+                .get_mut(guid)
+                .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
+            for page in &parsed.urls {
+                task.put_page_queue(page)?;
+            }
+            if let Some(code) = parsed.fail_code {
+                task.set_fail(code);
+                failed = true;
+            }
+            if parsed.exception.is_some() {
+                failed = true;
+            }
+        }
+        if !failed {
+            let task = self
+                .all_tasks
+                .get_mut(guid)
+                .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
+            if task.state != consts::TASK_STATE_FAILED {
+                task.state = consts::TASK_STATE_SCAN_IMG;
+            }
+        }
+        Ok(())
+    }
+
+    /// One real page-queue consumer: request -> RSS `imgurl` -> existing
+    /// `Task::put_img_queue`.
+    pub async fn scan_one_page(
+        &mut self,
+        guid: &str,
+        filters: &mut Filters,
+    ) -> Result<ImageScan, AppError> {
+        self.ensure_task_queues(guid)?;
+        let (page_url, policy, ori) = {
+            let task = self
+                .all_tasks
+                .get_mut(guid)
+                .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
+            let Some(page_url) = task.page_q.as_mut().and_then(|queue| queue.pop_front()) else {
+                return Ok(ImageScan::Empty);
+            };
+            (
+                page_url,
+                util::get_proxy_policy(task.config.proxy_image_only, task.config.proxy_image),
+                task.config.download_ori && self.has_login,
+            )
+        };
+        let session = self.http_session(policy);
+        let outcome = session
+            .request("GET", &page_url, None, false)
+            .await
+            .map_err(|error| AppError::Http(error.to_string()))?;
+        let view = Self::page_view(&outcome.response, ori, false);
+        let parsed = match filters.imgurl_outcome(&view) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                // HttpWorker catches a filter exception and re-runs the filter
+                // on _FakeResponse(url): the quota wrapper turns that into
+                // ERR_CONNECTION_ERROR without killing the worker.
+                let fake = PageResponse {
+                    status: 600,
+                    url: page_url.clone(),
+                    real_url: page_url.clone(),
+                    content_length: 0,
+                    text: String::new(),
+                    headers: Vec::new(),
+                    ori,
+                    has_stream: false,
+                };
+                let fallback = filters
+                    .imgurl_outcome(&fake)
+                    .map_err(|_| AppError::Filter(error.to_string()))?;
+                let _ = self.logger.warning(&format!("scan filter error: {error}"));
+                let code = fallback.fail_code.unwrap_or(consts::ERR_CONNECTION_ERROR);
+                return Ok(ImageScan::Failed {
+                    fail_code: code,
+                    real_url: page_url.clone(),
+                    url: page_url,
+                });
+            }
+        };
+        if let Some(code) = parsed.fail_code {
+            return Ok(ImageScan::Failed {
+                fail_code: code,
+                real_url: parsed.real_url.unwrap_or_else(|| page_url.clone()),
+                url: parsed.url.unwrap_or_else(|| page_url.clone()),
+            });
+        }
+        if let Some(kind) = parsed.exception {
+            return Ok(ImageScan::Exception { kind });
+        }
+        let (Some(image_url), Some(reload_url), Some(filename)) =
+            (parsed.image_url, parsed.reload_url, parsed.filename)
+        else {
+            return Ok(ImageScan::Exception {
+                kind: "missing success fields".into(),
+            });
+        };
+        let task = self
+            .all_tasks
+            .get_mut(guid)
+            .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
+        task.put_img_queue(&image_url, &reload_url, &filename)?;
+        Ok(ImageScan::Enqueued {
+            image_url,
+            filename,
+        })
+    }
+
+    /// One real image-queue consumer: request -> RSS download decision ->
+    /// native bounded stream -> Task staging/publish. The post-stream RSS
+    /// decision owns the broken/abort outcome.
+    pub async fn download_one_image(
+        &mut self,
+        guid: &str,
+        filters: &mut Filters,
+    ) -> Result<ImageDownload, AppError> {
+        self.ensure_task_queues(guid)?;
+        let (image_url, policy) = {
+            let task = self
+                .all_tasks
+                .get_mut(guid)
+                .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
+            let Some(image_url) = task.img_q.as_mut().and_then(|queue| queue.pop_front()) else {
+                return Ok(ImageDownload::Empty);
+            };
+            (
+                image_url,
+                util::get_proxy_policy(task.config.proxy_image_only, task.config.proxy_image),
+            )
+        };
+        let session = self.http_session(policy);
+        let mut outcome = session
+            .request("GET", &image_url, None, true)
+            .await
+            .map_err(|error| AppError::Http(error.to_string()))?;
+        let has_stream = outcome.response.has_stream();
+        let view = Self::page_view(&outcome.response, false, has_stream);
+        let decision = filters
+            .download_outcome(&view)
+            .map_err(|error| AppError::Filter(error.to_string()))?;
+        if let Some(code) = decision.fail_code {
+            let failed_url = decision.url.clone().unwrap_or_else(|| image_url.clone());
+            if let Some(stream) = outcome.response.stream {
+                stream.close().await;
+            }
+            let task = self
+                .all_tasks
+                .get_mut(guid)
+                .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
+            let _ = task.put_page_queue_retry(&failed_url);
+            return Ok(ImageDownload::Failed {
+                fail_code: code,
+                real_url: decision.real_url.unwrap_or_else(|| image_url.clone()),
+                url: failed_url,
+            });
+        }
+        if decision.exception.is_some() {
+            if let Some(stream) = outcome.response.stream {
+                stream.close().await;
+            }
+            return Ok(ImageDownload::Aborted);
+        }
+        if !decision.stream {
+            if let Some(stream) = outcome.response.stream {
+                stream.close().await;
+            }
+            return Ok(ImageDownload::Aborted);
+        }
+        let stream_page = Self::page_view(&outcome.response, false, true);
+        let mut stream = match outcome.response.stream.take() {
+            Some(stream) => stream,
+            None => {
+                return Ok(ImageDownload::Aborted);
+            }
+        };
+        let staged = {
+            let task = self
+                .all_tasks
+                .get_mut(guid)
+                .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
+            task.begin_staged_save(&image_url, &view.url)?
+        };
+        let staged = match staged {
+            SaveStart::AlreadyDone(path) => {
+                stream.close().await;
+                return Ok(ImageDownload::AlreadyDone(path));
+            }
+            SaveStart::Staged(staged) => staged,
+        };
+        let mut file = tokio::fs::File::create(&staged.stage)
+            .await
+            .map_err(|error| AppError::Download(format!("{}: {error}", staged.stage.display())))?;
+        let mut read = 0i64;
+        loop {
+            if self.exit >= consts::XEH_STATE_FULL_EXIT {
+                let _ = file.flush().await;
+                drop(file);
+                stream.close().await;
+                Task::abort_staged_save(staged);
+                return Ok(ImageDownload::Aborted);
+            }
+            match stream.next_chunk().await {
+                Ok(Some(chunk)) => {
+                    read += chunk.len() as i64;
+                    file.write_all(&chunk).await.map_err(|error| {
+                        AppError::Download(format!("{}: {error}", staged.stage.display()))
+                    })?;
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    let _ = file.flush().await;
+                    drop(file);
+                    let stream_view = &stream_page;
+                    let broken = filters
+                        .stream_outcome(stream_view, read, Some(&error))
+                        .map_err(|filter| AppError::Filter(filter.to_string()))?;
+                    let code = broken.code.unwrap_or(consts::ERR_IMAGE_BROKEN);
+                    Task::abort_staged_save(staged);
+                    let task = self
+                        .all_tasks
+                        .get_mut(guid)
+                        .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
+                    let _ = task.put_page_queue_retry(&view.url);
+                    return Ok(ImageDownload::Failed {
+                        fail_code: code,
+                        real_url: view.real_url.clone(),
+                        url: view.url.clone(),
+                    });
+                }
+            }
+        }
+        let _ = file.flush().await;
+        drop(file);
+        let stream_view = &stream_page;
+        let streamed = filters
+            .stream_outcome(stream_view, read, None)
+            .map_err(|filter| AppError::Filter(filter.to_string()))?;
+        if streamed.broken {
+            let code = streamed.code.unwrap_or(consts::ERR_IMAGE_BROKEN);
+            Task::abort_staged_save(staged);
+            let task = self
+                .all_tasks
+                .get_mut(guid)
+                .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
+            let _ = task.put_page_queue_retry(&view.url);
+            return Ok(ImageDownload::Failed {
+                fail_code: code,
+                real_url: view.real_url.clone(),
+                url: view.url.clone(),
+            });
+        }
+        let task = self
+            .all_tasks
+            .get_mut(guid)
+            .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
+        let path = task.commit_staged_save(staged)?;
+        Ok(ImageDownload::Saved(path))
     }
 
     pub fn save_session(&mut self) -> (i64, Option<String>) {
