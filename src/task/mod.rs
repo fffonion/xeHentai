@@ -32,6 +32,7 @@ pub struct RenameError {
     pub message: String,
 }
 pub use file_ops::resolve_dir;
+pub use file_ops::{boundary_path, normalize, path_within};
 
 /// The fourteen configuration keys captured when a task is created, in the
 /// order the reference `config.py` defines them.

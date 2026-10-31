@@ -2693,25 +2693,48 @@
       }
     },
     {
-      "id": "task.session-dir-authorization",
-      "source": "core.py:402-440; plan 5.2 security clause",
-      "target": "src/core.rs load_session directory authorization",
+      "id": "task.session-dir-history",
+      "source": "core.py:402-421; plan 5.2 security clause",
+      "target": "src/core.rs load_session trusted roots; src/task/file_ops.rs boundary_path",
       "suite": "session",
       "inputs": [
-        "reference-written h.json whose task dir is elsewhere",
-        "app config dir downloads"
+        "reference-written h.json saved with dir=elsewhere and restarted with dir=downloads",
+        "the same App after update_config changed dir, with tasks from both directories",
+        "three tasks with downloads, elsewhere and downloads/special directories",
+        "an absolute task directory below the base root",
+        "an explicitly configured external absolute root with a task in the same root"
       ],
       "assertions": [
-        "oracle loads the task and keeps writing to the persisted directory",
-        "candidate reports DirNotAuthorized instead of continuing",
-        "no task is registered or queued after the refusal"
+        "every historical relative or absolute task directory below the trusted base restores with its exact config.dir and file path",
+        "update_config no longer invalidates a task created under the previous directory",
+        "multiple per-task roots and subdirectories keep task, queue and cookie order",
+        "the explicitly configured external root is accepted; h.json alone grants no root"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "task.session-dir-authorization",
+      "source": "core.py:402-440; plan 5.2 security clause",
+      "target": "src/core.rs load_session local task rejection; src/task/file_ops.rs boundary_path",
+      "suite": "session",
+      "inputs": [
+        "reference-written h.json with one /definitely/not/authorized task between two legal tasks",
+        "synthetic login cookies and a legacy .ehentai.cookie variant",
+        "component-prefix, .. escape, symlink escape and unauthorized absolute variants in native tests"
+      ],
+      "assertions": [
+        "the reference keeps the foreign task, its queue slot and full state and still reads cookies",
+        "the candidate skips only the foreign task with a warning before scan/I/O and keeps every legal task, queue position, cookie, header and has_login value",
+        "restart and a second load keep the same local-only exclusion",
+        "component-prefix, .., symlink and unauthorized absolute directories are refused without touching their targets"
       ],
       "status": "delta",
       "delta": {
-        "reference": "a persisted task config dir is trusted and used for later file operations",
-        "candidate": "a persisted task dir must resolve to the current configured download root; otherwise the session is refused",
-        "client_impact": "a session created with a per-task dir must be retried after restoring that global dir; a tampered session cannot write elsewhere",
-        "regression": "session_directory_must_be_authorized"
+        "reference": "a persisted task dir is trusted and scanned; a foreign absolute path can be used",
+        "candidate": "a task dir must resolve, after component and existing-ancestor canonicalization, below the user's base/config root or another explicitly user-granted root; only that task is skipped",
+        "client_impact": "one tampered task no longer fails startup or drops cookies; a legal external per-task root from a previous run must still be selected in config at startup because h.json cannot grant authority",
+        "regression": "session_skips_an_unauthorized_task_and_keeps_the_valid_state; session_boundary_checks_use_components_and_canonical_paths; session_isolates_an_unsafe_task_and_preserves_every_legal_field; session_legacy_cookie_and_legal_tasks_survive_an_unsafe_task; entry_point_skips_an_unsafe_session_task"
       }
     }
   ],
@@ -2734,6 +2757,8 @@
     "config.rss.deny-* run under the pinned runtime feature set: the http-client feature is off, so the network case proves refusal plus zero loopback contacts rather than a formerly reachable network path; process and file writes are proven reachable under the pre-fix binding by a driven-SDK spike recorded in evidence-r1.",
     "M2 task-api/session/files suites run the real reference App/Task in an isolated cwd and compare full task/app observations.",
     "Session migration starts from an h.json written by the reference and is loaded independently by both implementations.",
+    "Session directory fixtures (history, updated, multi, subdir, external and isolation) are written by the reference App into each side's own work root and then loaded independently by the candidate; the candidate never writes those h.json files.",
+    "An external absolute task directory is authorized only by an explicit config/startup choice; a per-task grant from a previous run is not persisted and an h.json value cannot extend the trusted roots.",
     "Safety deltas (atomic session writes, symlink/empty-title refusal, self-duplicate lock release) are checked asymmetrically and listed per case.",
     "App::update_config is the internal snapshot-test entry; it is not the public RPC updateConfig, and it refuses proxy/RPC side effects instead of faking them."
   ]

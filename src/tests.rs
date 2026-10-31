@@ -1036,37 +1036,640 @@ fn session_save_failure_keeps_the_previous_session() {
     }
 }
 
+#[derive(Clone, Default)]
+struct CapturedOutput(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl CapturedOutput {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+
+impl std::io::Write for CapturedOutput {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn session_app(
+    root: &Path,
+    dir: &str,
+    guids: &[&str],
+) -> Result<crate::core::App, crate::core::AppError> {
+    session_app_with_logger(root, dir, guids, test_logger())
+}
+
+fn session_app_with_logger(
+    root: &Path,
+    dir: &str,
+    guids: &[&str],
+    logger: crate::util::logger::Logger,
+) -> Result<crate::core::App, crate::core::AppError> {
+    let mut config = Config::default();
+    config.dir = dir.to_string();
+    config.save_tasks = true;
+    crate::core::App::with_guid_source(
+        config,
+        logger,
+        root,
+        root,
+        Box::new(crate::core::FixedGuids::new(
+            guids.iter().map(|guid| guid.to_string()),
+        )),
+    )
+}
+
+fn titled_task(
+    app: &mut crate::core::App,
+    kwargs: serde_json::Map<String, serde_json::Value>,
+    title: &str,
+) -> String {
+    let (code, guid) = app.add_task(GALLERY_URL, kwargs).expect("add titled task");
+    assert_eq!(code, 0);
+    let guid = guid.expect("guid");
+    let task = app.task_mut(&guid).expect("task");
+    task.meta.insert("title".into(), serde_json::json!(title));
+    guid
+}
+
+fn inject_task(document: &mut serde_json::Value, template: &str, guid: &str, dir: &str) {
+    let tasks = document["tasks"].as_object_mut().expect("tasks object");
+    let mut task = tasks
+        .get(template)
+        .expect("template task")
+        .as_object()
+        .expect("task object")
+        .clone();
+    task.insert("guid".into(), serde_json::json!(guid));
+    task["config"]
+        .as_object_mut()
+        .expect("task config")
+        .insert("dir".into(), serde_json::json!(dir));
+    tasks.insert(guid.to_string(), serde_json::Value::Object(task));
+}
+
+fn move_task_to(document: &mut serde_json::Value, guid: &str, position: usize) {
+    let tasks = document["tasks"].as_object_mut().expect("tasks object");
+    let moved = tasks.shift_remove(guid).expect("moved task");
+    let rest: Vec<(String, serde_json::Value)> = tasks
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    tasks.clear();
+    for (index, (key, value)) in rest.into_iter().enumerate() {
+        if index == position {
+            tasks.insert(guid.to_string(), moved.clone());
+        }
+        tasks.insert(key, value);
+    }
+    if position >= tasks.len() {
+        tasks.insert(guid.to_string(), moved);
+    }
+}
+
 #[test]
-fn session_directory_must_be_authorized() {
+fn session_restores_a_task_saved_with_an_older_relative_directory() {
     let root = tempfile::tempdir().expect("root");
-    let mut app = app_with_config(
+    let mut app = session_app(root.path(), "elsewhere", &["guid0001"]).expect("app");
+    let guid = titled_task(&mut app, serde_json::Map::new(), "T");
+    app.set_cookie("a=1; ipb_member_id=7; ipb_pass_hash=h");
+    assert_eq!(app.save_session().0, 0);
+    let document: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(root.path().join("h.json")).unwrap()).unwrap();
+    assert_eq!(
+        document["tasks"][&guid]["config"]["dir"],
+        serde_json::json!("elsewhere")
+    );
+
+    let loaded = session_app(root.path(), "downloads", &[]).expect("historical session");
+    let task = loaded.task(&guid).expect("historical task restored");
+    assert_eq!(task.config.dir, "elsewhere");
+    assert_eq!(
+        task.get_fpath().unwrap(),
+        root.path().join("elsewhere").join("T")
+    );
+    assert_eq!(*loaded.queue(), std::collections::VecDeque::from([guid]));
+    assert_eq!(
+        loaded.cookie_header(),
+        Some("nw=1;a=1;ipb_member_id=7;ipb_pass_hash=h")
+    );
+}
+
+#[test]
+fn session_restores_tasks_after_update_config_changed_the_directory() {
+    let root = tempfile::tempdir().expect("root");
+    let mut app = session_app(root.path(), "downloads", &["guid0001", "guid0002"]).expect("app");
+    let first = titled_task(&mut app, serde_json::Map::new(), "First");
+    let mut patch = serde_json::Map::new();
+    patch.insert(
+        "dir".into(),
+        serde_json::json!(root.path().join("alt").to_string_lossy()),
+    );
+    app.update_config(patch).expect("update config");
+    let second = titled_task(&mut app, serde_json::Map::new(), "Second");
+    assert_eq!(app.save_session().0, 0);
+
+    let loaded = session_app(root.path(), "downloads", &[]).expect("updated session");
+    assert_eq!(loaded.all_task_guids(), vec![first.clone(), second.clone()]);
+    assert_eq!(loaded.task(&first).unwrap().config.dir, "downloads");
+    assert_eq!(
+        loaded.task(&second).unwrap().config.dir,
+        root.path().join("alt").to_string_lossy()
+    );
+    assert_eq!(
+        loaded.task(&second).unwrap().get_fpath().unwrap(),
+        root.path().join("alt").join("Second")
+    );
+    assert_eq!(
+        *loaded.queue(),
+        std::collections::VecDeque::from([first, second])
+    );
+}
+
+#[test]
+fn session_restores_multiple_task_directories_and_subdirectories() {
+    let root = tempfile::tempdir().expect("root");
+    let mut app = session_app(
         root.path(),
-        session_config(root.path(), true),
-        &["guid0001"],
+        "downloads",
+        &["guid0001", "guid0002", "guid0003"],
     )
     .expect("app");
-    let (_, guid) = app.add_task(GALLERY_URL, serde_json::Map::new()).unwrap();
-    let guid = guid.unwrap();
-    app.task_mut(&guid)
-        .unwrap()
-        .meta
-        .insert("title".into(), serde_json::json!("T"));
+    let first = titled_task(&mut app, serde_json::Map::new(), "First");
+    let mut elsewhere = serde_json::Map::new();
+    elsewhere.insert("dir".into(), serde_json::json!("elsewhere"));
+    let second = titled_task(&mut app, elsewhere, "Second");
+    let mut special = serde_json::Map::new();
+    special.insert("dir".into(), serde_json::json!("downloads/special"));
+    let third = titled_task(&mut app, special, "Third");
     assert_eq!(app.save_session().0, 0);
-    let raw = fs::read_to_string(root.path().join("h.json")).unwrap();
-    let hostile = raw.replace(
-        &root.path().join("downloads").to_string_lossy().into_owned(),
+
+    let loaded = session_app(root.path(), "downloads", &[]).expect("multiple dirs");
+    assert_eq!(
+        loaded.all_task_guids(),
+        vec![first.clone(), second.clone(), third.clone()]
+    );
+    assert_eq!(loaded.task(&first).unwrap().config.dir, "downloads");
+    assert_eq!(loaded.task(&second).unwrap().config.dir, "elsewhere");
+    assert_eq!(loaded.task(&third).unwrap().config.dir, "downloads/special");
+    assert_eq!(
+        loaded.task(&third).unwrap().get_fpath().unwrap(),
+        root.path().join("downloads").join("special").join("Third")
+    );
+    assert_eq!(
+        *loaded.queue(),
+        std::collections::VecDeque::from([first, second, third])
+    );
+}
+
+#[test]
+fn session_accepts_equivalent_and_sibling_absolute_directories() {
+    let root = tempfile::tempdir().expect("root");
+    let mut app = session_app(root.path(), "downloads", &["guid0001", "guid0002"]).expect("app");
+    let mut equivalent = serde_json::Map::new();
+    equivalent.insert(
+        "dir".into(),
+        serde_json::json!(root.path().join("downloads").to_string_lossy()),
+    );
+    let same = titled_task(&mut app, equivalent, "Same");
+    let mut sibling = serde_json::Map::new();
+    sibling.insert(
+        "dir".into(),
+        serde_json::json!(root.path().join("sibling").to_string_lossy()),
+    );
+    let other = titled_task(&mut app, sibling, "Other");
+    assert_eq!(app.save_session().0, 0);
+
+    let loaded = session_app(root.path(), "downloads", &[]).expect("absolute roots");
+    assert_eq!(loaded.all_task_guids(), vec![same.clone(), other.clone()]);
+    let task = loaded
+        .task(&same)
+        .expect("absolute form of the configured relative root");
+    assert_eq!(
+        task.config.dir,
+        root.path().join("downloads").to_string_lossy()
+    );
+    assert_eq!(
+        task.get_fpath().unwrap(),
+        root.path().join("downloads").join("Same")
+    );
+    assert_eq!(
+        loaded.task(&other).unwrap().get_fpath().unwrap(),
+        root.path().join("sibling").join("Other")
+    );
+    assert_eq!(
+        *loaded.queue(),
+        std::collections::VecDeque::from([same, other])
+    );
+}
+
+#[test]
+fn session_skips_an_unauthorized_task_and_keeps_the_valid_state() {
+    let root = tempfile::tempdir().expect("root");
+    let output = CapturedOutput::default();
+    let mut app = session_app_with_logger(root.path(), "downloads", &["guid0001"], {
+        crate::util::logger::Logger::with_output(Box::new(output.clone()), false)
+    })
+    .expect("app");
+    let guid = titled_task(&mut app, serde_json::Map::new(), "T");
+    app.set_cookie("a=1; ipb_member_id=7; ipb_pass_hash=h");
+    assert_eq!(app.save_session().0, 0);
+    let path = root.path().join("h.json");
+    let mut document: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    inject_task(
+        &mut document,
+        &guid,
+        "hostile1",
         "/definitely/not/authorized",
     );
-    fs::write(root.path().join("h.json"), hostile).unwrap();
-    let error = app_with_config(root.path(), session_config(root.path(), true), &[])
-        .expect_err("hostile directory");
-    assert!(
-        matches!(
-            error,
-            crate::core::AppError::Session(crate::core::SessionError::DirNotAuthorized { .. })
-        ),
-        "{error}"
+    fs::write(&path, serde_json::to_string(&document).unwrap()).unwrap();
+    let before = fs::read(&path).unwrap();
+
+    let loaded = session_app_with_logger(root.path(), "downloads", &[], {
+        crate::util::logger::Logger::with_output(Box::new(output.clone()), false)
+    })
+    .expect("a single unsafe task must not fail startup");
+    assert_eq!(loaded.all_task_guids(), vec![guid.clone()]);
+    assert!(loaded.task("hostile1").is_none());
+    assert_eq!(*loaded.queue(), std::collections::VecDeque::from([guid]));
+    assert_eq!(
+        loaded.cookie_header(),
+        Some("nw=1;a=1;ipb_member_id=7;ipb_pass_hash=h")
     );
+    assert!(loaded.has_login());
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        before,
+        "load must not rewrite h.json"
+    );
+    let log = output.text();
+    assert!(
+        log.contains("skipping task hostile1") && log.contains("/definitely/not/authorized"),
+        "{log}"
+    );
+}
+
+#[test]
+fn session_boundary_checks_use_components_and_canonical_paths() {
+    let root = tempfile::tempdir().expect("root");
+    let base = root.path().join("work");
+    fs::create_dir_all(&base).unwrap();
+    let outside = root.path().join("outside");
+    fs::create_dir_all(outside.join("T")).unwrap();
+    fs::write(outside.join("T").join("1.jpg"), b"").unwrap();
+    let external = root.path().join("ext").join("downloads");
+    fs::create_dir_all(root.path().join("ext")).unwrap();
+    fs::create_dir_all(root.path().join("ext").join("downloads-evil").join("T")).unwrap();
+    fs::write(
+        root.path()
+            .join("ext")
+            .join("downloads-evil")
+            .join("T")
+            .join("1.jpg"),
+        b"",
+    )
+    .unwrap();
+    let mut variants: Vec<(&str, String)> = vec![
+        (
+            "prefix01",
+            root.path()
+                .join("ext")
+                .join("downloads-evil")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        ("dotdot01", "../outside".to_string()),
+        ("abs00001", "/definitely/not/authorized".to_string()),
+        (
+            "legal001",
+            root.path()
+                .join("ext")
+                .join("downloads")
+                .join("sub")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+    ];
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&outside, base.join("link")).unwrap();
+        variants.insert(2, ("link0001", "link".to_string()));
+    }
+    #[cfg(not(unix))]
+    let _ = &outside;
+
+    let output = CapturedOutput::default();
+    let mut app = session_app_with_logger(
+        &base,
+        &external.to_string_lossy(),
+        &["base0001"],
+        crate::util::logger::Logger::with_output(Box::new(output.clone()), false),
+    )
+    .expect("app");
+    let base_guid = titled_task(&mut app, serde_json::Map::new(), "T");
+    app.set_cookie("a=1; ipb_member_id=7; ipb_pass_hash=h");
+    assert_eq!(app.save_session().0, 0);
+    let path = base.join("h.json");
+    let mut document: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    {
+        let tasks = document["tasks"].as_object_mut().unwrap();
+        let template = tasks[&base_guid].as_object().unwrap().clone();
+        for (guid, dir) in variants {
+            let mut task = template.clone();
+            task.insert("guid".into(), serde_json::json!(guid));
+            task["config"]
+                .as_object_mut()
+                .unwrap()
+                .insert("dir".into(), serde_json::json!(dir));
+            tasks.insert(guid.to_string(), serde_json::Value::Object(task));
+        }
+    }
+    fs::write(&path, serde_json::to_string(&document).unwrap()).unwrap();
+
+    let loaded = session_app_with_logger(
+        &base,
+        &external.to_string_lossy(),
+        &[],
+        crate::util::logger::Logger::with_output(Box::new(output.clone()), false),
+    )
+    .expect("boundary session");
+    assert_eq!(
+        loaded.all_task_guids(),
+        vec![base_guid.clone(), "legal001".into()]
+    );
+    assert_eq!(
+        *loaded.queue(),
+        std::collections::VecDeque::from([base_guid.clone(), "legal001".into()])
+    );
+    let mut rejected = vec!["prefix01", "dotdot01", "abs00001"];
+    #[cfg(unix)]
+    rejected.push("link0001");
+    for rejected in &rejected {
+        assert!(
+            loaded.task(rejected).is_none(),
+            "{rejected} must be rejected"
+        );
+    }
+    assert_eq!(
+        loaded.task("legal001").unwrap().get_fpath().unwrap(),
+        external.join("sub").join("T")
+    );
+    assert!(
+        outside.join("T").join("1.jpg").is_file(),
+        "rejected tasks must not be scanned"
+    );
+    assert!(
+        root.path()
+            .join("ext")
+            .join("downloads-evil")
+            .join("T")
+            .join("1.jpg")
+            .is_file(),
+        "component-prefix escape must not be scanned"
+    );
+    assert_eq!(
+        loaded.cookie_header(),
+        Some("nw=1;a=1;ipb_member_id=7;ipb_pass_hash=h")
+    );
+    let log = output.text();
+    for rejected in &rejected {
+        assert!(log.contains(&format!("skipping task {rejected}")), "{log}");
+    }
+}
+
+#[test]
+fn session_isolates_an_unsafe_task_and_preserves_every_legal_field() {
+    let root = tempfile::tempdir().expect("root");
+    let base = root.path().join("work");
+    fs::create_dir_all(&base).unwrap();
+    let outside = root.path().join("outside");
+    fs::create_dir_all(outside.join("T-first")).unwrap();
+    fs::write(outside.join("T-first").join("1.jpg"), b"").unwrap();
+
+    let output = CapturedOutput::default();
+    let mut app = session_app_with_logger(
+        &base,
+        "downloads",
+        &["guid0001", "guid0002", "guid0003"],
+        crate::util::logger::Logger::with_output(Box::new(output.clone()), false),
+    )
+    .expect("app");
+    let first = titled_task(&mut app, serde_json::Map::new(), "T-first");
+    {
+        let task = app.task_mut(&first).unwrap();
+        task.state = 1;
+        task.img_q = Some(std::collections::VecDeque::from([
+            "https://img.example/a.jpg".to_string(),
+            "https://img.example/b.jpg".to_string(),
+        ]));
+        task.page_q = Some(std::collections::VecDeque::from([format!(
+            "{GALLERY_URL}?p=0"
+        )]));
+        task.reload_map.insert(
+            "abcdef0123".into(),
+            (
+                "https://e-hentai.org/s/abcdef0123/111-1".into(),
+                "1.jpg".into(),
+            ),
+        );
+        task.renamed_map
+            .insert(crate::task::FidKey::Int(1), "1.jpg".into());
+        task.meta.insert("total".into(), serde_json::json!(2));
+        task.meta.insert(
+            "filelist".into(),
+            serde_json::json!({"abcdef0123": ["1", "x"]}),
+        );
+    }
+    let mut elsewhere = serde_json::Map::new();
+    elsewhere.insert("dir".into(), serde_json::json!("elsewhere"));
+    let second = titled_task(&mut app, elsewhere, "T-second");
+    {
+        let task = app.task_mut(&second).unwrap();
+        task.state = 10;
+        task.page_q = Some(std::collections::VecDeque::from([format!(
+            "{GALLERY_URL}?p=1"
+        )]));
+    }
+    let mut special = serde_json::Map::new();
+    special.insert("dir".into(), serde_json::json!("downloads/special"));
+    let third = titled_task(&mut app, special, "T-third");
+    app.task_mut(&third).unwrap().state = 3;
+    app.set_cookie("a=1; b=x=y; ipb_member_id=7; ipb_pass_hash=h");
+    assert_eq!(app.save_session().0, 0);
+
+    let legal_first = base.join("downloads").join("T-first");
+    fs::create_dir_all(&legal_first).unwrap();
+    fs::write(legal_first.join("1.jpg"), b"one").unwrap();
+    fs::write(legal_first.join("2.jpg"), b"").unwrap();
+
+    let path = base.join("h.json");
+    let mut document: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    inject_task(&mut document, &first, "unsafe01", "../outside");
+    move_task_to(&mut document, "unsafe01", 1);
+    fs::write(&path, serde_json::to_string(&document).unwrap()).unwrap();
+    let before = fs::read(&path).unwrap();
+
+    let loaded = session_app_with_logger(
+        &base,
+        "downloads",
+        &[],
+        crate::util::logger::Logger::with_output(Box::new(output.clone()), false),
+    )
+    .expect("mixed session");
+    assert_eq!(
+        loaded.all_task_guids(),
+        vec![first.clone(), second.clone(), third.clone()]
+    );
+    assert_eq!(
+        *loaded.queue(),
+        std::collections::VecDeque::from([first.clone(), second.clone(), third.clone()])
+    );
+    assert!(loaded.task("unsafe01").is_none());
+    assert_eq!(loaded.task(&first).unwrap().config.dir, "downloads");
+    assert_eq!(loaded.task(&second).unwrap().config.dir, "elsewhere");
+    assert_eq!(loaded.task(&third).unwrap().config.dir, "downloads/special");
+    assert_eq!(loaded.task(&first).unwrap().state, 1);
+    assert_eq!(loaded.task(&second).unwrap().state, 4);
+    assert_eq!(loaded.task(&third).unwrap().state, 3);
+    assert_eq!(
+        loaded.task(&first).unwrap().img_q,
+        Some(std::collections::VecDeque::from([
+            "https://img.example/a.jpg".to_string(),
+            "https://img.example/b.jpg".to_string(),
+        ]))
+    );
+    assert_eq!(
+        loaded.task(&second).unwrap().page_q,
+        Some(std::collections::VecDeque::from([format!(
+            "{GALLERY_URL}?p=1"
+        )]))
+    );
+    assert_eq!(loaded.task(&first).unwrap().flist_done().len(), 1);
+    assert!(!legal_first.join("2.jpg").exists(), "legal scan still runs");
+    assert_eq!(
+        loaded.cookies(),
+        &[
+            ("nw".to_string(), "1".to_string()),
+            ("a".to_string(), "1".to_string()),
+            ("b".to_string(), "x=y".to_string()),
+            ("ipb_member_id".to_string(), "7".to_string()),
+            ("ipb_pass_hash".to_string(), "h".to_string()),
+        ]
+    );
+    assert_eq!(
+        loaded.cookie_header(),
+        Some("nw=1;a=1;b=x=y;ipb_member_id=7;ipb_pass_hash=h")
+    );
+    let names: Vec<&str> = loaded
+        .headers()
+        .iter()
+        .map(|header| header.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "User-Agent",
+            "Accept-Charset",
+            "Accept",
+            "Connection",
+            "Cookie"
+        ]
+    );
+    assert!(loaded.has_login());
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        before,
+        "load must keep the session file"
+    );
+    assert!(
+        outside.join("T-first").join("1.jpg").is_file(),
+        "the unsafe task must not be scanned"
+    );
+    assert!(
+        !outside.join("T-first").join(".xehdone").exists(),
+        "the unsafe task must not be touched"
+    );
+    let log = output.text();
+    assert!(log.contains("skipping task unsafe01"), "{log}");
+
+    let mut loaded = loaded;
+    assert_eq!(loaded.save_session().0, 0);
+    let saved: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        saved["tasks"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![first.clone(), second.clone(), third.clone()]
+    );
+    let restarted = session_app(&base, "downloads", &[]).expect("restart");
+    assert_eq!(
+        restarted.all_task_guids(),
+        vec![first.clone(), second.clone(), third.clone()]
+    );
+    assert_eq!(restarted.task(&first).unwrap().config.dir, "downloads");
+    assert_eq!(restarted.task(&second).unwrap().config.dir, "elsewhere");
+    assert_eq!(
+        restarted.task(&third).unwrap().config.dir,
+        "downloads/special"
+    );
+}
+
+#[test]
+fn session_legacy_cookie_and_legal_tasks_survive_an_unsafe_task() {
+    let root = tempfile::tempdir().expect("root");
+    let base = root.path().join("work");
+    fs::create_dir_all(&base).unwrap();
+    let mut app = session_app(&base, "downloads", &["guid0001"]).expect("app");
+    let guid = titled_task(&mut app, serde_json::Map::new(), "T");
+    assert_eq!(app.save_session().0, 0);
+    let path = base.join("h.json");
+    let mut document: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    inject_task(&mut document, &guid, "unsafe01", "../outside");
+    fs::write(&path, serde_json::to_string(&document).unwrap()).unwrap();
+    fs::write(base.join(".ehentai.cookie"), "42,legacyhash\n").unwrap();
+
+    let loaded = session_app(&base, "downloads", &[]).expect("legacy mixed session");
+    assert_eq!(loaded.all_task_guids(), vec![guid]);
+    assert!(loaded.task("unsafe01").is_none());
+    assert!(loaded.has_login());
+    assert_eq!(
+        loaded.cookie_header(),
+        Some("nw=1;ipb_member_id=42;ipb_pass_hash=legacyhash")
+    );
+}
+
+#[test]
+fn entry_point_skips_an_unsafe_session_task() {
+    let root = tempfile::tempdir().expect("root");
+    let mut app = session_app(root.path(), "downloads", &["guid0001"]).expect("app");
+    let guid = titled_task(&mut app, serde_json::Map::new(), "T");
+    assert_eq!(app.save_session().0, 0);
+    let path = root.path().join("h.json");
+    let mut document: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    inject_task(&mut document, &guid, "unsafe01", "../outside");
+    fs::write(&path, serde_json::to_string(&document).unwrap()).unwrap();
+    assert_eq!(
+        crate::run(root.path()),
+        2,
+        "a rejected task must not exit 1"
+    );
+    let log = fs::read_to_string(root.path().join("eh.log")).expect("log file");
+    assert!(log.contains("skipping task unsafe01"), "{log}");
+    assert!(log.contains("load 1 tasks from saved session"), "{log}");
 }
 
 #[test]
@@ -1892,7 +2495,6 @@ fn m2_app_error_name(error: &crate::core::AppError) -> &'static str {
         AppError::Session(SessionError::Task(crate::task::TaskLoadError::Missing(_))) => "KeyError",
         AppError::Session(SessionError::Task(_)) => "TypeError",
         AppError::Session(SessionError::TooLarge { .. }) => "SessionTooLarge",
-        AppError::Session(SessionError::DirNotAuthorized { .. }) => "UnsafePathDelta",
         AppError::Session(SessionError::Unsafe { .. }) => "UnsafePathDelta",
         AppError::Session(SessionError::Json(_)) => "JSONDecodeError",
         AppError::Session(SessionError::Io { .. }) => "OSError",
@@ -2337,6 +2939,36 @@ fn m2_load_directory(directory: &Path) -> serde_json::Value {
     })
 }
 
+fn m2_fixture_load(root: &Path, name: &str, dir: Option<&Path>, twice: bool) -> serde_json::Value {
+    let directory = root.join(name);
+    let mut config = m2_config(&directory);
+    if let Some(dir) = dir {
+        config.dir = dir.to_string_lossy().into_owned();
+    }
+    let build = || {
+        crate::core::App::with_guid_source(
+            config.clone(),
+            m2_logger(),
+            &directory,
+            &directory,
+            Box::new(crate::core::FixedGuids::new(Vec::new())),
+        )
+        .expect("fixture app")
+    };
+    let mut app = build();
+    let mut result = serde_json::json!({"loaded": m2_app_obs(&app, &directory)});
+    if twice {
+        app.load_session().expect("second fixture load");
+        result["twice"] = m2_app_obs(&app, &directory);
+    }
+    let save = app.save_session();
+    result["save"] = serde_json::json!([save.0, save.1]);
+    let restarted = build();
+    result["restarted"] = m2_app_obs(&restarted, &directory);
+    result["tree"] = m2_tree(&directory);
+    result
+}
+
 fn compat_session(inputs: &serde_json::Value) -> serde_json::Value {
     let root = Path::new(inputs["root"].as_str().expect("root"));
     let mut result = serde_json::Map::new();
@@ -2533,50 +3165,17 @@ fn compat_session(inputs: &serde_json::Value) -> serde_json::Value {
         }),
     );
 
-    let auth_dir = m2_scenario(root, "dir_authorization");
-    let mut auth_config = m2_config(&auth_dir);
-    auth_config.dir = "elsewhere".into();
-    let mut auth_app = crate::core::App::with_guid_source(
-        auth_config,
-        m2_logger(),
-        &auth_dir,
-        &auth_dir,
-        Box::new(crate::core::FixedGuids::new(["00000001".to_string()])),
-    )
-    .unwrap();
-    let auth_guid = auth_app
-        .add_task(GALLERY_URL, serde_json::Map::new())
-        .unwrap()
-        .1
-        .unwrap();
-    {
-        let task = auth_app.task_mut(&auth_guid).unwrap();
-        let mut meta = serde_json::Map::new();
-        meta.insert("gnname".into(), serde_json::json!("T"));
-        meta.insert("gjname".into(), serde_json::Value::Null);
-        meta.insert("total".into(), serde_json::json!(1));
-        task.update_meta(meta).unwrap();
+    for name in ["history", "updated", "multi", "subdir"] {
+        result.insert(name.into(), m2_fixture_load(root, name, None, false));
     }
-    auth_app.save_session();
-    let auth_result = crate::core::App::with_guid_source(
-        m2_config(&auth_dir),
-        m2_logger(),
-        &auth_dir,
-        &auth_dir,
-        Box::new(crate::core::FixedGuids::new(Vec::new())),
-    );
-    let loader = match auth_result {
-        Ok(app) => serde_json::json!({
-            "ok": true,
-            "value": app.task(&auth_guid).unwrap().get_fpath().unwrap()
-                .strip_prefix(&auth_dir).unwrap().to_string_lossy().replace('\\', "/"),
-        }),
-        Err(error) => serde_json::json!({"ok": false, "error": m2_app_error_name(&error)}),
-    };
+    let external = root.join("external");
     result.insert(
-        "dir_authorization".into(),
-        serde_json::json!({"loader": loader}),
+        "external".into(),
+        m2_fixture_load(root, "external", Some(&external), false),
     );
+    for name in ["isolation", "isolation_legacy"] {
+        result.insert(name.into(), m2_fixture_load(root, name, None, true));
+    }
 
     let migrate_dir = Path::new(inputs["migrate_dir"].as_str().expect("migrate dir"));
     result.insert("migrate".into(), m2_load_directory(migrate_dir));

@@ -166,6 +166,65 @@ pub fn normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// Resolve a directory for the authorization boundary.
+///
+/// The longest existing ancestor is canonicalized so symlinked components are
+/// judged by their real target, missing tail components are kept as ordinary
+/// names, and a dangling symlink or an unreadable component refuses the whole
+/// path instead of silently falling back to a lexical prefix.
+pub fn boundary_path(path: &Path) -> Result<PathBuf, TaskError> {
+    let normalized = normalize(path);
+    let mut tail: Vec<OsString> = Vec::new();
+    let mut current = normalized.as_path();
+    loop {
+        match fs::canonicalize(current) {
+            Ok(mut resolved) => {
+                for part in tail.iter().rev() {
+                    resolved.push(part);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match fs::symlink_metadata(current) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        return Err(TaskError::UnsafePath {
+                            path: current.to_path_buf(),
+                            reason: "path component is a dangling symlink",
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(meta_error) if meta_error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(source) => {
+                        return Err(TaskError::Io {
+                            path: current.to_path_buf(),
+                            source,
+                        });
+                    }
+                }
+                let Some(parent) = current.parent() else {
+                    return Ok(normalized);
+                };
+                let Some(name) = current.file_name() else {
+                    return Ok(normalized);
+                };
+                tail.push(name.to_os_string());
+                current = parent;
+            }
+            Err(source) => {
+                return Err(TaskError::Io {
+                    path: current.to_path_buf(),
+                    source,
+                });
+            }
+        }
+    }
+}
+
+/// Component-wise containment; never a raw string prefix.
+pub fn path_within(root: &Path, candidate: &Path) -> bool {
+    candidate.starts_with(root)
+}
+
 pub(super) fn gallery_identifier(url: &str) -> (Option<String>, Option<String>) {
     static INDEX: std::sync::LazyLock<Regex> =
         std::sync::LazyLock::new(|| Regex::new(r".+/(\d+)/([^/]+)/*").expect("index regex"));

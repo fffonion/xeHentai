@@ -453,7 +453,6 @@ TASK_API_CASES = {
     "task.resume": ["resumes"],
     "task.api-methods": ["methods", "methods_exceptions"],
 }
-SESSION_DELTA_SCENARIOS = {"dir_authorization"}
 SESSION_CASES = {
     "task.session-save": ["roundtrip", "save_false"],
     "task.session-load": [
@@ -464,10 +463,22 @@ SESSION_CASES = {
         "duplicate_load",
         "state10",
         "migrate",
+        "history",
+        "updated",
+        "multi",
+        "subdir",
+        "external",
     ],
     "task.session-cookies": ["cookies", "logged_in"],
     "task.session-atomic": ["save_false"],
-    "task.session-dir-authorization": ["dir_authorization"],
+    "task.session-dir-history": [
+        "history",
+        "updated",
+        "multi",
+        "subdir",
+        "external",
+    ],
+    "task.session-dir-authorization": ["isolation", "isolation_legacy"],
 }
 FILES_CASES = {
     "task.files-scan-downloaded": ["scan", "scan_markers"],
@@ -742,6 +753,9 @@ def oracle_util(upstream, request):
 GALLERY_URL = "https://e-hentai.org/g/123456/0123456789/"
 EXHENTAI_URL = "https://exhentai.org/g/123456/0123456789/"
 IMAGE_HASH = "0123456789abcdef0123456789abcdef01234567"
+UNSAFE_SESSION_DIR = "/definitely/not/authorized"
+UNSAFE_SESSION_GUID = "e0000005"
+SESSION_SAFETY_SCENARIOS = {"isolation", "isolation_legacy"}
 TASK_BASE_KEYS = [
     "dir",
     "download_ori",
@@ -1119,7 +1133,111 @@ def oracle_session_fixture(upstream, request):
     (gallery / "1.jpg").write_bytes(b"one")
     (gallery / "3.jpg").write_bytes(b"three")
     assert app.save_session()[0] == 0
+    _write_session_directory_fixtures(core, defaults, work)
     return {"ok": True, "dir": str(directory), "guid": guid}
+
+
+def _write_session_directory_fixtures(core, defaults, work):
+    """Write the directory-restore fixtures with the real reference App.
+
+    The candidate loads these Python-written h.json files independently; they
+    are not produced by the candidate itself. Relative task directories stay
+    valid when the scenario directory is moved between the oracle/candidate
+    roots, while the explicit external root is generated inside each root.
+    """
+
+    def add(app, title, overrides=None, state=1):
+        guid = app.add_task(GALLERY_URL, **(overrides or {}))[1]
+        task = app._all_tasks[guid]
+        task.meta.update({"gnname": title, "gjname": None, "total": 2})
+        task.update_meta({})
+        task.state = state
+        return guid, task
+
+    directory = _scenario(work, "history")
+    app = _new_app(core, defaults, directory, ["a0000001"], {"dir": "elsewhere"})
+    add(app, "History", state=3)
+    app.set_cookie("a=1; ipb_member_id=7; ipb_pass_hash=h")
+    assert app.save_session()[0] == 0
+
+    directory = _scenario(work, "updated")
+    app = _new_app(core, defaults, directory, ["b0000001", "b0000002"])
+    add(app, "Before", state=3)
+    app.update_config(dir="alt", proxy=[])
+    add(app, "After", state=1)
+    assert app.save_session()[0] == 0
+
+    directory = _scenario(work, "multi")
+    app = _new_app(core, defaults, directory, ["c0000001", "c0000002", "c0000003"])
+    add(app, "First")
+    add(app, "Second", {"dir": "elsewhere"})
+    add(app, "Third", {"dir": "downloads/special"})
+    assert app.save_session()[0] == 0
+
+    directory = _scenario(work, "subdir")
+    app = _new_app(core, defaults, directory, ["d0000001"])
+    add(app, "Sub", {"dir": "downloads/special"})
+    assert app.save_session()[0] == 0
+
+    directory = _scenario(work, "external")
+    external = work / "external"
+    app = _new_app(core, defaults, directory, ["f0000001"], {"dir": str(external)})
+    add(app, "External")
+    assert app.save_session()[0] == 0
+
+    _write_isolation_fixture(core, defaults, work, "isolation", True)
+    _write_isolation_fixture(core, defaults, work, "isolation_legacy", False)
+
+
+def _write_isolation_fixture(core, defaults, work, name, login):
+    import queue
+
+    directory = _scenario(work, name)
+    app = _new_app(
+        core,
+        defaults,
+        directory,
+        ["e0000001", UNSAFE_SESSION_GUID, "e0000002"],
+    )
+    first = app.add_task(GALLERY_URL)[1]
+    task = app._all_tasks[first]
+    task.meta.update(
+        {
+            "gnname": "T-first",
+            "gjname": None,
+            "total": 2,
+            "filelist": {"abcdef0123": ["1", "x"]},
+        }
+    )
+    task.update_meta({})
+    task.state = 1
+    task.img_q = queue.Queue()
+    task.img_q.put("https://img.example/a.jpg")
+
+    unsafe = app.add_task(GALLERY_URL, dir=UNSAFE_SESSION_DIR)[1]
+    assert unsafe == UNSAFE_SESSION_GUID
+    unsafe_task = app._all_tasks[unsafe]
+    unsafe_task.meta.update({"gnname": "U", "gjname": None, "total": 1})
+    unsafe_task.update_meta({})
+
+    second = app.add_task(GALLERY_URL, dir="elsewhere")[1]
+    second_task = app._all_tasks[second]
+    second_task.meta.update({"gnname": "T-second", "gjname": None, "total": 1})
+    second_task.update_meta({})
+    second_task.state = 10
+    second_task.page_q = queue.Queue()
+    second_task.page_q.put(GALLERY_URL + "?p=1")
+
+    if login:
+        app.set_cookie("a=1; b=x=y; ipb_member_id=7; ipb_pass_hash=h")
+    else:
+        app.set_cookie("a=1")
+        (directory / ".ehentai.cookie").write_text("42,legacyhash\n", encoding="utf-8")
+    gallery = directory / "downloads" / "T-first"
+    gallery.mkdir(parents=True, exist_ok=True)
+    (gallery / "1.jpg").write_bytes(b"one")
+    (gallery / "2.jpg").write_bytes(b"")
+    assert app.save_session()[0] == 0
 
 
 def oracle_session(upstream, request):
@@ -1261,24 +1379,15 @@ def oracle_session(upstream, request):
         "tree": _tree(state10_dir),
     }
 
-    auth_dir = _scenario(work, "dir_authorization")
-    auth_app = _new_app(core, defaults, auth_dir, ["00000001"], {"dir": "elsewhere"})
-    auth_guid = auth_app.add_task(GALLERY_URL)[1]
-    auth_app._all_tasks[auth_guid].meta.update(
-        {"gnname": "T", "gjname": None, "total": 1}
+    for name in ("history", "updated", "multi", "subdir"):
+        result[name] = _fixture_load(core, defaults, work, name)
+    result["external"] = _fixture_load(
+        core, defaults, work, "external", config_dir=str(work / "external")
     )
-    auth_app._all_tasks[auth_guid].update_meta({})
-    auth_app.save_session()
-    auth_loaded = _new_app(core, defaults, auth_dir, [])
-    auth_task = auth_loaded._all_tasks[auth_guid]
-    result["dir_authorization"] = {
-        "loader": {
-            "ok": True,
-            "value": os.path.relpath(auth_task.get_fpath(), auth_dir).replace(
-                os.sep, "/"
-            ),
-        }
-    }
+    result["isolation"] = _fixture_load(core, defaults, work, "isolation", twice=True)
+    result["isolation_legacy"] = _fixture_load(
+        core, defaults, work, "isolation_legacy", twice=True
+    )
 
     migrate_dir = Path(request["migrate_dir"])
     migration = _capture_directory_load(
@@ -1302,6 +1411,25 @@ def _capture_directory_load(core, defaults, directory):
         "restarted": _app_obs(restarted, directory),
         "tree": _tree(directory),
     }
+
+
+def _fixture_load(core, defaults, work, name, config_dir=None, twice=False):
+    """Load a reference-written h.json in a fresh App and observe everything."""
+    import os
+
+    directory = work / name
+    os.chdir(directory)
+    overrides = {"dir": config_dir} if config_dir else None
+    app = _new_app(core, defaults, directory, [], overrides)
+    result = {"loaded": _app_obs(app, directory)}
+    if twice:
+        app.load_session()
+        result["twice"] = _app_obs(app, directory)
+    result["save"] = list(app.save_session())
+    restarted = _new_app(core, defaults, directory, [], overrides)
+    result["restarted"] = _app_obs(restarted, directory)
+    result["tree"] = _tree(directory)
+    return result
 
 
 def oracle_files(upstream, request):
@@ -1951,23 +2079,115 @@ def compare_task_api(cases, oracle, candidate):
 
 
 def compare_session(cases, oracle, candidate):
+    # Ordinary directory-restore scenarios are compared as a whole: there is
+    # no state-level skip for the historical/updated/multi/subdir/external
+    # cases. Only the intentional local-rejection scenarios are asymmetric.
     diffs, flags = _compare_scenarios(
-        oracle, candidate, "session", skip=SESSION_DELTA_SCENARIOS
+        oracle, candidate, "session", skip=SESSION_SAFETY_SCENARIOS
     )
-    delta_diffs = []
-    reference = oracle["dir_authorization"]["loader"]
-    candidate_loader = candidate["dir_authorization"]["loader"]
-    if reference != {"ok": True, "value": "elsewhere/T"}:
-        delta_diffs.append(
-            f"session.dir_authorization: oracle loaded a foreign directory: {reference}"
-        )
-    if candidate_loader != {"ok": False, "error": "UnsafePathDelta"}:
-        delta_diffs.append(
-            f"session.dir_authorization: candidate loader outcome: {candidate_loader}"
-        )
-    diffs.extend(delta_diffs)
-    flags["dir_authorization"] = not delta_diffs
+    for name in SESSION_SAFETY_SCENARIOS:
+        section = _compare_isolation(name, oracle.get(name), candidate.get(name))
+        flags[name] = not section
+        diffs.extend(section)
     _mark_cases(cases, SESSION_CASES, flags)
+    return diffs
+
+
+def _expected_unsafe_task():
+    """Full independent expectation for the foreign task in the fixture."""
+    return {
+        "url": GALLERY_URL,
+        "gid": "123456",
+        "sethash": "0123456789",
+        "failcode": 0,
+        "state": 1,
+        "guid": UNSAFE_SESSION_GUID,
+        "config": {
+            "dir": UNSAFE_SESSION_DIR,
+            "download_ori": False,
+            "jpn_title": True,
+            "rename_ori": False,
+            "proxy_image": True,
+            "proxy_image_only": False,
+            "make_archive": False,
+            "download_range": None,
+            "scan_thread_cnt": 1,
+            "download_thread_cnt": 5,
+            "download_timeout": 10,
+            "ignored_errors": [],
+            "delete_task_files": False,
+            "low_speed_threshold": 10,
+        },
+        "meta": {"gnname": "U", "gjname": None, "total": 1, "title": "U"},
+        "reload": [],
+        "duplicate": [],
+        "renamed": [],
+        "img_q": None,
+        "page_q": None,
+        "flist": [],
+    }
+
+
+def _without_guid(observation, guid):
+    expected = copy.deepcopy(observation)
+    expected["tasks"] = [entry for entry in expected["tasks"] if entry[0] != guid]
+    expected["queue"] = [item for item in expected["queue"] if item != guid]
+    return expected
+
+
+def _compare_isolation(name, oracle, candidate):
+    """Assert both complete states without deriving the candidate from itself.
+
+    The oracle must keep the foreign task with its exact full wire state; the
+    candidate must keep every other task, queue slot, cookie, header and login
+    flag, and after restart must have exactly the legal subset. The candidate
+    expectation is the oracle's legal state with the foreign guid removed, never
+    the candidate's own output.
+    """
+    prefix = f"session.{name}"
+    if not isinstance(oracle, dict) or not isinstance(candidate, dict):
+        return [f"{prefix}: missing full observation"]
+    diffs = []
+    for section in ("loaded", "twice", "restarted"):
+        oracle_obs = oracle.get(section)
+        candidate_obs = candidate.get(section)
+        if not isinstance(oracle_obs, dict) or not isinstance(candidate_obs, dict):
+            diffs.append(f"{prefix}.{section}: missing section")
+            continue
+        tasks = oracle_obs.get("tasks", [])
+        foreign = [entry for entry in tasks if entry[0] == UNSAFE_SESSION_GUID]
+        if len(foreign) != 1:
+            diffs.append(
+                f"{prefix}.oracle.{section}: foreign task count {len(foreign)} != 1"
+            )
+            continue
+        if len(tasks) != 3:
+            diffs.append(f"{prefix}.oracle.{section}: task count {len(tasks)} != 3")
+        diffs.extend(
+            compare(
+                _expected_unsafe_task(),
+                foreign[0][1],
+                f"{prefix}.oracle.{section}.unsafe",
+            )
+        )
+        queue_occurrences = 2 if section == "twice" else 1
+        actual_occurrences = oracle_obs.get("queue", []).count(UNSAFE_SESSION_GUID)
+        if actual_occurrences != queue_occurrences:
+            diffs.append(
+                f"{prefix}.oracle.{section}: foreign queue occurrences "
+                f"{actual_occurrences} != {queue_occurrences}"
+            )
+        expected = _without_guid(oracle_obs, UNSAFE_SESSION_GUID)
+        diffs.extend(compare(expected, candidate_obs, f"{prefix}.candidate.{section}"))
+        if any(
+            entry[0] == UNSAFE_SESSION_GUID
+            for entry in candidate_obs.get("tasks", [])
+        ):
+            diffs.append(f"{prefix}.candidate.{section}: accepted the foreign task")
+        if UNSAFE_SESSION_GUID in candidate_obs.get("queue", []):
+            diffs.append(f"{prefix}.candidate.{section}: queued the foreign task")
+    diffs.extend(compare(oracle.get("save"), candidate.get("save"), f"{prefix}.save"))
+    diffs.extend(compare(oracle.get("tree"), candidate.get("tree"), f"{prefix}.tree"))
     return diffs
 
 
@@ -2095,11 +2315,84 @@ def self_check(suite, oracle, candidate):
         cases = {}
         compare_session(cases, oracle, mutated)
         checks.append(("rename-key-count", not cases["task.session-save"]))
-        mutated = copy.deepcopy(candidate)
-        mutated["dir_authorization"]["loader"] = {"ok": True, "value": "elsewhere/T"}
-        cases = {}
-        compare_session(cases, oracle, mutated)
-        checks.append(("dir-authorization", not cases["task.session-dir-authorization"]))
+
+        def isolation_detected(change):
+            mutated = copy.deepcopy(candidate)
+            change(mutated)
+            cases = {}
+            compare_session(cases, oracle, mutated)
+            return not cases["task.session-dir-authorization"]
+
+        checks.append(
+            (
+                "isolation-missing-cookie",
+                isolation_detected(
+                    lambda mutated: mutated["isolation"]["loaded"]["cookies"].pop()
+                ),
+            )
+        )
+        checks.append(
+            (
+                "isolation-header-order",
+                isolation_detected(
+                    lambda mutated: mutated["isolation"]["loaded"]["headers"].reverse()
+                ),
+            )
+        )
+        checks.append(
+            (
+                "isolation-missing-legal-task",
+                isolation_detected(
+                    lambda mutated: mutated["isolation"]["loaded"]["tasks"].pop(0)
+                ),
+            )
+        )
+        checks.append(
+            (
+                "isolation-legal-task-state",
+                isolation_detected(
+                    lambda mutated: mutated["isolation"]["loaded"]["tasks"][0][1].__setitem__(
+                        "state", 99
+                    )
+                ),
+            )
+        )
+        checks.append(
+            (
+                "isolation-legal-config",
+                isolation_detected(
+                    lambda mutated: mutated["isolation"]["loaded"]["tasks"][0][1]["config"].__setitem__(
+                        "dir", "elsewhere"
+                    )
+                ),
+            )
+        )
+        checks.append(
+            (
+                "isolation-queue-order",
+                isolation_detected(
+                    lambda mutated: mutated["isolation"]["loaded"]["queue"].reverse()
+                ),
+            )
+        )
+
+        def accept_unsafe(mutated):
+            mutated["isolation"]["loaded"]["tasks"].insert(
+                1, [UNSAFE_SESSION_GUID, _expected_unsafe_task()]
+            )
+            mutated["isolation"]["loaded"]["queue"].insert(1, UNSAFE_SESSION_GUID)
+
+        checks.append(("isolation-accepts-unsafe", isolation_detected(accept_unsafe)))
+        checks.append(
+            (
+                "isolation-drops-session",
+                isolation_detected(
+                    lambda mutated: mutated["isolation"]["loaded"].update(
+                        {"tasks": [], "queue": [], "cookies": [], "has_login": False}
+                    )
+                ),
+            )
+        )
     elif suite == "files":
         mutated = copy.deepcopy(candidate)
         mutated["scan"]["tree"][0]["text"] = "mutated"
@@ -2229,22 +2522,29 @@ def run_suite(suite, output_root, upstream, target_dir):
             else:
                 diffs = compare_files(cases, oracle, candidate)
         elif suite == "session":
-            fixture_root = root / "fixture"
-            fixture_root.mkdir()
-            run_oracle(
-                "session-fixture",
-                {"root": str(fixture_root)},
-                root,
-                upstream,
-                root / "oracle-session-fixture.log",
-                cwd=fixture_root,
-            )
+            # Each side gets its own reference-written fixture tree so absolute
+            # paths inside h.json stay valid; the candidate never writes these
+            # h.json files before loading them.
             oracle_root = root / "oracle-work"
             candidate_root = root / "candidate-work"
             oracle_root.mkdir()
             candidate_root.mkdir()
-            shutil.copytree(fixture_root / "migrate", oracle_root / "migrate")
-            shutil.copytree(fixture_root / "migrate", candidate_root / "migrate")
+            run_oracle(
+                "session-fixture",
+                {"root": str(oracle_root)},
+                root,
+                upstream,
+                root / "oracle-session-fixture.log",
+                cwd=oracle_root,
+            )
+            run_oracle(
+                "session-fixture",
+                {"root": str(candidate_root)},
+                root,
+                upstream,
+                root / "candidate-session-fixture.log",
+                cwd=candidate_root,
+            )
             oracle = run_oracle(
                 "session",
                 {

@@ -20,8 +20,8 @@ use serde_json::{Map as JsonMap, Value};
 
 use crate::config::Config;
 use crate::r#const as consts;
-use crate::task::resolve_dir;
 use crate::task::{Task, TaskConfig, TaskError, TaskLoadError};
+use crate::task::{boundary_path, normalize, path_within, resolve_dir};
 use crate::util;
 use crate::util::logger::Logger;
 
@@ -109,28 +109,14 @@ impl From<SessionError> for AppError {
 
 #[derive(Debug)]
 pub enum SessionError {
-    Io {
-        path: PathBuf,
-        message: String,
-    },
+    Io { path: PathBuf, message: String },
     Json(String),
-    TooLarge {
-        path: PathBuf,
-        limit: u64,
-    },
+    TooLarge { path: PathBuf, limit: u64 },
     MissingKey(&'static str),
     Shape(String),
     Task(TaskLoadError),
     Scan(TaskError),
-    DirNotAuthorized {
-        guid: String,
-        dir: PathBuf,
-        authorized: PathBuf,
-    },
-    Unsafe {
-        path: PathBuf,
-        reason: &'static str,
-    },
+    Unsafe { path: PathBuf, reason: &'static str },
 }
 
 impl SessionError {
@@ -157,16 +143,6 @@ impl std::fmt::Display for SessionError {
             Self::Shape(message) => write!(f, "invalid session: {message}"),
             Self::Task(error) => write!(f, "{error}"),
             Self::Scan(error) => write!(f, "{error}"),
-            Self::DirNotAuthorized {
-                guid,
-                dir,
-                authorized,
-            } => write!(
-                f,
-                "task {guid} download directory {} is outside the authorized {}",
-                dir.display(),
-                authorized.display()
-            ),
             Self::Unsafe { path, reason } => {
                 write!(f, "unsafe session path {}: {reason}", path.display())
             }
@@ -189,6 +165,10 @@ pub struct App {
     base_dir: PathBuf,
     filepath: PathBuf,
     authorized_dir: PathBuf,
+    /// Canonical roots a restored task directory may live under: the user's
+    /// base/config root plus roots explicitly chosen through config or task
+    /// arguments. A value read from h.json never extends this set.
+    trusted_roots: Vec<PathBuf>,
     guid_source: Box<dyn GuidSource>,
 }
 
@@ -203,6 +183,7 @@ impl std::fmt::Debug for App {
             .field("exit", &self.exit)
             .field("base_dir", &self.base_dir)
             .field("authorized_dir", &self.authorized_dir)
+            .field("trusted_roots", &self.trusted_roots)
             .finish()
     }
 }
@@ -226,6 +207,7 @@ impl App {
     ) -> Result<Self, AppError> {
         logger.set_verbosity(cfg.log_verbose);
         let authorized_dir = resolve_dir(base_dir, &cfg.dir);
+        let base_root = boundary_path(base_dir).unwrap_or_else(|_| normalize(base_dir));
         let mut app = Self {
             cfg,
             logger,
@@ -258,8 +240,14 @@ impl App {
             base_dir: base_dir.to_path_buf(),
             filepath: filepath.to_path_buf(),
             authorized_dir,
+            trusted_roots: vec![base_root],
             guid_source,
         };
+        // The configured download root is an explicit user choice, so it may
+        // be an external absolute directory. A directory read from h.json is
+        // not granted this way.
+        let configured_root = app.authorized_dir.clone();
+        app.trust_dir(&configured_root);
         match app.load_session() {
             Ok(()) => Ok(app),
             Err(error) if error.is_recoverable() => {
@@ -344,6 +332,33 @@ impl App {
 
     pub fn authorized_dir(&self) -> &Path {
         &self.authorized_dir
+    }
+
+    /// Grant a download root that an explicit user entry point selected
+    /// (global config or task arguments). Never called with session values.
+    fn trust_dir(&mut self, dir: &Path) {
+        let Ok(root) = boundary_path(dir) else {
+            return;
+        };
+        if self
+            .trusted_roots
+            .iter()
+            .any(|trusted| path_within(trusted, &root))
+        {
+            return;
+        }
+        self.trusted_roots.push(root);
+    }
+
+    /// True when a task directory, after resolving symlinks on its existing
+    /// ancestors, stays below one of the trusted roots. This is a component
+    /// check, not equality with the current global download dir.
+    fn task_dir_is_authorized(&self, dir: &Path) -> Result<bool, TaskError> {
+        let candidate = boundary_path(dir)?;
+        Ok(self
+            .trusted_roots
+            .iter()
+            .any(|root| path_within(root, &candidate)))
     }
 
     pub fn logger_mut(&mut self) -> &mut Logger {
@@ -470,14 +485,23 @@ impl App {
             self.cfg.ignored_errors = merged;
         }
         self.logger.set_verbosity(self.cfg.log_verbose);
-        if let Some(Value::String(dir)) = patch.get("dir")
+        if let Some(Value::String(dir)) = patch.get("dir") {
+            let authorized = resolve_dir(&self.base_dir, dir);
+            self.authorized_dir = authorized.clone();
+            self.trust_dir(&authorized);
+        }
+        if let Some(dir) = patch.get("dir").and_then(Value::as_str)
             && !dir.is_empty()
-            && !Path::new(dir).exists()
-            && let Err(error) = fs::create_dir_all(dir)
+            && !self.authorized_dir.exists()
+            && let Err(error) = fs::create_dir_all(&self.authorized_dir)
         {
-            let message =
-                crate::i18n::render(crate::i18n::Locale::EnUs, "ERR_CANNOT_CREATE_DIR", &[dir])
-                    .unwrap_or_else(|| error.to_string());
+            let display = self.authorized_dir.to_string_lossy().into_owned();
+            let message = crate::i18n::render(
+                crate::i18n::Locale::EnUs,
+                "ERR_CANNOT_CREATE_DIR",
+                &[&display],
+            )
+            .unwrap_or_else(|| error.to_string());
             let _ = self.logger.error(&message);
         }
         let log_path = Path::new(&self.cfg.log_path);
@@ -512,7 +536,11 @@ impl App {
             let _ = self.logger.warning(&message);
         }
         let guid = self.guid_source.next_guid();
+        let task_root = resolve_dir(&self.base_dir, &config.dir);
         let task = Task::new(url, config, guid.clone(), &self.base_dir)?;
+        // A task argument is an explicit user choice and keeps its directory
+        // usable for the lifetime of this App, even if the global dir changes.
+        self.trust_dir(&task_root);
         if let Some(existing) = self.all_tasks.get_mut(&guid) {
             if existing.state == consts::TASK_STATE_FINISHED
                 || existing.state == consts::TASK_STATE_FAILED
@@ -699,12 +727,26 @@ impl App {
                 for value in tasks.values() {
                     let mut task =
                         Task::from_wire(value, &self.base_dir).map_err(SessionError::Task)?;
-                    if task.files().root() != self.authorized_dir {
-                        return Err(SessionError::DirNotAuthorized {
-                            guid: task.guid.clone(),
-                            dir: task.files().root().to_path_buf(),
-                            authorized: self.authorized_dir.clone(),
-                        });
+                    let authorized = match self.task_dir_is_authorized(task.files().root()) {
+                        Ok(authorized) => authorized,
+                        Err(error) => {
+                            let message = format!(
+                                "skipping task {}: cannot verify download directory {}: {error}",
+                                task.guid,
+                                task.files().root().display()
+                            );
+                            let _ = self.logger.warning(&message);
+                            continue;
+                        }
+                    };
+                    if !authorized {
+                        let message = format!(
+                            "skipping task {}: download directory {} is outside the trusted session roots",
+                            task.guid,
+                            task.files().root().display()
+                        );
+                        let _ = self.logger.warning(&message);
+                        continue;
                     }
                     if task.meta.contains_key("filelist") {
                         task.scan_downloaded().map_err(SessionError::Scan)?;
