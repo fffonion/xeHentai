@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use xeh_xtask::{
-    capture, compare_trees, rss_test, run_diff, run_proxy_diff, run_proxy_suite, run_rules_suite,
-    run_session_diff, run_session_suite, run_site_diff, run_site_suite, run_state_suite, run_suite,
-    run_task_diff, verify_deny_unverified, workspace_root,
+    capture, compare_trees, rss_test, run_diff, run_download_diff, run_download_suite,
+    run_proxy_diff, run_proxy_suite, run_rules_suite, run_session_diff, run_session_suite,
+    run_site_diff, run_site_suite, run_state_suite, run_suite, run_task_diff,
+    verify_deny_unverified, workspace_root,
 };
 
 fn main() -> ExitCode {
@@ -42,6 +43,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             "site" => run_site_suite(),
             "rules" => run_rules_suite(),
             "proxy" => run_proxy_suite(),
+            "download" => run_download_suite(),
             other => Err(format!("rss-test suite '{other}' is not implemented")),
         };
     }
@@ -52,6 +54,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             "session" => run_session_diff(),
             "site" => run_site_diff(),
             "proxy" => run_proxy_diff(),
+            "download" => run_download_diff(),
             other => Err(format!("diff suite '{other}' is not implemented")),
         };
     }
@@ -72,7 +75,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         };
         return manifest_check(&root);
     }
-    Err("usage: xeh-xtask oracle capture --suite <name> | oracle compare --left <dir> --right <dir> | verify --all --deny-unverified | manifest check [--root <dir>] | rss-test [--suite config|state|session|site|rules] | diff --suite config|task-api|session|site".to_string())
+    Err("usage: xeh-xtask oracle capture --suite <name> | oracle compare --left <dir> --right <dir> | verify --all --deny-unverified | manifest check [--root <dir>] | rss-test [--suite config|state|session|site|rules|proxy|download] | diff --suite config|task-api|session|site|proxy|download".to_string())
 }
 
 fn manifest_check(root: &std::path::Path) -> Result<(), String> {

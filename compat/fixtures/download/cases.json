@@ -1,0 +1,650 @@
+{
+  "cases": [
+    {
+      "id": "download.slots.scan-and-download",
+      "suite": "download",
+      "request": {
+        "operation": "slots",
+        "state": 4,
+        "scan_thread_cnt": 2,
+        "download_thread_cnt": 3,
+        "url": "https://e-hentai.org/g/1/aaaaaaaaaa/",
+        "total": 40,
+        "thumbnail_cnt": 20,
+        "page_q": ["https://e-hentai.org/s/aaaaaaaaaa/1-1"],
+        "img_q": ["https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg"]
+      },
+      "assertions": {
+        "/decisions/0": "slots:separated",
+        "/queues/metadata": [],
+        "/queues/list": [],
+        "/queues/scan/0": "https://e-hentai.org/s/aaaaaaaaaa/1-1",
+        "/queues/download/0": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "/slots/metadata": 1,
+        "/slots/list": 1,
+        "/slots/scan": 2,
+        "/slots/download": 3,
+        "/observable/worker_names/0": "down-1",
+        "/observable/worker_names/2": "down-3",
+        "/observable/worker_names/3": "scan-1",
+        "/observable/worker_names/4": "scan-2",
+        "/observable/spawned_scan": 2,
+        "/observable/spawned_download": 3,
+        "/observable/public_has_list_q": false,
+        "/observable/public_has_metadata_q": false,
+        "/observable/page_q/0": "https://e-hentai.org/s/aaaaaaaaaa/1-1",
+        "/observable/img_q/0": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg"
+      }
+    },
+    {
+      "id": "download.slots.metadata-only",
+      "suite": "download",
+      "request": {
+        "operation": "slots",
+        "state": 2,
+        "scan_thread_cnt": 2,
+        "download_thread_cnt": 3,
+        "url": "https://e-hentai.org/g/1/aaaaaaaaaa/",
+        "total": 40,
+        "thumbnail_cnt": 20,
+        "page_q": [],
+        "img_q": []
+      },
+      "assertions": {
+        "/decisions/0": "slots:separated",
+        "/queues/metadata/0": "https://e-hentai.org/g/1/aaaaaaaaaa/",
+        "/queues/list": [],
+        "/queues/scan": [],
+        "/queues/download": [],
+        "/slots/metadata": 1,
+        "/slots/list": 1,
+        "/slots/scan": 0,
+        "/slots/download": 0,
+        "/observable/worker_names": [],
+        "/observable/spawned_scan": 0,
+        "/observable/spawned_download": 0,
+        "/observable/public_has_list_q": false,
+        "/observable/public_has_metadata_q": false
+      }
+    },
+    {
+      "id": "download.slots.list-pages",
+      "suite": "download",
+      "request": {
+        "operation": "slots",
+        "state": 3,
+        "scan_thread_cnt": 1,
+        "download_thread_cnt": 1,
+        "url": "https://e-hentai.org/g/1/aaaaaaaaaa",
+        "total": 40,
+        "thumbnail_cnt": 20,
+        "page_q": [],
+        "img_q": []
+      },
+      "assertions": {
+        "/decisions/0": "slots:separated",
+        "/queues/metadata": [],
+        "/queues/list/0": "https://e-hentai.org/g/1/aaaaaaaaaa/?p=0",
+        "/queues/list/1": "https://e-hentai.org/g/1/aaaaaaaaaa/?p=1",
+        "/queues/scan": [],
+        "/slots/list": 1,
+        "/slots/scan": 0,
+        "/observable/worker_names": [],
+        "/observable/pending_list_urls/0": "https://e-hentai.org/g/1/aaaaaaaaaa/?p=0",
+        "/observable/pending_list_urls/1": "https://e-hentai.org/g/1/aaaaaaaaaa/?p=1",
+        "/observable/spawned_scan": 0,
+        "/observable/spawned_download": 0
+      }
+    },
+    {
+      "id": "download.retry.connection-error",
+      "suite": "download",
+      "request": {
+        "operation": "retry",
+        "kind": "connection-error",
+        "status_code": 600,
+        "requested_url": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "real_url": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "content_length": null,
+        "text": "",
+        "reload_url": "https://e-hentai.org/s/0123456789/99-2?nl=aa",
+        "fname": "002.jpg"
+      },
+      "assertions": {
+        "/decisions/0": "retry:connection-error",
+        "/observable/fail/0": 1009,
+        "/observable/requeue_url": "https://e-hentai.org/s/0123456789/99-2?nl=aa",
+        "/observable/exception": null,
+        "/observable/page_q/0": "https://e-hentai.org/s/0123456789/99-2?nl=aa"
+      }
+    },
+    {
+      "id": "download.retry.key-expired",
+      "suite": "download",
+      "request": {
+        "operation": "retry",
+        "kind": "key-expired",
+        "status_code": 403,
+        "requested_url": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "real_url": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "content_length": null,
+        "text": "",
+        "reload_url": "https://e-hentai.org/s/0123456789/99-2?nl=aa",
+        "fname": "002.jpg"
+      },
+      "assertions": {
+        "/decisions/0": "retry:key-expired",
+        "/observable/fail/0": 1007,
+        "/observable/requeue_url": "https://e-hentai.org/s/0123456789/99-2?nl=aa",
+        "/observable/exception": null
+      }
+    },
+    {
+      "id": "download.retry.not-found",
+      "suite": "download",
+      "request": {
+        "operation": "retry",
+        "kind": "not-found",
+        "status_code": 404,
+        "requested_url": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "real_url": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "content_length": 100,
+        "text": "",
+        "reload_url": "https://e-hentai.org/s/0123456789/99-2?nl=aa",
+        "fname": "002.jpg"
+      },
+      "assertions": {
+        "/decisions/0": "retry:not-found",
+        "/observable/fail/0": 1011,
+        "/observable/requeue_url": "https://e-hentai.org/s/0123456789/99-2?nl=aa",
+        "/observable/exception": null
+      }
+    },
+    {
+      "id": "download.retry.quota-status",
+      "suite": "download",
+      "request": {
+        "operation": "retry",
+        "kind": "quota-status",
+        "status_code": 509,
+        "requested_url": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "real_url": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "content_length": null,
+        "text": "",
+        "reload_url": "https://e-hentai.org/s/0123456789/99-2?nl=aa",
+        "fname": "002.jpg"
+      },
+      "assertions": {
+        "/decisions/0": "retry:quota",
+        "/observable/fail/0": 1006,
+        "/observable/requeue_url": "https://e-hentai.org/s/0123456789/99-2?nl=aa",
+        "/observable/exception": null
+      }
+    },
+    {
+      "id": "download.retry.quota-length",
+      "suite": "download",
+      "request": {
+        "operation": "retry",
+        "kind": "quota-length",
+        "status_code": 200,
+        "requested_url": "https://cdn.example/509.gif",
+        "real_url": "https://cdn.example/509.gif",
+        "content_length": 925,
+        "text": "",
+        "reload_url": "https://e-hentai.org/s/0123456789/99-2?nl=aa",
+        "fname": "002.jpg",
+        "reload_hash": "0123456789"
+      },
+      "assertions": {
+        "/decisions/0": "retry:quota",
+        "/observable/fail/0": 1006,
+        "/observable/exception": "IndexError"
+      }
+    },
+    {
+      "id": "download.retry.quota-text",
+      "suite": "download",
+      "request": {
+        "operation": "retry",
+        "kind": "quota-text",
+        "status_code": 200,
+        "requested_url": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "real_url": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "content_length": 100,
+        "text": "You have exceeded your image viewing limits",
+        "header_names": ["content-type"],
+        "header_values": ["text/html"],
+        "reload_url": "https://e-hentai.org/s/0123456789/99-2?nl=aa",
+        "fname": "002.jpg"
+      },
+      "assertions": {
+        "/decisions/0": "retry:quota",
+        "/observable/fail/0": 1006,
+        "/observable/requeue_url": "https://e-hentai.org/s/0123456789/99-2?nl=aa",
+        "/observable/exception": null
+      }
+    },
+    {
+      "id": "download.retry.wrong-length",
+      "suite": "download",
+      "request": {
+        "operation": "retry",
+        "kind": "wrong-length",
+        "status_code": 200,
+        "requested_url": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "real_url": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "content_length": 50,
+        "text": "",
+        "reload_url": "https://e-hentai.org/s/0123456789/99-2?nl=aa",
+        "fname": "002.jpg"
+      },
+      "assertions": {
+        "/decisions/0": "retry:broken",
+        "/observable/fail/0": 1012,
+        "/observable/requeue_url": "https://e-hentai.org/s/0123456789/99-2?nl=aa",
+        "/observable/exception": null
+      }
+    },
+    {
+      "id": "download.retry.broken-stream",
+      "suite": "download",
+      "request": {
+        "operation": "retry",
+        "kind": "broken-stream",
+        "status_code": 200,
+        "requested_url": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "real_url": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "content_length": 100,
+        "text": "",
+        "stream_broken": true,
+        "reload_url": "https://e-hentai.org/s/0123456789/99-2?nl=aa",
+        "fname": "002.jpg"
+      },
+      "assertions": {
+        "/decisions/0": "retry:broken",
+        "/observable/fail/0": 1012,
+        "/observable/requeue_url": "https://e-hentai.org/s/0123456789/99-2?nl=aa",
+        "/observable/exception": "DownloadAbortedException"
+      }
+    },
+    {
+      "id": "download.retry.low-speed",
+      "suite": "download",
+      "request": {
+        "operation": "retry",
+        "kind": "low-speed",
+        "status_code": 600,
+        "requested_url": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "real_url": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "content_length": null,
+        "text": "",
+        "reload_url": "https://e-hentai.org/s/0123456789/99-2?nl=aa",
+        "fname": "002.jpg"
+      },
+      "assertions": {
+        "/decisions/0": "retry:low-speed",
+        "/observable/fail/0": 1009,
+        "/observable/requeue_url": "https://e-hentai.org/s/0123456789/99-2?nl=aa",
+        "/observable/exception": null
+      }
+    },
+    {
+      "id": "download.retry.failed-reload",
+      "suite": "download",
+      "request": {
+        "operation": "retry",
+        "kind": "failed-reload",
+        "status_code": 403,
+        "requested_url": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "real_url": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "content_length": null,
+        "text": "",
+        "reload_url": "",
+        "fname": ""
+      },
+      "assertions": {
+        "/decisions/0": "retry:failed-reload",
+        "/observable/fail/0": 1007,
+        "/observable/exception": "KeyError",
+        "/observable/page_q": []
+      }
+    },
+    {
+      "id": "download.speed.window",
+      "suite": "download",
+      "request": {
+        "operation": "speed",
+        "threshold": 1024,
+        "chunks": [
+          {"t": 2, "bytes": 100},
+          {"t": 4, "bytes": 100},
+          {"t": 6, "bytes": 100},
+          {"t": 8, "bytes": 100},
+          {"t": 10, "bytes": 100}
+        ]
+      },
+      "assertions": {
+        "/decisions/0": "speed:low",
+        "/observable/low_speed": true,
+        "/observable/sample_count": 5,
+        "/observable/average_milli": 50000
+      }
+    },
+    {
+      "id": "download.speed.above-threshold",
+      "suite": "download",
+      "request": {
+        "operation": "speed",
+        "threshold": 1024,
+        "chunks": [
+          {"t": 2, "bytes": 3000},
+          {"t": 4, "bytes": 3000},
+          {"t": 6, "bytes": 3000},
+          {"t": 8, "bytes": 3000},
+          {"t": 10, "bytes": 3000}
+        ]
+      },
+      "assertions": {
+        "/decisions/0": "speed:ok",
+        "/observable/low_speed": false,
+        "/observable/sample_count": 5,
+        "/observable/average_milli": 1500000
+      }
+    },
+    {
+      "id": "download.monitor.zombie",
+      "suite": "download",
+      "request": {
+        "operation": "monitor",
+        "kind": "zombie",
+        "timeout": 10,
+        "retry": 3,
+        "now": 100,
+        "last_seen": 50,
+        "alive": true,
+        "name": "down-1",
+        "state": 4
+      },
+      "assertions": {
+        "/decisions/0": "monitor:zombie",
+        "/observable/reason": "zombie",
+        "/observable/zombies/0": "down-1",
+        "/observable/swept": [],
+        "/observable/task_state": 4,
+        "/observable/stopped": true
+      }
+    },
+    {
+      "id": "download.monitor.sweep",
+      "suite": "download",
+      "request": {
+        "operation": "monitor",
+        "kind": "sweep",
+        "timeout": 10,
+        "retry": 3,
+        "now": 100,
+        "last_seen": 50,
+        "alive": false,
+        "name": "scan-1",
+        "state": 4
+      },
+      "assertions": {
+        "/decisions/0": "monitor:sweep",
+        "/observable/reason": "sweep",
+        "/observable/zombies": [],
+        "/observable/swept/0": "scan-1",
+        "/observable/task_state": 4,
+        "/observable/stopped": true
+      }
+    },
+    {
+      "id": "download.monitor.stuck",
+      "suite": "download",
+      "request": {
+        "operation": "monitor",
+        "kind": "stuck",
+        "timeout": 10000,
+        "retry": 0,
+        "clock_step": 10,
+        "finished": 1,
+        "total_speed": 0,
+        "state": 10,
+        "name": "down-1"
+      },
+      "assertions": {
+        "/decisions/0": "monitor:stuck",
+        "/observable/reason": "stuck",
+        "/observable/stopped": true,
+        "/observable/task_state": 10
+      }
+    },
+    {
+      "id": "download.monitor.slow-not-stuck",
+      "suite": "download",
+      "request": {
+        "operation": "monitor",
+        "kind": "slow",
+        "timeout": 10000,
+        "retry": 0,
+        "clock_step": 10,
+        "finished": 1,
+        "total_speed": 2048,
+        "state": 10,
+        "name": "down-1"
+      },
+      "assertions": {
+        "/decisions/0": "monitor:slow",
+        "/observable/reason": "slow",
+        "/observable/stopped": false,
+        "/observable/task_state": 10
+      }
+    },
+    {
+      "id": "download.monitor.quota-vote",
+      "suite": "download",
+      "request": {
+        "operation": "monitor",
+        "kind": "quota-vote",
+        "timeout": 10,
+        "retry": 3,
+        "state": 10,
+        "votes": {"1006": 2},
+        "thread_count": 2,
+        "ignored_errors": []
+      },
+      "assertions": {
+        "/decisions/0": "monitor:quota-vote",
+        "/observable/reason": "quota",
+        "/observable/stopped": true,
+        "/observable/task_state": -1,
+        "/observable/votes/1006": 2
+      }
+    },
+    {
+      "id": "download.duplicates.finish-first",
+      "suite": "download",
+      "request": {
+        "operation": "duplicates",
+        "kind": "finish-first",
+        "old_exists": true,
+        "download_ori": false,
+        "total": 12,
+        "title": "gallery",
+        "img_url": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "reload_url": "https://e-hentai.org/s/0123456789/99-2?nl=aa",
+        "fname": "002.jpg",
+        "old_fid": 1,
+        "old_reload_url": "https://e-hentai.org/s/0123456789/99-1?nl=aa",
+        "old_fname": "001.jpg"
+      },
+      "assertions": {
+        "/decisions/0": "duplicate:copied",
+        "/observable/finished/0": 2,
+        "/observable/duplicate_map": {},
+        "/observable/img_q": [],
+        "/observable/copied": true
+      }
+    },
+    {
+      "id": "download.duplicates.finish-later",
+      "suite": "download",
+      "request": {
+        "operation": "duplicates",
+        "kind": "finish-later",
+        "old_exists": false,
+        "download_ori": false,
+        "total": 12,
+        "title": "gallery",
+        "img_url": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "reload_url": "https://e-hentai.org/s/0123456789/99-2?nl=aa",
+        "fname": "002.jpg",
+        "old_fid": 1,
+        "old_reload_url": "https://e-hentai.org/s/0123456789/99-1?nl=aa",
+        "old_fname": "001.jpg",
+        "save_original": true
+      },
+      "assertions": {
+        "/decisions/0": "duplicate:pending",
+        "/decisions/1": "duplicate:saved-copy",
+        "/observable/finished/0": 1,
+        "/observable/finished/1": 2,
+        "/observable/duplicate_map": {},
+        "/observable/copied": true
+      }
+    },
+    {
+      "id": "download.pages.repeated-unfinished",
+      "suite": "download",
+      "request": {
+        "operation": "pages",
+        "kind": "repeated-unfinished",
+        "total": 5,
+        "url": "https://e-hentai.org/s/aaaaaaaaaa/1-2",
+        "finished": []
+      },
+      "assertions": {
+        "/decisions/0": "page:queued",
+        "/observable/page_q/0": "https://e-hentai.org/s/aaaaaaaaaa/1-2",
+        "/observable/page_q/1": "https://e-hentai.org/s/aaaaaaaaaa/1-2",
+        "/observable/queued_count": 2
+      }
+    },
+    {
+      "id": "download.pages.repeated-finished",
+      "suite": "download",
+      "request": {
+        "operation": "pages",
+        "kind": "repeated-finished",
+        "total": 5,
+        "url": "https://e-hentai.org/s/aaaaaaaaaa/1-2",
+        "finished": [2]
+      },
+      "assertions": {
+        "/decisions/0": "page:skipped",
+        "/observable/page_q": [],
+        "/observable/queued_count": 0
+      }
+    },
+    {
+      "id": "download.pages.out-of-range",
+      "suite": "download",
+      "request": {
+        "operation": "pages",
+        "kind": "out-of-range",
+        "total": 5,
+        "download_range": [[1, 2]],
+        "finished": []
+      },
+      "assertions": {
+        "/decisions/0": "page:out-of-range",
+        "/observable/finished/0": 3,
+        "/observable/finished/1": 4,
+        "/observable/finished/2": 5,
+        "/observable/finished_count": 3,
+        "/observable/state": 1
+      }
+    },
+    {
+      "id": "download.pages.last-page",
+      "suite": "download",
+      "request": {
+        "operation": "pages",
+        "kind": "last-page",
+        "total": 5,
+        "finished": []
+      },
+      "assertions": {
+        "/decisions/0": "page:last-excluded",
+        "/observable/unfinished/0": 1,
+        "/observable/unfinished/3": 4,
+        "/observable/unfinished_count": 4,
+        "/observable/scanned_includes_last": true,
+        "/observable/finished_count": 0
+      }
+    },
+    {
+      "id": "download.lifecycle.pause-resume-exit",
+      "suite": "download",
+      "request": {
+        "operation": "lifecycle",
+        "state": 10,
+        "scan_thread_cnt": 1,
+        "download_thread_cnt": 2,
+        "steps": ["start", "pause", "pause", "resume", "exit"],
+        "finished": 3
+      },
+      "assertions": {
+        "/decisions/0": "lifecycle:no-double-submit",
+        "/observable/codes/0": 0,
+        "/observable/codes/1": 1106,
+        "/observable/codes/2": 0,
+        "/observable/states/0": 0,
+        "/observable/states/1": 0,
+        "/observable/states/2": 1,
+        "/observable/queue_puts": 1,
+        "/observable/exit_after_pause": true,
+        "/observable/finished": 3,
+        "/submit_ids/0": "down-1",
+        "/submit_ids/1": "down-2",
+        "/submit_count": 2,
+        "/permits_end": 0
+      }
+    },
+    {
+      "id": "download.hop.direct",
+      "suite": "download",
+      "request": {
+        "operation": "hop",
+        "kind": "direct",
+        "proxy_image": false,
+        "proxy_image_only": false,
+        "url": "http://127.0.0.1:9/image.bin"
+      },
+      "assertions": {
+        "/decisions/0": "hop:admit+exchange",
+        "/observable/path": "direct",
+        "/observable/status": 200,
+        "/route_kind": "direct"
+      }
+    },
+    {
+      "id": "download.hop.proxied",
+      "suite": "download",
+      "request": {
+        "operation": "hop",
+        "kind": "proxied",
+        "proxy_image": true,
+        "proxy_image_only": false,
+        "url": "http://target.invalid:9/image.bin",
+        "proxy_address": "http://127.0.0.1:9"
+      },
+      "assertions": {
+        "/decisions/0": "hop:proxy_request",
+        "/observable/path": "proxied",
+        "/observable/status": 200,
+        "/route_kind": "http"
+      }
+    }
+  ]
+}

@@ -303,6 +303,32 @@ fn authorization_config(authorization: &str) -> Result<vm::HttpConfig, HostError
     })
 }
 
+fn download_grants(authorization: &str) -> Result<Vec<crate::task_control::ProxyGrant>, HostError> {
+    let value: serde_json::Value = serde_json::from_str(authorization)
+        .map_err(|error| HostError::runtime(format!("proxy authorization is not JSON: {error}")))?;
+    let Some(items) = value.get("grants").and_then(serde_json::Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    items
+        .iter()
+        .map(|item| {
+            let object = item.as_object().ok_or_else(|| {
+                HostError::runtime("proxy grant must be an object")
+            })?;
+            let address = object
+                .get("address")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| HostError::runtime("proxy grant address is required"))?
+                .to_string();
+            let remote_dns = object
+                .get("remote_dns")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            Ok(crate::task_control::ProxyGrant { address, remote_dns })
+        })
+        .collect()
+}
+
 async fn run_proxy_scenario_async(
     root: &Path,
     request: &str,
@@ -440,6 +466,89 @@ async fn run_site_scenario_async(root: &Path, request: &str) -> Result<String, H
         Value::String(text) => Ok(text.as_str().to_string()),
         other => Err(HostError::runtime(format!(
             "site entry returned {other:?}, not a string"
+        ))),
+    }
+}
+
+/// Runs the RSS download entry with the retained proxy hosts.
+///
+/// Direct hops use `xeh_proxy::admit` and `xeh_proxy::exchange`. Proxied hops
+/// call the retained `request::execute` path. The authorization envelope is
+/// fixed before the guest starts.
+pub fn run_download_scenario(
+    root: &Path,
+    request: &str,
+    authorization: &str,
+) -> Result<String, HostError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| HostError::runtime(error.to_string()))?;
+    runtime.block_on(run_download_scenario_async(root, request, authorization))
+}
+
+async fn run_download_scenario_async(
+    root: &Path,
+    request: &str,
+    authorization: &str,
+) -> Result<String, HostError> {
+    let http = authorization_config(authorization)?;
+    let grants = download_grants(authorization)?;
+    let catalog = crate::proxy_host::proxy_catalog();
+    let entry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../app/download/entry.rss");
+    let program = compile_file_with_catalog(&entry, Arc::clone(&catalog)).map_err(|error| {
+        HostError::compile(format!(
+            "download decisions are not implemented: {}: {error}",
+            entry.display()
+        ))
+    })?;
+    let mut vm = Vm::try_new(program).map_err(HostError::from_vm)?;
+    vm.set_jit_config(vm::JitConfig {
+        enabled: false,
+        ..Default::default()
+    });
+    let mut registry = crate::task_control::registry_with_task_hosts(&catalog)?;
+    let host = crate::proxy_host::ProxyHost::new(
+        root.to_path_buf(),
+        http,
+        crate::dto::TransportHooks::default(),
+        grants,
+    );
+    crate::proxy_host::register_proxy(&mut registry, &catalog, host)?;
+    bind_vm(&mut vm, &registry)?;
+    attach_timer(&mut vm, Arc::new(EmbeddingTimer::new()));
+    drive_to_halt(&mut vm).await?;
+    let callable = vm
+        .resolve_exported_callable("run")
+        .map_err(HostError::from_vm)?;
+    let mut invocation = vm
+        .start_invocation(callable, vec![Value::string(request.to_string())])
+        .map_err(HostError::from_vm)?;
+    let value = poll_fn(|context| loop {
+        match invocation.poll_next_with_context(context) {
+            Ok(InvocationPoll::Pending) => return Poll::Pending,
+            Ok(InvocationPoll::Ready(Some(Ok(InvocationItem::Event(_))))) => continue,
+            Ok(InvocationPoll::Ready(Some(Ok(InvocationItem::Complete(value))))) => {
+                return Poll::Ready(Ok(value));
+            }
+            Ok(InvocationPoll::Ready(Some(Err(error)))) => {
+                return Poll::Ready(Err(HostError::runtime(format!(
+                    "download invocation failed: {error:?}"
+                ))));
+            }
+            Ok(InvocationPoll::Ready(None)) => {
+                return Poll::Ready(Err(HostError::runtime(
+                    "download invocation ended without a result",
+                )));
+            }
+            Err(error) => return Poll::Ready(Err(HostError::from_vm(error))),
+        }
+    })
+    .await?;
+    match value {
+        Value::String(text) => Ok(text.as_str().to_string()),
+        other => Err(HostError::runtime(format!(
+            "download entry returned {other:?}, not a string"
         ))),
     }
 }

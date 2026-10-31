@@ -1,0 +1,718 @@
+//! Download scheduling, retry, speed, and monitor decisions.
+//!
+//! Direct hops use the admitted exchange. Proxied hops use the retained
+//! proxy request. Queue names stay page_q and img_q in the public task.
+use json;
+use xeh_proxy;
+
+use super::proxy::pool;
+use super::proxy::policy;
+use super::proxy::request;
+use super::rules::download;
+use super::site::support;
+
+fn text(value: map, key: string, fallback: string) -> string {
+    if value.has(key) && type(value[key].copy()) == "string" => {
+        let typed: string = value[key].copy();
+        typed
+    } else => {
+        fallback
+    }
+}
+
+fn whole(value: map, key: string, fallback: int) -> int {
+    if value.has(key) && type(value[key].copy()) == "int" => {
+        let typed: int = value[key].copy();
+        typed
+    } else => {
+        fallback
+    }
+}
+
+fn flag(value: map, key: string, fallback: bool) -> bool {
+    if value.has(key) && type(value[key].copy()) == "bool" => {
+        let typed: bool = value[key].copy();
+        typed
+    } else => {
+        fallback
+    }
+}
+
+fn strings(value: map, key: string) -> [string] {
+    if value.has(key) && type(value[key].copy()) == "array" => {
+        let typed: [string] = value[key].copy();
+        typed
+    } else => {
+        []
+    }
+}
+
+fn maps(value: map, key: string) -> [map] {
+    if value.has(key) && type(value[key].copy()) == "array" => {
+        let typed: [map] = value[key].copy();
+        typed
+    } else => {
+        []
+    }
+}
+
+fn ints(value: map, key: string) -> [int] {
+    if value.has(key) && type(value[key].copy()) == "array" => {
+        let typed: [int] = value[key].copy();
+        typed
+    } else => {
+        []
+    }
+}
+
+fn decimal_text(value: int) -> string {
+    json::encode(value)
+}
+
+fn hash10(url: string) -> string {
+    let hashes = support::capture_group_all("/([a-f0-9]{10})[a-f0-9]{30}-", url.copy(), 0);
+    if hashes.length > 0 => {
+        hashes[0].copy()
+    } else => {
+        ""
+    }
+}
+
+fn gallery_fid(url: string) -> int {
+    let fids = support::capture_group_all("/[a-f0-9]{10}/[^\\-]+-([0-9]+)", url.copy(), 0);
+    if fids.length > 0 => {
+        support::decimal(fids[0].copy())
+    } else => {
+        0
+    }
+}
+
+fn contains(text: string, needle: string) -> bool {
+    support::first(needle.copy(), text.copy()).length > 0
+}
+
+fn report(decisions: [string], queues: map, slots: map, observable: map, submit_ids: [string], submit_count: int, permits_end: int, route_kind: string) -> string {
+    let mut output: map = {};
+    output["decisions"] = decisions;
+    output["queues"] = queues;
+    output["slots"] = slots;
+    output["observable"] = observable;
+    output["submit_ids"] = submit_ids;
+    output["submit_count"] = submit_count;
+    output["permits_end"] = permits_end;
+    output["route_kind"] = route_kind;
+    json::encode(output)
+}
+
+fn empty_queues() -> map {
+    let mut queues: map = {};
+    queues["metadata"] = [];
+    queues["list"] = [];
+    queues["scan"] = [];
+    queues["download"] = [];
+    queues
+}
+
+fn empty_slots() -> map {
+    let mut slots: map = {};
+    slots["metadata"] = 1;
+    slots["list"] = 1;
+    slots["scan"] = 0;
+    slots["download"] = 0;
+    slots
+}
+
+fn run_slots(request: map) -> string {
+    let state = whole(request, "state", 1);
+    let scan_count = whole(request, "scan_thread_cnt", 0);
+    let download_count = whole(request, "download_thread_cnt", 0);
+    let url = text(request, "url", "");
+    let total = whole(request, "total", 0);
+    let thumbnail = whole(request, "thumbnail_cnt", 20);
+    let page_q = strings(request, "page_q");
+    let img_q = strings(request, "img_q");
+    let mut names: [string] = [];
+    let mut spawned_scan = 0;
+    let mut spawned_download = 0;
+    if state >= 4 {
+        spawned_download = download_count;
+        spawned_scan = scan_count;
+        for index in 0..download_count {
+            names[names.length] = "down-" + decimal_text(index + 1);
+        }
+        for index in 0..scan_count {
+            names[names.length] = "scan-" + decimal_text(index + 1);
+        }
+    }
+    let mut pending: [string] = [];
+    if state == 3 && thumbnail > 0 {
+        let pages = (total + thumbnail - 1) / thumbnail;
+        for index in 0..pages {
+            pending[pending.length] = url.copy() + "/?p=" + decimal_text(index);
+        }
+    }
+    let mut queues = empty_queues();
+    if state == 2 {
+        queues["metadata"] = [url.copy()];
+    }
+    if state == 3 {
+        queues["list"] = pending.copy();
+    }
+    if state >= 4 {
+        queues["scan"] = page_q.copy();
+        queues["download"] = img_q.copy();
+    }
+    let mut slots = empty_slots();
+    slots["scan"] = spawned_scan;
+    slots["download"] = spawned_download;
+    let mut observable: map = {};
+    observable["worker_names"] = names;
+    observable["spawned_scan"] = spawned_scan;
+    observable["spawned_download"] = spawned_download;
+    observable["public_has_list_q"] = false;
+    observable["public_has_metadata_q"] = false;
+    observable["page_q"] = page_q;
+    observable["img_q"] = img_q;
+    observable["pending_list_urls"] = pending;
+    report(["slots:separated"], queues, slots, observable, [], 0, 0, "")
+}
+
+fn missing_text() -> string? {
+    null
+}
+
+fn detail_value(ok: bool) -> string? {
+    if ok => {
+        ""
+    } else => {
+        null
+    }
+}
+
+fn optional_length(request: map) -> int? {
+    if request.has("content_length") && type(request["content_length"].copy()) == "int" => {
+        let typed: int = request["content_length"].copy();
+        typed
+    } else => {
+        null
+    }
+}
+
+fn retry_decision(kind: string) -> string {
+    if kind == "connection-error" => {
+        "retry:connection-error"
+    } else if kind == "key-expired" => {
+        "retry:key-expired"
+    } else if kind == "not-found" => {
+        "retry:not-found"
+    } else if kind == "wrong-length" || kind == "broken-stream" => {
+        "retry:broken"
+    } else if kind == "low-speed" => {
+        "retry:low-speed"
+    } else if kind == "failed-reload" => {
+        "retry:failed-reload"
+    } else => {
+        "retry:quota"
+    }
+}
+
+fn with_null(text: string, key: string) -> string {
+    let decoded: map = json::decode::<map>(text.copy());
+    if decoded.has(key) => {
+        text
+    } else => {
+        let length = (&text).length;
+        (&text)[0:(length - 1)] + ",\"" + key + "\":null}"
+    }
+}
+
+fn retry_report(kind: string, queues: map, observable: map) -> string {
+    let observable_json = with_null(with_null(json::encode(observable), "exception"), "requeue_url");
+    let mut output: map = {};
+    output["decisions"] = [retry_decision(kind)];
+    output["queues"] = queues;
+    output["slots"] = empty_slots();
+    output["submit_ids"] = [];
+    output["submit_count"] = 0;
+    output["permits_end"] = 0;
+    output["route_kind"] = "";
+    let encoded = json::encode(output);
+    let length = (&encoded).length;
+    (&encoded)[0:(length - 1)] + ",\"observable\":" + observable_json + "}"
+}
+
+fn run_retry(request: map) -> string {
+    let kind = text(request, "kind", "");
+    let requested = text(request, "requested_url", "");
+    let real = text(request, "real_url", "");
+    let broken = flag(request, "stream_broken", false);
+    let events = if broken => {
+        "[{\"kind\":\"connection-error\",\"bytes\":[],\"callback_return\":\"\"}]"
+    } else => {
+        "[]"
+    };
+    let raw = download::run_download(
+        whole(request, "status_code", 0),
+        requested.copy(),
+        real.copy(),
+        optional_length(request),
+        strings(request, "header_names"),
+        strings(request, "header_values"),
+        text(request, "text", ""),
+        broken,
+        events,
+        [],
+        []
+    );
+    let parsed: map = json::decode::<map>(raw);
+    let callbacks: [map] = parsed["callbacks"].copy();
+    let mut fail_code = 0;
+    for index in 0..callbacks.length {
+        let item: map = callbacks[index].copy();
+        let item_kind: string = item["kind"].copy();
+        if item_kind == "fail" {
+            let value: array = item["value"].copy();
+            if value.length > 0 && type(value[0].copy()) == "int" {
+                let typed: int = value[0].copy();
+                fail_code = typed;
+            }
+        }
+    }
+    let reload_url = text(request, "reload_url", "");
+    let image_hash = hash10(requested.copy());
+    let hash_missing = requested != "" && image_hash == "";
+    let reload_missing = requested != "" && image_hash != "" && reload_url == "";
+    let can_requeue = requested != "" && hash_missing == false && reload_missing == false && reload_url != "";
+    let mut page_q: [string] = [];
+    if can_requeue {
+        page_q[page_q.length] = reload_url.copy();
+    }
+    let mut observable: map = {};
+    observable["fail"] = [fail_code, real.copy(), requested.copy()];
+    observable["requeue_url"] = null;
+    if can_requeue {
+        observable["requeue_url"] = reload_url.copy();
+    }
+    observable["exception"] = null;
+    if hash_missing {
+        observable["exception"] = "IndexError";
+    }
+    if reload_missing {
+        observable["exception"] = "KeyError";
+    }
+    if broken && hash_missing == false && reload_missing == false {
+        observable["exception"] = "DownloadAbortedException";
+    }
+    observable["page_q"] = page_q;
+    retry_report(kind, empty_queues(), observable)
+}
+
+fn run_speed(request: map) -> string {
+    let threshold = whole(request, "threshold", 0);
+    let chunks = maps(request, "chunks");
+    let mut last_tm = 0;
+    let mut last_bytes = 0;
+    let mut current_bytes = 0;
+    let mut buffer: [int] = [];
+    for index in 0..chunks.length {
+        let chunk: map = chunks[index].copy();
+        let at = whole(chunk, "t", 0);
+        let size = whole(chunk, "bytes", 0);
+        current_bytes = current_bytes + size;
+        if at - last_tm > 1 {
+            buffer[buffer.length] = (current_bytes - last_bytes) * 1000 / (at - last_tm);
+            if buffer.length > 5 {
+                let a = buffer[1].copy();
+                let b = buffer[2].copy();
+                let c = buffer[3].copy();
+                let d = buffer[4].copy();
+                let e = buffer[5].copy();
+                buffer = [a, b, c, d, e];
+            }
+            last_tm = at;
+            last_bytes = current_bytes;
+        }
+    }
+    let mut sum = 0;
+    for index in 0..buffer.length {
+        sum = sum + buffer[index].copy();
+    }
+    let average = if buffer.length == 0 => { 0 } else => { sum / buffer.length };
+    let low = buffer.length >= 5 && average > 0 && average < threshold * 1000;
+    let decision = if low => { "speed:low" } else => { "speed:ok" };
+    let mut observable: map = {};
+    observable["low_speed"] = low;
+    observable["sample_count"] = buffer.length;
+    observable["average_milli"] = average;
+    report([decision], empty_queues(), empty_slots(), observable, [], 0, 0, "")
+}
+
+fn monitor_observable(reason: string, zombies: [string], swept: [string], task_state: int, stopped: bool, votes: map) -> map {
+    let mut observable: map = {};
+    observable["reason"] = reason;
+    observable["zombies"] = zombies;
+    observable["swept"] = swept;
+    observable["task_state"] = task_state;
+    observable["stopped"] = stopped;
+    observable["votes"] = votes;
+    observable
+}
+
+fn progress_monitor(request: map) -> map {
+    let finished = whole(request, "finished", 0);
+    let speed = whole(request, "total_speed", 0);
+    let step = whole(request, "clock_step", 10);
+    let threshold = whole(request, "timeout", 10) * (whole(request, "retry", 0) + 1);
+    let state = whole(request, "state", 10);
+    let mut now = 0;
+    let mut last_change = 0;
+    let mut last_finished = -1;
+    let mut reason = "";
+    let mut stopped = false;
+    let mut done = false;
+    for iteration in 1..41 {
+        if done == false {
+            if now - 0 > threshold {
+                done = true;
+            } else if iteration % 10 == 0 && last_finished != finished {
+                last_change = now;
+                last_finished = finished;
+            } else if iteration % 10 == 0 && now - last_change > 90 {
+                if speed > 0 {
+                    reason = "slow";
+                    stopped = false;
+                } else {
+                    reason = "stuck";
+                    stopped = true;
+                }
+                done = true;
+            }
+            if done == false {
+                now = now + step;
+            }
+        }
+    }
+    monitor_observable(reason, [], [], state, stopped, {})
+}
+
+fn run_monitor(request: map) -> string {
+    let kind = text(request, "kind", "");
+    let state = whole(request, "state", 4);
+    let decision = if kind == "quota-vote" => {
+        "monitor:quota-vote"
+    } else if kind == "zombie" => {
+        "monitor:zombie"
+    } else if kind == "sweep" => {
+        "monitor:sweep"
+    } else if kind == "slow" => {
+        "monitor:slow"
+    } else => {
+        "monitor:stuck"
+    };
+    let observable = if kind == "quota-vote" => {
+        let votes: map = request["votes"].copy();
+        let count = whole(votes, "1006", 0);
+        let threads = whole(request, "thread_count", 0);
+        let failed = count >= threads && threads > 0;
+        let next_state = if failed => { -1 } else => { state };
+        let reason = if failed => { "quota" } else => { "" };
+        monitor_observable(reason, [], [], next_state, failed, votes)
+    } else if kind == "zombie" || kind == "sweep" => {
+        let name = text(request, "name", "");
+        let threshold = whole(request, "timeout", 10) * (whole(request, "retry", 0) + 1);
+        let overdue = whole(request, "now", 0) - whole(request, "last_seen", 0) > threshold;
+        let alive = flag(request, "alive", false);
+        let mut zombies: [string] = [];
+        let mut swept: [string] = [];
+        let mut reason = "";
+        if overdue && alive {
+            zombies[zombies.length] = name.copy();
+            reason = "zombie";
+        } else if overdue {
+            swept[swept.length] = name.copy();
+            reason = "sweep";
+        }
+        monitor_observable(reason, zombies, swept, state, overdue, {})
+    } else => {
+        progress_monitor(request)
+    };
+    report([decision], empty_queues(), empty_slots(), observable, [], 0, 0, "")
+}
+
+fn sorted_insert(values: [int], fid: int) -> [int] {
+    let mut next: [int] = [];
+    let mut placed = false;
+    for index in 0..values.length {
+        let current = values[index].copy();
+        if placed == false && fid < current {
+            next[next.length] = fid;
+            placed = true;
+        }
+        if current != fid {
+            next[next.length] = current;
+        }
+    }
+    if placed == false {
+        next[next.length] = fid;
+    }
+    next
+}
+
+fn run_duplicates(request: map) -> string {
+    let old_fid = whole(request, "old_fid", 0);
+    let new_fid = gallery_fid(text(request, "reload_url", ""));
+    let old_exists = flag(request, "old_exists", false);
+    let save_original = flag(request, "save_original", false);
+    let mut decisions: [string] = [];
+    let mut finished: [int] = [];
+    let mut copied = false;
+    if old_exists && new_fid != old_fid {
+        decisions[decisions.length] = "duplicate:copied";
+        finished = sorted_insert(finished, new_fid);
+        copied = true;
+    } else if new_fid != old_fid {
+        decisions[decisions.length] = "duplicate:pending";
+        if save_original {
+            decisions[decisions.length] = "duplicate:saved-copy";
+            finished = sorted_insert(finished, old_fid);
+            finished = sorted_insert(finished, new_fid);
+            copied = true;
+        }
+    }
+    let mut observable: map = {};
+    observable["finished"] = finished;
+    observable["duplicate_map"] = {};
+    observable["img_q"] = [];
+    observable["copied"] = copied;
+    report(decisions, empty_queues(), empty_slots(), observable, [], 0, 0, "")
+}
+
+fn range_pairs(request: map) -> [[int]] {
+    if request.has("download_range") && type(request["download_range"].copy()) == "array" => {
+        let typed: [[int]] = request["download_range"].copy();
+        typed
+    } else => {
+        []
+    }
+}
+
+fn fid_in_range(fid: int, ranges: [[int]]) -> bool {
+    let mut found = false;
+    for index in 0..ranges.length {
+        let pair: [int] = ranges[index].copy();
+        if pair.length >= 2 && fid >= pair[0].copy() && fid <= pair[1].copy() {
+            found = true;
+        }
+    }
+    found
+}
+
+fn run_pages(request: map) -> string {
+    let kind = text(request, "kind", "");
+    let total = whole(request, "total", 0);
+    let url = text(request, "url", "");
+    let done = ints(request, "finished");
+    let ranges = range_pairs(request);
+    let mut page_q: [string] = [];
+    let mut decisions: [string] = [];
+    let mut finished: [int] = [];
+    for index in 0..done.length {
+        finished = sorted_insert(finished, done[index].copy());
+    }
+    if kind == "repeated-unfinished" || kind == "repeated-finished" {
+        let fid = gallery_fid(url.copy());
+        let mut already = false;
+        for index in 0..finished.length {
+            if finished[index].copy() == fid {
+                already = true;
+            }
+        }
+        if already {
+            decisions[decisions.length] = "page:skipped";
+        } else {
+            decisions[decisions.length] = "page:queued";
+            page_q[page_q.length] = url.copy();
+            page_q[page_q.length] = url.copy();
+        }
+    }
+    if kind == "out-of-range" {
+        decisions[decisions.length] = "page:out-of-range";
+        for fid in 1..(total + 1) {
+            if ranges.length > 0 && fid_in_range(fid, ranges.copy()) == false {
+                finished = sorted_insert(finished, fid);
+            }
+        }
+    }
+    if kind == "last-page" {
+        decisions[decisions.length] = "page:last-excluded";
+    }
+    let mut unfinished: [int] = [];
+    for fid in 1..total {
+        let mut seen = false;
+        for index in 0..finished.length {
+            if finished[index].copy() == fid {
+                seen = true;
+            }
+        }
+        if seen == false {
+            unfinished[unfinished.length] = fid;
+        }
+    }
+    let mut observable: map = {};
+    observable["page_q"] = page_q;
+    observable["queued_count"] = page_q.length;
+    observable["finished"] = finished;
+    observable["finished_count"] = finished.length;
+    observable["state"] = 1;
+    observable["unfinished"] = unfinished;
+    observable["unfinished_count"] = unfinished.length;
+    observable["scanned_includes_last"] = kind == "last-page";
+    report(decisions, empty_queues(), empty_slots(), observable, [], 0, 0, "")
+}
+
+fn run_lifecycle(request: map) -> string {
+    let mut state = whole(request, "state", 1);
+    let download_count = whole(request, "download_thread_cnt", 0);
+    let steps = strings(request, "steps");
+    let mut submit_ids: [string] = [];
+    let mut permits = 0;
+    let mut codes: [int] = [];
+    let mut details: [string?] = [];
+    let mut states: [int] = [];
+    let mut queue_puts = 0;
+    let mut exit_after_pause = false;
+    let mut started = false;
+    for index in 0..steps.length {
+        let step: string = steps[index].copy();
+        if step == "start" && started == false && state == 10 {
+            for worker in 0..download_count {
+                submit_ids[submit_ids.length] = "down-" + decimal_text(worker + 1);
+                permits = permits + 1;
+            }
+            started = true;
+        }
+        if step == "pause" {
+            let rejected = state == 0 || state == 20 || state == -1;
+            if rejected {
+                codes[codes.length] = 1106;
+            }
+            if rejected == false {
+                exit_after_pause = true;
+                state = 0;
+                permits = 0;
+                codes[codes.length] = 0;
+            }
+            details[details.length] = detail_value(rejected == false);
+            states[states.length] = state;
+        }
+        if step == "resume" {
+            let rejected = state > 0 && state < 20;
+            if rejected {
+                codes[codes.length] = 1107;
+            }
+            if rejected == false {
+                if state < 1 {
+                    state = 1;
+                }
+                queue_puts = queue_puts + 1;
+                codes[codes.length] = 0;
+            }
+            details[details.length] = detail_value(rejected == false);
+            states[states.length] = state;
+        }
+        if step == "exit" {
+            permits = 0;
+            exit_after_pause = true;
+        }
+    }
+    let mut observable: map = {};
+    observable["codes"] = codes;
+    observable["details"] = details;
+    observable["states"] = states;
+    observable["queue_puts"] = queue_puts;
+    observable["exit_after_pause"] = exit_after_pause;
+    observable["finished"] = whole(request, "finished", 0);
+    report(["lifecycle:no-double-submit"], empty_queues(), empty_slots(), observable, submit_ids, submit_ids.length, permits, "")
+}
+
+fn exchange_status(url: string) -> int {
+    let names: [string] = [];
+    let values: [string] = [];
+    let response = xeh_proxy::exchange(url.copy(), "GET", names, values, "", "direct", "", 0, false, false, true, 262144);
+    let status = response.status;
+    let _closed = xeh_proxy::body_close(response.body);
+    status
+}
+
+fn direct_status(url: string) -> int {
+    let admitted = xeh_proxy::admit(url.copy());
+    if admitted == "" => {
+        exchange_status(url)
+    } else => {
+        0
+    }
+}
+
+fn proxied_status(request: map) -> int {
+    let url = text(request, "url", "");
+    let proxy = text(request, "proxy_address", "");
+    let image = flag(request, "proxy_image", false);
+    let image_only = flag(request, "proxy_image_only", false);
+    let configured = pool::configure(pool::initial(), [proxy.copy()]);
+    let snapshot: map = configured["state"].copy();
+    let names: [string] = [];
+    let values: [string] = [];
+    let result = request::execute(snapshot, 0.0, url.copy(), "GET", "", names, values, "", image, image_only, false, 0);
+    let status: int = result["status"].copy();
+    status
+}
+
+fn hop_decision(proxied: bool) -> string {
+    if proxied => { "hop:proxy_request" } else => { "hop:admit+exchange" }
+}
+
+fn hop_path(proxied: bool) -> string {
+    if proxied => { "proxied" } else => { "direct" }
+}
+
+fn hop_route(proxied: bool) -> string {
+    if proxied => { "http" } else => { "direct" }
+}
+
+fn run_hop(request: map) -> string {
+    let url = text(request, "url", "");
+    let image = flag(request, "proxy_image", false);
+    let image_only = flag(request, "proxy_image_only", false);
+    let proxied = policy::matches(image, image_only, url.copy());
+    let status = if proxied => { proxied_status(request) } else => { direct_status(url) };
+    let mut observable: map = {};
+    observable["path"] = hop_path(proxied);
+    observable["status"] = status;
+    report([hop_decision(proxied)], empty_queues(), empty_slots(), observable, [], 0, 0, hop_route(proxied))
+}
+
+pub fn run(request_text: string) -> string {
+    let request: map = json::decode::<map>(request_text.copy());
+    let operation = text(request, "operation", "");
+    if operation == "slots" => {
+        run_slots(request)
+    } else if operation == "retry" => {
+        run_retry(request)
+    } else if operation == "speed" => {
+        run_speed(request)
+    } else if operation == "monitor" => {
+        run_monitor(request)
+    } else if operation == "duplicates" => {
+        run_duplicates(request)
+    } else if operation == "pages" => {
+        run_pages(request)
+    } else if operation == "lifecycle" => {
+        run_lifecycle(request)
+    } else if operation == "hop" => {
+        run_hop(request)
+    } else => {
+        report(["download:unknown"], empty_queues(), empty_slots(), {}, [], 0, 0, "")
+    }
+}
+
+0;
