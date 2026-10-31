@@ -1,14 +1,17 @@
 //! Application entry point.
 //!
-//! This build implements the configuration/logging foundation. It loads the
-//! configuration through the real RSS path, applies logger settings, and then
-//! reports honestly that downloading is not implemented yet.
+//! This build implements the configuration, logging, task, session and file
+//! foundation. It loads the configuration through the real RSS path, restores
+//! the real session objects, and then reports honestly that downloading is not
+//! implemented yet.
 
 rust_i18n::i18n!("locales", fallback = "en_us");
 
 mod config;
 mod r#const;
+mod core;
 mod i18n;
+mod task;
 mod util;
 mod worker;
 
@@ -22,10 +25,11 @@ fn main() {
     std::process::exit(run(&root));
 }
 
-/// Run configuration initialization and return the process exit code.
+/// Run configuration/session initialization and return the process exit code.
 ///
-/// Exit codes: 0 reserved for a complete run, 1 for configuration/log setup
-/// errors, 2 because this foundation build does not implement downloading.
+/// Exit codes: 0 reserved for a complete run, 1 for configuration/log/session
+/// setup errors, 2 because this foundation build does not implement
+/// downloading.
 pub fn run(root: &Path) -> i32 {
     let loaded = match Config::load(root) {
         Ok(loaded) => loaded,
@@ -67,10 +71,23 @@ pub fn run(root: &Path) -> i32 {
         );
         return 1;
     }
-    logger.cleanup();
+    // FILEPATH in the reference is the application directory; the legacy
+    // cookie file lives next to the program, not in the working directory.
+    let filepath = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| root.to_path_buf());
+    let mut app = match core::App::new(loaded.config, logger, root, &filepath) {
+        Ok(app) => app,
+        Err(error) => {
+            eprintln!("xeHentai: session error: {error}");
+            return 1;
+        }
+    };
     eprintln!(
-        "xeHentai: this build implements the configuration foundation only; downloading is not implemented"
+        "xeHentai: this build implements the configuration, task, session and file foundation; downloading is not implemented"
     );
+    app.logger_mut().cleanup();
     2
 }
 

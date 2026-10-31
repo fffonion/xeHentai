@@ -2050,123 +2050,224 @@
     },
     {
       "id": "task.create-config-snapshot",
-      "source": "core.py:106-162 / task.py",
-      "target": "src/task.rs / src/core.rs",
-      "suite": "task",
-      "inputs": [],
-      "assertions": [
-        "14 base keys captured at Task creation"
+      "source": "core.py:106-131; plan 5.1",
+      "target": "src/core.rs App::add_task; src/task.rs TaskConfig::from_app",
+      "suite": "task-api",
+      "inputs": [
+        "GALLERY_URL",
+        "14-key global config",
+        "task kwargs with extra fields"
       ],
-      "status": "unimplemented",
-      "delta": null
+      "assertions": [
+        "fourteen base keys captured at Task creation in reference order",
+        "task-level dir/thread/title overrides stay independent of a later App update",
+        "rpc_*/daemon/save_tasks never leak into the Task config",
+        "extra kwargs are kept in the snapshot"
+      ],
+      "status": "delta",
+      "delta": {
+        "reference": "accepts any value type in task kwargs and only fails when the field is used",
+        "candidate": "validates the fourteen typed keys when the snapshot is built; malformed values are rejected before the task is registered",
+        "client_impact": "invalid RPC kwargs fail earlier with a typed error",
+        "regression": "task_configuration_is_snapshotted_at_creation"
+      }
     },
     {
       "id": "task.state-api",
       "source": "core.py:106-162",
-      "target": "src/task.rs / src/core.rs",
-      "suite": "task",
-      "inputs": [],
-      "assertions": [
-        "add/del/pause/resume and public states"
+      "target": "src/core.rs add/del/pause/resume",
+      "suite": "task-api",
+      "inputs": [
+        "bad url",
+        "exhentai url without login",
+        "valid task",
+        "pause/resume/delete sequence"
       ],
-      "status": "unimplemented",
+      "assertions": [
+        "return code/value including the empty-string success value",
+        "full task objects and ready-queue order before and after every step",
+        "running task cannot be deleted, paused/finished/failed cannot pause or resume as in the reference"
+      ],
+      "status": "implemented",
       "delta": null
     },
     {
       "id": "task.guid",
-      "source": "plan 5.1",
-      "target": "src/task.rs / src/core.rs",
-      "suite": "task",
-      "inputs": [],
-      "assertions": [
-        "UUID 8-char prefix and collision handling"
+      "source": "core.py:116-131; plan 5.1",
+      "target": "src/core.rs GuidSource/FixedGuids",
+      "suite": "task-api",
+      "inputs": [
+        "scripted UUID sequence",
+        "deliberate collision"
       ],
-      "status": "unimplemented",
+      "assertions": [
+        "production guid is the first eight characters of UUID4",
+        "collision keeps the existing task, returns its guid and only resets finished/failed tasks",
+        "no URL-based deduplication"
+      ],
+      "status": "implemented",
       "delta": null
     },
     {
       "id": "task.session-save",
-      "source": "task.py:417-440",
-      "target": "src/task.rs / src/core.rs",
-      "suite": "task",
-      "inputs": [],
-      "assertions": [
-        "h.json tasks/cookies shape"
+      "source": "core.py:390-400; task.py:434-440",
+      "target": "src/core.rs App::save_session; src/task.rs Serialize",
+      "suite": "session",
+      "inputs": [
+        "task with meta/reload/renamed/queues",
+        "cookies",
+        "save_tasks true/false"
       ],
-      "status": "unimplemented",
-      "delta": null
+      "assertions": [
+        "h.json has top-level tasks/cookies in that order",
+        "Task public fields present in reference order, internal fields absent",
+        "save_tasks=false writes empty tasks and still writes cookies",
+        "mixed int/string rename keys serialize as duplicate textual keys"
+      ],
+      "status": "delta",
+      "delta": {
+        "reference": "json.dumps default separators: a space after ',' and ':' and no trailing newline; written directly to h.json",
+        "candidate": "compact serde_json output, same key/array/null/omitted semantics, written through a same-directory stage",
+        "client_impact": "none for a JSON reader; the file is smaller and never partially replaced",
+        "regression": "session_save_and_load_round_trip_the_public_task_state; mixed_rename_indices_are_serialized_twice_and_collapse_on_reload"
+      }
     },
     {
       "id": "task.session-load",
-      "source": "core.py:390-440",
-      "target": "src/task.rs / src/core.rs",
-      "suite": "task",
-      "inputs": [],
-      "assertions": [
-        "corrupt/missing/old cookie recovery"
+      "source": "core.py:402-440",
+      "target": "src/core.rs App::load_session; src/task.rs Task::from_wire",
+      "suite": "session",
+      "inputs": [
+        "real reference h.json",
+        "missing h.json",
+        "bad JSON",
+        "missing tasks/cookies",
+        "duplicate load",
+        "state 10 with page queue"
       ],
-      "status": "unimplemented",
-      "delta": null
+      "assertions": [
+        "bad JSON is a warning and keeps running, missing top-level keys raise",
+        "queues/maps/config/meta restored with reference defaults and order",
+        "filelist triggers scan_downloaded, zero-byte files removed",
+        "state 10 + non-empty page_q falls back to scan_img",
+        "loading twice enqueues every task again"
+      ],
+      "status": "delta",
+      "delta": {
+        "reference": "loads tasks one by one into the live registry and only then reads cookies; a missing key leaves a partial registry. Session reads are unbounded.",
+        "candidate": "builds all tasks first and applies them after the whole document validates, so a failed load leaves the previous App state; reads are capped at 8 MiB with an explicit error and never truncated.",
+        "client_impact": "no half-loaded task registry and bounded memory; error is still reported",
+        "regression": "session_load_rejects_missing_top_level_keys; session_rejects_oversized_input_without_touching_it"
+      }
     },
     {
       "id": "task.resume",
-      "source": "plan 5.2",
-      "target": "src/task.rs / src/core.rs",
-      "suite": "task",
-      "inputs": [],
-      "assertions": [
-        "half-finished queue restoration"
+      "source": "core.py:153-162; core.py:402-421",
+      "target": "src/core.rs App::resume_task; src/core.rs load_session",
+      "suite": "task-api",
+      "inputs": [
+        "finished=20 task",
+        "failed=-1 task",
+        "state=10 task with page queue"
       ],
-      "status": "unimplemented",
+      "assertions": [
+        "finished resume keeps max(state, waiting)=20 and enqueues",
+        "failed resume becomes waiting and is enqueued",
+        "state 10 with a non-empty page queue is restored to scan_img"
+      ],
+      "status": "implemented",
       "delta": null
     },
     {
       "id": "task.files-scan-downloaded",
-      "source": "task.py:120-415",
-      "target": "src/task.rs / src/core.rs",
-      "suite": "task",
-      "inputs": [],
-      "assertions": [
-        "zero-byte and existing file counts"
+      "source": "task.py:173-206",
+      "target": "src/task.rs Task::scan_downloaded",
+      "suite": "files",
+      "inputs": [
+        "download_range [[2,3]]",
+        "zero/non-zero files",
+        ".xehdone",
+        "existing zip"
       ],
-      "status": "unimplemented",
+      "assertions": [
+        "out-of-range ids are marked finished",
+        "zero-byte files are deleted and not counted",
+        "markers mark every id finished, zero-byte files are kept",
+        "meta.finished is the set size and the state comparison stays a no-op"
+      ],
+      "status": "implemented",
       "delta": null
     },
     {
       "id": "task.naming",
-      "source": "task.py:120-415",
-      "target": "src/task.rs / src/core.rs",
-      "suite": "task",
-      "inputs": [],
-      "assertions": [
-        "sequence, rename_ori and conflict naming"
+      "source": "task.py:324-397",
+      "target": "src/task/files.rs Task::rename_fname",
+      "suite": "files",
+      "inputs": [
+        "non-jpg extension",
+        "existing target",
+        "rename_ori",
+        "1000 pages",
+        "string keys"
       ],
-      "status": "unimplemented",
+      "assertions": [
+        "sequence padding uses len(str(total))",
+        "jpg entries are skipped only when rename_ori is false",
+        "target conflicts gain (1) and rename_ori moves the original into -xeh-conflict-",
+        "renamed_map gains a string key and .xehdone is written when the count equals total"
+      ],
+      "status": "implemented",
       "delta": null
     },
     {
       "id": "task.duplicates",
-      "source": "task.py:120-415",
-      "target": "src/task.rs / src/core.rs",
-      "suite": "task",
-      "inputs": [],
-      "assertions": [
-        "duplicate image accounting"
+      "source": "task.py:120-160,223-289",
+      "target": "src/task.rs put_img_queue; src/task/files.rs save_file",
+      "suite": "files",
+      "inputs": [
+        "same image hash on different fids",
+        "source missing/present",
+        "self duplicate",
+        "third copy"
       ],
-      "status": "unimplemented",
-      "delta": null
+      "assertions": [
+        "missing source registers duplicate_map and keeps the image queued once",
+        "a finished source copies the duplicate and increments finished once",
+        "self duplicate downloads as usual without leaking the file lock",
+        "duplicate copies are published atomically"
+      ],
+      "status": "delta",
+      "delta": {
+        "reference": "self-duplicate breaks out of the loop while holding _f_lock and leaks the lock",
+        "candidate": "releases the file lock before downloading as usual; duplicate copies go through a stage and rename",
+        "client_impact": "same files and counts; the task's file lock stays usable",
+        "regression": "duplicate_images_copy_when_done_and_register_when_pending"
+      }
     },
     {
       "id": "task.archive",
-      "source": "task.py:120-415",
-      "target": "src/task.rs / src/core.rs",
-      "suite": "task",
-      "inputs": [],
-      "assertions": [
-        "STORE/ZIP64/entries/comments"
+      "source": "task.py:399-415",
+      "target": "src/task/archive.rs Task::make_archive",
+      "suite": "files",
+      "inputs": [
+        "sorted files",
+        ".xehdone",
+        "existing zip",
+        "remove true/false"
       ],
-      "status": "unimplemented",
-      "delta": null
+      "assertions": [
+        "entries sorted by name, ZIP_STORED, exact UTF-8 comment",
+        "existing zip returns early without deleting images and the lock stays usable",
+        "remove=true deletes the directory only after a complete archive",
+        "archive failure keeps every image and leaves no partial zip"
+      ],
+      "status": "delta",
+      "delta": {
+        "reference": "make_archive returns while still holding _f_lock when the zip already exists; a failed zip can leave a partial archive",
+        "candidate": "releases the task file lock on the early return and publishes the archive from a same-directory stage by rename; failures leave the original images intact",
+        "client_impact": "same archive bytes and early-return result; the lock stays usable and no partial archive is visible",
+        "regression": "archive_uses_store_sorted_entries_and_the_reference_comment; archive_failure_keeps_images_and_releases_the_lock"
+      }
     },
     {
       "id": "filters.login",
@@ -2455,21 +2556,185 @@
       ],
       "status": "unimplemented",
       "delta": null
+    },
+    {
+      "id": "task.api-methods",
+      "source": "task.py:48-97,110-119,162-172,291-327",
+      "target": "src/task.rs Task methods",
+      "suite": "task-api",
+      "inputs": [
+        "gallery url",
+        "metadata with/without Japanese title",
+        "image/reload URLs"
+      ],
+      "assertions": [
+        "base_url/mpv_url/update_meta/set_fail/migrate_exhentai values",
+        "get_imghash extracts the URL token only and get_imgfid/get_fname/get_fidpad match",
+        "get_fid_unfinished uses range(1,total) as the reference",
+        "reference exception classes for missing title / missing fullimg id"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "task.session-cookies",
+      "source": "core.py:402-473",
+      "target": "src/core.rs cookies/headers/set_cookie/legacy cookie",
+      "suite": "session",
+      "inputs": [
+        "h.json cookie order",
+        "legacy .ehentai.cookie",
+        "logged-in session"
+      ],
+      "assertions": [
+        "nw=1 first, existing keys keep position, new keys append",
+        "Cookie header is make_cookie(cookies) in the same order",
+        "legacy cookie loads only when not logged in and never overrides a login",
+        "has_login requires ipb_member_id and ipb_pass_hash"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "task.session-atomic",
+      "source": "core.py:390-400; plan 5.2",
+      "target": "src/core.rs App::write_session",
+      "suite": "session",
+      "inputs": [
+        "pending duplicate set",
+        "read-only session directory"
+      ],
+      "assertions": [
+        "candidate never opens/truncates the previous h.json before the document is complete",
+        "same-directory stage is removed on failure and the previous file is byte-identical",
+        "failure returns ERR_SAVE_SESSION_FAILED with a message"
+      ],
+      "status": "delta",
+      "delta": {
+        "reference": "opens h.json for writing before json.dumps; a set in duplicate_map or a write error truncates the file",
+        "candidate": "builds the document first, writes a same-directory stage and renames it; the previous session survives and no stage remains",
+        "client_impact": "no data loss; only the failure message text differs",
+        "regression": "session_save_preserves_the_previous_file_when_serialization_fails; session_save_failure_keeps_the_previous_session"
+      }
+    },
+    {
+      "id": "task.files-stream",
+      "source": "task.py:223-289; plan 3",
+      "target": "src/task/files.rs Task::save_file",
+      "suite": "files",
+      "inputs": [
+        "controlled chunk stream",
+        "cancel callback",
+        "existing non-empty and zero-byte files"
+      ],
+      "assertions": [
+        "chunks are written to a same-directory stage and published by rename",
+        "redirect filename updates reload_map",
+        "cancelling removes the stage and leaves no destination file",
+        "existing non-empty files short-circuit without consuming the stream",
+        "the stream runs without holding the task file lock"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "task.files-zip64",
+      "source": "task.py:406-411; plan 3",
+      "target": "src/task/archive.rs zip writer",
+      "suite": "files",
+      "inputs": [
+        "65,537 empty files"
+      ],
+      "assertions": [
+        "archive contains 65,537 STORE entries",
+        "raw bytes contain ZIP64 EOCD and locator records",
+        "comment and entry order still match"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "task.files-rename-crash",
+      "source": "task.py:375-376",
+      "target": "src/task/files.rs name collision path",
+      "suite": "files",
+      "inputs": [
+        "1.jpg and 1.png and 1(1).png present",
+        "renamed_map[1]='1.png'"
+      ],
+      "assertions": [
+        "reference re.sub receives the base name as replacement and a function as string and raises",
+        "candidate raises NameCollisionBug before moving any file",
+        "both leave the three files unchanged"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "task.files-safety",
+      "source": "task.py:339-359,407-414; plan 3",
+      "target": "src/task/files.rs path checks; src/task/archive.rs",
+      "suite": "files",
+      "inputs": [
+        "symlink inside the gallery",
+        "legalpath('///') empty title"
+      ],
+      "assertions": [
+        "reference follows the symlink into the archive and renames inside the download root",
+        "candidate refuses both with UnsafePath",
+        "originals stay intact and no partial archive is published"
+      ],
+      "status": "delta",
+      "delta": {
+        "reference": "zipfile.write follows symlink entries; an empty legalpath title makes the download root the gallery directory",
+        "candidate": "refuses symlink entries and empty/./.. components with UnsafePath before any write or move",
+        "client_impact": "does not read or modify paths outside the gallery; odd titles must be changed",
+        "regression": "archive_failure_keeps_images_and_releases_the_lock; path_traversal_symlinks_and_empty_titles_are_refused"
+      }
+    },
+    {
+      "id": "task.session-dir-authorization",
+      "source": "core.py:402-440; plan 5.2 security clause",
+      "target": "src/core.rs load_session directory authorization",
+      "suite": "session",
+      "inputs": [
+        "reference-written h.json whose task dir is elsewhere",
+        "app config dir downloads"
+      ],
+      "assertions": [
+        "oracle loads the task and keeps writing to the persisted directory",
+        "candidate reports DirNotAuthorized instead of continuing",
+        "no task is registered or queued after the refusal"
+      ],
+      "status": "delta",
+      "delta": {
+        "reference": "a persisted task config dir is trusted and used for later file operations",
+        "candidate": "a persisted task dir must resolve to the current configured download root; otherwise the session is refused",
+        "client_impact": "a session created with a per-task dir must be retried after restoring that global dir; a tampered session cannot write elsewhere",
+        "regression": "session_directory_must_be_authorized"
+      }
     }
   ],
   "oracle": {
     "upstream_revision": "43fc55c0c662f195d048becf6276a26ce06b09d9",
     "source_export": "tmp/xehentai-pyshape-20261031-f870b8ca/upstream",
-    "python": "CPython 3.14 (isolated subprocess, no site packages required)",
+    "python": "CPython 3.14.7 from the lease toolchain with the preinstalled requests package; isolated cwd/HOME/TMP per invocation, no network, no real accounts or cookies",
     "source_patches": [],
     "environment_simulations": [
-      "legalpath Windows branch: os.name='nt' plus the reference filename_filter regex"
+      "uuid.uuid4 frozen to a scripted sequence; throwaway draws during session load are unobservable",
+      "temporary roots normalized to <ROOT> in observations",
+      "directory listing order normalized for file trees; set-valued duplicate_map copies sorted",
+      "zip timestamps ignored; entry order, compression, sizes, contents and comment compared"
     ]
   },
   "notes": [
     "Status implemented/delta means two fresh rounds produced passing evidence.",
     "The en_us-only key z_test_fallback_probe is test-only and is excluded from key-set equality.",
     "Rust make_ua intentionally reproduces the reference implicit None return.",
-    "config.rss.deny-* run under the pinned runtime feature set: the http-client feature is off, so the network case proves refusal plus zero loopback contacts rather than a formerly reachable network path; process and file writes are proven reachable under the pre-fix binding by a driven-SDK spike recorded in evidence-r1."
+    "config.rss.deny-* run under the pinned runtime feature set: the http-client feature is off, so the network case proves refusal plus zero loopback contacts rather than a formerly reachable network path; process and file writes are proven reachable under the pre-fix binding by a driven-SDK spike recorded in evidence-r1.",
+    "M2 task-api/session/files suites run the real reference App/Task in an isolated cwd and compare full task/app observations.",
+    "Session migration starts from an h.json written by the reference and is loaded independently by both implementations.",
+    "Safety deltas (atomic session writes, symlink/empty-title refusal, self-duplicate lock release) are checked asymmetrically and listed per case.",
+    "App::update_config is the internal snapshot-test entry; it is not the public RPC updateConfig, and it refuses proxy/RPC side effects instead of faking them."
   ]
 }
