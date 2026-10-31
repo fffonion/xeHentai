@@ -13,25 +13,28 @@
   (`cargo run -p xeh-xtask -- rss-test --suite site|rules`) and the fixed-source
   differential (`cargo run -p xeh-xtask -- diff --suite site`), which also runs
   nine mutation gates through the same production comparator.
-- Suite sizes: 19 `site` cases and 17 `rules` cases (36 total).
+- Suite sizes: 23 `site` cases and 17 `rules` cases (40 total).
 
 ## Branch coverage by case id
 
 - `site.login.*`: two `Set-Cookie` captures, failure status/message, missing
   header fallback.
 - `site.metadata.*`: status 600/404, fjords/banned prefixes, malformed fields,
-  success names/total/tags/thumbnail count/MPV flags, entity titles and both MPV
-  markup variants.
+  success names/total/tags/thumbnail count, entity titles, and executed MPV
+  markup fixtures `site.metadata.mpv-div` (`<div`) and
+  `site.metadata.mpv-img-alt` (`<img alt`).
 - `site.pages.*`: duplicate links and order, no-match fail with the raw
   `debug.htm` effect, status not generically checked.
 - `site.mpv.*`: imagelist order and 1-based index, malformed list (two fails and
-  continuation), strict-JSON `NaN` delta.
+  continuation), strict-JSON `NaN` delta, and `site.mpv.partial-missing-key`
+  (earlier success kept, then source `KeyError`).
 - `rule.image.quota-*`: 600 connection, 403 key, 509/size marker, equal-size
   exemption and mismatch, small-text/content-type threshold, last hash-size
   match, case-sensitive body text.
 - `site.image.*`: keystamp over style fallback, `image.php?...n=` filename
   fallback, original/resampled URL triples, `nl`/redirect query rules,
-  prefix-anchored `Invalid page`.
+  prefix-anchored `Invalid page`, and `site.image.original-fallback-entity`
+  (no Download original link; already decoded `image_url` is not decoded again).
 - `rule.download.*`: 404, zero length, missing callback, chunk callback before
   yield, empty chunk, iterator and callback connection aborts, short/long
   completion.

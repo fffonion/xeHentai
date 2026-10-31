@@ -87,6 +87,10 @@ pub fn extract_mpv_urls(text: string, real_url: string, suc_returns: [string], f
                 break;
             }
             let image: map = images[index].copy();
+            if image.has("k") == false {
+                loop_exception = "KeyError";
+                break;
+            }
             let key: string = image["k"].copy();
             let page_url = baseurl + "/s/" + key + "/" + gid + "-" + json::encode(index + 1);
             callbacks[callbacks.length] = success_event(page_url, callback_return(suc_returns, index));

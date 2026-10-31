@@ -34,6 +34,66 @@
       }
     },
     {
+      "id": "site.metadata.mpv-div",
+      "suite": "site",
+      "request": {
+        "operation": "metadata",
+        "status_code": 200,
+        "requested_url": "https://exhentai.org/g/12345/abcdef0123/",
+        "real_url": "https://exhentai.org/g/12345/abcdef0123/",
+        "content_length": 128,
+        "header_names": [],
+        "header_values": [],
+        "text": "<h1 id=\"gj\">A &amp;lt; Ω</h1><h1 id=\"gn\">Synthetic</h1>Length:</td><td class=\"gdt2\">2 pages</td>Showing 1 - 20 of 20 images toggle_tagmenu('artist:one' toggle_tagmenu('artist:one'<a href=\"https://exhentai.org/mpv/12345/abcdef0123/#page1\"><div title=\"Page 1\">",
+        "original_image": false,
+        "stream_callback_present": true,
+        "stream_events": [],
+        "suc_returns": [
+          "mpv-div-suc"
+        ],
+        "fail_returns": [
+          "mpv-div-fail"
+        ]
+      },
+      "assertions": {
+        "/callbacks/0/kind": "suc",
+        "/callbacks/0/value/use_multipage_viewer": true,
+        "/callbacks/0/value/gjname": "A &lt; Ω",
+        "/callbacks/0/returned": "mpv-div-suc",
+        "/exception": null
+      }
+    },
+    {
+      "id": "site.metadata.mpv-img-alt",
+      "suite": "site",
+      "request": {
+        "operation": "metadata",
+        "status_code": 200,
+        "requested_url": "https://e-hentai.org/g/67890/0123456789/",
+        "real_url": "https://e-hentai.org/g/67890/0123456789/",
+        "content_length": 128,
+        "header_names": [],
+        "header_values": [],
+        "text": "<h1 id=\"gj\">A &amp;lt; Ω</h1><h1 id=\"gn\">Synthetic</h1>Length:</td><td class=\"gdt2\">2 pages</td>Showing 1 - 20 of 20 images toggle_tagmenu('artist:one' toggle_tagmenu('artist:one'<a href=\"https://e-hentai.org/mpv/67890/0123456789/#page2\"><img alt=\"2\" title=\"Page 2\">",
+        "original_image": false,
+        "stream_callback_present": true,
+        "stream_events": [],
+        "suc_returns": [
+          "mpv-img-suc"
+        ],
+        "fail_returns": [
+          "mpv-img-fail"
+        ]
+      },
+      "assertions": {
+        "/callbacks/0/kind": "suc",
+        "/callbacks/0/value/use_multipage_viewer": true,
+        "/callbacks/0/value/gjname": "A &lt; Ω",
+        "/callbacks/0/returned": "mpv-img-suc",
+        "/exception": null
+      }
+    },
+    {
       "id": "site.metadata.connection-error",
       "suite": "site",
       "request": {
@@ -259,6 +319,36 @@
         "/callbacks/1/value": "https://exhentai.org/s/key-b/12345-2",
         "/callbacks/0/returned": "mpv-A",
         "/callbacks/1/returned": "mpv-B"
+      }
+    },
+    {
+      "id": "site.mpv.partial-missing-key",
+      "suite": "site",
+      "request": {
+        "operation": "mpv",
+        "status_code": 200,
+        "requested_url": "https://exhentai.org/mpv/12345/abcdef/",
+        "real_url": "https://exhentai.org/mpv/12345/abcdef/",
+        "content_length": 128,
+        "header_names": [],
+        "header_values": [],
+        "text": "imagelist = [{\"k\":\"key-a\"},{\"n\":\"other\"}];",
+        "original_image": false,
+        "stream_callback_present": true,
+        "stream_events": [],
+        "suc_returns": [
+          "mpv-A",
+          "mpv-B"
+        ],
+        "fail_returns": [
+          "mpv-fail"
+        ]
+      },
+      "assertions": {
+        "/callbacks/0/kind": "suc",
+        "/callbacks/0/value": "https://exhentai.org/s/key-a/12345-1",
+        "/callbacks/0/returned": "mpv-A",
+        "/exception": "KeyError"
       }
     },
     {
@@ -491,6 +581,37 @@
         "/callbacks/0/value/0": "https://img.test/original.jpg?token=1&redirect=https://e-hentai.org/s/abcdef/123-1?source=task7",
         "/callbacks/0/value/1": "https://e-hentai.org/s/abcdef/123-1?server=1&nl=nonce-123&redirect=https://e-hentai.org/s/abcdef/123-1?source=task7",
         "/callbacks/0/value/2": "file.jpg"
+      }
+    },
+    {
+      "id": "site.image.original-fallback-entity",
+      "suite": "site",
+      "request": {
+        "operation": "image",
+        "status_code": 200,
+        "requested_url": "https://e-hentai.org/s/abcdef/123-1?source=preflight",
+        "real_url": "https://e-hentai.org/s/abcdef/123-1",
+        "content_length": 1024,
+        "header_names": [],
+        "header_values": [],
+        "text": "<img src=\"https://img.test/file.jpg?keystamp=stamp&amp;lt;\" style=\"x\"></a></div><div>file.jpg :: x :: y</di return nl('nonce-123')",
+        "original_image": true,
+        "stream_callback_present": false,
+        "stream_events": [],
+        "suc_returns": [
+          "fallback-entity-suc"
+        ],
+        "fail_returns": [
+          "fallback-entity-fail"
+        ]
+      },
+      "assertions": {
+        "/callbacks/0/kind": "suc",
+        "/callbacks/0/value/0": "https://img.test/file.jpg?keystamp=stamp&lt;&redirect=https://e-hentai.org/s/abcdef/123-1?source=preflight",
+        "/callbacks/0/value/1": "https://e-hentai.org/s/abcdef/123-1?nl=nonce-123&redirect=https://e-hentai.org/s/abcdef/123-1?source=preflight",
+        "/callbacks/0/value/2": "file.jpg",
+        "/callbacks/0/returned": "fallback-entity-suc",
+        "/exception": null
       }
     },
     {

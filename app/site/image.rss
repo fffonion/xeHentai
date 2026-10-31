@@ -105,14 +105,16 @@ pub fn extract(text: string, requested_url: string, real_url: string, original_i
                         } else => {
                             decisions[decisions.length] = "image:real-url-index-found";
                             let original_urls = support::capture_group_all("class=\"mr\".+<a href=\"(.+)\"\\s*>Download original", text.copy(), 0);
-                            let raw_original_url: string = if original_urls.length > 0 => {
+                            let escaped_original: map = if original_urls.length > 0 => {
                                 decisions[decisions.length] = "image:original-url-found";
-                                original_urls[0].copy()
+                                support::htmlescape(original_urls[0].copy())
                             } else => {
                                 decisions[decisions.length] = "image:original-url-fallback";
-                                image_url.copy()
+                                let mut skipped: map = {};
+                                skipped["ok"] = true;
+                                skipped["text"] = image_url.copy();
+                                skipped
                             };
-                            let escaped_original = support::htmlescape(raw_original_url.copy());
                             if escaped_original["ok"].copy() == false => {
                                 decisions[decisions.length] = "image:original-url-unescape-error";
                                 report(callbacks, "", "ValueError", decisions)

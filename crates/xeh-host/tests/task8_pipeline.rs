@@ -841,3 +841,65 @@ fn dropped_exchange_removes_only_its_partial_spool() {
     }
     assert!(!root.join("slow.bin").exists());
 }
+
+fn repeated_header_server() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let port = listener.local_addr().expect("port").port();
+    std::thread::spawn(move || loop {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let body = b"ok";
+        let extra = "\
+Content-Type: text/html\r\n\
+Content-Type: text/plain\r\n\
+Set-Cookie: a=1; Path=/\r\n\
+Set-Cookie: b=2; Path=/\r\n\
+X-Trace: first\r\n\
+X-Trace: second\r\n";
+        let _ = stream.write_all(&http_bytes(200, extra, body));
+    });
+    port
+}
+
+#[test]
+fn repeated_set_cookie_keeps_every_cookie_requests_keeps() {
+    let port = repeated_header_server();
+    let root = lease_root("task8-repeated-set-cookie");
+    let mut owner = TaskControl::open_with_proxy(
+        &ControlOptions::fixture(&[], 0),
+        None,
+        ProxyServices {
+            root,
+            http: http_config(port),
+            grants: Vec::new(),
+        },
+    )
+    .expect("owner");
+    let address = format!("http://127.0.0.1:{port}/browse.php?u=x&b=4");
+    assert_eq!(
+        invoke(&mut owner, json!({"op": "proxy_add", "address": address}))["ok"],
+        json!(true)
+    );
+    let report = invoke(
+        &mut owner,
+        json!({
+            "op": "proxy_request",
+            "url": format!("http://127.0.0.1:{port}/page"),
+            "method": "GET",
+            "header_names": ["Cookie"],
+            "header_values": ["nw=1"],
+            "proxy_image": true,
+            "explicit_allow_redirects": false,
+            "now": 1.0
+        }),
+    );
+    assert_eq!(report["ok"], json!(true), "{report}");
+    let value = value_of(&report);
+    // requests HTTPHeaderDict.get joins repeated headers with ", ".
+    // Glype then rewrites that joined Set-Cookie; both cookies survive.
+    // CaseInsensitiveDict last-wins is not the source behavior.
+    assert_eq!(value["content_type"], json!("text/html, text/plain"), "{value}");
+    assert_eq!(value["set_cookie"], json!("a=1;b=2"), "{value}");
+}

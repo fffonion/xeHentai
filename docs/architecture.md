@@ -100,7 +100,7 @@ Task5 不实现 session、站点扫描、代理、下载器、文件归档或 RP
 
 `download.rss` 保持原有配额/404/长度/回调预检顺序，并把流处理拆成 Task9 可复用的有界状态机：`stream_begin(expected_length)` 返回命名 `StreamState`（只含计数、终端标志与失败码，不保存镜像字节），`stream_chunk`、`stream_connection_error`、`stream_end` 每次只接收一个有界 chunk 并返回 `StreamStep{state,events,decisions}`。夹具批量 runner 与跨调用测试驱动同一组 transition，没有第二套事件模型；空 chunk、连接/回调异常、短/长完成和互不相关的流都由同一实现处理。
 
-站点差分在 `crates/xeh-xtask/src/site.rs`：先按 Git 树与 blob 逐字节核对固定源 `43fc55c0c662f195d048becf6276a26ce06b09d9` 的 19 个包文件，再由 `compat/oracle/site_runner.py` 在隔离 cwd/env 中执行真实上游 `filters.py`/`util`。比较覆盖 callbacks/顺序、return、exception class、debug 字节与 stream 事件/chunk 字节；9 个 mutation 由同一生产 comparator 拒绝。`rss-test --suite rules` 执行 17 个 RSS 断言 case，`diff --suite site` 执行 36 个 oracle 差分 case（site+rules）。已知差异只有三个窄边界，逐条记录在 `docs/compatibility-deltas.md`，没有全局放行或业务 URL/状态忽略。
+站点差分在 `crates/xeh-xtask/src/site.rs`：先按 Git 树与 blob 逐字节核对固定源 `43fc55c0c662f195d048becf6276a26ce06b09d9` 的 19 个包文件，再由 `compat/oracle/site_runner.py` 在隔离 cwd/env 中执行真实上游 `filters.py`/`util`。比较覆盖 callbacks/顺序、return、exception class、debug 字节与 stream 事件/chunk 字节；9 个 mutation 由同一生产 comparator 拒绝。`rss-test --suite rules` 执行 17 个 RSS 断言 case，`diff --suite site` 执行 40 个 oracle 差分 case（site+rules）。已知差异只有三个窄边界，逐条记录在 `docs/compatibility-deltas.md`，没有全局放行或业务 URL/状态忽略。
 
 ## Task 8 代理传输与 RSS 池、Glype
 
