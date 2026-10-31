@@ -5568,6 +5568,528 @@ mod m3_transport {
         server.await.unwrap();
     }
 
+    struct DownloadFixture {
+        app: crate::core::App,
+        guid: String,
+        image_url: String,
+        reload_url: String,
+        task_dir: std::path::PathBuf,
+        sentinel: std::path::PathBuf,
+    }
+
+    fn prepare_download_fixture(root: &std::path::Path, port: u16) -> DownloadFixture {
+        const HASH: &str = "0123456789abcdef0123456789abcdef01234567";
+        let image_url = format!("http://127.0.0.1:{port}/{HASH}-4096-200-0-jpg/keystamp=abc");
+        let mut app = super::test_app(root, &["guid0001"]);
+        app.set_session_config(SessionConfig {
+            retry: 1,
+            timeout: Duration::from_secs(5),
+            resolver: Arc::new(MapResolver::default()),
+            fallback: FallbackMap::empty(),
+            clock: Arc::new(TestClock::new(0.0)),
+            ..SessionConfig::default()
+        });
+        let (code, guid) = app
+            .add_task(
+                "https://e-hentai.org/g/123/abcdef0123/",
+                serde_json::Map::new(),
+            )
+            .unwrap();
+        assert_eq!(code, 0);
+        let guid = guid.unwrap();
+        app.start_task(&guid).unwrap();
+        let reload = format!("https://e-hentai.org/s/abcdef0123/{HASH}-1");
+        let task = app.task_mut(&guid).unwrap();
+        task.meta.insert(
+            "title".into(),
+            serde_json::Value::String("Test Gallery".into()),
+        );
+        task.meta
+            .insert("total".into(), serde_json::Value::Number(1.into()));
+        task.put_img_queue(&image_url, &reload, "pic.jpg").unwrap();
+        task.img_q = Some(std::collections::VecDeque::from([image_url.clone()]));
+        let task_dir = app.task(&guid).unwrap().get_fpath().unwrap();
+        std::fs::create_dir_all(&task_dir).unwrap();
+        let sentinel = task_dir.join("sentinel.txt");
+        std::fs::write(&sentinel, b"old-state").unwrap();
+        DownloadFixture {
+            app,
+            guid,
+            image_url,
+            reload_url: reload,
+            task_dir,
+            sentinel,
+        }
+    }
+
+    fn stage_names(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("xehentai-"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn assert_clean_stage(fixture: &DownloadFixture) {
+        assert!(
+            stage_names(&fixture.task_dir).is_empty(),
+            "leftover stages: {:?}",
+            stage_names(&fixture.task_dir)
+        );
+        assert!(
+            !fixture.task_dir.join("1.jpg").exists(),
+            "no destination may be published"
+        );
+        let task = fixture.app.task(&fixture.guid).unwrap();
+        assert!(
+            task.meta.get("finished").is_none(),
+            "finished must not move before publish"
+        );
+        assert_eq!(
+            std::fs::read(&fixture.sentinel).unwrap(),
+            b"old-state",
+            "a pre-existing file in the task directory is untouched"
+        );
+    }
+
+    fn refill_image_queue(fixture: &mut DownloadFixture) {
+        let task = fixture.app.task_mut(&fixture.guid).unwrap();
+        task.img_q = Some(std::collections::VecDeque::from([fixture
+            .image_url
+            .clone()]));
+    }
+
+    fn image_body() -> Vec<u8> {
+        (0..4096u32).map(|value| (value % 251) as u8).collect()
+    }
+
+    async fn serve_full_image(socket: &mut (impl AsyncRead + AsyncWrite + Unpin), bytes: &[u8]) {
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
+            bytes.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(bytes);
+        socket.write_all(&response).await.unwrap();
+        socket.shutdown().await.unwrap();
+    }
+
+    async fn read_until_eof(socket: &mut (impl AsyncRead + Unpin), millis: u64) -> bool {
+        let mut buffer = [0u8; 16];
+        matches!(
+            tokio::time::timeout(Duration::from_millis(millis), socket.read(&mut buffer)).await,
+            Ok(Ok(0))
+        )
+    }
+
+    #[tokio::test]
+    async fn download_open_error_aborts_the_owned_stage() {
+        use crate::core::{ImageDownload, IoFault, set_io_fault};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let bytes = image_body();
+        let expected = bytes.clone();
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel::<bool>();
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            read_headers(&mut first).await;
+            serve_full_image(&mut first, &bytes).await;
+            let closed = read_until_eof(&mut first, 1000).await;
+            let _ = closed_tx.send(closed);
+            let (mut second, _) = listener.accept().await.unwrap();
+            read_headers(&mut second).await;
+            serve_full_image(&mut second, &bytes).await;
+        });
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("downloads")).unwrap();
+        let mut fixture = prepare_download_fixture(root.path(), port);
+        let mut filters =
+            crate::filters::Filters::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+        set_io_fault(Some(IoFault::Open));
+        let error = fixture
+            .app
+            .download_one_image(&fixture.guid, &mut filters)
+            .await
+            .expect_err("injected open failure");
+        set_io_fault(None);
+        assert!(
+            matches!(error, crate::core::AppError::Download(_)),
+            "{error:?}"
+        );
+        assert_clean_stage(&fixture);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), closed_rx)
+                .await
+                .expect("peer closure observation timed out")
+                .expect("closure notify"),
+            "the stream must close when the stage cannot be opened"
+        );
+        refill_image_queue(&mut fixture);
+        match fixture
+            .app
+            .download_one_image(&fixture.guid, &mut filters)
+            .await
+            .unwrap()
+        {
+            ImageDownload::Saved(path) => {
+                assert_eq!(std::fs::read(path).unwrap(), expected);
+            }
+            other => panic!("expected saved image, got {other:?}"),
+        }
+        assert_eq!(
+            fixture
+                .app
+                .task(&fixture.guid)
+                .unwrap()
+                .meta_i64("finished")
+                .unwrap(),
+            1
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn download_write_error_after_partial_bytes_aborts_the_owned_stage() {
+        use crate::core::{ImageDownload, IoFault, set_io_fault};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let bytes = image_body();
+        let expected = bytes.clone();
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel::<bool>();
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            read_headers(&mut first).await;
+            let mut head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
+                bytes.len()
+            )
+            .into_bytes();
+            head.extend_from_slice(&bytes[..1024]);
+            first.write_all(&head).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            first.write_all(&bytes[1024..]).await.unwrap();
+            first.flush().await.unwrap();
+            let closed = read_until_eof(&mut first, 1000).await;
+            let _ = closed_tx.send(closed);
+            let (mut second, _) = listener.accept().await.unwrap();
+            read_headers(&mut second).await;
+            serve_full_image(&mut second, &bytes).await;
+        });
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("downloads")).unwrap();
+        let mut fixture = prepare_download_fixture(root.path(), port);
+        let mut filters =
+            crate::filters::Filters::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+        set_io_fault(Some(IoFault::Write));
+        let error = fixture
+            .app
+            .download_one_image(&fixture.guid, &mut filters)
+            .await
+            .expect_err("injected write failure");
+        set_io_fault(None);
+        assert!(
+            matches!(error, crate::core::AppError::Download(_)),
+            "{error:?}"
+        );
+        assert_clean_stage(&fixture);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), closed_rx)
+                .await
+                .expect("peer closure observation timed out")
+                .expect("closure notify"),
+            "the stream must close when a partial write fails"
+        );
+        refill_image_queue(&mut fixture);
+        match fixture
+            .app
+            .download_one_image(&fixture.guid, &mut filters)
+            .await
+            .unwrap()
+        {
+            ImageDownload::Saved(path) => {
+                assert_eq!(std::fs::read(path).unwrap(), expected);
+            }
+            other => panic!("expected saved image, got {other:?}"),
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn download_flush_error_aborts_the_owned_stage() {
+        use crate::core::{ImageDownload, IoFault, set_io_fault};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let bytes = image_body();
+        let expected = bytes.clone();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                read_headers(&mut socket).await;
+                serve_full_image(&mut socket, &bytes).await;
+            }
+        });
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("downloads")).unwrap();
+        let mut fixture = prepare_download_fixture(root.path(), port);
+        let mut filters =
+            crate::filters::Filters::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+        set_io_fault(Some(IoFault::Flush));
+        let error = fixture
+            .app
+            .download_one_image(&fixture.guid, &mut filters)
+            .await
+            .expect_err("injected flush failure");
+        set_io_fault(None);
+        assert!(
+            matches!(error, crate::core::AppError::Download(_)),
+            "{error:?}"
+        );
+        assert_clean_stage(&fixture);
+        refill_image_queue(&mut fixture);
+        match fixture
+            .app
+            .download_one_image(&fixture.guid, &mut filters)
+            .await
+            .unwrap()
+        {
+            ImageDownload::Saved(path) => {
+                assert_eq!(std::fs::read(path).unwrap(), expected);
+            }
+            other => panic!("expected saved image, got {other:?}"),
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn download_read_error_aborts_the_owned_stage() {
+        use crate::core::ImageDownload;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let bytes = image_body();
+        let expected = bytes.clone();
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            read_headers(&mut first).await;
+            let mut head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
+                bytes.len()
+            )
+            .into_bytes();
+            head.extend_from_slice(&bytes[..1024]);
+            first.write_all(&head).await.unwrap();
+            first.shutdown().await.unwrap();
+            let (mut second, _) = listener.accept().await.unwrap();
+            read_headers(&mut second).await;
+            serve_full_image(&mut second, &bytes).await;
+        });
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("downloads")).unwrap();
+        let mut fixture = prepare_download_fixture(root.path(), port);
+        let mut filters =
+            crate::filters::Filters::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+        match fixture
+            .app
+            .download_one_image(&fixture.guid, &mut filters)
+            .await
+            .unwrap()
+        {
+            ImageDownload::Failed { fail_code, .. } => {
+                assert_eq!(fail_code, crate::r#const::ERR_IMAGE_BROKEN);
+            }
+            other => panic!("expected broken image, got {other:?}"),
+        }
+        assert_clean_stage(&fixture);
+        let task = fixture.app.task(&fixture.guid).unwrap();
+        assert!(
+            task.meta.get("finished").is_none() || task.meta_i64("finished").unwrap() == 0,
+            "read failure must not mark a file finished"
+        );
+        {
+            let task = fixture.app.task_mut(&fixture.guid).unwrap();
+            task.put_img_queue(&fixture.image_url, &fixture.reload_url, "pic.jpg")
+                .unwrap();
+        }
+        refill_image_queue(&mut fixture);
+        match fixture
+            .app
+            .download_one_image(&fixture.guid, &mut filters)
+            .await
+            .unwrap()
+        {
+            ImageDownload::Saved(path) => {
+                assert_eq!(std::fs::read(path).unwrap(), expected);
+            }
+            other => panic!("expected saved image, got {other:?}"),
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_download_aborts_the_owned_stage_and_closes_the_stream() {
+        use crate::core::ImageDownload;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let bytes = image_body();
+        let expected = bytes.clone();
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel::<bool>();
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            read_headers(&mut first).await;
+            let mut head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
+                bytes.len()
+            )
+            .into_bytes();
+            head.extend_from_slice(&bytes[..1024]);
+            first.write_all(&head).await.unwrap();
+            let closed = read_until_eof(&mut first, 1500).await;
+            let _ = closed_tx.send(closed);
+            let (mut second, _) = listener.accept().await.unwrap();
+            read_headers(&mut second).await;
+            serve_full_image(&mut second, &bytes).await;
+        });
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("downloads")).unwrap();
+        let mut fixture = prepare_download_fixture(root.path(), port);
+        let mut filters =
+            crate::filters::Filters::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+        let mut download = Box::pin(fixture.app.download_one_image(&fixture.guid, &mut filters));
+        let mut created = false;
+        for _ in 0..10_000 {
+            let written = std::fs::read_dir(&fixture.task_dir)
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .any(|entry| {
+                    entry.file_name().to_string_lossy().starts_with("xehentai-")
+                        && entry.metadata().map(|meta| meta.len() > 0).unwrap_or(false)
+                });
+            if written {
+                created = true;
+                break;
+            }
+            tokio::select! {
+                biased;
+                _ = &mut download => panic!("download completed before the staging barrier"),
+                _ = tokio::task::yield_now() => {}
+            }
+        }
+        assert!(created, "download never wrote the first staged bytes");
+        drop(download);
+        assert_clean_stage(&fixture);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), closed_rx)
+                .await
+                .expect("peer closure observation timed out")
+                .expect("closure notify"),
+            "dropping the download must close the image stream"
+        );
+        refill_image_queue(&mut fixture);
+        match fixture
+            .app
+            .download_one_image(&fixture.guid, &mut filters)
+            .await
+            .unwrap()
+        {
+            ImageDownload::Saved(path) => {
+                assert_eq!(std::fs::read(path).unwrap(), expected);
+            }
+            other => panic!("expected saved image, got {other:?}"),
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_queued_stage_open_cannot_recreate_the_stage() {
+        use crate::core::ImageDownload;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let bytes = image_body();
+        let expected = bytes.clone();
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel::<bool>();
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            read_headers(&mut first).await;
+            serve_full_image(&mut first, &bytes).await;
+            let closed = read_until_eof(&mut first, 1500).await;
+            let _ = closed_tx.send(closed);
+            let (mut second, _) = listener.accept().await.unwrap();
+            read_headers(&mut second).await;
+            serve_full_image(&mut second, &bytes).await;
+        });
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("downloads")).unwrap();
+        let mut fixture = prepare_download_fixture(root.path(), port);
+        let mut filters =
+            crate::filters::Filters::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+        let crate::core::SlowOpenHandle {
+            started,
+            finished,
+            release,
+        } = crate::core::arm_slow_open();
+        crate::core::set_io_fault(Some(crate::core::IoFault::SlowOpen));
+        let mut download = Box::pin(fixture.app.download_one_image(&fixture.guid, &mut filters));
+        tokio::select! {
+            biased;
+            _ = &mut download => panic!("the slow stage open must hold the download"),
+            result = tokio::task::spawn_blocking(move || {
+                started.recv_timeout(Duration::from_secs(3))
+            }) => {
+                result.expect("started receiver").expect("stage open started");
+            }
+        }
+        drop(download);
+        crate::core::set_io_fault(None);
+        release.send(()).expect("release the queued open");
+        tokio::task::spawn_blocking(move || finished.recv_timeout(Duration::from_secs(3)))
+            .await
+            .expect("finished receiver")
+            .expect("queued open completed");
+        assert_eq!(
+            stage_names(&fixture.task_dir),
+            Vec::<String>::new(),
+            "the late blocking open must not leave a recreated stage"
+        );
+        assert!(!fixture.task_dir.join("1.jpg").exists());
+        let task = fixture.app.task(&fixture.guid).unwrap();
+        assert!(task.meta.get("finished").is_none());
+        assert_eq!(std::fs::read(&fixture.sentinel).unwrap(), b"old-state");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), closed_rx)
+                .await
+                .expect("peer closure observation timed out")
+                .expect("closure notify"),
+            "cancelling a queued stage open must close the stream"
+        );
+        refill_image_queue(&mut fixture);
+        match fixture
+            .app
+            .download_one_image(&fixture.guid, &mut filters)
+            .await
+            .unwrap()
+        {
+            ImageDownload::Saved(path) => {
+                assert_eq!(std::fs::read(path).unwrap(), expected);
+            }
+            other => panic!("expected saved image, got {other:?}"),
+        }
+        server.await.unwrap();
+    }
+
     #[tokio::test]
     async fn proxy_ban_disables_the_first_proxy_and_reselects() {
         let first = TcpListener::bind("127.0.0.1:0").await.unwrap();

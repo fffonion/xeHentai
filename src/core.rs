@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use indexmap::IndexMap;
@@ -24,11 +24,11 @@ use crate::config::Config;
 use crate::r#const as consts;
 use crate::filters::{self, Filters, PageResponse};
 use crate::proxy::Pool;
-use crate::task::{SaveStart, Task, TaskConfig, TaskError, TaskLoadError};
+use crate::task::{SaveStart, StagedSave, Task, TaskConfig, TaskError, TaskLoadError};
 use crate::task::{boundary_path, normalize, path_within, resolve_dir};
 use crate::util;
 use crate::util::logger::Logger;
-use crate::worker::{FetchedResponse, Session, SessionConfig};
+use crate::worker::{FetchedResponse, Session, SessionConfig, StreamBody};
 
 pub const SESSION_FILE: &str = "h.json";
 pub const LEGACY_COOKIE_FILE: &str = ".ehentai.cookie";
@@ -37,6 +37,183 @@ pub const LEGACY_COOKIE_FILE: &str = ".ehentai.cookie";
 pub const MAX_SESSION_BYTES: u64 = 8 * 1024 * 1024;
 
 static SESSION_STAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Test-only deterministic failures at the existing staging writer. The
+/// production path is unchanged; tests use these to exercise cleanup on open,
+/// write and flush errors without replacing the real request/filter/save code.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IoFault {
+    Open,
+    Write,
+    Flush,
+    /// Test-only: hold the blocking stage open until the test releases it.
+    SlowOpen,
+}
+
+#[cfg(test)]
+thread_local! {
+    static IO_FAULT: std::cell::RefCell<Option<IoFault>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_io_fault(fault: Option<IoFault>) {
+    IO_FAULT.with(|slot| *slot.borrow_mut() = fault);
+}
+
+#[cfg(test)]
+fn io_fault() -> Option<IoFault> {
+    IO_FAULT.with(|slot| *slot.borrow())
+}
+
+/// Test-only gate that holds the blocking stage open mid-flight so a
+/// cancellation can be delivered while the queued filesystem open is still
+/// pending. Production never arms this.
+#[cfg(test)]
+pub(crate) struct SlowOpenHandle {
+    pub started: std::sync::mpsc::Receiver<()>,
+    pub finished: std::sync::mpsc::Receiver<()>,
+    pub release: std::sync::mpsc::Sender<()>,
+}
+
+#[cfg(test)]
+struct SlowOpenChannels {
+    started: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+    finished: std::sync::mpsc::Sender<()>,
+}
+
+#[cfg(test)]
+static SLOW_OPEN: Mutex<Option<SlowOpenChannels>> = Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn arm_slow_open() -> SlowOpenHandle {
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    *SLOW_OPEN.lock().unwrap() = Some(SlowOpenChannels {
+        started: started_tx,
+        release: release_rx,
+        finished: finished_tx,
+    });
+    SlowOpenHandle {
+        started: started_rx,
+        finished: finished_rx,
+        release: release_tx,
+    }
+}
+
+#[cfg(test)]
+fn take_slow_open() -> Option<SlowOpenChannels> {
+    SLOW_OPEN.lock().unwrap().take()
+}
+
+/// Owns one staged download from `begin_staged_save` through the final RSS
+/// decision and publish. Any `?`/drop/cancellation before `commit` removes only
+/// this stage, leaves the target and task bookkeeping untouched and closes the
+/// native response stream.
+struct DownloadStage {
+    staged: Option<StagedSave>,
+    stream: Option<StreamBody>,
+    canceled: Arc<AtomicBool>,
+}
+
+impl DownloadStage {
+    fn new(staged: StagedSave, stream: StreamBody) -> Self {
+        Self {
+            staged: Some(staged),
+            stream: Some(stream),
+            canceled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn staged_ref(&self) -> &StagedSave {
+        self.staged.as_ref().expect("staged save is armed")
+    }
+
+    fn cancel_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.canceled)
+    }
+
+    fn stream_mut(&mut self) -> &mut StreamBody {
+        self.stream.as_mut().expect("response stream is armed")
+    }
+
+    /// Publish exactly once. Taking the stage disarms the drop cleanup only
+    /// for the successful publish itself; `commit_staged_save` removes the
+    /// stage when the publish fails.
+    fn commit(mut self, task: &mut Task) -> Result<PathBuf, TaskError> {
+        let staged = self.staged.take().expect("staged save is armed");
+        task.commit_staged_save(staged)
+    }
+}
+
+impl Drop for DownloadStage {
+    fn drop(&mut self) {
+        self.canceled.store(true, Ordering::SeqCst);
+        if let Some(staged) = self.staged.take() {
+            let _ = fs::remove_file(&staged.stage);
+        }
+        if let Some(stream) = self.stream.take() {
+            drop(stream);
+        }
+    }
+}
+
+/// Open the staging file on the blocking pool. If the surrounding download is
+/// cancelled while the open is still queued, the cancellation flag makes the
+/// blocking side remove the just-created path, so cleanup cannot be followed by
+/// a recreated stage.
+async fn create_stage_file(
+    staged: &StagedSave,
+    canceled: Arc<AtomicBool>,
+) -> std::io::Result<tokio::fs::File> {
+    #[cfg(test)]
+    if io_fault() == Some(IoFault::Open) {
+        return Err(std::io::Error::other("injected open failure"));
+    }
+    let path = staged.stage.clone();
+    #[cfg(test)]
+    let slow = if io_fault() == Some(IoFault::SlowOpen) {
+        take_slow_open()
+    } else {
+        None
+    };
+    let std_file = tokio::task::spawn_blocking(move || -> std::io::Result<std::fs::File> {
+        #[cfg(test)]
+        if let Some(channels) = &slow {
+            let _ = channels.started.send(());
+            let _ = channels
+                .release
+                .recv_timeout(std::time::Duration::from_secs(5));
+        }
+        let outcome = (|| -> std::io::Result<std::fs::File> {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&path)?;
+            if canceled.load(Ordering::SeqCst) {
+                drop(file);
+                let _ = std::fs::remove_file(&path);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "download cancelled",
+                ));
+            }
+            Ok(file)
+        })();
+        #[cfg(test)]
+        if let Some(channels) = &slow {
+            let _ = channels.finished.send(());
+        }
+        outcome
+    })
+    .await
+    .map_err(std::io::Error::other)??;
+    Ok(tokio::fs::File::from_std(std_file))
+}
 
 pub trait GuidSource: Send {
     fn next_guid(&mut self) -> String;
@@ -1152,7 +1329,7 @@ impl App {
             return Ok(ImageDownload::Aborted);
         }
         let stream_page = Self::page_view(&outcome.response, false, true);
-        let mut stream = match outcome.response.stream.take() {
+        let stream = match outcome.response.stream.take() {
             Some(stream) => stream,
             None => {
                 return Ok(ImageDownload::Aborted);
@@ -1172,35 +1349,45 @@ impl App {
             }
             SaveStart::Staged(staged) => staged,
         };
-        let mut file = tokio::fs::File::create(&staged.stage)
+        let mut stage = DownloadStage::new(staged, stream);
+        let mut file = create_stage_file(stage.staged_ref(), stage.cancel_flag())
             .await
-            .map_err(|error| AppError::Download(format!("{}: {error}", staged.stage.display())))?;
+            .map_err(|error| {
+                AppError::Download(format!("{}: {error}", stage.staged_ref().stage.display()))
+            })?;
         let mut read = 0i64;
+        #[cfg(test)]
+        let mut writes = 0usize;
         loop {
             if self.exit >= consts::XEH_STATE_FULL_EXIT {
-                let _ = file.flush().await;
-                drop(file);
-                stream.close().await;
-                Task::abort_staged_save(staged);
                 return Ok(ImageDownload::Aborted);
             }
-            match stream.next_chunk().await {
+            match stage.stream_mut().next_chunk().await {
                 Ok(Some(chunk)) => {
                     read += chunk.len() as i64;
+                    #[cfg(test)]
+                    if io_fault() == Some(IoFault::Write) && writes >= 1 {
+                        return Err(AppError::Download("injected write failure".into()));
+                    }
                     file.write_all(&chunk).await.map_err(|error| {
-                        AppError::Download(format!("{}: {error}", staged.stage.display()))
+                        AppError::Download(format!(
+                            "{}: {error}",
+                            stage.staged_ref().stage.display()
+                        ))
                     })?;
+                    #[cfg(test)]
+                    {
+                        writes += 1;
+                    }
                 }
                 Ok(None) => break,
                 Err(error) => {
-                    let _ = file.flush().await;
                     drop(file);
                     let stream_view = &stream_page;
                     let broken = filters
                         .stream_outcome(stream_view, read, Some(&error))
                         .map_err(|filter| AppError::Filter(filter.to_string()))?;
                     let code = broken.code.unwrap_or(consts::ERR_IMAGE_BROKEN);
-                    Task::abort_staged_save(staged);
                     let task = self
                         .all_tasks
                         .get_mut(guid)
@@ -1214,7 +1401,13 @@ impl App {
                 }
             }
         }
-        let _ = file.flush().await;
+        #[cfg(test)]
+        if io_fault() == Some(IoFault::Flush) {
+            return Err(AppError::Download("injected flush failure".into()));
+        }
+        file.flush().await.map_err(|error| {
+            AppError::Download(format!("{}: {error}", stage.staged_ref().stage.display()))
+        })?;
         drop(file);
         let stream_view = &stream_page;
         let streamed = filters
@@ -1222,7 +1415,6 @@ impl App {
             .map_err(|filter| AppError::Filter(filter.to_string()))?;
         if streamed.broken {
             let code = streamed.code.unwrap_or(consts::ERR_IMAGE_BROKEN);
-            Task::abort_staged_save(staged);
             let task = self
                 .all_tasks
                 .get_mut(guid)
@@ -1238,7 +1430,7 @@ impl App {
             .all_tasks
             .get_mut(guid)
             .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
-        let path = task.commit_staged_save(staged)?;
+        let path = stage.commit(task)?;
         Ok(ImageDownload::Saved(path))
     }
 
