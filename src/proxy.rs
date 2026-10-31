@@ -9,8 +9,10 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -515,8 +517,18 @@ pub fn ssl_agree_marker() -> &'static str {
 
 // --- DNS and TLS -----------------------------------------------------------
 
+pub type LookupFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<SocketAddr>, String>> + Send + 'a>>;
+
 pub trait Resolver: Send + Sync {
     fn resolve(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, String>;
+
+    /// Asynchronous variant used by the real system resolver. `None` means
+    /// this resolver is an in-memory map whose synchronous `resolve` does no
+    /// blocking I/O and is used directly.
+    fn lookup<'a>(&'a self, _host: &'a str, _port: u16) -> Option<LookupFuture<'a>> {
+        None
+    }
 }
 
 pub struct SystemResolver;
@@ -528,6 +540,19 @@ impl Resolver for SystemResolver {
             .to_socket_addrs()
             .map(|addresses| addresses.collect())
             .map_err(|error| error.to_string())
+    }
+
+    /// Standard Tokio resolution. The lookup runs on Tokio's blocking pool;
+    /// cancelling the future drops the result but cannot interrupt the
+    /// operating-system call already in flight. It can never start a late
+    /// HTTP exchange because its owner returns the cancellation first.
+    fn lookup<'a>(&'a self, host: &'a str, port: u16) -> Option<LookupFuture<'a>> {
+        Some(Box::pin(async move {
+            tokio::net::lookup_host((host, port))
+                .await
+                .map(|addresses| addresses.collect())
+                .map_err(|error| error.to_string())
+        }))
     }
 }
 
@@ -620,7 +645,7 @@ async fn tcp_connect(
     }
 }
 
-fn resolve_host(
+async fn resolve_host(
     host: &str,
     port: u16,
     resolver: &dyn Resolver,
@@ -628,7 +653,10 @@ fn resolve_host(
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         return Ok(vec![SocketAddr::new(ip, port)]);
     }
-    resolver.resolve(host, port).map_err(ProxyError::Dns)
+    match resolver.lookup(host, port) {
+        Some(future) => future.await.map_err(ProxyError::Dns),
+        None => resolver.resolve(host, port).map_err(ProxyError::Dns),
+    }
 }
 
 fn first_address(addresses: Vec<SocketAddr>) -> Result<SocketAddr, ProxyError> {
@@ -646,7 +674,7 @@ async fn connect_target(
     tls: &TlsClient,
     target_tls: bool,
 ) -> Result<BoxStream, ProxyError> {
-    let address = first_address(resolve_host(host, port, resolver)?)?;
+    let address = first_address(resolve_host(host, port, resolver).await?)?;
     let stream = tcp_connect(address, deadline).await?;
     if target_tls {
         let tls_stream = tls.connect(host, stream).await?;
@@ -660,12 +688,14 @@ async fn connect_target(
 /// request line. `absolute_url` is only used for an HTTP proxy and a plain
 /// HTTP target, where the reference requests library sends absolute-form.
 ///
-/// Every blocking step of one route attempt (DNS is synchronous, then TCP,
-/// SOCKS4/4a/5/5h, CONNECT and TLS) shares a single absolute deadline derived
-/// from the configured request timeout, so a peer that drips handshake bytes
-/// cannot extend the budget one byte at a time. The deadline does not become
-/// an `HttpError::Pool`; it is the same retryable network error as any other
-/// route failure.
+/// Every step of one route attempt (asynchronous DNS, then TCP, SOCKS4/4a/5/5h,
+/// CONNECT and TLS) shares a single absolute deadline derived from the
+/// configured request timeout, so a peer that drips handshake bytes cannot
+/// extend the budget one byte at a time. DNS is awaited through Tokio's
+/// standard resolver, so a pending lookup cannot freeze an unrelated worker on
+/// the same `LocalSet`; dropping the future at the deadline cannot start a
+/// late HTTP exchange. The deadline does not become an `HttpError::Pool`; it
+/// is the same retryable network error as any other route failure.
 #[allow(clippy::too_many_arguments)]
 pub async fn open_route(
     spec: Option<&ProxySpec>,
@@ -721,7 +751,7 @@ async fn open_route_inner(
                 .host_str()
                 .ok_or_else(|| ProxyError::Address(spec.addr.clone()))?;
             let proxy_port = proxy_url.port_or_known_default().unwrap_or(80);
-            let address = first_address(resolve_host(proxy_host, proxy_port, resolver)?)?;
+            let address = first_address(resolve_host(proxy_host, proxy_port, resolver).await?)?;
             let stream = tcp_connect(address, deadline).await?;
             let mut stream: BoxStream = if *proxy_tls {
                 Box::new(tls.connect(proxy_host, stream).await?)
@@ -759,7 +789,7 @@ async fn open_route_inner(
                 .host_str()
                 .ok_or_else(|| ProxyError::Address(spec.addr.clone()))?;
             let proxy_port = proxy_url.port_or_known_default().unwrap_or(1080);
-            let address = first_address(resolve_host(proxy_host, proxy_port, resolver)?)?;
+            let address = first_address(resolve_host(proxy_host, proxy_port, resolver).await?)?;
             let mut stream = tcp_connect(address, deadline).await?;
             if *version == 4 {
                 socks4_handshake(&mut stream, host, port, *remote_dns, resolver).await?;
@@ -831,7 +861,7 @@ async fn socks4_handshake(
         request.extend_from_slice(host.as_bytes());
         request.push(0);
     } else {
-        let address = first_address(resolve_host(host, port, resolver)?)?;
+        let address = first_address(resolve_host(host, port, resolver).await?)?;
         match address.ip() {
             std::net::IpAddr::V4(ip) => request.extend_from_slice(&ip.octets()),
             std::net::IpAddr::V6(_) => {
@@ -891,7 +921,7 @@ async fn socks5_handshake(
         request.push(host.len() as u8);
         request.extend_from_slice(host.as_bytes());
     } else {
-        let address = first_address(resolve_host(host, port, resolver)?)?;
+        let address = first_address(resolve_host(host, port, resolver).await?)?;
         match address.ip() {
             std::net::IpAddr::V4(ip) => {
                 request.push(1);
@@ -951,7 +981,6 @@ pub struct MapResolver {
     pub map: BTreeMap<String, Vec<SocketAddr>>,
     pub calls: Arc<Mutex<Vec<String>>>,
 }
-
 impl MapResolver {
     pub fn new(map: Vec<(String, Vec<SocketAddr>)>) -> Self {
         Self {
@@ -977,6 +1006,44 @@ impl Resolver for MapResolver {
                     .collect()
             })
             .ok_or_else(|| format!("no synthetic record for {host}"))
+    }
+}
+
+/// Test/probe resolver that returns one exact socket address, port included.
+/// The reference tests need `e-hentai.org` routed to a local ephemeral port;
+/// `MapResolver` deliberately keeps DNS port substitution, this helper does
+/// not. Production sessions use [`SystemResolver`].
+#[derive(Clone, Default)]
+pub struct FixedResolver {
+    pub map: BTreeMap<String, SocketAddr>,
+    pub calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl FixedResolver {
+    pub fn new(address: SocketAddr) -> Self {
+        let mut map = BTreeMap::new();
+        map.insert("e-hentai.org".to_string(), address);
+        map.insert("exhentai.org".to_string(), address);
+        map.insert("forums.e-hentai.org".to_string(), address);
+        Self {
+            map,
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+impl Resolver for FixedResolver {
+    fn resolve(&self, host: &str, _port: u16) -> Result<Vec<SocketAddr>, String> {
+        self.calls.lock().unwrap().push(host.to_string());
+        self.map
+            .get(host)
+            .copied()
+            .map(|address| vec![address])
+            .ok_or_else(|| format!("no fixed record for {host}"))
     }
 }
 

@@ -4,6 +4,8 @@
 use std::fs;
 use std::path::Path;
 
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
 use vm::{SourceFlavor, Value, Vm, VmStatus, compile_source_with_flavor};
 
 use crate::config::{CONFIG_FILE, Config, ConfigError, Origin};
@@ -367,6 +369,8 @@ fn compat_probe() {
         "site" => compat_site(&request["inputs"]),
         "proxy" => compat_proxy(&request["inputs"]),
         "transport" => compat_transport(&request["inputs"]),
+        "monitor" => compat_monitor(&request["inputs"]),
+        "download" => compat_download(&request["inputs"]),
         other => panic!("unknown probe suite {other}"),
     };
     let output = std::env::var("XEH_COMPAT_OUTPUT").expect("probe output");
@@ -375,6 +379,619 @@ fn compat_probe() {
         serde_json::to_string_pretty(&result).expect("probe JSON"),
     )
     .expect("write probe output");
+}
+
+fn compat_monitor_app(scenario: &serde_json::Value) -> crate::core::App {
+    use crate::config::Config;
+    use crate::task::{Task, TaskConfig};
+
+    let root = tempfile::tempdir().expect("monitor root").keep();
+    let mut config = Config::default();
+    config.dir = root.join("downloads").to_string_lossy().into_owned();
+    config.save_tasks = false;
+    std::fs::create_dir_all(root.join("downloads")).unwrap();
+    let mut app = crate::core::App::with_guid_source(
+        config,
+        crate::util::logger::Logger::with_output(Box::new(Vec::new()), false),
+        &root,
+        &root,
+        Box::new(crate::core::FixedGuids::new(vec!["guidmon1".into()])),
+    )
+    .unwrap();
+    let task_config = TaskConfig::from_app(&app.cfg, &serde_json::Map::new()).unwrap();
+    let task = Task::new(
+        "http://e-hentai.org/g/123/abcdef0123/",
+        task_config,
+        "guidmon1".into(),
+        &root,
+    )
+    .unwrap();
+    let guid = app.insert_task_for_test(task);
+    let task = app.task_mut(&guid).unwrap();
+    if let Some(ignored) = scenario["ignored"].as_array() {
+        task.config.ignored_errors = ignored
+            .iter()
+            .filter_map(serde_json::Value::as_i64)
+            .collect();
+    }
+    task.state = crate::r#const::TASK_STATE_DOWNLOAD;
+    task.meta
+        .insert("title".into(), serde_json::json!("compat"));
+    task.meta.insert(
+        "total".into(),
+        serde_json::json!(scenario["total"].as_i64().unwrap_or(0)),
+    );
+    task.meta.insert(
+        "finished".into(),
+        serde_json::json!(scenario["finished"].as_i64().unwrap_or(0)),
+    );
+    task.img_q = Some(std::collections::VecDeque::new());
+    if let Some(pending) = scenario["pending"].as_u64() {
+        let queue = task.img_q.as_mut().unwrap();
+        for _ in 0..pending {
+            queue.push_back("x".into());
+        }
+    }
+    app
+}
+
+fn compat_monitor(inputs: &serde_json::Value) -> serde_json::Value {
+    use crate::core::{Runtime, WorkerRef};
+    use crate::worker::{SpeedChecker, StepClock, TickClock};
+
+    let speed = &inputs["speed"];
+    let start = speed["start"].as_f64().unwrap_or(100.0);
+    let clock = std::sync::Arc::new(StepClock::new(start, 0.0));
+    let mut checker = SpeedChecker::new(speed["cnt"].as_u64().unwrap_or(5) as usize, clock.clone());
+    let mut speed_trace = Vec::new();
+    let mut now = start;
+    let resets: Vec<usize> = speed["resets"]
+        .as_array()
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_u64().map(|v| v as usize))
+                .collect()
+        })
+        .unwrap_or_default();
+    for (index, step) in speed["timeline"].as_array().unwrap().iter().enumerate() {
+        let size = step[0].as_u64().unwrap_or(0) as usize;
+        let delta = step[1].as_f64().unwrap_or(0.0);
+        now += delta;
+        clock.set_now(now);
+        checker.check(size);
+        speed_trace.push(serde_json::json!([
+            round6(checker.calc(false)),
+            round6(checker.calc(true)),
+            checker.sample_count(),
+        ]));
+        if resets.contains(&index) {
+            checker.reset();
+            speed_trace.push(serde_json::json!([
+                "reset",
+                round6(checker.calc(false)),
+                checker.sample_count(),
+            ]));
+        }
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("compat runtime");
+    let monitors = runtime.block_on(async {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let mut output = serde_json::Map::new();
+                for (name, scenario) in inputs["monitor"].as_object().unwrap() {
+                    let mut app = crate::tests::compat_monitor_app(scenario);
+                    let guid = app
+                        .all_task_guids()
+                        .into_iter()
+                        .next()
+                        .expect("monitor task");
+                    app.set_session_config(crate::worker::SessionConfig {
+                        clock: std::sync::Arc::new(TickClock::new(1000.0)),
+                        ..crate::worker::SessionConfig::default()
+                    });
+                    let runtime =
+                        Runtime::new(app, std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+                    let handle = runtime.handle();
+                    let names: Vec<String> = scenario["names"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|value| value.as_str().unwrap().to_string())
+                        .collect();
+                    let (monitor, join) = runtime.start_monitor_for_test(&guid, &names);
+                    let sample = scenario["speed_bytes"].as_u64().unwrap_or(0) as usize;
+                    let mut refs = Vec::new();
+                    for name in &names {
+                        let speed = if sample == 0 {
+                            None
+                        } else {
+                            let clock = std::sync::Arc::new(StepClock::new(0.0, 1.1));
+                            let mut checker = SpeedChecker::new(5, clock);
+                            for _ in 0..5 {
+                                checker.check(sample);
+                            }
+                            Some(std::sync::Arc::new(std::sync::Mutex::new(checker)))
+                        };
+                        let reference = WorkerRef {
+                            name: name.clone(),
+                            alive: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                            speed,
+                            zombie_threshold: scenario["thresholds"]
+                                .get(name)
+                                .and_then(serde_json::Value::as_f64)
+                                .unwrap_or(30.0),
+                        };
+                        monitor.register(reference.clone());
+                        monitor.keepalive(&reference, false);
+                        refs.push(reference);
+                    }
+                    let mut events = Vec::new();
+                    for vote in scenario["votes"].as_array().into_iter().flatten() {
+                        let code = vote[1].as_i64().unwrap_or(0);
+                        monitor.vote(vote[0].as_str().unwrap(), code);
+                        events.push(serde_json::json!(format!("vote:{code}")));
+                    }
+                    let finished_updates: Vec<(usize, i64)> = scenario["finished_updates"]
+                        .as_array()
+                        .map(|values| {
+                            values
+                                .iter()
+                                .map(|row| {
+                                    (
+                                        row[0].as_u64().unwrap_or(0) as usize,
+                                        row[1].as_i64().unwrap_or(0),
+                                    )
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let finish_when_complete =
+                        scenario["finish_when_complete"].as_bool().unwrap_or(false);
+                    let zero_after = scenario["zero_speed_after_stats"].as_u64();
+
+                    let max_ticks = scenario["max_ticks"].as_u64().unwrap_or(1000);
+                    monitor.set_tick_limit(max_ticks);
+                    let mut stats = 0usize;
+                    let mut applied = 0usize;
+                    let mut guard = 0u64;
+                    let mut guard_hit = false;
+                    loop {
+                        let trace = handle.trace();
+                        let current_stats = trace
+                            .iter()
+                            .filter(|event| event.kind == "monitor.stats")
+                            .count();
+                        if current_stats != stats {
+                            stats = current_stats;
+                            while applied < finished_updates.len()
+                                && finished_updates[applied].0 <= stats
+                            {
+                                let finished = finished_updates[applied].1;
+                                handle.borrow_app_mut(|app| {
+                                    if let Some(task) = app.task_mut(&guid) {
+                                        task.meta
+                                            .insert("finished".into(), serde_json::json!(finished));
+                                    }
+                                });
+                                applied += 1;
+                            }
+                            if zero_after.is_some_and(|after| stats as u64 >= after) {
+                                for reference in &refs {
+                                    if let Some(speed) = &reference.speed {
+                                        speed.lock().unwrap().reset();
+                                    }
+                                }
+                            }
+                            let finished = handle.borrow_app(|app| {
+                                app.task(&guid)
+                                    .and_then(|task| {
+                                        task.meta
+                                            .get("finished")
+                                            .and_then(serde_json::Value::as_i64)
+                                    })
+                                    .unwrap_or(0)
+                            });
+                            let total = scenario["total"].as_i64().unwrap_or(0);
+                            if finish_when_complete && finished == total {
+                                for reference in &refs {
+                                    monitor.keepalive(reference, true);
+                                }
+                            }
+                        }
+                        if join.is_finished() {
+                            break;
+                        }
+                        guard += 1;
+                        if guard > 200_000 {
+                            guard_hit = true;
+                            monitor.request_exit();
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    }
+                    let _ = join.await;
+                    let finished_now = handle.borrow_app(|app| {
+                        app.task(&guid)
+                            .and_then(|task| {
+                                task.meta
+                                    .get("finished")
+                                    .and_then(serde_json::Value::as_i64)
+                            })
+                            .unwrap_or(0)
+                    });
+                    let total = scenario["total"].as_i64().unwrap_or(0);
+                    let stopped = (monitor.limit_hit() && finished_now != total) || guard_hit;
+                    let trace = handle.trace();
+                    for event in &trace {
+                        match event.kind.as_str() {
+                            "monitor.stats" => events.push(serde_json::json!("stats")),
+                            "monitor.slow" => events.push(serde_json::json!("slow")),
+                            "monitor.stuck" => events.push(serde_json::json!("stuck")),
+                            "monitor.quota" => events.push(serde_json::json!("quota")),
+                            "monitor.zombie" => events.push(serde_json::json!("zombie")),
+                            "monitor.finished" => events.push(serde_json::json!("finished")),
+                            _ => {}
+                        }
+                    }
+                    let state = handle.borrow_app(|app| app.task(&guid).unwrap().state);
+                    let finished = handle.borrow_app(|app| {
+                        app.task(&guid)
+                            .and_then(|task| {
+                                task.meta
+                                    .get("finished")
+                                    .and_then(serde_json::Value::as_i64)
+                            })
+                            .unwrap_or(0)
+                    });
+                    let download_speed = round6(monitor.download_speed());
+                    output.insert(
+                        name.clone(),
+                        serde_json::json!({
+                            "events": events,
+                            "state": state,
+                            "finished": finished,
+                            "download_speed": download_speed,
+                            "stopped": stopped,
+                            "stats": stats,
+                        }),
+                    );
+                }
+                serde_json::Value::Object(output)
+            })
+            .await
+    });
+    serde_json::json!({"speed": speed_trace, "monitor": monitors})
+}
+
+fn round6(value: f64) -> f64 {
+    (value * 1_000_000.0).round() / 1_000_000.0
+}
+
+fn hex_bytes(text: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len() / 2);
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index + 1 < bytes.len() {
+        let high = (bytes[index] as char).to_digit(16).expect("hex high");
+        let low = (bytes[index + 1] as char).to_digit(16).expect("hex low");
+        out.push(((high << 4) | low) as u8);
+        index += 2;
+    }
+    out
+}
+
+async fn compat_read_head<S: tokio::io::AsyncRead + Unpin>(socket: &mut S) -> String {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        let read = socket.read(&mut byte).await.unwrap_or(0);
+        if read == 0 {
+            break;
+        }
+        head.push(byte[0]);
+        if head.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&head).into_owned()
+}
+
+fn compat_path_of(head: &str) -> String {
+    head.lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("")
+        .to_string()
+}
+
+async fn compat_respond<S: tokio::io::AsyncWrite + Unpin>(
+    socket: &mut S,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+) {
+    let head = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    let _ = socket.write_all(head.as_bytes()).await;
+    let _ = socket.write_all(body).await;
+    let _ = socket.shutdown().await;
+}
+
+fn compat_download(inputs: &serde_json::Value) -> serde_json::Value {
+    use std::net::SocketAddr;
+    use std::sync::{Arc, Mutex};
+
+    use crate::config::Config;
+    use crate::core::{Runtime, TraceEvent};
+    use crate::proxy::FixedResolver;
+    use crate::task::{Task, TaskConfig};
+    use crate::worker::{FallbackMap, SessionConfig};
+
+    let scenario = &inputs["scenario"];
+    let url = scenario["url"].as_str().unwrap();
+    let metadata = scenario["metadata"].as_str().unwrap().as_bytes().to_vec();
+    let page = scenario["page"].as_str().unwrap().as_bytes().to_vec();
+    let img_pages: Vec<Vec<u8>> = scenario["img_pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap().as_bytes().to_vec())
+        .collect();
+    let images: Vec<Vec<u8>> = scenario["images"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| hex_bytes(value.as_str().unwrap()))
+        .collect();
+    let image_hashes: Vec<String> = scenario["image_hashes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap().to_string())
+        .collect();
+    let root = std::path::PathBuf::from(inputs["root"].as_str().unwrap());
+    std::fs::create_dir_all(root.join("downloads")).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("download runtime");
+    runtime.block_on(async {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address: SocketAddr = listener.local_addr().unwrap();
+                let requests = Arc::new(Mutex::new(Vec::new()));
+                let seen = Arc::clone(&requests);
+                let server = tokio::spawn(async move {
+                    loop {
+                        let Ok((mut socket, _)) = listener.accept().await else {
+                            return;
+                        };
+                        let metadata = metadata.clone();
+                        let page = page.clone();
+                        let img_pages = img_pages.clone();
+                        let images = images.clone();
+                        let image_hashes = image_hashes.clone();
+                        let seen = Arc::clone(&seen);
+                        tokio::spawn(async move {
+                            let head = compat_read_head(&mut socket).await;
+                            let path = compat_path_of(&head);
+                            seen.lock().unwrap().push(format!("GET {path}"));
+                            if path.contains("?p=") {
+                                compat_respond(&mut socket, "200 OK", "text/html; charset=utf-8", &page).await;
+                            } else if path.contains("/img/") {
+                                let index = if path.contains(&image_hashes[0]) {
+                                    0
+                                } else {
+                                    1
+                                };
+                                compat_respond(&mut socket, "200 OK", "image/jpeg", &images[index]).await;
+                            } else if path.contains("/s/") {
+                                let fid = path
+                                    .rsplit('-')
+                                    .next()
+                                    .and_then(|value| value.split('?').next())
+                                    .and_then(|value| value.parse::<usize>().ok())
+                                    .unwrap_or(1);
+                                compat_respond(
+                                    &mut socket,
+                                    "200 OK",
+                                    "text/html; charset=utf-8",
+                                    &img_pages[fid.saturating_sub(1)],
+                                )
+                                .await;
+                            } else {
+                                compat_respond(&mut socket, "200 OK", "text/html; charset=utf-8", &metadata).await;
+                            }
+                        });
+                    }
+                });
+
+                let mut config = Config::default();
+                config.dir = root.join("downloads").to_string_lossy().into_owned();
+                config.save_tasks = false;
+                config.scan_thread_cnt = scenario["scan_threads"].as_i64().unwrap_or(1);
+                config.download_thread_cnt = scenario["download_threads"].as_i64().unwrap_or(1);
+                config.download_timeout = 5;
+                config.low_speed_threshold = 0;
+                config.make_archive = false;
+                config.delete_task_files = false;
+                let mut app = crate::core::App::with_guid_source(
+                    config.clone(),
+                    crate::util::logger::Logger::with_output(Box::new(Vec::new()), false),
+                    &root,
+                    &root,
+                    Box::new(crate::core::FixedGuids::new(vec!["00000001".into()])),
+                )
+                .unwrap();
+                let task_config = TaskConfig::from_app(&app.cfg, &serde_json::Map::new()).unwrap();
+                let task = Task::new(url, task_config, "00000001".into(), &root).unwrap();
+                let guid = app.insert_task_for_test(task);
+                // Force the same 14-key snapshot values the Python task uses.
+                let mut resolver = FixedResolver::new(address);
+                resolver.map.insert("img.test".into(), address);
+                app.set_session_config(SessionConfig {
+                    retry: 10,
+                    timeout: std::time::Duration::from_secs(10),
+                    resolver: Arc::new(resolver),
+                    fallback: FallbackMap::empty(),
+                    clock: Arc::new(crate::worker::RealClock),
+                    ..SessionConfig::default()
+                });
+                let runtime = Runtime::new(app, std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+                let (run, handle) = runtime.spawn();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                loop {
+                    if handle.task_state(&guid) == Some(crate::r#const::TASK_STATE_FINISHED)
+                        || handle.task_state(&guid) == Some(crate::r#const::TASK_STATE_FAILED)
+                    {
+                        break;
+                    }
+                    if std::time::Instant::now() > deadline {
+                        panic!("compat download did not finish: {:?}", handle.trace());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                handle.shutdown().await;
+                run.await.unwrap();
+                server.abort();
+                let task = handle.borrow_app(|app| {
+                    let task = app.task(&guid).unwrap();
+                    let mut config = serde_json::to_value(&task.config).unwrap();
+                    normalize_value(&mut config, &root);
+                    let reload: Vec<serde_json::Value> = task
+                        .reload_map
+                        .iter()
+                        .map(|(key, (page, name))| serde_json::json!([key, [page, name]]))
+                        .collect();
+                    let duplicate: Vec<serde_json::Value> = task
+                        .duplicate_pairs()
+                        .into_iter()
+                        .map(|(fid, copies)| serde_json::json!([fid, copies]))
+                        .collect();
+                    let mut renamed: Vec<serde_json::Value> = task
+                        .renamed_pairs()
+                        .into_iter()
+                        .map(|(key, name)| serde_json::json!([key, name]))
+                        .collect();
+                    renamed.sort_by_key(|value| value[0].to_string());
+                    let mut reload = reload;
+                    reload.sort_by_key(|value| value[0].to_string());
+                    let mut duplicate = duplicate;
+                    duplicate.sort_by_key(|value| value[0].to_string());
+                    serde_json::json!({
+                        "url": task.url,
+                        "failcode": task.failcode,
+                        "state": task.state,
+                        "guid": "GUID",
+                        "config": config,
+                        "meta": task.meta,
+                        "reload": reload,
+                        "duplicate": duplicate,
+                        "renamed": renamed,
+                        "img_q": task.img_q.as_ref().map(|queue| queue.iter().cloned().collect::<Vec<_>>()),
+                        "page_q": task.page_q.as_ref().map(|queue| queue.iter().cloned().collect::<Vec<_>>()),
+                        "flist": task.flist_done().iter().copied().collect::<Vec<_>>(),
+                        "gid": task.gid,
+                        "sethash": task.sethash,
+                    })
+                });
+                let tree = compat_tree(&root.join("downloads"), &root);
+                let mut requests = requests.lock().unwrap().clone();
+                requests.sort();
+                let trace: Vec<TraceEvent> = handle.trace();
+                let mut votes = std::collections::BTreeMap::<i64, i64>::new();
+                for event in &trace {
+                    if event.kind == "monitor.vote" {
+                        let code = event.detail["code"].as_i64().unwrap_or(0);
+                        *votes.entry(code).or_insert(0) += 1;
+                    }
+                }
+                let finished = task["meta"]["finished"].clone();
+                serde_json::json!({
+                    "task": task,
+                    "tree": tree,
+                    "requests": requests,
+                    "monitor": {
+                        "state": task["state"].clone(),
+                        "finished": finished,
+                        "votes": votes.into_iter().map(|(code, count)| serde_json::json!([code.to_string(), count])).collect::<Vec<_>>(),
+                    },
+                })
+            })
+            .await
+    })
+}
+
+fn normalize_value(value: &mut serde_json::Value, root: &std::path::Path) {
+    let root = root.to_string_lossy().into_owned();
+    match value {
+        serde_json::Value::String(text) => {
+            if let Some(rest) = text.strip_prefix(&root) {
+                *text = format!("<ROOT>{rest}");
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                normalize_value(item, std::path::Path::new(&root));
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values_mut() {
+                normalize_value(item, std::path::Path::new(&root));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn compat_tree(dir: &std::path::Path, _root: &std::path::Path) -> Vec<serde_json::Value> {
+    fn walk(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<serde_json::Value>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut entries: Vec<_> = entries.flatten().collect();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name == "h.json" || name == "eh.log" {
+                continue;
+            }
+            let relative = path.strip_prefix(root).unwrap_or(&path);
+            if path.is_dir() {
+                out.push(serde_json::json!({
+                    "path": relative.to_string_lossy().replace('\\', "/"),
+                    "type": "dir",
+                }));
+                walk(&path, root, out);
+            } else {
+                let data = std::fs::read(&path).unwrap_or_default();
+                let text = if data.len() <= 4096 {
+                    String::from_utf8(data.clone()).ok()
+                } else {
+                    None
+                };
+                out.push(serde_json::json!({
+                    "path": relative.to_string_lossy().replace('\\', "/"),
+                    "type": "file",
+                    "size": data.len(),
+                    "text": text,
+                }));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out);
+    out.sort_by_key(|value| value["path"].to_string());
+    out
 }
 
 fn compat_proxy(inputs: &serde_json::Value) -> serde_json::Value {
@@ -6988,5 +7605,2032 @@ mod m3_transport {
             "PoolException is not counted as a proxy failure"
         );
         server.await.unwrap();
+    }
+}
+
+/// M4: persistent scan/download workers, Task pipeline, monitor and
+/// cancellation. These tests use real local sockets, real RSS filters and the
+/// production Runtime; only the clock/DNS fixture is injected.
+mod m4 {
+    use std::collections::VecDeque;
+    use std::net::SocketAddr;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::task::LocalSet;
+
+    use crate::config::Config;
+    use crate::r#const as consts;
+    use crate::core::{
+        App, AppHandle, CommitOutcome, DownloadPort, Runtime, TraceEvent, WorkerRef,
+    };
+    use crate::proxy::FixedResolver;
+    use crate::task::{SaveStart, StagedSave, Task, TaskConfig};
+    use crate::worker::{SessionConfig, SpeedChecker, StepClock, TestClock, TickClock};
+
+    const MANIFEST: &str = env!("CARGO_MANIFEST_DIR");
+
+    fn m4_logger() -> crate::util::logger::Logger {
+        crate::util::logger::Logger::with_output(Box::new(std::io::stderr()), false)
+    }
+
+    fn m4_config(root: &Path, scan: i64, download: i64) -> Config {
+        let mut config = Config::default();
+        config.dir = root.join("downloads").to_string_lossy().into_owned();
+        config.save_tasks = true;
+        config.scan_thread_cnt = scan;
+        config.download_thread_cnt = download;
+        config.download_timeout = 5;
+        config.low_speed_threshold = 0;
+        config
+    }
+
+    fn m4_app(root: &Path, config: Config) -> App {
+        m4_app_guids(root, config, &["guid0001"])
+    }
+
+    fn m4_app_guids(root: &Path, config: Config, guids: &[&str]) -> App {
+        std::fs::create_dir_all(root.join("downloads")).unwrap();
+        App::with_guid_source(
+            config,
+            m4_logger(),
+            root,
+            root,
+            Box::new(crate::core::FixedGuids::new(
+                guids.iter().map(|guid| guid.to_string()),
+            )),
+        )
+        .unwrap()
+    }
+
+    fn m4_task(app: &mut App, root: &Path, url: &str, kwargs: serde_json::Value) -> String {
+        let config = TaskConfig::from_app(&app.cfg, kwargs.as_object().unwrap()).unwrap();
+        let task = Task::new(url, config, "guid0001".into(), root).unwrap();
+        app.insert_task_for_test(task)
+    }
+
+    fn m4_session(
+        app: &mut App,
+        clock: Arc<dyn crate::worker::HttpClock>,
+        resolver: Arc<dyn crate::proxy::Resolver>,
+    ) {
+        app.set_session_config(SessionConfig {
+            retry: 1,
+            timeout: Duration::from_secs(5),
+            resolver,
+            fallback: crate::worker::FallbackMap::empty(),
+            clock,
+            ..SessionConfig::default()
+        });
+    }
+
+    async fn read_head<S: tokio::io::AsyncRead + Unpin>(socket: &mut S) -> String {
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            let read = socket.read(&mut byte).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            head.push(byte[0]);
+            if head.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&head).into_owned()
+    }
+
+    async fn respond<S: tokio::io::AsyncWrite + Unpin>(
+        socket: &mut S,
+        status: &str,
+        content_type: &str,
+        body: &[u8],
+    ) {
+        let head = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let _ = socket.write_all(head.as_bytes()).await;
+        let _ = socket.write_all(body).await;
+        let _ = socket.shutdown().await;
+    }
+
+    fn path_of(head: &str) -> String {
+        head.lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or("")
+            .to_string()
+    }
+
+    fn metadata_body(total: i64) -> Vec<u8> {
+        format!(
+            "=\"gj\">日本語タイトル</h1>=\"gn\">English title</h1>\
+             Length:</td><td class=\"gdt2\">{total} pages</td>\
+             Showing 1 - 20 of {total} images"
+        )
+        .into_bytes()
+    }
+
+    fn page_body(hash: &str, count: i64) -> Vec<u8> {
+        let mut body = String::new();
+        for fid in 1..=count {
+            body.push_str(&format!(
+                "<a href=\"http://e-hentai.org/s/{hash}/123456-{fid}\"><div title=\"Page {fid}\""
+            ));
+        }
+        body.into_bytes()
+    }
+
+    fn image_page_body(
+        port: u16,
+        hash40: &str,
+        hash10: &str,
+        fid: i64,
+        name: &str,
+        size: usize,
+    ) -> Vec<u8> {
+        format!(
+            "<img src=\"http://127.0.0.1:{port}/img/{hash40}-{size}-200-0-jpg/keystamp=abc\" style=\"max-width:100%\">\
+             </a></div><div>{name}.jpg :: 100x200 :: 2 KB</di>\
+             return nl('{hash10}-{fid}')"
+        )
+        .into_bytes()
+    }
+
+    fn image_body(seed: u8, size: usize) -> Vec<u8> {
+        (0..size)
+            .map(|index| seed.wrapping_add(index as u8))
+            .collect()
+    }
+
+    async fn wait_state(handle: &AppHandle, guid: &str, state: i64) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            if handle.task_state(guid) == Some(state) {
+                return;
+            }
+            if std::time::Instant::now() > deadline {
+                let trace = handle.trace();
+                panic!(
+                    "task {guid} did not reach {state}: {:?}\ntrace {:?}",
+                    handle.task_state(guid),
+                    trace
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pipeline_scans_pages_downloads_real_files_and_finishes() {
+        let image_hash_a = "0123456789abcdef0123456789abcdef01234567";
+        let image_hash_b = "89abcdef0123456789abcdef0123456789abcdef";
+        let image_hash10_a = "0123456789";
+        let image_hash10_b = "89abcdef01";
+        let image_a = image_body(1, 1000);
+        let image_b = image_body(2, 1200);
+        let image_a_server = image_a.clone();
+        let image_b_server = image_b.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let metadata = metadata_body(2);
+        let page = page_body("0123456789", 2);
+        let page2 = page_body("0123456789", 2);
+        let img_a = image_page_body(port, image_hash_a, image_hash10_a, 1, "one", image_a.len());
+        let img_b = image_page_body(port, image_hash_b, image_hash10_b, 2, "two", image_b.len());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&requests);
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let seen = Arc::clone(&seen);
+                let metadata = metadata.clone();
+                let page = page.clone();
+                let page2 = page2.clone();
+                let img_a = img_a.clone();
+                let img_b = img_b.clone();
+                let image_a = image_a_server.clone();
+                let image_b = image_b_server.clone();
+                tokio::spawn(async move {
+                    let head = read_head(&mut socket).await;
+                    let path = path_of(&head);
+                    seen.lock().unwrap().push(path.clone());
+                    if path.contains("?p=") {
+                        respond(&mut socket, "200 OK", "text/html", &page).await;
+                    } else if path.starts_with("/g/123/abcdef0123/") {
+                        let _ = page2;
+                        respond(&mut socket, "200 OK", "text/html", &metadata).await;
+                    } else if path.contains("/s/0123456789/123456-1") {
+                        respond(&mut socket, "200 OK", "text/html", &img_a).await;
+                    } else if path.contains("/s/0123456789/123456-2") {
+                        respond(&mut socket, "200 OK", "text/html", &img_b).await;
+                    } else if path.contains("123456-1") {
+                        respond(&mut socket, "200 OK", "text/html", &img_a).await;
+                    } else if path.contains("123456-2") {
+                        respond(&mut socket, "200 OK", "text/html", &img_b).await;
+                    } else if path.contains(image_hash_a) {
+                        respond(&mut socket, "200 OK", "image/jpeg", &image_a).await;
+                    } else if path.contains(image_hash_b) {
+                        respond(&mut socket, "200 OK", "image/jpeg", &image_b).await;
+                    } else {
+                        respond(&mut socket, "404 Not Found", "text/html", b"missing").await;
+                    }
+                });
+            }
+        });
+
+        let root = tempfile::tempdir().unwrap();
+        let mut config = m4_config(root.path(), 2, 2);
+        config.download_timeout = 5;
+        let mut app = m4_app(root.path(), config);
+        let guid = {
+            let mut kwargs = serde_json::Map::new();
+            kwargs.insert("scan_thread_cnt".into(), serde_json::json!(2));
+            kwargs.insert("download_thread_cnt".into(), serde_json::json!(2));
+            m4_task(
+                &mut app,
+                root.path(),
+                "http://e-hentai.org/g/123/abcdef0123/",
+                serde_json::Value::Object(kwargs),
+            )
+        };
+        m4_session(
+            &mut app,
+            Arc::new(crate::worker::RealClock),
+            Arc::new(FixedResolver::new(
+                format!("127.0.0.1:{port}").parse::<SocketAddr>().unwrap(),
+            )),
+        );
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let runtime = Runtime::new(app, Path::new(MANIFEST).to_path_buf());
+                let (mut run, handle) = runtime.spawn();
+                tokio::select! {
+                    _ = wait_state(&handle, &guid, consts::TASK_STATE_FINISHED) => {}
+                    result = &mut run => panic!("runtime stopped early: {result:?}"),
+                }
+                let report = handle.shutdown().await;
+                run.await.unwrap();
+                assert!(report.joined >= 1, "{report:?}");
+                let app = handle.borrow_app(|app| {
+                    let task = app.task(&guid).unwrap();
+                    assert_eq!(task.meta_i64("finished").unwrap(), 2);
+                    let dir = task.get_fpath().unwrap();
+                    assert_eq!(std::fs::read(dir.join("1.jpg")).unwrap(), image_a);
+                    assert_eq!(std::fs::read(dir.join("2.jpg")).unwrap(), image_b);
+                    assert!(task.renamed_map.len() >= 2);
+                    true
+                });
+                assert!(app);
+                let trace = handle.trace();
+                assert!(
+                    trace.iter().any(|event| event.kind == "worker.scan.ok"),
+                    "{trace:?}"
+                );
+                assert!(
+                    trace
+                        .iter()
+                        .any(|event| event.kind == "worker.download.saved"),
+                    "{trace:?}"
+                );
+                assert!(
+                    trace.iter().any(|event| event.kind == "monitor.finished"),
+                    "{trace:?}"
+                );
+            })
+            .await;
+        server.abort();
+        let requests = requests.lock().unwrap();
+        assert!(
+            requests.iter().any(|path| path.contains("/img/")),
+            "{requests:?}"
+        );
+        assert!(
+            requests
+                .iter()
+                .filter(|path| path.starts_with("/s/"))
+                .count()
+                == 2,
+            "{requests:?}"
+        );
+    }
+
+    async fn wait_trace_count(handle: &AppHandle, kind: &str, count: usize) -> Vec<TraceEvent> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let trace = handle.trace();
+            if trace.iter().filter(|event| event.kind == kind).count() >= count {
+                return trace;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("trace {kind} x{count} not reached: {trace:?}");
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    fn monitor_fixture(root: &Path, total: i64, ignored: Vec<i64>) -> (Runtime, String) {
+        let mut config = m4_config(root, 0, 2);
+        config.ignored_errors = ignored;
+        let mut app = m4_app(root, config);
+        let guid = m4_task(
+            &mut app,
+            root,
+            "http://e-hentai.org/g/123/abcdef0123/",
+            serde_json::json!({}),
+        );
+        {
+            let task = app.task_mut(&guid).unwrap();
+            task.state = consts::TASK_STATE_DOWNLOAD;
+            task.meta
+                .insert("title".into(), serde_json::json!("monitor"));
+            task.meta.insert("total".into(), serde_json::json!(total));
+            task.meta.insert("finished".into(), serde_json::json!(0));
+            task.meta
+                .insert("thumbnail_cnt".into(), serde_json::json!(20));
+            task.img_q = Some(std::collections::VecDeque::new());
+            task.page_q = Some(std::collections::VecDeque::new());
+        }
+        app.set_session_config(SessionConfig {
+            clock: Arc::new(TickClock::new(100.0)),
+            ..SessionConfig::default()
+        });
+        (Runtime::new(app, Path::new(MANIFEST).to_path_buf()), guid)
+    }
+
+    fn speed_ref(bytes: usize) -> Arc<Mutex<SpeedChecker>> {
+        let mut checker = SpeedChecker::new(5, Arc::new(StepClock::new(0.0, 1.1)));
+        for _ in 0..5 {
+            checker.check(bytes);
+        }
+        Arc::new(Mutex::new(checker))
+    }
+
+    #[tokio::test]
+    async fn monitor_reports_two_slow_windows_before_a_zero_speed_stuck_break() {
+        let root = tempfile::tempdir().unwrap();
+        let (runtime, guid) = monitor_fixture(root.path(), 10, Vec::new());
+        let names: Vec<String> = vec!["down-1".into(), "down-2".into()];
+        let local = LocalSet::new();
+        local
+            .run_until(async {
+                let (monitor, join) = runtime.start_monitor_for_test(&guid, &names);
+                let refs: Vec<WorkerRef> = names
+                    .iter()
+                    .map(|name| WorkerRef {
+                        name: name.clone(),
+                        alive: Arc::new(AtomicBool::new(true)),
+                        speed: Some(speed_ref(20_000)),
+                        zombie_threshold: 1.0e9,
+                    })
+                    .collect();
+                for reference in &refs {
+                    monitor.register(reference.clone());
+                }
+                let handle = runtime.handle();
+                wait_trace_count(&handle, "monitor.stats", 1).await;
+                let info = handle.get_info();
+                assert_eq!(info["threads_running"], serde_json::json!(2));
+                assert_eq!(info["threads_zombie"], serde_json::json!(0));
+                let trace = wait_trace_count(&handle, "monitor.slow", 2).await;
+                let slow: Vec<usize> = trace
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, event)| event.kind == "monitor.slow")
+                    .map(|(index, _)| index)
+                    .collect();
+                assert!(slow.len() >= 2, "{trace:?}");
+                assert!(
+                    !trace.iter().any(|event| event.kind == "monitor.stuck"),
+                    "no stuck before the zero-speed window: {trace:?}"
+                );
+                for reference in &refs {
+                    reference.speed.as_ref().unwrap().lock().unwrap().reset();
+                }
+                let trace = wait_trace_count(&handle, "monitor.stuck", 1).await;
+                let stuck = trace
+                    .iter()
+                    .position(|event| event.kind == "monitor.stuck")
+                    .unwrap();
+                assert!(slow[1] < stuck, "two slow windows first: {trace:?}");
+                monitor.request_exit();
+                let _ = join.await;
+                assert_eq!(
+                    handle.task_state(&guid),
+                    Some(consts::TASK_STATE_DOWNLOAD),
+                    "stuck leaves the task unfinished"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn configured_scan_and_download_workers_reach_the_server_barrier_limits() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let scan_barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let down_barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let scan_active = Arc::new(AtomicUsize::new(0));
+        let scan_peak = Arc::new(AtomicUsize::new(0));
+        let down_active = Arc::new(AtomicUsize::new(0));
+        let down_peak = Arc::new(AtomicUsize::new(0));
+        let metadata = metadata_body(4);
+        let mut pages = String::new();
+        let mut image_pages = Vec::new();
+        let mut images = Vec::new();
+        for index in 0..4u32 {
+            let hash10 = format!("{:010x}", 0xaaaa0000u32 + index);
+            let hash40 = format!("{:040x}", index + 1);
+            let size = 1000 + index as usize;
+            pages.push_str(&format!(
+                "<a href=\"http://e-hentai.org/s/{hash10}/123456-{index}\"><div title=\"Page {index}\""
+            ));
+            image_pages.push(
+                format!(
+                    "<img src=\"http://127.0.0.1:{port}/img/{hash40}-{size}-200-0-jpg/keystamp=x\" style=\"max-width:100%\">\
+                     </a></div><div>n{index}.jpg :: 100x200 :: 2 KB</di>\
+                     return nl('{hash10}-{index}')"
+                )
+                .into_bytes(),
+            );
+            images.push(image_body(index as u8 + 1, size));
+        }
+        let pages = pages.into_bytes();
+        let image_pages = Arc::new(image_pages);
+        let images = Arc::new(images);
+        let server = tokio::spawn({
+            let scan_barrier = Arc::clone(&scan_barrier);
+            let down_barrier = Arc::clone(&down_barrier);
+            let scan_active = Arc::clone(&scan_active);
+            let scan_peak = Arc::clone(&scan_peak);
+            let down_active = Arc::clone(&down_active);
+            let down_peak = Arc::clone(&down_peak);
+            async move {
+                loop {
+                    let Ok((mut socket, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let metadata = metadata.clone();
+                    let pages = pages.clone();
+                    let image_pages = Arc::clone(&image_pages);
+                    let images = Arc::clone(&images);
+                    let scan_barrier = Arc::clone(&scan_barrier);
+                    let down_barrier = Arc::clone(&down_barrier);
+                    let scan_active = Arc::clone(&scan_active);
+                    let scan_peak = Arc::clone(&scan_peak);
+                    let down_active = Arc::clone(&down_active);
+                    let down_peak = Arc::clone(&down_peak);
+                    tokio::spawn(async move {
+                        let head = read_head(&mut socket).await;
+                        let path = path_of(&head);
+                        if path.contains("?p=") {
+                            respond(&mut socket, "200 OK", "text/html", &pages).await;
+                        } else if path.starts_with("/g/123/abcdef0123/") {
+                            respond(&mut socket, "200 OK", "text/html", &metadata).await;
+                        } else if path.contains("/s/") {
+                            let fid = path
+                                .rsplit('-')
+                                .next()
+                                .and_then(|value| value.parse::<usize>().ok())
+                                .unwrap_or(0);
+                            let now = scan_active.fetch_add(1, Ordering::SeqCst) + 1;
+                            scan_peak.fetch_max(now, Ordering::SeqCst);
+                            scan_barrier.wait().await;
+                            respond(&mut socket, "200 OK", "text/html", &image_pages[fid]).await;
+                            scan_active.fetch_sub(1, Ordering::SeqCst);
+                        } else if path.contains("/img/") {
+                            let index = (0..4)
+                                .find(|index| path.contains(&format!("{:040x}", index + 1)))
+                                .unwrap_or(0);
+                            let now = down_active.fetch_add(1, Ordering::SeqCst) + 1;
+                            down_peak.fetch_max(now, Ordering::SeqCst);
+                            down_barrier.wait().await;
+                            respond(&mut socket, "200 OK", "image/jpeg", &images[index]).await;
+                            down_active.fetch_sub(1, Ordering::SeqCst);
+                        } else {
+                            respond(&mut socket, "404 Not Found", "text/html", b"missing").await;
+                        }
+                    });
+                }
+            }
+        });
+
+        let root = tempfile::tempdir().unwrap();
+        let mut config = m4_config(root.path(), 2, 2);
+        config.download_timeout = 5;
+        let mut app = m4_app(root.path(), config);
+        let mut kwargs = serde_json::Map::new();
+        kwargs.insert("scan_thread_cnt".into(), serde_json::json!(2));
+        kwargs.insert("download_thread_cnt".into(), serde_json::json!(2));
+        let guid = m4_task(
+            &mut app,
+            root.path(),
+            "http://e-hentai.org/g/123/abcdef0123/",
+            serde_json::Value::Object(kwargs),
+        );
+        m4_session(
+            &mut app,
+            Arc::new(crate::worker::RealClock),
+            Arc::new(FixedResolver::new(
+                format!("127.0.0.1:{port}").parse::<SocketAddr>().unwrap(),
+            )),
+        );
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let runtime = Runtime::new(app, Path::new(MANIFEST).to_path_buf());
+                let (mut run, handle) = runtime.spawn();
+                tokio::select! {
+                    _ = wait_state(&handle, &guid, consts::TASK_STATE_FINISHED) => {}
+                    result = &mut run => panic!("runtime stopped early: {result:?}"),
+                }
+                handle.shutdown().await;
+                run.await.unwrap();
+                let finished =
+                    handle.borrow_app(|app| app.task(&guid).unwrap().meta_i64("finished").unwrap());
+                assert_eq!(finished, 4);
+            })
+            .await;
+        server.abort();
+        assert_eq!(scan_peak.load(Ordering::SeqCst), 2);
+        assert_eq!(down_peak.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn one_persistent_download_worker_keeps_cookies_across_urls() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hash40_a = "0123456789abcdef0123456789abcdef01234567";
+        let hash40_b = "89abcdef0123456789abcdef0123456789abcdef";
+        let size_a = 900usize;
+        let size_b = 700usize;
+        let image_a = image_body(3, size_a);
+        let image_b = image_body(4, size_b);
+        let image_a_server = image_a.clone();
+        let image_b_server = image_b.clone();
+        let metadata = metadata_body(2);
+        let page = page_body("0123456789", 2);
+        let img_a = format!(
+            "<img src=\"http://127.0.0.1:{port}/img/{hash40_a}-{size_a}-200-0-jpg/keystamp=a\" style=\"x\">\
+             </a></div><div>a.jpg :: 100x200 :: 2 KB</di>return nl('0123456789-1')"
+        )
+        .into_bytes();
+        let img_b = format!(
+            "<img src=\"http://127.0.0.1:{port}/img/{hash40_b}-{size_b}-200-0-jpg/keystamp=b\" style=\"x\">\
+             </a></div><div>b.jpg :: 100x200 :: 2 KB</di>return nl('89abcdef01-2')"
+        )
+        .into_bytes();
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&recorded);
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let seen = Arc::clone(&seen);
+                let metadata = metadata.clone();
+                let page = page.clone();
+                let img_a = img_a.clone();
+                let img_b = img_b.clone();
+                let image_a = image_a_server.clone();
+                let image_b = image_b_server.clone();
+                tokio::spawn(async move {
+                    let head = read_head(&mut socket).await;
+                    let path = path_of(&head);
+                    if path.contains("?p=") {
+                        respond(&mut socket, "200 OK", "text/html", &page).await;
+                    } else if path.starts_with("/g/123/abcdef0123/") {
+                        respond(&mut socket, "200 OK", "text/html", &metadata).await;
+                    } else if path.contains("123456-1") {
+                        respond(&mut socket, "200 OK", "text/html", &img_a).await;
+                    } else if path.contains("123456-2") {
+                        respond(&mut socket, "200 OK", "text/html", &img_b).await;
+                    } else if path.contains("/img/") {
+                        let body = if path.contains(hash40_a) {
+                            &image_a
+                        } else {
+                            &image_b
+                        };
+                        seen.lock().unwrap().push(head.to_ascii_lowercase());
+                        if body.len() == size_a {
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nSet-Cookie: img=1; Path=/\r\nContent-Length: {}\r\n\r\n",
+                                body.len()
+                            );
+                            socket.write_all(response.as_bytes()).await.unwrap();
+                            socket.write_all(body).await.unwrap();
+                            let _ = socket.shutdown().await;
+                        } else {
+                            respond(&mut socket, "200 OK", "image/jpeg", body).await;
+                        }
+                    } else {
+                        respond(&mut socket, "404 Not Found", "text/html", b"missing").await;
+                    }
+                });
+            }
+        });
+
+        let root = tempfile::tempdir().unwrap();
+        let mut config = m4_config(root.path(), 1, 1);
+        config.download_timeout = 5;
+        let mut app = m4_app(root.path(), config);
+        let mut kwargs = serde_json::Map::new();
+        kwargs.insert("scan_thread_cnt".into(), serde_json::json!(1));
+        kwargs.insert("download_thread_cnt".into(), serde_json::json!(1));
+        let guid = m4_task(
+            &mut app,
+            root.path(),
+            "http://e-hentai.org/g/123/abcdef0123/",
+            serde_json::Value::Object(kwargs),
+        );
+        m4_session(
+            &mut app,
+            Arc::new(crate::worker::RealClock),
+            Arc::new(FixedResolver::new(
+                format!("127.0.0.1:{port}").parse::<SocketAddr>().unwrap(),
+            )),
+        );
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let runtime = Runtime::new(app, Path::new(MANIFEST).to_path_buf());
+                let (mut run, handle) = runtime.spawn();
+                tokio::select! {
+                    _ = wait_state(&handle, &guid, consts::TASK_STATE_FINISHED) => {}
+                    result = &mut run => panic!("runtime stopped early: {result:?}"),
+                }
+                handle.shutdown().await;
+                run.await.unwrap();
+                let dir = handle.borrow_app(|app| app.task(&guid).unwrap().get_fpath().unwrap());
+                assert_eq!(std::fs::read(dir.join("1.jpg")).unwrap(), image_a);
+                assert_eq!(std::fs::read(dir.join("2.jpg")).unwrap(), image_b);
+            })
+            .await;
+        server.abort();
+        let recorded = recorded.lock().unwrap();
+        assert_eq!(recorded.len(), 2, "{recorded:?}");
+        assert!(recorded[0].starts_with("get /img/"), "{recorded:?}");
+        assert!(
+            recorded[1].contains("cookie: img=1"),
+            "second URL on the same worker carries the Set-Cookie jar: {recorded:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn low_speed_stream_feeds_fake_response_through_the_same_filter_and_rescans() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hash40_a = "0123456789abcdef0123456789abcdef01234567";
+        let hash40_b = "89abcdef0123456789abcdef0123456789abcdef";
+        let metadata = metadata_body(1);
+        let page = page_body("aaaa000001", 1);
+        let img_a = format!(
+            "<img src=\"http://127.0.0.1:{port}/img/{hash40_a}-5000-200-0-jpg/keystamp=a\" style=\"x\">\
+             </a></div><div>a.jpg :: 100x200 :: 2 KB</di>return nl('aaaa000001-1')"
+        )
+        .into_bytes();
+        let img_b = format!(
+            "<img src=\"http://127.0.0.1:{port}/img/{hash40_b}-25000-200-0-jpg/keystamp=b\" style=\"x\">\
+             </a></div><div>b.jpg :: 100x200 :: 2 KB</di>return nl('aaaa000001-1')"
+        )
+        .into_bytes();
+        let image_a = image_body(5, 5000);
+        let image_b = image_body(6, 25_000);
+        let image_b_server = image_b.clone();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&requests);
+        let page_served = Arc::new(AtomicUsize::new(0));
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let seen = Arc::clone(&seen);
+                let metadata = metadata.clone();
+                let page = page.clone();
+                let img_a = img_a.clone();
+                let img_b = img_b.clone();
+                let image_a = image_a.clone();
+                let image_b = image_b_server.clone();
+                let page_served = Arc::clone(&page_served);
+                tokio::spawn(async move {
+                    let head = read_head(&mut socket).await;
+                    let path = path_of(&head);
+                    seen.lock().unwrap().push(path.clone());
+                    if path.contains("?p=") {
+                        respond(&mut socket, "200 OK", "text/html", &page).await;
+                    } else if path.starts_with("/g/123/abcdef0123/") {
+                        respond(&mut socket, "200 OK", "text/html", &metadata).await;
+                    } else if path.contains("/s/") {
+                        let attempt = page_served.fetch_add(1, Ordering::SeqCst);
+                        if attempt > 0 {
+                            tokio::time::sleep(Duration::from_millis(1500)).await;
+                            respond(&mut socket, "200 OK", "text/html", &img_b).await;
+                        } else {
+                            respond(&mut socket, "200 OK", "text/html", &img_a).await;
+                        }
+                    } else if path.contains(hash40_a) {
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
+                            image_a.len()
+                        );
+                        let _ = socket.write_all(head.as_bytes()).await;
+                        for chunk in image_a.chunks(1000) {
+                            if socket.write_all(chunk).await.is_err() {
+                                return;
+                            }
+                            tokio::time::sleep(Duration::from_millis(1100)).await;
+                        }
+                        let _ = socket.shutdown().await;
+                    } else if path.contains(hash40_b) {
+                        respond(&mut socket, "200 OK", "image/jpeg", &image_b).await;
+                    } else {
+                        respond(&mut socket, "404 Not Found", "text/html", b"missing").await;
+                    }
+                });
+            }
+        });
+
+        let root = tempfile::tempdir().unwrap();
+        let mut config = m4_config(root.path(), 1, 1);
+        config.download_timeout = 8;
+        config.low_speed_threshold = 1;
+        let mut app = m4_app(root.path(), config);
+        let mut kwargs = serde_json::Map::new();
+        kwargs.insert("scan_thread_cnt".into(), serde_json::json!(1));
+        kwargs.insert("download_thread_cnt".into(), serde_json::json!(1));
+        kwargs.insert("low_speed_threshold".into(), serde_json::json!(1));
+        let guid = m4_task(
+            &mut app,
+            root.path(),
+            "http://e-hentai.org/g/123/abcdef0123/",
+            serde_json::Value::Object(kwargs),
+        );
+        m4_session(
+            &mut app,
+            Arc::new(crate::worker::RealClock),
+            Arc::new(FixedResolver::new(
+                format!("127.0.0.1:{port}").parse::<SocketAddr>().unwrap(),
+            )),
+        );
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let runtime = Runtime::new(app, Path::new(MANIFEST).to_path_buf());
+                let (mut run, handle) = runtime.spawn();
+                tokio::select! {
+                    _ = wait_state(&handle, &guid, consts::TASK_STATE_FINISHED) => {}
+                    result = &mut run => panic!("runtime stopped early: {result:?}"),
+                }
+                let dir = handle.borrow_app(|app| app.task(&guid).unwrap().get_fpath().unwrap());
+                assert_eq!(std::fs::read(dir.join("1.jpg")).unwrap(), image_b);
+                let trace = handle.trace();
+                assert!(
+                    trace
+                        .iter()
+                        .any(|event| event.kind == "worker.download.fail"),
+                    "{trace:?}"
+                );
+                assert!(
+                    trace
+                        .iter()
+                        .filter(|event| event.kind == "worker.scan.ok")
+                        .count()
+                        >= 2,
+                    "{trace:?}"
+                );
+                handle.shutdown().await;
+                run.await.unwrap();
+            })
+            .await;
+        server.abort();
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests.iter().filter(|path| path.contains("/s/")).count(),
+            2,
+            "{requests:?}"
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|path| path.contains(hash40_a))
+                .count(),
+            1,
+            "{requests:?}"
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|path| path.contains(hash40_b))
+                .count(),
+            1,
+            "{requests:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pause_mid_body_aborts_the_owned_stage_and_resume_completes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hash40 = "0123456789abcdef0123456789abcdef01234567";
+        let size = 4000usize;
+        let image = image_body(9, size);
+        let image_server = image.clone();
+        let metadata = metadata_body(1);
+        let page = page_body("aaaa000001", 1);
+        let img_page = format!(
+            "<img src=\"http://127.0.0.1:{port}/img/{hash40}-{size}-200-0-jpg/keystamp=x\" style=\"x\">\
+             </a></div><div>one.jpg :: 100x200 :: 2 KB</di>return nl('aaaa000001-1')"
+        )
+        .into_bytes();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let started_tx = Arc::new(Mutex::new(Some(started_tx)));
+        let release_rx = Arc::new(tokio::sync::Mutex::new(release_rx));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let metadata = metadata.clone();
+                let page = page.clone();
+                let img_page = img_page.clone();
+                let image = image_server.clone();
+                let started_tx = Arc::clone(&started_tx);
+                let release_rx = Arc::clone(&release_rx);
+                let attempts = Arc::clone(&attempts);
+                tokio::spawn(async move {
+                    let head = read_head(&mut socket).await;
+                    let path = path_of(&head);
+                    if path.contains("?p=") {
+                        respond(&mut socket, "200 OK", "text/html", &page).await;
+                    } else if path.starts_with("/g/123/abcdef0123/") {
+                        respond(&mut socket, "200 OK", "text/html", &metadata).await;
+                    } else if path.contains("/s/") {
+                        respond(&mut socket, "200 OK", "text/html", &img_page).await;
+                    } else if path.contains("/img/") {
+                        let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
+                            image.len()
+                        );
+                        let _ = socket.write_all(head.as_bytes()).await;
+                        if attempt == 0 {
+                            let _ = socket.write_all(&image[..500]).await;
+                            if let Some(tx) = started_tx.lock().unwrap().take() {
+                                let _ = tx.send(());
+                            }
+                            let mut release = release_rx.lock().await;
+                            let _ = (&mut *release).await;
+                            let _ = socket.write_all(&image[500..]).await;
+                            let _ = socket.shutdown().await;
+                        } else {
+                            let _ = socket.write_all(&image).await;
+                            let _ = socket.shutdown().await;
+                        }
+                    } else {
+                        respond(&mut socket, "404 Not Found", "text/html", b"missing").await;
+                    }
+                });
+            }
+        });
+
+        let root = tempfile::tempdir().unwrap();
+        let mut config = m4_config(root.path(), 1, 1);
+        config.download_timeout = 8;
+        let mut app = m4_app(root.path(), config);
+        let mut kwargs = serde_json::Map::new();
+        kwargs.insert("scan_thread_cnt".into(), serde_json::json!(1));
+        kwargs.insert("download_thread_cnt".into(), serde_json::json!(1));
+        let guid = m4_task(
+            &mut app,
+            root.path(),
+            "http://e-hentai.org/g/123/abcdef0123/",
+            serde_json::Value::Object(kwargs),
+        );
+        m4_session(
+            &mut app,
+            Arc::new(crate::worker::RealClock),
+            Arc::new(FixedResolver::new(
+                format!("127.0.0.1:{port}").parse::<SocketAddr>().unwrap(),
+            )),
+        );
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let runtime = Runtime::new(app, Path::new(MANIFEST).to_path_buf());
+                let (mut run, handle) = runtime.spawn();
+                tokio::select! {
+                    _ = started_rx => {}
+                    result = &mut run => panic!("runtime stopped early: {result:?}"),
+                }
+                let report = handle.pause_task_and_wait(&guid).await.unwrap();
+                assert_eq!(report.blocking_pending, 0, "{report:?}");
+                assert_eq!(handle.task_state(&guid), Some(consts::TASK_STATE_PAUSED));
+                let (dir, pending) = handle.borrow_app(|app| {
+                    let task = app.task(&guid).unwrap();
+                    (
+                        task.get_fpath().unwrap(),
+                        task.img_q.as_ref().map(VecDeque::len).unwrap_or(0),
+                    )
+                });
+                assert_eq!(pending, 1, "the interrupted image is requeued for resume");
+                assert!(!dir.join("1.jpg").exists());
+                let mut leftovers = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(&dir) {
+                    for entry in entries.flatten() {
+                        if entry.file_name().to_string_lossy().starts_with("xehentai-") {
+                            leftovers.push(entry.path());
+                        }
+                    }
+                }
+                assert!(leftovers.is_empty(), "{leftovers:?}");
+                let _ = release_tx.send(());
+                handle.resume_task(&guid).unwrap();
+                tokio::select! {
+                    _ = wait_state(&handle, &guid, consts::TASK_STATE_FINISHED) => {}
+                    result = &mut run => panic!("runtime stopped early: {result:?}"),
+                }
+                let path = handle.borrow_app(|app| app.task(&guid).unwrap().get_fpath().unwrap());
+                assert_eq!(std::fs::read(path.join("1.jpg")).unwrap(), image);
+                handle.shutdown().await;
+                run.await.unwrap();
+            })
+            .await;
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pause_mid_page_drops_the_late_scan_result_and_resume_scans_again() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hash40 = "0123456789abcdef0123456789abcdef01234567";
+        let size = 1200usize;
+        let image = image_body(11, size);
+        let image_server = image.clone();
+        let metadata = metadata_body(1);
+        let page = page_body("aaaa000001", 1);
+        let img_page = format!(
+            "<img src=\"http://127.0.0.1:{port}/img/{hash40}-{size}-200-0-jpg/keystamp=x\" style=\"x\">\
+             </a></div><div>one.jpg :: 100x200 :: 2 KB</di>return nl('aaaa000001-1')"
+        )
+        .into_bytes();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let started_tx = Arc::new(Mutex::new(Some(started_tx)));
+        let release_rx = Arc::new(tokio::sync::Mutex::new(release_rx));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let metadata = metadata.clone();
+                let page = page.clone();
+                let img_page = img_page.clone();
+                let image = image_server.clone();
+                let started_tx = Arc::clone(&started_tx);
+                let release_rx = Arc::clone(&release_rx);
+                let attempts = Arc::clone(&attempts);
+                tokio::spawn(async move {
+                    let head = read_head(&mut socket).await;
+                    let path = path_of(&head);
+                    if path.contains("?p=") {
+                        respond(&mut socket, "200 OK", "text/html", &page).await;
+                    } else if path.starts_with("/g/123/abcdef0123/") {
+                        respond(&mut socket, "200 OK", "text/html", &metadata).await;
+                    } else if path.contains("/s/") {
+                        let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                        if attempt == 0 {
+                            if let Some(tx) = started_tx.lock().unwrap().take() {
+                                let _ = tx.send(());
+                            }
+                            let mut release = release_rx.lock().await;
+                            let _ = (&mut *release).await;
+                            respond(&mut socket, "200 OK", "text/html", &img_page).await;
+                        } else {
+                            respond(&mut socket, "200 OK", "text/html", &img_page).await;
+                        }
+                    } else if path.contains("/img/") {
+                        respond(&mut socket, "200 OK", "image/jpeg", &image).await;
+                    } else {
+                        respond(&mut socket, "404 Not Found", "text/html", b"missing").await;
+                    }
+                });
+            }
+        });
+
+        let root = tempfile::tempdir().unwrap();
+        let mut config = m4_config(root.path(), 1, 1);
+        config.download_timeout = 8;
+        let mut app = m4_app(root.path(), config);
+        let mut kwargs = serde_json::Map::new();
+        kwargs.insert("scan_thread_cnt".into(), serde_json::json!(1));
+        kwargs.insert("download_thread_cnt".into(), serde_json::json!(1));
+        let guid = m4_task(
+            &mut app,
+            root.path(),
+            "http://e-hentai.org/g/123/abcdef0123/",
+            serde_json::Value::Object(kwargs),
+        );
+        m4_session(
+            &mut app,
+            Arc::new(crate::worker::RealClock),
+            Arc::new(FixedResolver::new(
+                format!("127.0.0.1:{port}").parse::<SocketAddr>().unwrap(),
+            )),
+        );
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let runtime = Runtime::new(app, Path::new(MANIFEST).to_path_buf());
+                let (mut run, handle) = runtime.spawn();
+                tokio::select! {
+                    _ = started_rx => {}
+                    result = &mut run => panic!("runtime stopped early: {result:?}"),
+                }
+                handle.pause_task_and_wait(&guid).await.unwrap();
+                let (img_pending, page_pending) = handle.borrow_app(|app| {
+                    let task = app.task(&guid).unwrap();
+                    (
+                        task.img_q.as_ref().map(VecDeque::len).unwrap_or(0),
+                        task.page_q.as_ref().map(VecDeque::len).unwrap_or(0),
+                    )
+                });
+                assert_eq!(img_pending, 0, "the dropped response is not published");
+                assert!(page_pending >= 1, "the in-flight page is requeued");
+                let _ = release_tx.send(());
+                handle.resume_task(&guid).unwrap();
+                tokio::select! {
+                    _ = wait_state(&handle, &guid, consts::TASK_STATE_FINISHED) => {}
+                    result = &mut run => panic!("runtime stopped early: {result:?}"),
+                }
+                let path = handle.borrow_app(|app| app.task(&guid).unwrap().get_fpath().unwrap());
+                assert_eq!(std::fs::read(path.join("1.jpg")).unwrap(), image);
+                handle.shutdown().await;
+                run.await.unwrap();
+            })
+            .await;
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn partial_session_resume_downloads_only_missing_images_and_restart_is_quiet() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hash40_b = "89abcdef0123456789abcdef0123456789abcdef";
+        let hash40_c = "abcdef0123456789abcdef0123456789abcdef01";
+        let hash10_b = "89abcdef01";
+        let hash10_c = "abcdef0123";
+        let image_b = image_body(12, 1100);
+        let image_c = image_body(13, 1300);
+        let image_b_server = image_b.clone();
+        let image_c_server = image_c.clone();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&requests);
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let seen = Arc::clone(&seen);
+                let image_b = image_b_server.clone();
+                let image_c = image_c_server.clone();
+                tokio::spawn(async move {
+                    let head = read_head(&mut socket).await;
+                    let path = path_of(&head);
+                    seen.lock().unwrap().push(path.clone());
+                    if path.contains(hash40_b) {
+                        respond(&mut socket, "200 OK", "image/jpeg", &image_b).await;
+                    } else if path.contains(hash40_c) {
+                        respond(&mut socket, "200 OK", "image/jpeg", &image_c).await;
+                    } else {
+                        respond(&mut socket, "404 Not Found", "text/html", b"missing").await;
+                    }
+                });
+            }
+        });
+
+        let root = tempfile::tempdir().unwrap();
+        let config = m4_config(root.path(), 1, 1);
+        let mut app = m4_app(root.path(), config.clone());
+        let guid = m4_task(
+            &mut app,
+            root.path(),
+            "http://e-hentai.org/g/123/abcdef0123/",
+            serde_json::json!({"scan_thread_cnt": 1, "download_thread_cnt": 1}),
+        );
+        let gallery = root.path().join("downloads").join("resume");
+        std::fs::create_dir_all(&gallery).unwrap();
+        std::fs::write(gallery.join("1.jpg"), b"already-downloaded").unwrap();
+        let image_b_url =
+            format!("http://127.0.0.1:{port}/img/{hash40_b}-1100-200-0-jpg/keystamp=b");
+        let image_c_url =
+            format!("http://127.0.0.1:{port}/img/{hash40_c}-1300-200-0-jpg/keystamp=c");
+        {
+            let task = app.task_mut(&guid).unwrap();
+            task.state = consts::TASK_STATE_DOWNLOAD;
+            task.meta
+                .insert("title".into(), serde_json::json!("resume"));
+            task.meta.insert("total".into(), serde_json::json!(3));
+            task.meta.insert("finished".into(), serde_json::json!(1));
+            task.meta
+                .insert("thumbnail_cnt".into(), serde_json::json!(20));
+            task.img_q = Some(VecDeque::from([image_b_url.clone(), image_c_url.clone()]));
+            task.reload_map.insert(
+                hash10_b.into(),
+                (
+                    format!("http://e-hentai.org/s/{hash10_b}/123456-2"),
+                    "two.jpg".into(),
+                ),
+            );
+            task.reload_map.insert(
+                hash10_c.into(),
+                (
+                    format!("http://e-hentai.org/s/{hash10_c}/123456-3"),
+                    "three.jpg".into(),
+                ),
+            );
+        }
+        assert_eq!(app.save_session().0, consts::ERR_NO_ERROR);
+        drop(app);
+
+        let mut resumed = m4_app(root.path(), config.clone());
+        assert_eq!(resumed.queue_len(), 1);
+        m4_session(
+            &mut resumed,
+            Arc::new(crate::worker::RealClock),
+            Arc::new(FixedResolver::new(
+                format!("127.0.0.1:{port}").parse::<SocketAddr>().unwrap(),
+            )),
+        );
+        let guid_first = guid.clone();
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let runtime = Runtime::new(resumed, Path::new(MANIFEST).to_path_buf());
+                let (mut run, handle) = runtime.spawn();
+                tokio::select! {
+                    _ = wait_state(&handle, &guid_first, consts::TASK_STATE_FINISHED) => {}
+                    result = &mut run => panic!("runtime stopped early: {result:?}"),
+                }
+                let finished = handle
+                    .borrow_app(|app| app.task(&guid_first).unwrap().meta_i64("finished").unwrap());
+                assert_eq!(finished, 3);
+                assert_eq!(std::fs::read(gallery.join("2.jpg")).unwrap(), image_b);
+                assert_eq!(std::fs::read(gallery.join("3.jpg")).unwrap(), image_c);
+                handle.save_session();
+                handle.shutdown().await;
+                run.await.unwrap();
+            })
+            .await;
+        let requests_after_resume = requests.lock().unwrap().len();
+        assert_eq!(requests_after_resume, 2, "{requests:?}");
+        assert!(
+            !requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|path| path.contains("already")),
+        );
+
+        // Restart from the saved finished session: the task is skipped and no
+        // image byte is requested again.
+        let mut restarted = m4_app(root.path(), config);
+        m4_session(
+            &mut restarted,
+            Arc::new(crate::worker::RealClock),
+            Arc::new(FixedResolver::new(
+                format!("127.0.0.1:{port}").parse::<SocketAddr>().unwrap(),
+            )),
+        );
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let runtime = Runtime::new(restarted, Path::new(MANIFEST).to_path_buf());
+                let (run, handle) = runtime.spawn();
+                tokio::time::sleep(Duration::from_millis(1200)).await;
+                assert_eq!(
+                    handle.borrow_app(|app| app.task(&guid).unwrap().state),
+                    consts::TASK_STATE_FINISHED
+                );
+                handle.shutdown().await;
+                let _ = run.await;
+            })
+            .await;
+        assert_eq!(requests.lock().unwrap().len(), requests_after_resume);
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn archive_runs_after_downloads_rename_and_then_removes_the_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = m4_config(root.path(), 1, 1);
+        config.make_archive = true;
+        let mut app = m4_app(root.path(), config);
+        let guid = m4_task(
+            &mut app,
+            root.path(),
+            "http://e-hentai.org/g/123/abcdef0123/",
+            serde_json::json!({"scan_thread_cnt": 1, "download_thread_cnt": 1, "make_archive": true}),
+        );
+        let gallery = root.path().join("downloads").join("archived");
+        std::fs::create_dir_all(&gallery).unwrap();
+        std::fs::write(gallery.join("1.jpg"), b"image-bytes").unwrap();
+        {
+            let task = app.task_mut(&guid).unwrap();
+            task.state = consts::TASK_STATE_DOWNLOAD;
+            task.meta
+                .insert("title".into(), serde_json::json!("archived"));
+            task.meta.insert("total".into(), serde_json::json!(1));
+            task.meta.insert("finished".into(), serde_json::json!(1));
+            task.meta
+                .insert("thumbnail_cnt".into(), serde_json::json!(20));
+            task.img_q = Some(VecDeque::new());
+            task.page_q = Some(VecDeque::new());
+        }
+        m4_session(
+            &mut app,
+            Arc::new(crate::worker::RealClock),
+            Arc::new(FixedResolver::new(
+                "127.0.0.1:9".parse::<SocketAddr>().unwrap(),
+            )),
+        );
+        let zip_path = root.path().join("downloads").join("archived.zip");
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let runtime = Runtime::new(app, Path::new(MANIFEST).to_path_buf());
+                let (run, handle) = runtime.spawn();
+                let deadline = std::time::Instant::now() + Duration::from_secs(15);
+                loop {
+                    if zip_path.exists() {
+                        break;
+                    }
+                    if std::time::Instant::now() > deadline {
+                        panic!("archive not created: {:?}", handle.trace());
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                assert!(!gallery.exists(), "directory removed after archive");
+                assert_eq!(
+                    handle.borrow_app(|app| app.task(&guid).unwrap().state),
+                    consts::TASK_STATE_FINISHED
+                );
+                let trace = handle.trace();
+                assert!(
+                    trace.iter().any(|event| event.kind == "archive.done"),
+                    "{trace:?}"
+                );
+                let file = std::fs::File::open(&zip_path).unwrap();
+                let mut zip = zip::ZipArchive::new(file).unwrap();
+                assert!(zip.by_name("1.jpg").is_ok());
+                handle.shutdown().await;
+                run.await.unwrap();
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn same_run_and_same_guid_reuse_reject_old_scan_and_file_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = m4_config(root.path(), 1, 1);
+        config.delete_task_files = false;
+        let mut app = m4_app(root.path(), config);
+        let image_hash = "0123456789abcdef0123456789abcdef01234567";
+        let image_url = format!("http://127.0.0.1:9/img/{image_hash}-10-20-0-jpg/keystamp=x");
+        let page_url = "http://e-hentai.org/s/0123456789/123456-1";
+        let guid = m4_task(
+            &mut app,
+            root.path(),
+            "http://e-hentai.org/g/123/abcdef0123/",
+            serde_json::json!({}),
+        );
+        {
+            let task = app.task_mut(&guid).unwrap();
+            task.state = consts::TASK_STATE_DOWNLOAD;
+            task.meta.insert("title".into(), serde_json::json!("stale"));
+            task.meta.insert("total".into(), serde_json::json!(1));
+            task.meta.insert("finished".into(), serde_json::json!(0));
+            task.reload_map.insert(
+                "0123456789".into(),
+                (page_url.to_string(), "one.jpg".into()),
+            );
+            task.page_q = Some(VecDeque::new());
+            task.img_q = Some(VecDeque::new());
+        }
+        let runtime = Runtime::new(app, Path::new(MANIFEST).to_path_buf());
+        let handle = runtime.handle();
+        let old_token = handle.borrow_app(|app| app.task_token(&guid).unwrap());
+        let staged: StagedSave = handle.borrow_app_mut(|app| {
+            let task = app.task_mut(&guid).unwrap();
+            match task.begin_staged_save(&image_url, &image_url).unwrap() {
+                SaveStart::Staged(staged) => staged,
+                SaveStart::AlreadyDone(_) => panic!("fresh task must stage"),
+            }
+        });
+        let stage_path = staged.stage.clone();
+        handle.pause_task(&guid).unwrap();
+        let mut old_port = handle.shared_port(&guid, old_token);
+        assert!(matches!(
+            old_port.commit(staged).unwrap(),
+            CommitOutcome::Rejected
+        ));
+        assert!(!stage_path.exists(), "stale commit removes its stage");
+        handle.borrow_app_mut(|app| {
+            app.put_scanned_image(&guid, old_token, &image_url, page_url, "one.jpg")
+                .unwrap();
+        });
+        assert_eq!(
+            handle.borrow_app(|app| app.task(&guid).unwrap().img_q.as_ref().unwrap().len()),
+            0
+        );
+
+        // Delete and recreate the same guid: the new Task has a new owner, so
+        // the old port cannot publish even into a fresh run marker.
+        handle
+            .borrow_app_mut(|app| app.task_mut(&guid).unwrap().state = consts::TASK_STATE_FINISHED);
+        assert_eq!(
+            handle.delete_task_and_wait(&guid).await.unwrap().0,
+            consts::ERR_NO_ERROR
+        );
+        let new_guid = handle.borrow_app_mut(|app| {
+            let config = TaskConfig::from_app(&app.cfg, &serde_json::Map::new()).unwrap();
+            let task = Task::new(
+                "http://e-hentai.org/g/123/abcdef0123/",
+                config,
+                "guid0001".into(),
+                root.path(),
+            )
+            .unwrap();
+            let guid = app.insert_task_for_test(task);
+            app.ensure_task_queues(&guid).unwrap();
+            let task = app.task_mut(&guid).unwrap();
+            task.state = consts::TASK_STATE_DOWNLOAD;
+            task.meta.insert("title".into(), serde_json::json!("stale"));
+            task.meta.insert("total".into(), serde_json::json!(1));
+            task.reload_map.insert(
+                "0123456789".into(),
+                (page_url.to_string(), "one.jpg".into()),
+            );
+            guid
+        });
+        assert_eq!(new_guid, guid);
+        let new_token = handle.borrow_app(|app| app.task_token(&guid).unwrap());
+        assert_ne!(old_token.0, new_token.0, "same guid, new owner");
+        let staged: StagedSave = handle.borrow_app_mut(|app| {
+            let task = app.task_mut(&guid).unwrap();
+            match task.begin_staged_save(&image_url, &image_url).unwrap() {
+                SaveStart::Staged(staged) => staged,
+                SaveStart::AlreadyDone(_) => panic!("new task must stage"),
+            }
+        });
+        let stage_path = staged.stage.clone();
+        assert!(matches!(
+            old_port.commit(staged).unwrap(),
+            CommitOutcome::Rejected
+        ));
+        assert!(!stage_path.exists());
+        handle.borrow_app_mut(|app| {
+            app.put_scanned_image(&guid, old_token, &image_url, page_url, "one.jpg")
+                .unwrap();
+        });
+        assert_eq!(
+            handle.borrow_app(|app| app.task(&guid).unwrap().img_q.as_ref().unwrap().len()),
+            0
+        );
+        handle.borrow_app_mut(|app| {
+            app.put_scanned_image(&guid, new_token, &image_url, page_url, "one.jpg")
+                .unwrap();
+        });
+        assert_eq!(
+            handle.borrow_app(|app| app.task(&guid).unwrap().img_q.as_ref().unwrap().len()),
+            1
+        );
+        handle.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn task_loop_records_last_task_guid_and_prefetches_the_next_metadata() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hash40 = "0123456789abcdef0123456789abcdef01234567";
+        let size = 1800usize;
+        let image = image_body(51, size);
+        let metadata_one =
+            b"=\"gj\">one-jp</h1>=\"gn\">one</h1>Length:</td><td class=\"gdt2\">1 pages</td>\
+              Showing 1 - 20 of 1 images"
+                .to_vec();
+        let metadata_two =
+            b"=\"gj\">two-jp</h1>=\"gn\">two</h1>Length:</td><td class=\"gdt2\">0 pages</td>\
+              Showing 1 - 20 of 0 images"
+                .to_vec();
+        let page = page_body("aaaaaaaaaa", 1);
+        let img_page = format!(
+            "<img src=\"http://127.0.0.1:{port}/img/{hash40}-{size}-200-0-jpg/keystamp=x\" style=\"x\">\
+             </a></div><div>one.jpg :: 100x200 :: 2 KB</di>return nl('aaaaaaaaaa-1')"
+        )
+        .into_bytes();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let started_tx = Arc::new(Mutex::new(Some(started_tx)));
+        let release_rx = Arc::new(tokio::sync::Mutex::new(release_rx));
+        let second_metadata = Arc::new(AtomicBool::new(false));
+        let seen_second = Arc::clone(&second_metadata);
+        let seen_second_server = Arc::clone(&second_metadata);
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let metadata_one = metadata_one.clone();
+                let metadata_two = metadata_two.clone();
+                let page = page.clone();
+                let img_page = img_page.clone();
+                let image = image.clone();
+                let started_tx = Arc::clone(&started_tx);
+                let release_rx = Arc::clone(&release_rx);
+                let seen_second = Arc::clone(&seen_second_server);
+                tokio::spawn(async move {
+                    let head = read_head(&mut socket).await;
+                    let path = path_of(&head);
+                    if path.contains("/g/111/aaaaaaaaaa/") && path.contains("?p=") {
+                        respond(&mut socket, "200 OK", "text/html", &page).await;
+                    } else if path.contains("/g/111/aaaaaaaaaa/") {
+                        respond(&mut socket, "200 OK", "text/html", &metadata_one).await;
+                    } else if path.contains("/g/222/bbbbbbbbbb/") {
+                        seen_second.store(true, Ordering::SeqCst);
+                        respond(&mut socket, "200 OK", "text/html", &metadata_two).await;
+                    } else if path.contains("/s/aaaaaaaaaa/") {
+                        respond(&mut socket, "200 OK", "text/html", &img_page).await;
+                    } else if path.contains("/img/") {
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
+                            image.len()
+                        );
+                        let _ = socket.write_all(head.as_bytes()).await;
+                        if let Some(tx) = started_tx.lock().unwrap().take() {
+                            let _ = tx.send(());
+                        }
+                        let mut release = release_rx.lock().await;
+                        let _ = (&mut *release).await;
+                        let _ = socket.write_all(&image).await;
+                        let _ = socket.shutdown().await;
+                    } else {
+                        respond(&mut socket, "404 Not Found", "text/html", b"missing").await;
+                    }
+                });
+            }
+        });
+
+        let root = tempfile::tempdir().unwrap();
+        let config = m4_config(root.path(), 1, 1);
+        std::fs::create_dir_all(root.path().join("downloads").join("two-jp")).unwrap();
+        let mut app = m4_app_guids(root.path(), config, &["guid0001", "guid0002"]);
+        let guid_one = app
+            .add_task(
+                "http://e-hentai.org/g/111/aaaaaaaaaa/",
+                serde_json::json!({"scan_thread_cnt": 1, "download_thread_cnt": 1})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap()
+            .1
+            .unwrap();
+        let guid_two = app
+            .add_task(
+                "http://e-hentai.org/g/222/bbbbbbbbbb/",
+                serde_json::json!({"scan_thread_cnt": 1, "download_thread_cnt": 1})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap()
+            .1
+            .unwrap();
+        assert_ne!(guid_one, guid_two);
+        m4_session(
+            &mut app,
+            Arc::new(crate::worker::RealClock),
+            Arc::new(FixedResolver::new(
+                format!("127.0.0.1:{port}").parse::<SocketAddr>().unwrap(),
+            )),
+        );
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let runtime = Runtime::new(app, Path::new(MANIFEST).to_path_buf());
+                let (mut run, handle) = runtime.spawn();
+                tokio::select! {
+                    _ = started_rx => {}
+                    result = &mut run => panic!("runtime stopped early: {result:?}"),
+                }
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while !seen_second.load(Ordering::SeqCst) {
+                    if std::time::Instant::now() > deadline {
+                        panic!("second metadata was not prefetched: {:?}", handle.trace());
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                assert_eq!(
+                    handle.last_task_guid().as_deref(),
+                    Some(guid_one.as_str()),
+                    "the popped second task records the first as last_task_guid"
+                );
+                let _ = release_tx.send(());
+                wait_state(&handle, &guid_one, consts::TASK_STATE_FINISHED).await;
+                wait_state(&handle, &guid_two, consts::TASK_STATE_FINISHED).await;
+                assert!(root.path().join("h.json").exists());
+                handle.shutdown().await;
+                run.await.unwrap();
+            })
+            .await;
+        server.abort();
+    }
+
+    struct StallResolver;
+
+    impl crate::proxy::Resolver for StallResolver {
+        fn resolve(&self, host: &str, _port: u16) -> Result<Vec<SocketAddr>, String> {
+            panic!("synchronous DNS must not run for the system resolver path: {host}");
+        }
+
+        fn lookup<'a>(
+            &'a self,
+            _host: &'a str,
+            _port: u16,
+        ) -> Option<crate::proxy::LookupFuture<'a>> {
+            Some(Box::pin(std::future::pending()))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pending_dns_lookup_does_not_freeze_other_local_work_or_start_late_http() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = read_head(&mut socket).await;
+            respond(&mut socket, "200 OK", "text/html", b"local").await;
+        });
+        let local = LocalSet::new();
+        local
+            .run_until(async {
+                let mut stalled = crate::worker::Session::new(
+                    vec![],
+                    None,
+                    crate::util::ProxyPolicy::All,
+                    SessionConfig {
+                        retry: 1,
+                        timeout: Duration::from_secs(5),
+                        resolver: Arc::new(StallResolver),
+                        fallback: crate::worker::FallbackMap::empty(),
+                        clock: Arc::new(TestClock::new(0.0)),
+                        ..SessionConfig::default()
+                    },
+                );
+                let stalled_handle = tokio::task::spawn_local(async move {
+                    let _ = stalled
+                        .request("GET", "http://stall.test/page", None, false)
+                        .await;
+                });
+                let mut local_session = crate::worker::Session::new(
+                    vec![],
+                    None,
+                    crate::util::ProxyPolicy::All,
+                    SessionConfig {
+                        retry: 1,
+                        timeout: Duration::from_secs(3),
+                        resolver: Arc::new(FixedResolver::new(
+                            format!("127.0.0.1:{port}").parse::<SocketAddr>().unwrap(),
+                        )),
+                        fallback: crate::worker::FallbackMap::empty(),
+                        clock: Arc::new(TestClock::new(0.0)),
+                        ..SessionConfig::default()
+                    },
+                );
+                let ticks = Arc::new(AtomicUsize::new(0));
+                let tick_counter = Arc::clone(&ticks);
+                let ticker = tokio::task::spawn_local(async move {
+                    for _ in 0..20 {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        tick_counter.fetch_add(1, Ordering::SeqCst);
+                    }
+                });
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                assert!(
+                    ticks.load(Ordering::SeqCst) >= 1,
+                    "other local work kept running while DNS is pending"
+                );
+                let outcome = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    local_session.request(
+                        "GET",
+                        &format!("http://127.0.0.1:{port}/ok"),
+                        None,
+                        false,
+                    ),
+                )
+                .await
+                .expect("unrelated request must not wait on DNS")
+                .expect("local request");
+                assert_eq!(outcome.response.text, "local");
+                assert!(
+                    ticks.load(Ordering::SeqCst) >= 1,
+                    "other local work kept running"
+                );
+                assert!(
+                    !stalled_handle.is_finished(),
+                    "stalled lookup still pending"
+                );
+                stalled_handle.abort();
+                let _ = stalled_handle.await;
+                ticker.abort();
+            })
+            .await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn same_task_duplicate_images_download_once_and_copy_for_the_second_fid() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hash40 = "0123456789abcdef0123456789abcdef01234567";
+        let size = 1500usize;
+        let image = image_body(21, size);
+        let image_server = image.clone();
+        let metadata = metadata_body(2);
+        let page = b"<a href=\"http://e-hentai.org/s/0123456789/123456-1\"><div title=\"Page 1\"\
+                     <a href=\"http://e-hentai.org/s/0123456789/123456-2\"><div title=\"Page 2\""
+            .to_vec();
+        let image_pages = Arc::new(vec![
+            format!(
+                "<img src=\"http://127.0.0.1:{port}/img/{hash40}-{size}-200-0-jpg/keystamp=x\" style=\"x\">\
+                 </a></div><div>same.jpg :: 100x200 :: 2 KB</di>return nl('123456-1')"
+            )
+            .into_bytes(),
+            format!(
+                "<img src=\"http://127.0.0.1:{port}/img/{hash40}-{size}-200-0-jpg/keystamp=x\" style=\"x\">\
+                 </a></div><div>same.jpg :: 100x200 :: 2 KB</di>return nl('123456-2')"
+            )
+            .into_bytes(),
+        ]);
+        let image_requests = Arc::new(AtomicUsize::new(0));
+        let seen_images = Arc::clone(&image_requests);
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let metadata = metadata.clone();
+                let page = page.clone();
+                let image_pages = Arc::clone(&image_pages);
+                let image = image_server.clone();
+                let seen_images = Arc::clone(&seen_images);
+                tokio::spawn(async move {
+                    let head = read_head(&mut socket).await;
+                    let path = path_of(&head);
+                    if path.contains("?p=") {
+                        respond(&mut socket, "200 OK", "text/html", &page).await;
+                    } else if path.starts_with("/g/123/abcdef0123/") {
+                        respond(&mut socket, "200 OK", "text/html", &metadata).await;
+                    } else if path.contains("123456-1") {
+                        respond(&mut socket, "200 OK", "text/html", &image_pages[0]).await;
+                    } else if path.contains("123456-2") {
+                        respond(&mut socket, "200 OK", "text/html", &image_pages[1]).await;
+                    } else if path.contains("/img/") {
+                        seen_images.fetch_add(1, Ordering::SeqCst);
+                        respond(&mut socket, "200 OK", "image/jpeg", &image).await;
+                    } else {
+                        respond(&mut socket, "404 Not Found", "text/html", b"missing").await;
+                    }
+                });
+            }
+        });
+
+        let root = tempfile::tempdir().unwrap();
+        let config = m4_config(root.path(), 2, 2);
+        let mut app = m4_app(root.path(), config);
+        let guid = m4_task(
+            &mut app,
+            root.path(),
+            "http://e-hentai.org/g/123/abcdef0123/",
+            serde_json::json!({"scan_thread_cnt": 2, "download_thread_cnt": 2}),
+        );
+        m4_session(
+            &mut app,
+            Arc::new(crate::worker::RealClock),
+            Arc::new(FixedResolver::new(
+                format!("127.0.0.1:{port}").parse::<SocketAddr>().unwrap(),
+            )),
+        );
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let runtime = Runtime::new(app, Path::new(MANIFEST).to_path_buf());
+                let (mut run, handle) = runtime.spawn();
+                tokio::select! {
+                    _ = wait_state(&handle, &guid, consts::TASK_STATE_FINISHED) => {}
+                    result = &mut run => panic!("runtime stopped early: {result:?}"),
+                }
+                let (a, b) = handle.borrow_app(|app| {
+                    let task = app.task(&guid).unwrap();
+                    assert_eq!(task.meta_i64("finished").unwrap(), 2);
+                    assert!(task.duplicate_pairs().is_empty());
+                    let dir = task.get_fpath().unwrap();
+                    (
+                        std::fs::read(dir.join("1.jpg")).unwrap(),
+                        std::fs::read(dir.join("2.jpg")).unwrap(),
+                    )
+                });
+                assert_eq!(a, b);
+                assert_eq!(a, image);
+                handle.shutdown().await;
+                run.await.unwrap();
+            })
+            .await;
+        server.abort();
+        assert_eq!(image_requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn download_worker_retries_exactly_three_times_before_the_fake_rescan() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hash40 = "0123456789abcdef0123456789abcdef01234567";
+        let size = 1600usize;
+        let image = image_body(31, size);
+        let image_server = image.clone();
+        let metadata = metadata_body(1);
+        let page = page_body("aaaa000001", 1);
+        let img_page = format!(
+            "<img src=\"http://127.0.0.1:{port}/img/{hash40}-{size}-200-0-jpg/keystamp=x\" style=\"x\">\
+             </a></div><div>one.jpg :: 100x200 :: 2 KB</di>return nl('aaaa000001-1')"
+        )
+        .into_bytes();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&attempts);
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let metadata = metadata.clone();
+                let page = page.clone();
+                let img_page = img_page.clone();
+                let image = image_server.clone();
+                let seen = Arc::clone(&seen);
+                tokio::spawn(async move {
+                    let head = read_head(&mut socket).await;
+                    let path = path_of(&head);
+                    if path.contains("?p=") {
+                        respond(&mut socket, "200 OK", "text/html", &page).await;
+                    } else if path.starts_with("/g/123/abcdef0123/") {
+                        respond(&mut socket, "200 OK", "text/html", &metadata).await;
+                    } else if path.contains("/s/") {
+                        respond(&mut socket, "200 OK", "text/html", &img_page).await;
+                    } else if path.contains("/img/") {
+                        let attempt = seen.fetch_add(1, Ordering::SeqCst);
+                        if attempt < 3 {
+                            // Close without a response: a retryable protocol
+                            // error inside the worker's HttpReq (retry 3).
+                            let _ = socket.shutdown().await;
+                        } else {
+                            respond(&mut socket, "200 OK", "image/jpeg", &image).await;
+                        }
+                    } else {
+                        respond(&mut socket, "404 Not Found", "text/html", b"missing").await;
+                    }
+                });
+            }
+        });
+
+        let root = tempfile::tempdir().unwrap();
+        let mut config = m4_config(root.path(), 1, 1);
+        config.download_timeout = 5;
+        let mut app = m4_app(root.path(), config);
+        let guid = m4_task(
+            &mut app,
+            root.path(),
+            "http://e-hentai.org/g/123/abcdef0123/",
+            serde_json::json!({"scan_thread_cnt": 1, "download_thread_cnt": 1}),
+        );
+        m4_session(
+            &mut app,
+            Arc::new(crate::worker::RealClock),
+            Arc::new(FixedResolver::new(
+                format!("127.0.0.1:{port}").parse::<SocketAddr>().unwrap(),
+            )),
+        );
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let runtime = Runtime::new(app, Path::new(MANIFEST).to_path_buf());
+                let (mut run, handle) = runtime.spawn();
+                tokio::select! {
+                    _ = wait_state(&handle, &guid, consts::TASK_STATE_FINISHED) => {}
+                    result = &mut run => panic!("runtime stopped early: {result:?}"),
+                }
+                let dir = handle.borrow_app(|app| app.task(&guid).unwrap().get_fpath().unwrap());
+                assert_eq!(std::fs::read(dir.join("1.jpg")).unwrap(), image);
+                handle.shutdown().await;
+                run.await.unwrap();
+            })
+            .await;
+        server.abort();
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            4,
+            "three failures then rescan success"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pause_waits_for_a_queued_blocking_stage_open_before_reporting_quiescent() {
+        use crate::core::{IoFault, arm_slow_open, set_io_fault};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hash40 = "0123456789abcdef0123456789abcdef01234567";
+        let size = 900usize;
+        let image = image_body(41, size);
+        let metadata = metadata_body(1);
+        let page = page_body("aaaa000001", 1);
+        let img_page = format!(
+            "<img src=\"http://127.0.0.1:{port}/img/{hash40}-{size}-200-0-jpg/keystamp=x\" style=\"x\">\
+             </a></div><div>one.jpg :: 100x200 :: 2 KB</di>return nl('aaaa000001-1')"
+        )
+        .into_bytes();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let metadata = metadata.clone();
+                let page = page.clone();
+                let img_page = img_page.clone();
+                let image = image.clone();
+                tokio::spawn(async move {
+                    let head = read_head(&mut socket).await;
+                    let path = path_of(&head);
+                    if path.contains("?p=") {
+                        respond(&mut socket, "200 OK", "text/html", &page).await;
+                    } else if path.starts_with("/g/123/abcdef0123/") {
+                        respond(&mut socket, "200 OK", "text/html", &metadata).await;
+                    } else if path.contains("/s/") {
+                        respond(&mut socket, "200 OK", "text/html", &img_page).await;
+                    } else if path.contains("/img/") {
+                        respond(&mut socket, "200 OK", "image/jpeg", &image).await;
+                    } else {
+                        respond(&mut socket, "404 Not Found", "text/html", b"missing").await;
+                    }
+                });
+            }
+        });
+
+        let root = tempfile::tempdir().unwrap();
+        let config = m4_config(root.path(), 1, 1);
+        let mut app = m4_app(root.path(), config);
+        let guid = m4_task(
+            &mut app,
+            root.path(),
+            "http://e-hentai.org/g/123/abcdef0123/",
+            serde_json::json!({"scan_thread_cnt": 1, "download_thread_cnt": 1}),
+        );
+        m4_session(
+            &mut app,
+            Arc::new(crate::worker::RealClock),
+            Arc::new(FixedResolver::new(
+                format!("127.0.0.1:{port}").parse::<SocketAddr>().unwrap(),
+            )),
+        );
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let runtime = Runtime::new(app, Path::new(MANIFEST).to_path_buf());
+                let slow = arm_slow_open();
+                set_io_fault(Some(IoFault::SlowOpen));
+                let (run, handle) = runtime.spawn();
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while slow.started.try_recv().is_err() {
+                    if std::time::Instant::now() > deadline {
+                        panic!("blocking stage open did not start: {:?}", handle.trace());
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                let mut pause = Box::pin(handle.pause_task_and_wait(&guid));
+                let early = tokio::time::timeout(Duration::from_millis(150), &mut pause).await;
+                assert!(
+                    early.is_err(),
+                    "pause cannot be quiescent while the OS open is owned"
+                );
+                let _ = slow.release.send(());
+                let report = pause.await.unwrap();
+                assert_eq!(report.blocking_pending, 0);
+                let _ = slow.finished.try_recv();
+                set_io_fault(None);
+                assert_eq!(handle.task_state(&guid), Some(consts::TASK_STATE_PAUSED));
+                handle.shutdown().await;
+                let _ = run.await;
+            })
+            .await;
+        server.abort();
+        let _ = std::fs::read_dir(root.path().join("downloads")).map(|entries| {
+            for entry in entries.flatten() {
+                assert!(!entry.file_name().to_string_lossy().starts_with("xehentai-"));
+            }
+        });
+        let _ = image;
+    }
+
+    #[tokio::test]
+    async fn monitor_quota_ignored_errors_and_zombie_reentry_follow_the_reference() {
+        let root = tempfile::tempdir().unwrap();
+        let (runtime, guid) = monitor_fixture(root.path(), 10, Vec::new());
+        let names: Vec<String> = (1..=5).map(|i| format!("down-{i}")).collect();
+        let local = LocalSet::new();
+        local
+            .run_until(async {
+                let (monitor, join) = runtime.start_monitor_for_test(&guid, &names);
+                let refs: Vec<WorkerRef> = names
+                    .iter()
+                    .map(|name| WorkerRef {
+                        name: name.clone(),
+                        alive: Arc::new(AtomicBool::new(true)),
+                        speed: None,
+                        zombie_threshold: 1.0e9,
+                    })
+                    .collect();
+                for reference in &refs {
+                    monitor.register(reference.clone());
+                }
+                for _ in 0..names.len() {
+                    monitor.vote("down-1", consts::ERR_QUOTA_EXCEEDED);
+                }
+                let handle = runtime.handle();
+                wait_trace_count(&handle, "monitor.quota", 1).await;
+                assert_eq!(handle.task_state(&guid), Some(consts::TASK_STATE_FAILED));
+                monitor.request_exit();
+                let _ = join.await;
+
+                // A zombie threshold passed without a heartbeat yields a
+                // zombie; a late heartbeat removes the flag and re-enters.
+                let (runtime2, guid2) = monitor_fixture(root.path(), 10, Vec::new());
+                let names2 = vec!["down-1".to_string()];
+                let (monitor2, join2) = runtime2.start_monitor_for_test(&guid2, &names2);
+                let reference = WorkerRef {
+                    name: "down-1".into(),
+                    alive: Arc::new(AtomicBool::new(true)),
+                    speed: None,
+                    zombie_threshold: 0.5,
+                };
+                monitor2.register(reference.clone());
+                let handle2 = runtime2.handle();
+                wait_trace_count(&handle2, "monitor.zombie", 1).await;
+                assert_eq!(monitor2.zombie_count(), 1);
+                assert!(!monitor2.keepalive(&reference, false));
+                assert_eq!(monitor2.zombie_count(), 0);
+                assert_eq!(monitor2.running_count(), 1);
+                monitor2.keepalive(&reference, true);
+                assert_eq!(monitor2.running_count(), 0, "worker exit removes last_seen");
+                monitor2.request_exit();
+                let _ = join2.await;
+
+                // Ignored quota votes never fail the task.
+                let (runtime3, guid3) =
+                    monitor_fixture(root.path(), 10, vec![consts::ERR_QUOTA_EXCEEDED]);
+                let names3 = vec!["down-1".to_string()];
+                let (monitor3, join3) = runtime3.start_monitor_for_test(&guid3, &names3);
+                let reference = WorkerRef {
+                    name: "down-1".into(),
+                    alive: Arc::new(AtomicBool::new(true)),
+                    speed: None,
+                    zombie_threshold: 1.0e9,
+                };
+                monitor3.register(reference);
+                monitor3.vote("down-1", consts::ERR_QUOTA_EXCEEDED);
+                let handle3 = runtime3.handle();
+                wait_trace_count(&handle3, "monitor.stats", 1).await;
+                assert_ne!(handle3.task_state(&guid3), Some(consts::TASK_STATE_FAILED));
+                assert!(
+                    !handle3
+                        .trace()
+                        .iter()
+                        .any(|event| event.kind == "monitor.quota")
+                );
+                monitor3.request_exit();
+                let _ = join3.await;
+            })
+            .await;
     }
 }

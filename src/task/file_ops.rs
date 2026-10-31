@@ -24,7 +24,7 @@ static STAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// finished counter). They are never held across a stream.
 pub struct TaskFiles {
     root: PathBuf,
-    f_lock: Mutex<()>,
+    f_lock: Arc<Mutex<()>>,
     cnt_lock: Mutex<()>,
 }
 
@@ -32,13 +32,20 @@ impl TaskFiles {
     pub fn new(root: PathBuf) -> Arc<Self> {
         Arc::new(Self {
             root,
-            f_lock: Mutex::new(()),
+            f_lock: Arc::new(Mutex::new(())),
             cnt_lock: Mutex::new(()),
         })
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Cloneable handle for blocking work that must take the same file lock
+    /// from its own thread (the archive writer). The lock is still taken for
+    /// the duration of that work, exactly like `task.py:401`.
+    pub fn lock_handle(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.f_lock)
     }
 
     pub(super) fn lock(&self) -> MutexGuard<'_, ()> {

@@ -207,6 +207,69 @@ PLACEHOLDER = re.compile(r"%\(default\)[sd]|%\.[0-9]f|%[sd]|\{\}")
 
 # Cargo test names that prove cases which have no Python oracle.
 NATIVE_CASE_MAP = {
+    "download": {
+        "tests::m4::pipeline_scans_pages_downloads_real_files_and_finishes": [
+            "m4.pipeline.local",
+            "m4.queue.src-while-active",
+            "m4.task-loop.autosave",
+        ],
+        "tests::m4::partial_session_resume_downloads_only_missing_images_and_restart_is_quiet": [
+            "m4.session.partial-resume"
+        ],
+        "tests::m4::archive_runs_after_downloads_rename_and_then_removes_the_directory": [
+            "m4.archive.after-finish"
+        ],
+        "tests::m4::one_persistent_download_worker_keeps_cookies_across_urls": [
+            "m4.worker.multi-url-cookie"
+        ],
+        "tests::m4::task_loop_records_last_task_guid_and_prefetches_the_next_metadata": [
+            "m4.task-loop.last-guid",
+            "m4.task-loop.prefetch",
+        ],
+    },
+    "concurrency": {
+        "tests::m4::configured_scan_and_download_workers_reach_the_server_barrier_limits": [
+            "m4.workers.overlap-scan",
+            "m4.workers.overlap-download",
+            "m4.concurrent.limit",
+        ],
+        "tests::m4::pause_mid_body_aborts_the_owned_stage_and_resume_completes": [
+            "m4.pause.mid-body"
+        ],
+        "tests::m4::pause_mid_page_drops_the_late_scan_result_and_resume_scans_again": [
+            "m4.pause.mid-page"
+        ],
+        "tests::m4::pause_waits_for_a_queued_blocking_stage_open_before_reporting_quiescent": [
+            "m4.pause.blocking-open"
+        ],
+        "tests::m4::same_run_and_same_guid_reuse_reject_old_scan_and_file_publication": [
+            "m4.stale.same-run",
+            "m4.stale.same-guid-owner",
+        ],
+        "tests::m4::same_task_duplicate_images_download_once_and_copy_for_the_second_fid": [
+            "m4.duplicates.concurrent"
+        ],
+        "tests::m4::pending_dns_lookup_does_not_freeze_other_local_work_or_start_late_http": [
+            "m4.dns.pending"
+        ],
+        "tests::m4::low_speed_stream_feeds_fake_response_through_the_same_filter_and_rescans": [
+            "m4.retry.low-speed-rescan"
+        ],
+        "tests::m4::download_worker_retries_exactly_three_times_before_the_fake_rescan": [
+            "m4.retry.worker-three"
+        ],
+        "tests::m4::task_loop_records_last_task_guid_and_prefetches_the_next_metadata": [
+            "m4.task-loop.last-guid"
+        ],
+    },
+    "monitor": {
+        "tests::m4::monitor_reports_two_slow_windows_before_a_zero_speed_stuck_break": [
+            "m4.monitor.native-slow-stuck"
+        ],
+        "tests::m4::monitor_quota_ignored_errors_and_zombie_reentry_follow_the_reference": [
+            "m4.monitor.native-votes"
+        ],
+    },
     "config": {
         "config::tests::rss_encoding_round_trips_every_field_without_losing_false_zero_or_empty": [
             "config.rss.roundtrip"
@@ -539,6 +602,26 @@ NATIVE_COMMANDS = {
         ["cargo", "test", "--bin", "xeHentai", "transport_"],
         ["cargo", "test", "--bin", "xeHentai", "site_end_to_end"],
     ],
+    "monitor": [
+        ["cargo", "test", "--bin", "xeHentai", "tests::m4::monitor_"],
+    ],
+    "download": [
+        ["cargo", "test", "--bin", "xeHentai", "tests::m4::pipeline"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m4::partial_session"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m4::archive_runs"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m4::one_persistent"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m4::task_loop_records"],
+    ],
+    "concurrency": [
+        ["cargo", "test", "--bin", "xeHentai", "tests::m4::configured"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m4::pause_mid"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m4::pause_waits"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m4::same_run"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m4::same_task_duplicate"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m4::pending_dns"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m4::low_speed"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m4::download_worker_retries"],
+    ],
     "files": [
         ["cargo", "test", "--bin", "xeHentai", "tests::scan_"],
         ["cargo", "test", "--bin", "xeHentai", "tests::duplicate_"],
@@ -843,6 +926,10 @@ def oracle_main(args):
         result = oracle_proxy(upstream, request)
     elif args.oracle == "transport":
         result = oracle_transport(upstream, request)
+    elif args.oracle == "monitor":
+        result = oracle_monitor(upstream, request)
+    elif args.oracle == "download":
+        result = oracle_download(upstream, request)
     else:
         raise CompatError(f"unknown oracle suite {args.oracle}")
     output.write_text(
@@ -3007,6 +3094,565 @@ def build_i18n_messages(upstream):
     return messages, codes
 
 
+def _compat_fake_time(now=100.0, step=0.0):
+    class FakeTime:
+        def __init__(self):
+            self.now = now
+            self.step = step
+            self.ticks = 0
+            self.limit = None
+            self.on_tick = None
+
+        def time(self):
+            value = self.now
+            self.now += self.step
+            return value
+
+        def sleep(self, seconds):
+            self.now += seconds
+            self.ticks += 1
+            if self.on_tick is not None:
+                self.on_tick(self)
+            if self.limit is not None and self.ticks >= self.limit:
+                raise _CompatStopMonitor()
+
+    return FakeTime()
+
+
+class _CompatStopMonitor(Exception):
+    pass
+
+
+def _compat_speed_trace(worker, speed):
+    clock = _compat_fake_time(speed.get("start", 100.0), 0.0)
+    original = worker.time
+    worker.time = clock
+    try:
+        checker = worker.speed_checker(cnt=speed.get("cnt", 5))
+        trace = []
+        now = speed.get("start", 100.0)
+        resets = set(speed.get("resets", []))
+        for index, (size, delta) in enumerate(speed["timeline"]):
+            now += delta
+            clock.now = now
+            checker.check(size)
+            trace.append([float(round(checker.calc(False), 6)), float(round(checker.calc(True), 6)), len(checker.speed_buffer)])
+            if index in resets:
+                checker.reset()
+                trace.append(["reset", float(round(checker.calc(False), 6)), len(checker.speed_buffer)])
+        return trace
+    finally:
+        worker.time = original
+
+
+def _compat_speed_ref(worker, sample_bytes):
+    clock = _compat_fake_time(0.0, 1.1)
+    original = worker.time
+    worker.time = clock
+    try:
+        checker = worker.speed_checker()
+        for _ in range(5):
+            checker.check(sample_bytes)
+        return checker
+    finally:
+        worker.time = original
+
+
+def _compat_monitor_scenario(worker, const, scenario):
+    events = []
+    clock = _compat_fake_time(1000.0, 0.0)
+    original_time = worker.time
+    worker.time = clock
+    stats = {"count": 0}
+    finished_updates = {int(index): value for index, value in scenario.get("finished_updates", [])}
+    zero_after = scenario.get("zero_speed_after_stats")
+    state = {"value": const.TASK_STATE_DOWNLOAD}
+
+    class Task:
+        def __init__(self):
+            self.guid = "compat"
+            self.meta = {
+                "total": scenario["total"],
+                "finished": scenario.get("finished", 0),
+                "title": "compat",
+            }
+            import queue as queue_module
+
+            self.img_q = queue_module.Queue()
+            for _ in range(scenario.get("pending", 0)):
+                self.img_q.put("x")
+            self._done = set()
+            self.rename_calls = 0
+            self.cleanup_calls = 0
+
+        @property
+        def state(self):
+            return state["value"]
+
+        @state.setter
+        def state(self, value):
+            state["value"] = value
+
+        def get_fid_unfinished(self):
+            total = self.meta["total"]
+            return [index for index in range(1, total) if index not in self._done]
+
+        def rename_fname(self):
+            self.rename_calls += 1
+            return []
+
+        def cleanup(self, before_delete=False):
+            self.cleanup_calls += 1
+
+    task = Task()
+
+    class Writer:
+        def __init__(self):
+            self.records = []
+
+        def __getattr__(self, name):
+            def write(message, *args, **kwargs):
+                self.records.append((name, str(message)))
+
+            return write
+
+    logger = Writer()
+
+    def inspect(level, message):
+        if "R/" in message and "queue" in message:
+            stats["count"] += 1
+            events.append("stats")
+            if stats["count"] in finished_updates:
+                task.meta["finished"] = finished_updates[stats["count"]]
+            if zero_after is not None and stats["count"] >= zero_after:
+                for reference in workers:
+                    reference.stream_speed = None
+            if scenario.get("finish_when_complete") and task.meta["finished"] == task.meta["total"]:
+                for reference in workers:
+                    monitor.wrk_keepalive(reference, _exit=True)
+        elif "is slow" in message:
+            events.append("slow")
+        elif "is stuck" in message:
+            events.append("stuck")
+        elif "quota" in message.lower():
+            events.append("quota")
+        elif "may became zombie" in message:
+            events.append("zombie")
+        elif "is dead, deref" in message:
+            events.append("sweep")
+        elif "download finished" in message:
+            events.append("finished")
+
+    class RecordingLogger:
+        def verbose(self, message, *args, **kwargs):
+            pass
+
+        def debug(self, message, *args, **kwargs):
+            pass
+
+        def info(self, message, *args, **kwargs):
+            inspect("info", message)
+
+        def warning(self, message, *args, **kwargs):
+            inspect("warning", message)
+
+        warn = warning
+
+        def error(self, message, *args, **kwargs):
+            inspect("error", message)
+
+        def critical(self, message, *args, **kwargs):
+            pass
+
+    class Worker:
+        def __init__(self, name, threshold, speed_bytes):
+            self.name = name
+            self._alive = True
+            self.zombie_threshold = threshold
+            self.stream_speed = _compat_speed_ref(worker, speed_bytes) if speed_bytes else None
+
+        def is_alive(self):
+            return self._alive
+
+    workers = [
+        Worker(
+            name,
+            scenario.get("thresholds", {}).get(name, 30.0),
+            scenario.get("speed_bytes", 0),
+        )
+        for name in scenario["names"]
+    ]
+    monitor = worker.Monitor(
+        None,
+        None,
+        RecordingLogger(),
+        task,
+        ignored_errors=scenario.get("ignored", []),
+    )
+    monitor.set_vote_ns(scenario["names"])
+    for reference in workers:
+        monitor.wrk_keepalive(reference)
+    for tname, code in scenario.get("votes", []):
+        monitor.vote(tname, code)
+        events.append(f"vote:{code}")
+    clock.limit = scenario.get("max_ticks", 1000)
+    clock.on_tick = lambda _clock: None
+    try:
+        monitor.run()
+        stopped = False
+    except _CompatStopMonitor:
+        stopped = True
+    finally:
+        worker.time = original_time
+    return {
+        "events": events,
+        "state": state["value"],
+        "finished": task.meta["finished"],
+        "rename_calls": task.rename_calls,
+        "cleanup_calls": task.cleanup_calls,
+        "download_speed": float(round(getattr(monitor, "download_speed", 0.0), 6)),
+        "stopped": stopped,
+        "stats": stats["count"],
+    }
+
+
+def oracle_monitor(upstream, request):
+    import importlib
+
+    sys.path.insert(0, str(upstream))
+    worker = importlib.import_module("xeHentai.worker")
+    const = importlib.import_module("xeHentai.const")
+    result = {
+        "speed": _compat_speed_trace(worker, request["speed"]),
+        "monitor": {},
+    }
+    for name, scenario in request["monitor"].items():
+        result["monitor"][name] = _compat_monitor_scenario(worker, const, scenario)
+    return result
+
+
+def monitor_scenarios():
+    return {
+        "speed": {
+            "start": 100.0,
+            "cnt": 5,
+            "timeline": [
+                [1024, 2.0],
+                [1024, 0.5],
+                [2048, 1.0],
+                [1024, 2.0],
+                [4096, 2.0],
+                [0, 2.0],
+                [1024, 2.0],
+                [1024, 3.0],
+                [1024, 1.0],
+            ],
+            "resets": [3, 7],
+        },
+        "monitor": {
+            "finish": {
+                "total": 2,
+                "finished": 2,
+                "names": ["down-1"],
+                "speed_bytes": 0,
+                "finish_when_complete": True,
+                "max_ticks": 10,
+            },
+            "slow": {
+                "total": 10,
+                "finished": 0,
+                "names": ["down-1", "down-2"],
+                "thresholds": {"down-1": 1.0e9, "down-2": 1.0e9},
+                "speed_bytes": 20000,
+                "max_ticks": 400,
+            },
+            "stuck": {
+                "total": 10,
+                "finished": 0,
+                "names": ["down-1"],
+                "thresholds": {"down-1": 1.0e9},
+                "speed_bytes": 0,
+                "max_ticks": 400,
+            },
+            "quota": {
+                "total": 10,
+                "finished": 0,
+                "names": ["down-1", "down-2"],
+                "votes": [["down-1", 1006], ["down-2", 1006]],
+                "max_ticks": 5,
+            },
+            "ignored": {
+                "total": 10,
+                "finished": 0,
+                "names": ["down-1"],
+                "ignored": [1006],
+                "votes": [["down-1", 1006]],
+                "max_ticks": 5,
+            },
+            "zombie": {
+                "total": 10,
+                "finished": 0,
+                "names": ["down-1"],
+                "thresholds": {"down-1": 0.5},
+                "max_ticks": 100,
+            },
+        },
+    }
+
+
+MONITOR_CASES = [
+    "m4.speed.checker",
+    "m4.monitor.finish",
+    "m4.monitor.slow-windows",
+    "m4.monitor.stuck",
+    "m4.monitor.quota",
+    "m4.monitor.ignored-errors",
+    "m4.monitor.zombie",
+]
+MONITOR_CASE_KEYS = {
+    "m4.speed.checker": "speed",
+    "m4.monitor.finish": "finish",
+    "m4.monitor.slow-windows": "slow",
+    "m4.monitor.stuck": "stuck",
+    "m4.monitor.quota": "quota",
+    "m4.monitor.ignored-errors": "ignored",
+    "m4.monitor.zombie": "zombie",
+}
+
+
+def compare_monitor(cases, oracle, candidate):
+    diffs = []
+    for case_id in MONITOR_CASES:
+        cases.setdefault(case_id, True)
+    diffs.extend(compare(oracle["speed"], candidate["speed"], "speed"))
+    if diffs:
+        cases["m4.speed.checker"] = False
+    for case_id, key in MONITOR_CASE_KEYS.items():
+        if case_id == "m4.speed.checker":
+            continue
+        expected = {
+            field: oracle["monitor"][key].get(field)
+            for field in ("events", "state", "finished", "download_speed", "stopped", "stats")
+        }
+        actual = {
+            field: candidate["monitor"][key].get(field)
+            for field in ("events", "state", "finished", "download_speed", "stopped", "stats")
+        }
+        local = compare(expected, actual, key)
+        if local:
+            cases[case_id] = False
+            diffs.extend(local)
+    return diffs
+
+
+class _CompatDownloadResponse:
+    def __init__(self, status, url, headers, body, chunks):
+        self.status_code = status
+        self.url = url
+        self._real_url = url
+        self.headers = headers
+        self.content = body
+        self._chunks = chunks
+        self.iter_content_cb = None
+
+    @property
+    def text(self):
+        return self.content.decode("utf-8", "replace")
+
+    def iter_content(self, chunk_size=16384):
+        for chunk in self._chunks:
+            yield chunk
+
+
+def _compat_download_observation(work, task, calls):
+    tree = _tree(work / "downloads")
+    observation = _task_obs(task, work)
+    observation["guid"] = "GUID"
+    observation["reload"] = sorted(observation["reload"], key=lambda row: str(row[0]))
+    observation["renamed"] = sorted(observation["renamed"], key=lambda row: str(row[0]))
+    observation["duplicate"] = sorted(observation["duplicate"], key=lambda row: str(row[0]))
+    observation["config"] = {
+        key: ("<ROOT>" + value[len(str(work)):] if isinstance(value, str) and value.startswith(str(work)) else value)
+        for key, value in observation["config"].items()
+    }
+    if observation.get("url"):
+        observation["url"] = observation["url"].replace(str(work), "<ROOT>")
+    requests = sorted(calls)
+    return {"task": observation, "tree": tree, "requests": requests}
+
+
+def oracle_download(upstream, request):
+    import importlib
+    import queue as queue_module
+    import threading
+    import time as time_module
+    from urllib.parse import urlparse
+
+    core, task_module, _const, defaults = _load_upstream(upstream)
+    work = Path(request["root"])
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "downloads").mkdir(parents=True, exist_ok=True)
+    scenario = request["scenario"]
+    app = _new_app(
+        core,
+        defaults,
+        work,
+        ["00000001"],
+        overrides={
+            "dir": str(work / "downloads"),
+            "save_tasks": False,
+            "scan_thread_cnt": scenario["scan_threads"],
+            "download_thread_cnt": scenario["download_threads"],
+            "download_timeout": 5,
+            "low_speed_threshold": 0,
+            "make_archive": False,
+            "delete_task_files": False,
+        },
+    )
+    calls = []
+
+    def fake_request(_session, method, url, **kwargs):
+        path = urlparse(url).path
+        query = urlparse(url).query
+        calls.append(f"{method} {path}" + (f"?{query}" if query else ""))
+        if "?p=" in url:
+            return _CompatDownloadResponse(200, url, {"content-type": "text/html; charset=utf-8"}, scenario["page"].encode(), [scenario["page"].encode()])
+        if "/img/" in path:
+            if scenario["image_hashes"][0] in path:
+                body = bytes.fromhex(scenario["images"][0])
+            else:
+                body = bytes.fromhex(scenario["images"][1])
+            return _CompatDownloadResponse(
+                200,
+                url,
+                {"content-type": "image/jpeg", "content-length": str(len(body))},
+                body,
+                [body],
+            )
+        if "/s/" in path:
+            fid = int(path.rsplit("-", 1)[1])
+            return _CompatDownloadResponse(
+                200,
+                url,
+                {"content-type": "text/html; charset=utf-8"},
+                scenario["img_pages"][fid - 1].encode(),
+                [scenario["img_pages"][fid - 1].encode()],
+            )
+        return _CompatDownloadResponse(
+            200,
+            url,
+            {"content-type": "text/html; charset=utf-8"},
+            scenario["metadata"].encode(),
+            [scenario["metadata"].encode()],
+        )
+
+    import requests
+
+    original_request = requests.Session.request
+    requests.Session.request = fake_request
+    task = task_module.Task(
+        scenario["url"],
+        _task_config(
+            app,
+            {
+                "dir": str(work / "downloads"),
+                "scan_thread_cnt": scenario["scan_threads"],
+                "download_thread_cnt": scenario["download_threads"],
+                "download_timeout": 5,
+                "low_speed_threshold": 0,
+                "make_archive": False,
+                "delete_task_files": False,
+            },
+        ),
+        app.logger,
+    )
+    app._all_tasks[task.guid] = task
+    app.tasks = queue_module.Queue()
+    app.tasks.put(task.guid)
+    thread = threading.Thread(target=app._task_loop, daemon=True)
+    thread.start()
+    deadline = time_module.time() + 20
+    try:
+        while time_module.time() < deadline:
+            if task.state in (_const.TASK_STATE_FINISHED, _const.TASK_STATE_FAILED):
+                break
+            time_module.sleep(0.02)
+        app._exit = True
+        thread.join(timeout=10)
+    finally:
+        requests.Session.request = original_request
+    observation = _compat_download_observation(work, task, calls)
+    observation["monitor"] = {
+        "state": task.state,
+        "finished": task.meta.get("finished"),
+        "votes": sorted((str(key), int(value)) for key, value in getattr(app._monitor, "vote_result", {}).items()),
+    }
+    return observation
+
+
+def download_scenarios():
+    hash40_a = "0123456789abcdef0123456789abcdef01234567"
+    hash40_b = "89abcdef0123456789abcdef0123456789abcdef"
+    image_a = (b"image-one-" * 400)[:2400].hex()
+    image_b = (b"image-two-" * 500)[:3200].hex()
+    return {
+        "url": "http://e-hentai.org/g/123/abcdef0123/",
+        "scan_threads": 1,
+        "download_threads": 1,
+        "metadata": '="gj">jp-title</h1>="gn">en-title</h1>Length:</td><td class="gdt2">2 pages</td>Showing 1 - 20 of 2 images',
+        "page": '<a href="http://e-hentai.org/s/aaaa000001/123456-1"><div title="Page 1"'
+                '<a href="http://e-hentai.org/s/bbbb000002/123456-2"><div title="Page 2"',
+        "img_pages": [
+            f'<img src="http://img.test/img/{hash40_a}-2400-200-0-jpg/keystamp=x" style="x"></a></div><div>one.jpg :: 100x200 :: 2 KB</di>return nl(\'aaaa000001-1\')',
+            f'<img src="http://img.test/img/{hash40_b}-3200-200-0-jpg/keystamp=x" style="x"></a></div><div>two.jpg :: 100x200 :: 2 KB</di>return nl(\'bbbb000002-2\')',
+        ],
+        "images": [image_a, image_b],
+        "image_hashes": [hash40_a, hash40_b],
+    }
+
+
+DOWNLOAD_CASES = [
+    "m4.pipeline.local",
+    "m4.task-loop.autosave",
+    "m4.workers.overlap-scan",
+    "m4.workers.overlap-download",
+    "m4.worker.multi-url-cookie",
+    "m4.queue.src-while-active",
+    "m4.retry.low-speed-rescan",
+    "m4.retry.worker-three",
+    "m4.pause.mid-body",
+    "m4.pause.mid-page",
+    "m4.pause.blocking-open",
+    "m4.stale.same-run",
+    "m4.stale.same-guid-owner",
+    "m4.duplicates.concurrent",
+    "m4.session.partial-resume",
+    "m4.archive.after-finish",
+    "m4.task-loop.last-guid",
+    "m4.task-loop.prefetch",
+    "m4.dns.pending",
+    "m4.concurrent.limit",
+    "m4.monitor.native-slow-stuck",
+    "m4.monitor.native-votes",
+]
+DOWNLOAD_NATIVE_CASES = DOWNLOAD_CASES
+
+
+def compare_download(cases, oracle, candidate):
+    diffs = []
+    diffs.extend(compare(oracle["task"], candidate["task"], "task"))
+    diffs.extend(compare(oracle["tree"], candidate["tree"], "tree"))
+    diffs.extend(compare(oracle["requests"], candidate["requests"], "requests"))
+    diffs.extend(compare(oracle["monitor"], candidate["monitor"], "monitor"))
+    if diffs:
+        for case_id in DOWNLOAD_CASES:
+            cases[case_id] = False
+    else:
+        for case_id in DOWNLOAD_CASES:
+            cases[case_id] = True
+    return diffs
+
+
 def write_json(path, value):
     path.write_text(
         json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True),
@@ -3645,6 +4291,40 @@ def self_check(suite, oracle, candidate):
         cases = {}
         compare_files(cases, oracle, mutated)
         checks.append(("safety-delta", not cases["task.files-safety"]))
+    elif suite == "monitor":
+        mutated = copy.deepcopy(candidate)
+        mutated["speed"][0][1] = float(mutated["speed"][0][1]) + 1.0
+        cases = {}
+        compare_monitor(cases, oracle, mutated)
+        checks.append(("speed-sample", not cases["m4.speed.checker"]))
+        mutated = copy.deepcopy(candidate)
+        mutated["monitor"]["finish"]["events"].append("mutated")
+        cases = {}
+        compare_monitor(cases, oracle, mutated)
+        checks.append(("monitor-event", not cases["m4.monitor.finish"]))
+        mutated = copy.deepcopy(candidate)
+        mutated["monitor"]["slow"]["stats"] = 1
+        cases = {}
+        compare_monitor(cases, oracle, mutated)
+        checks.append(("monitor-stat", not cases["m4.monitor.slow-windows"]))
+    elif suite == "download":
+        mutated = copy.deepcopy(candidate)
+        mutated["task"]["meta"]["finished"] = 1
+        cases = {}
+        compare_download(cases, oracle, mutated)
+        checks.append(("task-field", not cases["m4.pipeline.local"]))
+        mutated = copy.deepcopy(candidate)
+        mutated["tree"][0]["path"] = "mutated"
+        cases = {}
+        compare_download(cases, oracle, mutated)
+        checks.append(("tree-path", not cases["m4.pipeline.local"]))
+        mutated = copy.deepcopy(candidate)
+        mutated["requests"].append("GET /mutated")
+        cases = {}
+        compare_download(cases, oracle, mutated)
+        checks.append(("request-set", not cases["m4.pipeline.local"]))
+    elif suite == "concurrency":
+        checks.append(("zero-tests", detect_zero_tests("running 0 tests\n\ntest result: ok. 0 passed")))
     if not checks or not all(detected for _, detected in checks):
         raise CompatError(f"{suite}: comparator self-check failed: {checks}")
     return [{"mutation": name, "detected": detected} for name, detected in checks]
@@ -3802,6 +4482,52 @@ def run_suite(suite, output_root, upstream, target_dir):
             )
             cases = {}
             diffs = compare_transport(cases, oracle, candidate)
+        elif suite == "download":
+            oracle_root = root / "oracle-work"
+            candidate_root = root / "candidate-work"
+            oracle_root.mkdir()
+            candidate_root.mkdir()
+            scenario = download_scenarios()
+            oracle = run_oracle(
+                "download",
+                {"root": str(oracle_root), "scenario": scenario},
+                root,
+                upstream,
+                root / "oracle-download.log",
+                cwd=oracle_root,
+            )
+            candidate = run_probe(
+                "download",
+                {"root": str(candidate_root), "scenario": scenario},
+                root,
+                target_dir,
+                root / "probe.log",
+            )
+            cases = {}
+            diffs = compare_download(cases, oracle, candidate)
+        elif suite == "monitor":
+            oracle_root = root / "oracle-work"
+            candidate_root = root / "candidate-work"
+            oracle_root.mkdir()
+            candidate_root.mkdir()
+            scenarios = monitor_scenarios()
+            oracle = run_oracle(
+                "monitor",
+                scenarios,
+                root,
+                upstream,
+                root / "oracle-monitor.log",
+                cwd=oracle_root,
+            )
+            candidate = run_probe(
+                "monitor",
+                scenarios,
+                root,
+                target_dir,
+                root / "probe.log",
+            )
+            cases = {}
+            diffs = compare_monitor(cases, oracle, candidate)
         elif suite == "proxy":
             oracle_root = root / "oracle-work"
             candidate_root = root / "candidate-work"
@@ -3988,7 +4714,7 @@ def suite_command(args):
         raise CompatError(f"invalid upstream tree: {upstream_path}")
 
     suites = (
-        ["config", "util", "i18n", "worker", "task-api", "session", "files", "site", "proxy", "transport"]
+        ["config", "util", "i18n", "worker", "task-api", "session", "files", "site", "proxy", "transport", "monitor", "download", "concurrency"]
         if args.suite == "all"
         else [args.suite]
     )
@@ -4044,6 +4770,9 @@ def main(argv=None):
             "site",
             "proxy",
             "transport",
+            "monitor",
+            "download",
+            "concurrency",
             "all",
         ],
     )
@@ -4064,6 +4793,8 @@ def main(argv=None):
             "site",
             "proxy",
             "transport",
+            "monitor",
+            "download",
         ],
     )
     parser.add_argument("--locale")

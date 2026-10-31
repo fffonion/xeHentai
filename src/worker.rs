@@ -190,6 +190,174 @@ impl HttpClock for TestClock {
     }
 }
 
+/// Deterministic clock whose `now()` advances by a fixed step on every call.
+/// It is a test/probe dependency, never production; the speed checker and the
+/// monitor receive their clock exactly where the reference reads `time.time`.
+pub struct StepClock {
+    now: Mutex<f64>,
+    step: Mutex<f64>,
+    sleeps: Mutex<Vec<f64>>,
+    random: f64,
+}
+
+impl StepClock {
+    pub fn new(now: f64, step: f64) -> Self {
+        Self {
+            now: Mutex::new(now),
+            step: Mutex::new(step),
+            sleeps: Mutex::new(Vec::new()),
+            random: 0.5,
+        }
+    }
+
+    pub fn set_step(&self, step: f64) {
+        *self.step.lock().unwrap() = step;
+    }
+
+    pub fn set_now(&self, now: f64) {
+        *self.now.lock().unwrap() = now;
+    }
+
+    pub fn sleeps(&self) -> Vec<f64> {
+        self.sleeps.lock().unwrap().clone()
+    }
+}
+
+impl HttpClock for StepClock {
+    fn random(&self) -> f64 {
+        self.random
+    }
+
+    fn sleep<'a>(&'a self, seconds: f64) -> SleepFuture<'a> {
+        self.sleeps.lock().unwrap().push(seconds);
+        Box::pin(std::future::ready(()))
+    }
+
+    fn now(&self) -> f64 {
+        let mut now = self.now.lock().unwrap();
+        let value = *now;
+        *now += *self.step.lock().unwrap();
+        value
+    }
+}
+
+/// Clock for the monitor loop: `sleep(seconds)` advances the same clock the
+/// loop reads and yields to the LocalSet instead of really waiting. Ten
+/// monitor ticks therefore cost 5.0 reference seconds without wall-clock
+/// sleeps, while the production `RealClock` keeps the real cadence.
+pub struct TickClock {
+    now: Mutex<f64>,
+    random: f64,
+}
+
+impl TickClock {
+    pub fn new(now: f64) -> Self {
+        Self {
+            now: Mutex::new(now),
+            random: 0.5,
+        }
+    }
+
+    pub fn set_now(&self, value: f64) {
+        *self.now.lock().unwrap() = value;
+    }
+
+    pub fn advance(&self, seconds: f64) {
+        *self.now.lock().unwrap() += seconds;
+    }
+}
+
+impl HttpClock for TickClock {
+    fn random(&self) -> f64 {
+        self.random
+    }
+
+    fn sleep<'a>(&'a self, seconds: f64) -> SleepFuture<'a> {
+        *self.now.lock().unwrap() += seconds.max(0.0);
+        Box::pin(tokio::task::yield_now())
+    }
+
+    fn now(&self) -> f64 {
+        *self.now.lock().unwrap()
+    }
+}
+
+// --- speed checker ---------------------------------------------------------
+
+/// `speed_checker` from `worker.py:141-169`. A sample is only appended when
+/// strictly more than one second of reference time passed since the previous
+/// sample; `calc(full=True)` is zero until the five-sample ring is full.
+pub struct SpeedChecker {
+    pub cnt: usize,
+    buffer: std::collections::VecDeque<f64>,
+    last_tm: f64,
+    last_bytes: i64,
+    current_bytes: i64,
+    current_tm: f64,
+    clock: Arc<dyn HttpClock>,
+}
+
+impl SpeedChecker {
+    pub fn new(cnt: usize, clock: Arc<dyn HttpClock>) -> Self {
+        let mut checker = Self {
+            cnt,
+            buffer: std::collections::VecDeque::new(),
+            last_tm: 0.0,
+            last_bytes: 0,
+            current_bytes: 0,
+            current_tm: 0.0,
+            clock,
+        };
+        checker.reset();
+        checker
+    }
+
+    pub fn check(&mut self, len: usize) {
+        self.current_bytes += len as i64;
+        self.current_tm = self.clock.now();
+        let elapsed = self.current_tm - self.last_tm;
+        if elapsed > 1.0 {
+            self.buffer
+                .push_back((self.current_bytes - self.last_bytes) as f64 / elapsed);
+            while self.buffer.len() > self.cnt {
+                self.buffer.pop_front();
+            }
+            self.last_tm = self.current_tm;
+            self.last_bytes = self.current_bytes;
+        }
+    }
+
+    pub fn calc(&self, full: bool) -> f64 {
+        if self.buffer.is_empty() {
+            return 0.0;
+        }
+        if full && self.buffer.len() < self.cnt {
+            return 0.0;
+        }
+        self.buffer.iter().sum::<f64>() / self.buffer.len() as f64
+    }
+
+    pub fn reset(&mut self) {
+        self.last_tm = self.clock.now();
+        self.last_bytes = 0;
+        self.current_bytes = 0;
+        self.current_tm = 0.0;
+        if !self.buffer.is_empty() {
+            self.buffer.clear();
+        }
+    }
+
+    pub fn sample_count(&self) -> usize {
+        self.buffer.len()
+    }
+}
+
+/// `0 < calc(full=True) < threshold` exactly. A zero or not-yet-full buffer
+/// must not stop an otherwise healthy download.
+pub fn is_low_speed(full: f64, threshold_bytes: i64) -> bool {
+    threshold_bytes > 0 && full > 0.0 && full < threshold_bytes as f64
+}
+
 // --- fallback IP map -------------------------------------------------------
 
 #[derive(Clone)]

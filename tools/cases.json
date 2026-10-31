@@ -3006,6 +3006,354 @@
       ],
       "status": "delta",
       "delta": "Reference glype sslagree follow-up passes allow_redirects twice and raises TypeError after the first request; candidate omits the duplicate and completes with the same cookie/text state as the no-kwargs flow."
+    },
+    {
+      "id": "m4.speed.checker",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "monitor",
+      "inputs": [],
+      "assertions": [
+        "Five-sample ring, strict >1s samples, full/zero calculation and idle reset match frozen speed_checker."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.monitor.finish",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "monitor",
+      "inputs": [],
+      "assertions": [
+        "Monitor finish path: stats, finished progress, rename and FINISHED state match the frozen Monitor.run."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.monitor.slow-windows",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "monitor",
+      "inputs": [],
+      "assertions": [
+        "Two consecutive positive-speed slow windows reset last_change and keep running."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.monitor.stuck",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "monitor",
+      "inputs": [],
+      "assertions": [
+        "Zero-speed slow window breaks as stuck without renaming or finishing."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.monitor.quota",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "monitor",
+      "inputs": [],
+      "assertions": [
+        "Quota votes against live workers fail the task; ignored errors do not."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.monitor.ignored-errors",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "monitor",
+      "inputs": [],
+      "assertions": [
+        "ignored_errors clears quota votes and preserves the task."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.monitor.zombie",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "monitor",
+      "inputs": [],
+      "assertions": [
+        "Zombie threshold warning and sweep-out/heartbeat re-entry match Monitor.run."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.monitor.native-slow-stuck",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "monitor",
+      "inputs": [],
+      "assertions": [
+        "Native repeated-slow then zero-speed stuck trace."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.monitor.native-votes",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "monitor",
+      "inputs": [],
+      "assertions": [
+        "Native quota/ignored/zombie heartbeat trace."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.pipeline.local",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "download",
+      "inputs": [],
+      "assertions": [
+        "Actual App task queue -> metadata -> pages -> scan workers -> img queue -> download workers -> real files -> rename/FINISHED."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.task-loop.autosave",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "download",
+      "inputs": [],
+      "assertions": [
+        "_task_loop saves the session on task start and idle cadence."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.workers.overlap-scan",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "concurrency",
+      "inputs": [],
+      "assertions": [
+        "Two persistent scan workers overlap at the same local server barrier."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.workers.overlap-download",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "concurrency",
+      "inputs": [],
+      "assertions": [
+        "Two persistent download workers overlap at the same local server barrier."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.worker.multi-url-cookie",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "download",
+      "inputs": [],
+      "assertions": [
+        "One persistent download worker serves multiple URLs and retains the Set-Cookie jar."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.queue.src-while-active",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "download",
+      "inputs": [],
+      "assertions": [
+        "RSS image source parsed while a worker is active appears in img_q and is consumed."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.retry.low-speed-rescan",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "concurrency",
+      "inputs": [],
+      "assertions": [
+        "Low-speed stream feeds the same RSS filter a 600 response, retries the page and rescans the real source."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.retry.worker-three",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "concurrency",
+      "inputs": [],
+      "assertions": [
+        "HttpWorker retries three times (not ten) before the fake-response rescan."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.pause.mid-body",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "concurrency",
+      "inputs": [],
+      "assertions": [
+        "Pause mid-body aborts the owned stage, removes it, requeues the item and resume completes."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.pause.mid-page",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "concurrency",
+      "inputs": [],
+      "assertions": [
+        "Pause mid-page drops the late scan result, requeues the page and resume scans again."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.pause.blocking-open",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "concurrency",
+      "inputs": [],
+      "assertions": [
+        "Pause waits for a queued blocking stage open and reports zero pending only after retirement."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.stale.same-run",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "concurrency",
+      "inputs": [],
+      "assertions": [
+        "Pause/resume token rejects old scan publication and staged file commit."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.stale.same-guid-owner",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "concurrency",
+      "inputs": [],
+      "assertions": [
+        "Delete/recreate same guid gives a new owner; old port cannot publish."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.duplicates.concurrent",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "concurrency",
+      "inputs": [],
+      "assertions": [
+        "Duplicate image fids under concurrent workers transfer once and copy for the second fid."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.session.partial-resume",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "download",
+      "inputs": [],
+      "assertions": [
+        "Original-style partial h.json resumes only missing images and a restart performs no image request."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.archive.after-finish",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "download",
+      "inputs": [],
+      "assertions": [
+        "Archive starts only after downloads/rename, writes STORE zip and removes the gallery directory."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.task-loop.last-guid",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "download",
+      "inputs": [],
+      "assertions": [
+        "_task_loop records last_task_guid and saves the session when the next task is popped."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.task-loop.prefetch",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "download",
+      "inputs": [],
+      "assertions": [
+        "Next task metadata is prefetched while the prior task's download worker is still in flight."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.dns.pending",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "concurrency",
+      "inputs": [],
+      "assertions": [
+        "Pending async DNS does not freeze other LocalSet work and cannot start late HTTP."
+      ],
+      "delta": null
+    },
+    {
+      "id": "m4.concurrent.limit",
+      "status": "implemented",
+      "source": "M4 contract (worker.py/core.py/task.py)",
+      "target": "src/core/runtime.rs + src/tests.rs",
+      "suite": "concurrency",
+      "inputs": [],
+      "assertions": [
+        "scan_thread_cnt/download_thread_cnt snapshots independently bound real overlap."
+      ],
+      "delta": null
     }
   ],
   "oracle": {

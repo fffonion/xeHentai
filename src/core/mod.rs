@@ -6,11 +6,16 @@
 //! not pretended here.
 #![allow(dead_code)]
 
+pub(crate) mod runtime;
+
+#[allow(unused_imports)]
+pub use runtime::{AppHandle, DrainReport, Monitor, Runtime, TraceEvent, WorkerRef};
+
 use std::collections::VecDeque;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use indexmap::IndexMap;
@@ -19,6 +24,7 @@ use serde::Serialize;
 use serde::ser::{SerializeMap, Serializer};
 use serde_json::{Map as JsonMap, Value};
 use tokio::io::AsyncWriteExt;
+use tokio::sync::watch;
 
 use crate::config::Config;
 use crate::r#const as consts;
@@ -28,7 +34,9 @@ use crate::task::{SaveStart, StagedSave, Task, TaskConfig, TaskError, TaskLoadEr
 use crate::task::{boundary_path, normalize, path_within, resolve_dir};
 use crate::util;
 use crate::util::logger::Logger;
-use crate::worker::{FetchedResponse, Session, SessionConfig, StreamBody};
+use crate::worker::{
+    FetchedResponse, Session, SessionConfig, SpeedChecker, StreamBody, is_low_speed,
+};
 
 pub const SESSION_FILE: &str = "h.json";
 pub const LEGACY_COOKIE_FILE: &str = ".ehentai.cookie";
@@ -140,6 +148,12 @@ impl DownloadStage {
         self.stream.as_mut().expect("response stream is armed")
     }
 
+    /// Take the staged save for a port-owned publish. The stream stays owned
+    /// by the stage and is closed when the stage drops right after commit.
+    fn staged_take(&mut self) -> StagedSave {
+        self.staged.take().expect("staged save is armed")
+    }
+
     /// Publish exactly once. Taking the stage disarms the drop cleanup only
     /// for the successful publish itself; `commit_staged_save` removes the
     /// stage when the publish fails.
@@ -161,13 +175,60 @@ impl Drop for DownloadStage {
     }
 }
 
+/// Tracks filesystem opens that are already queued on the blocking pool.
+/// A pause can wait for these owners to retire instead of claiming quiescence
+/// while an OS open is still in flight (an OS open itself cannot be aborted).
+#[derive(Clone, Default)]
+pub struct StageDrain {
+    count: Arc<AtomicUsize>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+pub struct StageGuard {
+    drain: StageDrain,
+}
+
+impl StageDrain {
+    pub fn enter(&self) -> StageGuard {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        StageGuard {
+            drain: self.clone(),
+        }
+    }
+
+    pub fn pending(&self) -> usize {
+        self.count.load(Ordering::SeqCst)
+    }
+
+    pub async fn wait_zero(&self) {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.count.load(Ordering::SeqCst) == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+impl Drop for StageGuard {
+    fn drop(&mut self) {
+        self.drain.count.fetch_sub(1, Ordering::SeqCst);
+        self.drain.notify.notify_waiters();
+    }
+}
+
 /// Open the staging file on the blocking pool. If the surrounding download is
 /// cancelled while the open is still queued, the cancellation flag makes the
 /// blocking side remove the just-created path, so cleanup cannot be followed by
-/// a recreated stage.
+/// a recreated stage. An optional drain guard keeps pause truthful while the
+/// uninterruptible OS open is still running.
 async fn create_stage_file(
     staged: &StagedSave,
     canceled: Arc<AtomicBool>,
+    drain: Option<StageDrain>,
 ) -> std::io::Result<tokio::fs::File> {
     #[cfg(test)]
     if io_fault() == Some(IoFault::Open) {
@@ -180,7 +241,9 @@ async fn create_stage_file(
     } else {
         None
     };
+    let guard = drain.as_ref().map(StageDrain::enter);
     let std_file = tokio::task::spawn_blocking(move || -> std::io::Result<std::fs::File> {
+        let _guard = guard;
         #[cfg(test)]
         if let Some(channels) = &slow {
             let _ = channels.started.send(());
@@ -400,6 +463,15 @@ pub enum ImageDownload {
     Aborted,
 }
 
+/// Immutable inputs captured when a download worker takes one queue item.
+pub(crate) struct DownloadItem {
+    pub image_url: String,
+    pub policy: util::ProxyPolicy,
+    pub token: (u64, u64),
+    pub timeout: i64,
+    pub low_speed_threshold: i64,
+}
+
 impl std::fmt::Debug for App {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("App")
@@ -499,6 +571,18 @@ impl App {
 
     pub fn task(&self, guid: &str) -> Option<&Task> {
         self.all_tasks.get(guid)
+    }
+
+    /// Test/compat fixture entry: insert an already-built Task and queue it,
+    /// preserving the normal registry order. Production tasks enter through
+    /// `add_task`; this exists so integration tests can point a real task at a
+    /// local server URL that `add_task` would reject.
+    #[cfg(test)]
+    pub fn insert_task_for_test(&mut self, task: Task) -> String {
+        let guid = task.guid.clone();
+        self.all_tasks.insert(guid.clone(), task);
+        self.tasks.push_back(guid.clone());
+        guid
     }
 
     pub fn task_mut(&mut self, guid: &str) -> Option<&mut Task> {
@@ -791,6 +875,7 @@ impl App {
                 || existing.state == consts::TASK_STATE_FAILED
             {
                 existing.state = consts::TASK_STATE_WAITING;
+                existing.bump_run();
                 existing.cleanup(false)?;
             }
             return Ok((consts::ERR_NO_ERROR, Some(guid)));
@@ -827,6 +912,7 @@ impl App {
         if consts::TASK_STATE_PAUSED < state && state < consts::TASK_STATE_FINISHED {
             return Ok((consts::ERR_DELETE_RUNNING_TASK, None));
         }
+        self.all_tasks.get_mut(guid).expect("checked").bump_run();
         self.all_tasks
             .get_mut(guid)
             .expect("checked")
@@ -846,6 +932,7 @@ impl App {
             return Ok((consts::ERR_TASK_CANNOT_PAUSE, None));
         }
         task.state = consts::TASK_STATE_PAUSED;
+        task.bump_run();
         Ok((consts::ERR_NO_ERROR, Some(String::new())))
     }
 
@@ -857,6 +944,7 @@ impl App {
             return Ok((consts::ERR_TASK_CANNOT_RESUME, None));
         }
         task.state = task.state.max(consts::TASK_STATE_WAITING);
+        task.bump_run();
         self.tasks.push_back(guid.to_string());
         Ok((consts::ERR_NO_ERROR, Some(String::new())))
     }
@@ -866,6 +954,84 @@ impl App {
     pub fn set_session_config(&mut self, config: SessionConfig) {
         self.session_config = config;
         self.session = None;
+    }
+
+    /// Update the process exit marker (`XEH_STATE_*`). The runtime and later
+    /// signal/CLI owners use it; plain `App::new` never spawns anything.
+    pub fn set_exit(&mut self, state: i64) {
+        self.exit = state;
+    }
+
+    /// Request exit and return the previous value.
+    pub fn request_exit(&mut self, state: i64) -> i64 {
+        let previous = self.exit;
+        self.exit = state;
+        previous
+    }
+
+    /// A fresh native session built from the current App headers, login
+    /// cookies, shared proxy pool and injected transport config. Each worker
+    /// owns one of these for its whole life, like one `requests.Session`.
+    pub fn new_session(&self, policy: util::ProxyPolicy) -> Session {
+        let headers = self
+            .headers
+            .iter()
+            .map(|header| (header.name.clone(), header.value.clone()))
+            .collect();
+        Session::new(
+            headers,
+            self.proxy.clone(),
+            policy,
+            self.session_config.clone(),
+        )
+    }
+
+    /// Move the App-level session out so a sequential call can borrow `self`
+    /// through short callbacks while awaiting network I/O, then put it back.
+    pub fn take_http_session(&mut self, policy: util::ProxyPolicy) -> Session {
+        let mut session = self
+            .session
+            .take()
+            .unwrap_or_else(|| self.new_session(policy));
+        session.proxy_policy = policy;
+        session
+    }
+
+    pub fn restore_http_session(&mut self, session: Session) {
+        self.session = Some(session);
+    }
+
+    /// Pop the next queued guid and maintain `last_task_guid` exactly like
+    /// `_task_loop`: the previously handled guid is recorded before the new
+    /// one becomes current.
+    pub fn pop_queued_task(&mut self, current: &mut Option<String>) -> Option<String> {
+        let guid = self.tasks.pop_front()?;
+        self.last_task_guid = current.take();
+        *current = Some(guid.clone());
+        Some(guid)
+    }
+
+    pub fn push_task_back(&mut self, guid: &str) {
+        self.tasks.push_back(guid.to_string());
+    }
+
+    pub fn task_token(&self, guid: &str) -> Option<(u64, u64)> {
+        self.all_tasks.get(guid).map(Task::token)
+    }
+
+    /// True while the exact task object/run a worker captured is still the
+    /// live run and can be mutated. Paused, failed, finished, deleted and
+    /// same-guid-new-task states all reject the late callback.
+    pub fn task_is_current(&self, guid: &str, token: (u64, u64)) -> bool {
+        self.exit < consts::XEH_STATE_FULL_EXIT
+            && self
+                .all_tasks
+                .get(guid)
+                .is_some_and(|task| task.token() == token && is_runnable_state(task.state))
+    }
+
+    pub fn task_state(&self, guid: &str) -> Option<i64> {
+        self.all_tasks.get(guid).map(|task| task.state)
     }
 
     /// Enter the first real task state (`_do_task`'s WAITING -> GET_META)
@@ -1267,6 +1433,310 @@ impl App {
             filename,
         })
     }
+}
+
+#[derive(Debug)]
+pub enum CommitOutcome {
+    Published(PathBuf),
+    Rejected,
+}
+
+/// The short, borrow-scoped half of one download. Implemented for the direct
+/// `App::download_one_image` call and for a worker sharing the live Task
+/// through `Rc<RefCell<App>>`; no variant holds a borrow across an await.
+pub(crate) trait DownloadPort {
+    fn validate(&self) -> bool;
+    fn begin_save(&mut self, imgurl: &str, redirect_url: &str) -> Result<SaveStart, TaskError>;
+    fn retry_page(&mut self, url: &str) -> Result<bool, TaskError>;
+    fn commit(&mut self, staged: StagedSave) -> Result<CommitOutcome, TaskError>;
+}
+
+pub(crate) struct DirectPort<'a> {
+    pub task: &'a mut Task,
+    pub token: (u64, u64),
+}
+
+impl DownloadPort for DirectPort<'_> {
+    fn validate(&self) -> bool {
+        self.task.token() == self.token && is_runnable_state(self.task.state)
+    }
+
+    fn begin_save(&mut self, imgurl: &str, redirect_url: &str) -> Result<SaveStart, TaskError> {
+        if !self.validate() {
+            return Err(TaskError::QueueNotStarted("stale download"));
+        }
+        self.task.begin_staged_save(imgurl, redirect_url)
+    }
+
+    fn retry_page(&mut self, url: &str) -> Result<bool, TaskError> {
+        if !self.validate() {
+            return Ok(false);
+        }
+        self.task.put_page_queue_retry(url)?;
+        Ok(true)
+    }
+
+    fn commit(&mut self, staged: StagedSave) -> Result<CommitOutcome, TaskError> {
+        if !self.validate() {
+            Task::abort_staged_save(staged);
+            return Ok(CommitOutcome::Rejected);
+        }
+        Ok(CommitOutcome::Published(
+            self.task.commit_staged_save(staged)?,
+        ))
+    }
+}
+
+/// Per-item download runtime inputs. `speed`/`low_speed_threshold` are only
+/// set for the streaming download worker; the direct API passes none.
+pub(crate) struct DownloadRuntime<'a> {
+    pub speed: Option<Arc<Mutex<SpeedChecker>>>,
+    pub low_speed_threshold: i64,
+    pub cancel: Option<&'a mut watch::Receiver<bool>>,
+    pub stage_drain: Option<StageDrain>,
+}
+
+fn fake_page(url: &str) -> PageResponse {
+    PageResponse {
+        status: 600,
+        url: url.to_string(),
+        real_url: url.to_string(),
+        content_length: 0,
+        text: String::new(),
+        headers: Vec::new(),
+        ori: false,
+        has_stream: false,
+    }
+}
+
+fn download_failed(
+    filters: &mut Filters,
+    image_url: &str,
+    response: &PageResponse,
+    ensure_retry: bool,
+) -> Result<ImageDownload, AppError> {
+    let decision = filters
+        .download_outcome(response)
+        .map_err(|error| AppError::Filter(error.to_string()))?;
+    let code = decision.fail_code.unwrap_or(consts::ERR_CONNECTION_ERROR);
+    let failed_url = decision
+        .url
+        .clone()
+        .unwrap_or_else(|| image_url.to_string());
+    let _ = ensure_retry;
+    Ok(ImageDownload::Failed {
+        fail_code: code,
+        real_url: decision
+            .real_url
+            .clone()
+            .unwrap_or_else(|| response.real_url.clone()),
+        url: failed_url,
+    })
+}
+
+/// One real image transfer shared by the sequential API and the persistent
+/// download worker: request -> RSS decision -> bounded native stream ->
+/// staged file -> publish. Every Task mutation goes through `port`, so the
+/// caller may keep only short borrows while the socket is in flight.
+pub(crate) async fn run_download<P: DownloadPort>(
+    port: &mut P,
+    session: &mut Session,
+    filters: &mut Filters,
+    image_url: &str,
+    runtime: &mut DownloadRuntime<'_>,
+    keepalive: &mut dyn FnMut() -> bool,
+) -> Result<ImageDownload, AppError> {
+    macro_rules! guarded {
+        ($fut:expr) => {
+            match runtime.cancel.as_deref_mut() {
+                Some(receiver) => {
+                    tokio::select! {
+                        biased;
+                        changed = receiver.changed() => {
+                            let _ = changed;
+                            return Ok(ImageDownload::Aborted);
+                        }
+                        value = $fut => value,
+                    }
+                }
+                None => $fut.await,
+            }
+        };
+    }
+
+    if !port.validate() || keepalive() {
+        return Ok(ImageDownload::Aborted);
+    }
+    let mut outcome = match guarded!(session.request("GET", image_url, None, true)) {
+        Ok(outcome) => outcome,
+        Err(error) => return Err(AppError::Http(error.to_string())),
+    };
+    if !port.validate() {
+        if let Some(stream) = outcome.response.stream.take() {
+            stream.close().await;
+        }
+        return Ok(ImageDownload::Aborted);
+    }
+    let has_stream = outcome.response.has_stream();
+    let view = App::page_view(&outcome.response, false, has_stream);
+    let decision = filters
+        .download_outcome(&view)
+        .map_err(|error| AppError::Filter(error.to_string()))?;
+    if decision.fail_code.is_some() {
+        if let Some(stream) = outcome.response.stream.take() {
+            stream.close().await;
+        }
+        let failed = download_failed(filters, image_url, &view, true)?;
+        if let ImageDownload::Failed { url, .. } = &failed
+            && port.validate()
+        {
+            let _ = port.retry_page(url);
+        }
+        return Ok(failed);
+    }
+    if decision.exception.is_some() || !decision.stream {
+        if let Some(stream) = outcome.response.stream.take() {
+            stream.close().await;
+        }
+        return Ok(ImageDownload::Aborted);
+    }
+    let stream_page = App::page_view(&outcome.response, false, true);
+    let Some(stream) = outcome.response.stream.take() else {
+        return Ok(ImageDownload::Aborted);
+    };
+    let staged = match port
+        .begin_save(image_url, &view.url)
+        .map_err(AppError::Task)?
+    {
+        SaveStart::AlreadyDone(path) => {
+            stream.close().await;
+            return Ok(ImageDownload::AlreadyDone(path));
+        }
+        SaveStart::Staged(staged) => staged,
+    };
+    let mut stage = DownloadStage::new(staged, stream);
+    let mut file = match guarded!(create_stage_file(
+        stage.staged_ref(),
+        stage.cancel_flag(),
+        runtime.stage_drain.clone(),
+    )) {
+        Ok(file) => file,
+        Err(error) => {
+            return Err(AppError::Download(format!(
+                "{}: {error}",
+                stage.staged_ref().stage.display()
+            )));
+        }
+    };
+    let mut read = 0i64;
+    loop {
+        if keepalive() {
+            return Ok(ImageDownload::Aborted);
+        }
+        let chunk = guarded!(stage.stream_mut().next_chunk());
+        match chunk {
+            Ok(Some(chunk)) => {
+                read += chunk.len() as i64;
+                if let Some(speed) = &runtime.speed {
+                    let mut checker = speed.lock().unwrap_or_else(|error| error.into_inner());
+                    checker.check(chunk.len());
+                    let full = checker.calc(true);
+                    drop(checker);
+                    if is_low_speed(full, runtime.low_speed_threshold) {
+                        drop(file);
+                        drop(stage);
+                        let failed =
+                            download_failed(filters, image_url, &fake_page(&view.url), false)?;
+                        if let ImageDownload::Failed { url, .. } = &failed
+                            && port.validate()
+                        {
+                            let _ = port.retry_page(url);
+                        }
+                        return Ok(failed);
+                    }
+                }
+                #[cfg(test)]
+                if io_fault() == Some(IoFault::Write) && read > 0 {
+                    return Err(AppError::Download("injected write failure".into()));
+                }
+                file.write_all(&chunk).await.map_err(|error| {
+                    AppError::Download(format!("{}: {error}", stage.staged_ref().stage.display()))
+                })?;
+            }
+            Ok(None) => break,
+            Err(error) => {
+                drop(file);
+                let broken = filters
+                    .stream_outcome(&stream_page, read, Some(&error))
+                    .map_err(|filter| AppError::Filter(filter.to_string()))?;
+                let code = broken.code.unwrap_or(consts::ERR_IMAGE_BROKEN);
+                drop(stage);
+                if port.validate() {
+                    let _ = port.retry_page(&view.url);
+                }
+                return Ok(ImageDownload::Failed {
+                    fail_code: code,
+                    real_url: view.real_url.clone(),
+                    url: view.url.clone(),
+                });
+            }
+        }
+    }
+    #[cfg(test)]
+    if io_fault() == Some(IoFault::Flush) {
+        return Err(AppError::Download("injected flush failure".into()));
+    }
+    file.flush().await.map_err(|error| {
+        AppError::Download(format!("{}: {error}", stage.staged_ref().stage.display()))
+    })?;
+    drop(file);
+    let streamed = filters
+        .stream_outcome(&stream_page, read, None)
+        .map_err(|filter| AppError::Filter(filter.to_string()))?;
+    if streamed.broken {
+        let code = streamed.code.unwrap_or(consts::ERR_IMAGE_BROKEN);
+        drop(stage);
+        if port.validate() {
+            let _ = port.retry_page(&view.url);
+        }
+        return Ok(ImageDownload::Failed {
+            fail_code: code,
+            real_url: view.real_url.clone(),
+            url: view.url.clone(),
+        });
+    }
+    if !port.validate() || keepalive() {
+        return Ok(ImageDownload::Aborted);
+    }
+    match port.commit(stage.staged_take()).map_err(AppError::Task)? {
+        CommitOutcome::Published(path) => Ok(ImageDownload::Saved(path)),
+        CommitOutcome::Rejected => Ok(ImageDownload::Aborted),
+    }
+}
+
+impl App {
+    /// Pop one image-queue item and capture the immutable inputs a worker
+    /// needs. Nothing is requested here.
+    pub(crate) fn begin_download_item(
+        &mut self,
+        guid: &str,
+    ) -> Result<Option<DownloadItem>, AppError> {
+        self.ensure_task_queues(guid)?;
+        let task = self
+            .all_tasks
+            .get_mut(guid)
+            .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
+        let Some(image_url) = task.img_q.as_mut().and_then(|queue| queue.pop_front()) else {
+            return Ok(None);
+        };
+        Ok(Some(DownloadItem {
+            image_url,
+            policy: util::get_proxy_policy(task.config.proxy_image_only, task.config.proxy_image),
+            token: task.token(),
+            timeout: task.config.download_timeout,
+            low_speed_threshold: task.config.low_speed_threshold,
+        }))
+    }
 
     /// One real image-queue consumer: request -> RSS download decision ->
     /// native bounded stream -> Task staging/publish. The post-stream RSS
@@ -1276,162 +1746,35 @@ impl App {
         guid: &str,
         filters: &mut Filters,
     ) -> Result<ImageDownload, AppError> {
-        self.ensure_task_queues(guid)?;
-        let (image_url, policy) = {
-            let task = self
+        let Some(item) = self.begin_download_item(guid)? else {
+            return Ok(ImageDownload::Empty);
+        };
+        let mut session = self.take_http_session(item.policy);
+        let mut port = DirectPort {
+            task: self
                 .all_tasks
                 .get_mut(guid)
-                .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
-            let Some(image_url) = task.img_q.as_mut().and_then(|queue| queue.pop_front()) else {
-                return Ok(ImageDownload::Empty);
-            };
-            (
-                image_url,
-                util::get_proxy_policy(task.config.proxy_image_only, task.config.proxy_image),
-            )
+                .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?,
+            token: item.token,
         };
-        let session = self.http_session(policy);
-        let mut outcome = session
-            .request("GET", &image_url, None, true)
-            .await
-            .map_err(|error| AppError::Http(error.to_string()))?;
-        let has_stream = outcome.response.has_stream();
-        let view = Self::page_view(&outcome.response, false, has_stream);
-        let decision = filters
-            .download_outcome(&view)
-            .map_err(|error| AppError::Filter(error.to_string()))?;
-        if let Some(code) = decision.fail_code {
-            let failed_url = decision.url.clone().unwrap_or_else(|| image_url.clone());
-            if let Some(stream) = outcome.response.stream {
-                stream.close().await;
-            }
-            let task = self
-                .all_tasks
-                .get_mut(guid)
-                .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
-            let _ = task.put_page_queue_retry(&failed_url);
-            return Ok(ImageDownload::Failed {
-                fail_code: code,
-                real_url: decision.real_url.unwrap_or_else(|| image_url.clone()),
-                url: failed_url,
-            });
-        }
-        if decision.exception.is_some() {
-            if let Some(stream) = outcome.response.stream {
-                stream.close().await;
-            }
-            return Ok(ImageDownload::Aborted);
-        }
-        if !decision.stream {
-            if let Some(stream) = outcome.response.stream {
-                stream.close().await;
-            }
-            return Ok(ImageDownload::Aborted);
-        }
-        let stream_page = Self::page_view(&outcome.response, false, true);
-        let stream = match outcome.response.stream.take() {
-            Some(stream) => stream,
-            None => {
-                return Ok(ImageDownload::Aborted);
-            }
+        let mut runtime = DownloadRuntime {
+            speed: None,
+            low_speed_threshold: 0,
+            cancel: None,
+            stage_drain: None,
         };
-        let staged = {
-            let task = self
-                .all_tasks
-                .get_mut(guid)
-                .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
-            task.begin_staged_save(&image_url, &view.url)?
-        };
-        let staged = match staged {
-            SaveStart::AlreadyDone(path) => {
-                stream.close().await;
-                return Ok(ImageDownload::AlreadyDone(path));
-            }
-            SaveStart::Staged(staged) => staged,
-        };
-        let mut stage = DownloadStage::new(staged, stream);
-        let mut file = create_stage_file(stage.staged_ref(), stage.cancel_flag())
-            .await
-            .map_err(|error| {
-                AppError::Download(format!("{}: {error}", stage.staged_ref().stage.display()))
-            })?;
-        let mut read = 0i64;
-        #[cfg(test)]
-        let mut writes = 0usize;
-        loop {
-            if self.exit >= consts::XEH_STATE_FULL_EXIT {
-                return Ok(ImageDownload::Aborted);
-            }
-            match stage.stream_mut().next_chunk().await {
-                Ok(Some(chunk)) => {
-                    read += chunk.len() as i64;
-                    #[cfg(test)]
-                    if io_fault() == Some(IoFault::Write) && writes >= 1 {
-                        return Err(AppError::Download("injected write failure".into()));
-                    }
-                    file.write_all(&chunk).await.map_err(|error| {
-                        AppError::Download(format!(
-                            "{}: {error}",
-                            stage.staged_ref().stage.display()
-                        ))
-                    })?;
-                    #[cfg(test)]
-                    {
-                        writes += 1;
-                    }
-                }
-                Ok(None) => break,
-                Err(error) => {
-                    drop(file);
-                    let stream_view = &stream_page;
-                    let broken = filters
-                        .stream_outcome(stream_view, read, Some(&error))
-                        .map_err(|filter| AppError::Filter(filter.to_string()))?;
-                    let code = broken.code.unwrap_or(consts::ERR_IMAGE_BROKEN);
-                    let task = self
-                        .all_tasks
-                        .get_mut(guid)
-                        .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
-                    let _ = task.put_page_queue_retry(&view.url);
-                    return Ok(ImageDownload::Failed {
-                        fail_code: code,
-                        real_url: view.real_url.clone(),
-                        url: view.url.clone(),
-                    });
-                }
-            }
-        }
-        #[cfg(test)]
-        if io_fault() == Some(IoFault::Flush) {
-            return Err(AppError::Download("injected flush failure".into()));
-        }
-        file.flush().await.map_err(|error| {
-            AppError::Download(format!("{}: {error}", stage.staged_ref().stage.display()))
-        })?;
-        drop(file);
-        let stream_view = &stream_page;
-        let streamed = filters
-            .stream_outcome(stream_view, read, None)
-            .map_err(|filter| AppError::Filter(filter.to_string()))?;
-        if streamed.broken {
-            let code = streamed.code.unwrap_or(consts::ERR_IMAGE_BROKEN);
-            let task = self
-                .all_tasks
-                .get_mut(guid)
-                .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
-            let _ = task.put_page_queue_retry(&view.url);
-            return Ok(ImageDownload::Failed {
-                fail_code: code,
-                real_url: view.real_url.clone(),
-                url: view.url.clone(),
-            });
-        }
-        let task = self
-            .all_tasks
-            .get_mut(guid)
-            .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?;
-        let path = stage.commit(task)?;
-        Ok(ImageDownload::Saved(path))
+        let exit = self.exit;
+        let result = run_download(
+            &mut port,
+            &mut session,
+            filters,
+            &item.image_url,
+            &mut runtime,
+            &mut || exit >= consts::XEH_STATE_FULL_EXIT,
+        )
+        .await;
+        self.restore_http_session(session);
+        result
     }
 
     pub fn save_session(&mut self) -> (i64, Option<String>) {
@@ -1717,6 +2060,10 @@ pub(crate) fn as_range(key: &str, value: &Value) -> Result<Vec<[i64; 2]>, AppErr
             Ok([start, end])
         })
         .collect()
+}
+
+fn is_runnable_state(state: i64) -> bool {
+    consts::TASK_STATE_PAUSED < state && state < consts::TASK_STATE_FINISHED
 }
 
 fn valid_task_url(url: &str) -> bool {

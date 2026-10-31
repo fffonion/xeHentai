@@ -8,16 +8,21 @@
 #![allow(dead_code)]
 
 mod archive;
-mod file_ops;
+pub(crate) mod file_ops;
+
+pub use archive::ArchiveSnapshot;
+pub(crate) use archive::make_archive_snapshot;
 
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use indexmap::IndexMap;
 use serde::ser::{SerializeMap, Serializer};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map as JsonMap, Value};
+use tokio::sync::Notify;
 
 use crate::config::Config;
 use crate::r#const as consts;
@@ -459,7 +464,19 @@ pub struct Task {
     pub page_q: Option<VecDeque<String>>,
     flist_done: BTreeSet<i64>,
     files: Arc<TaskFiles>,
+    /// Identity of this concrete `Task` object. A deleted task recreated under
+    /// the same guid gets a new owner, so a late worker result can never land
+    /// on the replacement.
+    owner: u64,
+    /// Local run marker bumped whenever a run is started, paused, resumed or
+    /// invalidated by delete/reuse. A worker captures it with `token` and must
+    /// match it before publishing anything.
+    run_marker: u64,
+    page_notify: Notify,
+    img_notify: Notify,
 }
+
+static TASK_OWNER_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 impl Task {
     pub fn new(
@@ -485,9 +502,33 @@ impl Task {
             page_q: None,
             flist_done: BTreeSet::new(),
             files: TaskFiles::new(root),
+            owner: TASK_OWNER_COUNTER.fetch_add(1, Ordering::Relaxed),
+            run_marker: 0,
+            page_notify: Notify::new(),
+            img_notify: Notify::new(),
         };
         task.refresh_gallery_identifier();
         Ok(task)
+    }
+
+    /// `(owner, run_marker)` captured by a worker when it takes one queue item.
+    pub fn token(&self) -> (u64, u64) {
+        (self.owner, self.run_marker)
+    }
+
+    /// Invalidate every in-flight callback for this task object and return the
+    /// new token. Called on start, pause, resume, delete and same-guid reuse.
+    pub fn bump_run(&mut self) -> u64 {
+        self.run_marker = self.run_marker.wrapping_add(1);
+        self.run_marker
+    }
+
+    pub fn page_waiter(&self) -> &Notify {
+        &self.page_notify
+    }
+
+    pub fn img_waiter(&self) -> &Notify {
+        &self.img_notify
     }
 
     fn refresh_gallery_identifier(&mut self) {
@@ -774,6 +815,7 @@ impl Task {
             .as_mut()
             .ok_or(TaskError::QueueNotStarted("img"))?
             .push_back(imgurl.to_string());
+        self.img_notify.notify_one();
         Ok(())
     }
 
@@ -795,6 +837,7 @@ impl Task {
             .as_mut()
             .ok_or(TaskError::QueueNotStarted("page"))?
             .push_back(reload_url);
+        self.page_notify.notify_one();
         Ok(())
     }
 
@@ -854,8 +897,39 @@ impl Task {
                 .as_mut()
                 .ok_or(TaskError::QueueNotStarted("page"))?
                 .push_back(url.to_string());
+            self.page_notify.notify_one();
         }
         Ok(())
+    }
+
+    /// Pre-request duplicate/resume check. The reference always transfers the
+    /// body and only notices an existing destination inside `save_file`; the
+    /// M4 pipeline checks the destination first so a resumed session transfers
+    /// only the missing images. Returns the fid and path when a non-empty file
+    /// already exists.
+    pub fn existing_image(&self, imgurl: &str) -> Result<Option<(i64, PathBuf)>, TaskError> {
+        let fid = if file_ops::has_image_hash(imgurl) {
+            match self.reload_map.get(&Self::get_imghash(imgurl)?) {
+                Some((pageurl, _)) => {
+                    file_ops::gallery_fid(pageurl).ok_or(TaskError::InvalidUrl)?
+                }
+                None => return Ok(None),
+            }
+        } else {
+            match file_ops::fullimg_fid(imgurl) {
+                Some(fid) => fid,
+                None => return Ok(None),
+            }
+        };
+        let fpath = self.get_fpath()?;
+        let dest = self
+            .files
+            .child_file(&fpath, &self.get_fidpad(fid, "jpg")?)?;
+        if file_ops::path_exists(&dest)? && file_ops::file_size(&dest)? > 0 {
+            Ok(Some((fid, dest)))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn set_fid_finished(&mut self, fid: i64) {
