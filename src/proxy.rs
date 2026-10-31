@@ -609,11 +609,14 @@ fn default_port(scheme: &str) -> u16 {
     }
 }
 
-async fn tcp_connect(addr: SocketAddr, timeout: Duration) -> Result<TcpStream, ProxyError> {
-    match tokio::time::timeout(timeout, TcpStream::connect(addr)).await {
+async fn tcp_connect(
+    addr: SocketAddr,
+    deadline: tokio::time::Instant,
+) -> Result<TcpStream, ProxyError> {
+    match tokio::time::timeout_at(deadline, TcpStream::connect(addr)).await {
         Ok(Ok(stream)) => Ok(stream),
         Ok(Err(error)) => Err(ProxyError::Connect(error.to_string())),
-        Err(_) => Err(ProxyError::Connect("connect timed out".into())),
+        Err(_) => Err(ProxyError::Connect("route establishment timed out".into())),
     }
 }
 
@@ -639,12 +642,12 @@ async fn connect_target(
     host: &str,
     port: u16,
     resolver: &dyn Resolver,
-    timeout: Duration,
+    deadline: tokio::time::Instant,
     tls: &TlsClient,
     target_tls: bool,
 ) -> Result<BoxStream, ProxyError> {
     let address = first_address(resolve_host(host, port, resolver)?)?;
-    let stream = tcp_connect(address, timeout).await?;
+    let stream = tcp_connect(address, deadline).await?;
     if target_tls {
         let tls_stream = tls.connect(host, stream).await?;
         Ok(Box::new(tls_stream))
@@ -656,6 +659,13 @@ async fn connect_target(
 /// Open the socket path for one hop and tell the caller how to write the
 /// request line. `absolute_url` is only used for an HTTP proxy and a plain
 /// HTTP target, where the reference requests library sends absolute-form.
+///
+/// Every blocking step of one route attempt (DNS is synchronous, then TCP,
+/// SOCKS4/4a/5/5h, CONNECT and TLS) shares a single absolute deadline derived
+/// from the configured request timeout, so a peer that drips handshake bytes
+/// cannot extend the budget one byte at a time. The deadline does not become
+/// an `HttpError::Pool`; it is the same retryable network error as any other
+/// route failure.
 #[allow(clippy::too_many_arguments)]
 pub async fn open_route(
     spec: Option<&ProxySpec>,
@@ -667,8 +677,40 @@ pub async fn open_route(
     tls: &TlsClient,
     timeout: Duration,
 ) -> Result<(BoxStream, RequestForm), ProxyError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    match tokio::time::timeout_at(
+        deadline,
+        open_route_inner(
+            spec,
+            absolute_url,
+            host,
+            port,
+            target_tls,
+            resolver,
+            tls,
+            deadline,
+        ),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(ProxyError::Connect("route establishment timed out".into())),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn open_route_inner(
+    spec: Option<&ProxySpec>,
+    absolute_url: &str,
+    host: &str,
+    port: u16,
+    target_tls: bool,
+    resolver: &dyn Resolver,
+    tls: &TlsClient,
+    deadline: tokio::time::Instant,
+) -> Result<(BoxStream, RequestForm), ProxyError> {
     let Some(spec) = spec else {
-        let stream = connect_target(host, port, resolver, timeout, tls, target_tls).await?;
+        let stream = connect_target(host, port, resolver, deadline, tls, target_tls).await?;
         return Ok((stream, RequestForm::Origin));
     };
     match &spec.kind {
@@ -680,7 +722,7 @@ pub async fn open_route(
                 .ok_or_else(|| ProxyError::Address(spec.addr.clone()))?;
             let proxy_port = proxy_url.port_or_known_default().unwrap_or(80);
             let address = first_address(resolve_host(proxy_host, proxy_port, resolver)?)?;
-            let stream = tcp_connect(address, timeout).await?;
+            let stream = tcp_connect(address, deadline).await?;
             let mut stream: BoxStream = if *proxy_tls {
                 Box::new(tls.connect(proxy_host, stream).await?)
             } else {
@@ -718,11 +760,11 @@ pub async fn open_route(
                 .ok_or_else(|| ProxyError::Address(spec.addr.clone()))?;
             let proxy_port = proxy_url.port_or_known_default().unwrap_or(1080);
             let address = first_address(resolve_host(proxy_host, proxy_port, resolver)?)?;
-            let mut stream = tcp_connect(address, timeout).await?;
+            let mut stream = tcp_connect(address, deadline).await?;
             if *version == 4 {
-                socks4_handshake(&mut stream, host, port, *remote_dns, resolver, timeout).await?;
+                socks4_handshake(&mut stream, host, port, *remote_dns, resolver).await?;
             } else {
-                socks5_handshake(&mut stream, host, port, *remote_dns, resolver, timeout).await?;
+                socks5_handshake(&mut stream, host, port, *remote_dns, resolver).await?;
             }
             if target_tls {
                 let tls_stream = tls.connect(host, stream).await?;
@@ -781,7 +823,6 @@ async fn socks4_handshake(
     port: u16,
     remote_dns: bool,
     resolver: &dyn Resolver,
-    _timeout: Duration,
 ) -> Result<(), ProxyError> {
     let mut request = vec![4u8, 1, (port >> 8) as u8, port as u8];
     if remote_dns {
@@ -825,7 +866,6 @@ async fn socks5_handshake(
     port: u16,
     remote_dns: bool,
     resolver: &dyn Resolver,
-    _timeout: Duration,
 ) -> Result<(), ProxyError> {
     stream
         .write_all(&[5, 1, 0])

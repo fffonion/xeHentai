@@ -4857,6 +4857,312 @@ mod m3_transport {
     }
 
     #[tokio::test]
+    async fn route_establishment_deadline_bounds_socks_handshakes() {
+        for scheme in ["socks4", "socks4a", "socks5", "socks5h"] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut greeting = [0u8; 32];
+                let _ = socket.read(&mut greeting).await;
+                let mut hold = [0u8; 1];
+                let _ = socket.read(&mut hold).await;
+            });
+            let mut pool = Pool::new();
+            pool.add_proxy(&format!("{scheme}://127.0.0.1:{port}"))
+                .unwrap();
+            let resolver = Arc::new(MapResolver::new(vec![(
+                "gallery.test".into(),
+                vec![SocketAddr::new("127.0.0.1".parse().unwrap(), 80)],
+            )]));
+            let mut client = session(
+                Some(Arc::new(Mutex::new(pool))),
+                resolver,
+                FallbackMap::empty(),
+                TlsClient::production(),
+                ProxyPolicy::All,
+            );
+            client.config.timeout = Duration::from_millis(200);
+            let started = std::time::Instant::now();
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(3),
+                client.request("GET", "http://gallery.test/page", None, false),
+            )
+            .await;
+            let elapsed = started.elapsed();
+            // A retryable timeout after the configured retry budget ends in
+            // the reference 600 boundary, not an exception; the attempt record
+            // must still carry the bounded route error rather than success.
+            match outcome {
+                Ok(Err(error)) => assert!(
+                    error.to_string().contains("route establishment timed out"),
+                    "{scheme}: unexpected error {error}"
+                ),
+                Ok(Ok(outcome)) => {
+                    assert_eq!(outcome.response.status, 600, "{scheme}: unexpected success");
+                    let error = outcome.attempts[0].error.as_deref().unwrap_or("");
+                    assert!(
+                        error.contains("route establishment timed out"),
+                        "{scheme}: unexpected attempt error {error}"
+                    );
+                }
+                Err(_) => panic!("{scheme}: route establishment was not bounded"),
+            }
+            assert!(
+                elapsed < Duration::from_secs(2),
+                "{scheme}: bounded deadline took {elapsed:?}"
+            );
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn route_establishment_deadline_bounds_connect_drip() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_headers(&mut socket).await;
+            assert!(String::from_utf8_lossy(&request).starts_with("CONNECT "));
+            for byte in b"HTTP/1.1 200 Connection established\r\n\r\n" {
+                if socket.write_all(&[*byte]).await.is_err() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            let mut hold = [0u8; 1];
+            let _ = socket.read(&mut hold).await;
+        });
+        let mut pool = Pool::new();
+        pool.add_proxy(&format!("http://127.0.0.1:{port}")).unwrap();
+        let mut client = session(
+            Some(Arc::new(Mutex::new(pool))),
+            Arc::new(MapResolver::default()),
+            FallbackMap::empty(),
+            TlsClient::production(),
+            ProxyPolicy::All,
+        );
+        client.config.timeout = Duration::from_millis(200);
+        let started = std::time::Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(3),
+            client.request("GET", "https://gallery.test/page", None, false),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        match outcome {
+            Ok(Err(error)) => assert!(
+                error.to_string().contains("route establishment timed out"),
+                "unexpected error {error}"
+            ),
+            Ok(Ok(outcome)) => {
+                assert_eq!(outcome.response.status, 600, "unexpected success");
+                let error = outcome.attempts[0].error.as_deref().unwrap_or("");
+                assert!(
+                    error.contains("route establishment timed out"),
+                    "unexpected attempt error {error}"
+                );
+            }
+            Err(_) => panic!("CONNECT establishment was not bounded"),
+        }
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "CONNECT deadline took {elapsed:?}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn route_establishment_deadline_bounds_tls_handshakes() {
+        // A target TLS handshake that never answers, then an outer proxy TLS
+        // handshake that never answers. Both must fit one route deadline.
+        for proxy_tls in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                // Hold the accepted TCP connection without ever answering the
+                // TLS ClientHello, then let the task end when the test aborts.
+                tokio::time::sleep(Duration::from_secs(4)).await;
+                drop(socket);
+            });
+            let resolver = Arc::new(MapResolver::new(vec![(
+                "proxy.test".into(),
+                vec![SocketAddr::new("127.0.0.1".parse().unwrap(), port)],
+            )]));
+            let (proxy, target) = if proxy_tls {
+                let mut pool = Pool::new();
+                pool.add_proxy(&format!("https://proxy.test:{port}"))
+                    .unwrap();
+                (
+                    Some(Arc::new(Mutex::new(pool))),
+                    "https://gallery.test/page".to_string(),
+                )
+            } else {
+                (None, format!("https://gallery.test:{port}/page"))
+            };
+            let mut client = session(
+                proxy,
+                Arc::clone(&resolver),
+                FallbackMap::empty(),
+                TlsClient::production(),
+                ProxyPolicy::All,
+            );
+            if !proxy_tls {
+                client.config.resolver = Arc::new(MapResolver::new(vec![(
+                    "gallery.test".into(),
+                    vec![SocketAddr::new("127.0.0.1".parse().unwrap(), port)],
+                )]));
+            }
+            client.config.timeout = Duration::from_millis(200);
+            let started = std::time::Instant::now();
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(3),
+                client.request("GET", &target, None, false),
+            )
+            .await;
+            let elapsed = started.elapsed();
+            match outcome {
+                Ok(Err(error)) => assert!(
+                    error.to_string().contains("route establishment timed out"),
+                    "proxy_tls={proxy_tls}: unexpected error {error}"
+                ),
+                Ok(Ok(outcome)) => {
+                    assert_eq!(
+                        outcome.response.status, 600,
+                        "proxy_tls={proxy_tls}: unexpected success"
+                    );
+                    let error = outcome.attempts[0].error.as_deref().unwrap_or("");
+                    assert!(
+                        error.contains("route establishment timed out"),
+                        "proxy_tls={proxy_tls}: unexpected attempt error {error}"
+                    );
+                }
+                Err(_) => panic!("proxy_tls={proxy_tls}: TLS route establishment was not bounded"),
+            }
+            assert!(
+                elapsed < Duration::from_secs(2),
+                "proxy_tls={proxy_tls}: TLS deadline took {elapsed:?}"
+            );
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn route_timeout_is_retryable_and_scores_the_proxy_pool() {
+        let stalled = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stalled_port = stalled.local_addr().unwrap().port();
+        let stalled_task = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = stalled.accept().await {
+                held.push(socket);
+            }
+        });
+        let working = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let working_port = working.local_addr().unwrap().port();
+        let working_task = tokio::spawn(async move {
+            let (mut socket, _) = working.accept().await.unwrap();
+            read_headers(&mut socket).await;
+            respond_http(&mut socket, "after-timeout", "200 OK").await;
+        });
+        let mut pool = Pool::new();
+        let first = format!("socks5://127.0.0.1:{stalled_port}");
+        let second = format!("http://127.0.0.1:{working_port}");
+        pool.add_proxy(&first).unwrap();
+        pool.add_proxy(&second).unwrap();
+        let pool = Arc::new(Mutex::new(pool));
+        let resolver = Arc::new(MapResolver::new(vec![(
+            "gallery.test".into(),
+            vec![SocketAddr::new("127.0.0.1".parse().unwrap(), 80)],
+        )]));
+        let mut client = session(
+            Some(Arc::clone(&pool)),
+            resolver,
+            FallbackMap::empty(),
+            TlsClient::production(),
+            ProxyPolicy::All,
+        );
+        client.config.timeout = Duration::from_millis(150);
+        client.config.retry = 6;
+        let started = std::time::Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(4),
+            client.request("GET", "http://gallery.test/after", None, false),
+        )
+        .await
+        .expect("retry loop was not bounded")
+        .expect("the second proxy must serve after the first times out");
+        assert_eq!(outcome.response.text, "after-timeout");
+        assert_eq!(outcome.attempts.len(), 6);
+        assert!(
+            outcome.attempts[..5]
+                .iter()
+                .all(|attempt| attempt.proxy.as_deref() == Some(first.as_str())),
+            "{:?}",
+            outcome.attempts
+        );
+        assert_eq!(pool.lock().unwrap().counts(&first), Some((0, 5)));
+        assert_eq!(pool.lock().unwrap().counts(&second), Some((1, 0)));
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "five bounded attempts plus one success took {:?}",
+            started.elapsed()
+        );
+        stalled_task.abort();
+        working_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_route_attempt_closes_peer_and_next_request_works() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel::<()>();
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel::<bool>();
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            assert!(String::from_utf8_lossy(&read_headers(&mut first).await).starts_with("GET "));
+            let _ = seen_tx.send(());
+            let mut buffer = [0u8; 16];
+            let closed = matches!(
+                tokio::time::timeout(Duration::from_secs(1), first.read(&mut buffer)).await,
+                Ok(Ok(0))
+            );
+            let _ = closed_tx.send(closed);
+            let (mut second, _) = listener.accept().await.unwrap();
+            read_headers(&mut second).await;
+            respond_http(&mut second, "fresh", "200 OK").await;
+        });
+        let mut pool = Pool::new();
+        pool.add_proxy(&format!("http://127.0.0.1:{port}")).unwrap();
+        let mut client = session(
+            Some(Arc::new(Mutex::new(pool))),
+            Arc::new(MapResolver::default()),
+            FallbackMap::empty(),
+            TlsClient::production(),
+            ProxyPolicy::All,
+        );
+        client.config.timeout = Duration::from_secs(5);
+        let mut request =
+            Box::pin(client.request("GET", "http://gallery.test/cancel", None, false));
+        tokio::select! {
+            _ = &mut request => panic!("the stalled proxy must not answer"),
+            _ = seen_rx => {}
+        }
+        drop(request);
+        let closed = tokio::time::timeout(Duration::from_secs(2), closed_rx)
+            .await
+            .expect("peer closure observation timed out")
+            .expect("closure notify");
+        assert!(closed, "dropping the request must close the proxy peer");
+        let outcome = client
+            .request("GET", "http://gallery.test/next", None, false)
+            .await
+            .expect("next request on the same session");
+        assert_eq!(outcome.response.text, "fresh");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn proxy_ban_disables_the_first_proxy_and_reselects() {
         let first = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let first_port = first.local_addr().unwrap().port();

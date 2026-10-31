@@ -966,14 +966,25 @@ impl Session {
                 .parse()
                 .map_err(|error| HttpError::Dns(format!("{ip}: {error}")))?;
             let socket = SocketAddr::new(address, fallback_port);
-            let stream = connect_socket(socket, self.config.timeout).await?;
-            let tls = self
-                .config
-                .tls
-                .connect(&host, stream)
-                .await
-                .map_err(|error| HttpError::Tls(error.to_string()))?;
-            (Box::new(tls) as BoxStream, RequestForm::Origin)
+            // DNS is skipped for a pinned fallback IP, but TCP + TLS still
+            // share the one configured route deadline.
+            match tokio::time::timeout(self.config.timeout, async {
+                let stream = connect_socket(socket, self.config.timeout).await?;
+                let tls = self
+                    .config
+                    .tls
+                    .connect(&host, stream)
+                    .await
+                    .map_err(|error| HttpError::Tls(error.to_string()))?;
+                Ok::<BoxStream, HttpError>(Box::new(tls))
+            })
+            .await
+            {
+                Ok(result) => (result?, RequestForm::Origin),
+                Err(_) => {
+                    return Err(HttpError::Connect("route establishment timed out".into()));
+                }
+            }
         } else if let Some(spec) = selected {
             let absolute = proxy::absolute_url(&scheme, &host, port, &path);
             proxy::open_route(
