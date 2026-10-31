@@ -222,6 +222,8 @@ pub fn execute(
     let mut history: [string] = [url.copy()];
     let mut stop = false;
     let mut tried = 0;
+    let mut retry_cookie: string = "";
+    let mut retry_cookie_ready = false;
     let mut result = failed(pool_state.copy(), "", "", url.copy());
     let session_headers = header_maps(header_names.copy(), header_values.copy());
     while stop == false {
@@ -244,6 +246,14 @@ pub fn execute(
                 url.copy(),
                 history[0].copy(),
                 ""
+            );
+            stop = true;
+        } else if tried == 2 {
+            result = failed(
+                pool_state.copy(),
+                "PoolException",
+                "can't bypass glype https warning",
+                url.copy()
             );
             stop = true;
         } else {
@@ -305,7 +315,16 @@ pub fn execute(
                                 prepare_error = prepared["error"].copy();
                                 prepare_detail = prepared["detail"].copy();
                             } else {
-                                let split = split_headers(prepared["headers"].copy());
+                                let mut prepared_headers: [map] = prepared["headers"].copy();
+                                if retry_cookie_ready {
+                                    prepared_headers = glype::header_set(
+                                        prepared_headers.copy(),
+                                        "Cookie",
+                                        retry_cookie.copy()
+                                    );
+                                    retry_cookie_ready = false;
+                                }
+                                let split = split_headers(prepared_headers.copy());
                                 let split_names: [string] = split["names"].copy();
                                 let split_values: [string] = split["values"].copy();
                                 names = split_names;
@@ -454,6 +473,10 @@ pub fn execute(
                                         let cookie_state: map = prepared["cookie_state"].copy();
                                         let applied = glype::apply_sslagree_cookie(cookie_state, set_cookie.copy());
                                         let updated_s: string = applied["glyph_s"].copy();
+                                        if header_present(agree_names.copy(), "Set-Cookie") {
+                                            retry_cookie = applied["cookie"].copy();
+                                            retry_cookie_ready = true;
+                                        }
                                         let published = pool::glyph_publish(
                                             pool_state.copy(),
                                             address.copy(),

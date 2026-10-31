@@ -271,7 +271,10 @@ def parse_responses(case):
     output = []
     for item in case["glype"]["responses"]:
         headers = [(name, value) for name, value in item.get("headers", [])]
-        if "body_text" in item:
+        if "body_repeat" in item:
+            repeat = item["body_repeat"]
+            body = bytes([repeat["byte"]]) * repeat["length"]
+        elif "body_text" in item:
             body = item["body_text"].encode("utf-8")
         else:
             body = bytes.fromhex(item["body_hex"])

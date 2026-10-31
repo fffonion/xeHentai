@@ -162,6 +162,41 @@ pub struct ProxyServices {
     pub grants: Vec<ProxyGrant>,
 }
 
+impl ProxyServices {
+    /// Loopback fixture connector. Logical fixture hosts are admitted so Glype
+    /// can rewrite them; the policy is fixed here and a dispatch request cannot
+    /// widen it.
+    pub fn loopback(root: impl Into<PathBuf>, port: u16, logical_hosts: &[String]) -> Self {
+        let mut allowed_hosts = vec!["127.0.0.1".to_string()];
+        for host in logical_hosts {
+            if !allowed_hosts
+                .iter()
+                .any(|item| item.eq_ignore_ascii_case(host))
+            {
+                allowed_hosts.push(host.clone());
+            }
+        }
+        let mut allowed_ports = vec![port, 80];
+        allowed_ports.sort_unstable();
+        allowed_ports.dedup();
+        Self {
+            root: root.into(),
+            http: vm::HttpConfig {
+                allowed_schemes: vec!["http".to_string()],
+                allowed_hosts,
+                allowed_ports,
+                allow_private_ips: true,
+                connect_timeout: std::time::Duration::from_secs(5),
+                request_timeout: std::time::Duration::from_secs(60),
+                stream_idle_timeout: std::time::Duration::from_secs(30),
+                max_stream_duration: std::time::Duration::from_secs(60),
+                ..vm::HttpConfig::default()
+            },
+            grants: Vec::new(),
+        }
+    }
+}
+
 /// Cloneable cancel handle for the owner's in-flight proxy exchange.
 #[derive(Clone)]
 pub struct ProxyCancel(Arc<crate::proxy_exchange::LiveGeneration>);

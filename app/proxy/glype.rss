@@ -196,7 +196,7 @@ fn header_value(headers: [map], name: string) -> string? {
     found
 }
 
-fn header_set(headers: [map], name: string, value: string) -> [map] {
+pub fn header_set(headers: [map], name: string, value: string) -> [map] {
     let mut output: [map] = [];
     let wanted = string_lower_ascii(name.copy());
     let mut replaced = false;
@@ -598,7 +598,7 @@ fn fetch_request(url: string, headers: [map], follow: bool) -> map {
     let text_error: string = response.text_error;
     let mut reported_error: string = error_kind.copy();
     let mut reported_detail: string = error_detail.copy();
-    if refused && reported_error == "" && text_error != "text_budget" {
+    if refused && reported_error == "" {
         reported_error = "inline_refused";
         reported_detail = refused_error.copy();
     }

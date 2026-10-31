@@ -497,6 +497,36 @@
         "/exception": "PoolException",
         "/detail": "glype returns: <div id=\"error\">upstream</div>"
       }
+    },
+    {
+      "id": "proxy.glype.large-stage",
+      "suite": "proxy",
+      "kind": "glype",
+      "request": {
+        "operation": "glype",
+        "session_headers": [{"name": "User-Agent", "value": "xeh-fixture/1"}, {"name": "Accept-Encoding", "value": "identity"}],
+        "targets": ["http://synthetic.invalid/large.bin"]
+      },
+      "glype": {
+        "path": "/browse.php?u=x&b=4",
+        "session_headers": [{"name": "User-Agent", "value": "xeh-fixture/1"}, {"name": "Accept-Encoding", "value": "identity"}],
+        "targets": ["http://synthetic.invalid/large.bin"],
+        "responses": [
+          {
+            "status": 200,
+            "headers": [["Content-Type", "image/jpeg"]],
+            "body_repeat": {"byte": 165, "length": 65537}
+          }
+        ]
+      },
+      "assertions": {
+        "/ok": true,
+        "/flows/0/ok": true,
+        "/flows/0/status": 200,
+        "/flows/0/content": "",
+        "/flows/0/content_type": "image/jpeg",
+        "/flows/0/url": "http://synthetic.invalid/large.bin"
+      }
     }
   ]
 }

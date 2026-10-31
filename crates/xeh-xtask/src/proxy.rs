@@ -139,23 +139,36 @@ fn parse_responses(case: &Value) -> Result<Vec<ScriptResponse>, String> {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let body = match response.get("body_text").and_then(Value::as_str) {
-            Some(text) => text.as_bytes().to_vec(),
-            None => {
-                let hex = response
-                    .get("body_hex")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| "glype response body is missing".to_string())?;
-                let mut bytes = Vec::new();
-                let mut index = 0usize;
-                while index + 1 < hex.len() {
-                    let byte = u8::from_str_radix(&hex[index..index + 2], 16)
-                        .map_err(|_| "glype response hex is invalid".to_string())?;
-                    bytes.push(byte);
-                    index += 2;
-                }
-                bytes
+        let body = if let Some(repeat) = response.get("body_repeat").and_then(Value::as_object) {
+            let byte = repeat
+                .get("byte")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| "body_repeat.byte must be an integer".to_string())?
+                as u8;
+            let length = usize::try_from(
+                repeat
+                    .get("length")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| "body_repeat.length must be an integer".to_string())?,
+            )
+            .map_err(|_| "body_repeat.length does not fit".to_string())?;
+            vec![byte; length]
+        } else if let Some(text) = response.get("body_text").and_then(Value::as_str) {
+            text.as_bytes().to_vec()
+        } else {
+            let hex = response
+                .get("body_hex")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "glype response body is missing".to_string())?;
+            let mut bytes = Vec::new();
+            let mut index = 0usize;
+            while index + 1 < hex.len() {
+                let byte = u8::from_str_radix(&hex[index..index + 2], 16)
+                    .map_err(|_| "glype response hex is invalid".to_string())?;
+                bytes.push(byte);
+                index += 2;
             }
+            bytes
         };
         output.push(ScriptResponse {
             status,
@@ -164,6 +177,48 @@ fn parse_responses(case: &Value) -> Result<Vec<ScriptResponse>, String> {
         });
     }
     Ok(output)
+}
+
+const INLINE_LIMIT: usize = 64 * 1024;
+
+fn large_scripted_bodies(case: &Value) -> Result<Vec<Vec<u8>>, String> {
+    if case.get("kind").and_then(Value::as_str) != Some("glype") {
+        return Ok(Vec::new());
+    }
+    Ok(parse_responses(case)?
+        .into_iter()
+        .filter(|response| response.body.len() > INLINE_LIMIT)
+        .map(|response| response.body)
+        .collect())
+}
+
+/// The staged file must equal the scripted Glype body. A missing file means
+/// the differential path still used the scenario entry instead of proxy_request.
+fn compare_large_stage(
+    case: &Value,
+    root: &Path,
+    failures: &mut Vec<String>,
+) -> Result<(), String> {
+    let id = case
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("<missing id>");
+    for (index, expected) in large_scripted_bodies(case)?.into_iter().enumerate() {
+        let path = root.join(format!("glype-staged-{index}.bin"));
+        match fs::read(&path) {
+            Err(error) => failures.push(format!(
+                "{id}: glype response larger than 64KiB was not staged at {}: {error}",
+                path.display()
+            )),
+            Ok(got) if got != expected => failures.push(format!(
+                "{id}: staged glype bytes differ from the scripted response {index}: staged {} bytes, scripted {} bytes",
+                got.len(),
+                expected.len()
+            )),
+            Ok(_) => {}
+        }
+    }
+    Ok(())
 }
 
 fn read_header_block(stream: &mut TcpStream) -> Vec<u8> {
@@ -509,35 +564,234 @@ fn rss_observable(case: &Value, report: &Value, seen: Value) -> Result<Value, St
 
 // ---- RSS drivers ----------------------------------------------------------
 
+fn session_headers(case: &Value) -> Result<(Vec<String>, Vec<String>), String> {
+    let headers = case
+        .get("glype")
+        .and_then(|value| value.get("session_headers"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "glype session headers are missing".to_string())?;
+    let mut names = Vec::new();
+    let mut values = Vec::new();
+    for item in headers {
+        names.push(
+            item.get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        );
+        values.push(
+            item.get("value")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        );
+    }
+    Ok((names, values))
+}
+
+fn logical_hosts(targets: &[String]) -> Vec<String> {
+    let mut hosts = Vec::new();
+    for target in targets {
+        let rest = target
+            .strip_prefix("http://")
+            .or_else(|| target.strip_prefix("https://"))
+            .unwrap_or(target);
+        let host = rest.split(['/', '?', ':']).next().unwrap_or("");
+        if !host.is_empty()
+            && !hosts
+                .iter()
+                .any(|item: &String| item.eq_ignore_ascii_case(host))
+        {
+            hosts.push(host.to_string());
+        }
+    }
+    hosts
+}
+
+fn glype_targets(case: &Value) -> Result<Vec<String>, String> {
+    let targets = case
+        .get("glype")
+        .and_then(|value| value.get("targets"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "glype targets are missing".to_string())?;
+    targets
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| "glype target must be a string".to_string())
+        })
+        .collect()
+}
+
+fn invoke_owner(control: &mut xeh_host::TaskControl, request: &Value) -> Result<Value, String> {
+    let text = serde_json::to_string(request)
+        .map_err(|error| format!("cannot encode retained proxy request: {error}"))?;
+    let raw = control
+        .invoke(&text)
+        .map_err(|error| format!("retained proxy invoke failed: {error}"))?;
+    serde_json::from_str(&raw)
+        .map_err(|error| format!("retained proxy report is not JSON: {error}\n{raw}"))
+}
+
+fn retained_value(report: &Value) -> Result<Value, String> {
+    match report.get("value").and_then(Value::as_str) {
+        Some(text) if !text.is_empty() => serde_json::from_str(text)
+            .map_err(|error| format!("retained proxy value is not JSON: {error}")),
+        _ => Ok(Value::Null),
+    }
+}
+
+fn bytes_json(bytes: &[u8]) -> Value {
+    Value::Array(bytes.iter().copied().map(|byte| json!(byte)).collect())
+}
+
+/// One TaskControl drives every Glype target. Large bodies are the files
+/// `proxy_request` staged, compared later with the scripted response.
+fn run_glype_retained(
+    case: &Value,
+    output: &Path,
+) -> Result<(Value, Value, Option<PathBuf>), String> {
+    let responses = parse_responses(case)?;
+    let server = start_server(responses)?;
+    let (request, _path) = glype_request(case, &server.address)?;
+    let address = request
+        .get("address")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "glype address is missing".to_string())?
+        .to_string();
+    let port: u16 = server
+        .address
+        .rsplit(':')
+        .next()
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| "scripted server address has no port".to_string())?;
+    let (names, values) = session_headers(case)?;
+    let targets = glype_targets(case)?;
+    let logical_hosts = logical_hosts(&targets);
+    let mut control = xeh_host::TaskControl::open_with_proxy(
+        &xeh_host::ControlOptions::fixture(&[], 0),
+        None,
+        xeh_host::ProxyServices::loopback(output, port, &logical_hosts),
+    )
+    .map_err(|error| format!("cannot open retained proxy owner: {error}"))?;
+    let added = invoke_owner(
+        &mut control,
+        &json!({"op": "proxy_add", "address": address}),
+    )?;
+    if added.get("ok") != Some(&Value::Bool(true)) {
+        server.stop();
+        return Err(format!("proxy_add failed: {added}"));
+    }
+    let mut flows = Vec::new();
+    let mut glyph_s = String::new();
+    let mut large_index = 0usize;
+    let mut stopped = false;
+    for (index, target) in targets.iter().enumerate() {
+        if stopped {
+            break;
+        }
+        let stage = format!("flow-{index}.bin");
+        let report = invoke_owner(
+            &mut control,
+            &json!({
+                "op": "proxy_request",
+                "url": target,
+                "method": "GET",
+                "stage": stage,
+                "header_names": names,
+                "header_values": values,
+                "proxy_image": true,
+                "explicit_allow_redirects": false,
+                "now": 10.0 + (index as f64) * 10.0
+            }),
+        )?;
+        let value = retained_value(&report)?;
+        if let Some(text) = value.get("glyph_s").and_then(Value::as_str) {
+            if !text.is_empty() {
+                glyph_s = text.to_string();
+            }
+        }
+        if value.get("ok") == Some(&Value::Bool(true)) {
+            let content_type = value
+                .get("content_type")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let staged_path = output.join(&stage);
+            let staged = fs::read(&staged_path).map_err(|error| {
+                format!(
+                    "proxy_request did not stage {target} at {}: {error}",
+                    staged_path.display()
+                )
+            })?;
+            if staged.len() > INLINE_LIMIT {
+                let dest = output.join(format!("glype-staged-{large_index}.bin"));
+                fs::write(&dest, &staged).map_err(|error| {
+                    format!(
+                        "cannot retain staged glype body {}: {error}",
+                        dest.display()
+                    )
+                })?;
+                large_index += 1;
+            }
+            let content_bytes = if content_type.starts_with("text") {
+                json!([])
+            } else {
+                bytes_json(&staged)
+            };
+            flows.push(json!({
+                "ok": true,
+                "exception": "",
+                "detail": "",
+                "url": target,
+                "status": value.get("status").cloned().unwrap_or(Value::Null),
+                "content_type": content_type,
+                "content": value.get("content").cloned().unwrap_or(json!("")),
+                "content_bytes": content_bytes,
+                "set_cookie": value.get("set_cookie").cloned().unwrap_or(json!("")),
+            }));
+        } else {
+            flows.push(json!({
+                "ok": false,
+                "exception": value.get("error").and_then(Value::as_str).unwrap_or(""),
+                "detail": value.get("detail").and_then(Value::as_str).unwrap_or(""),
+            }));
+            stopped = true;
+        }
+    }
+    let seen = normalize_seen(&server.seen(), &server.address);
+    server.stop();
+    let failed = flows
+        .iter()
+        .rev()
+        .find(|flow| flow.get("ok") != Some(&Value::Bool(true)));
+    let report = if let Some(flow) = failed {
+        json!({
+            "ok": false,
+            "exception": flow.get("exception").cloned().unwrap_or(json!("")),
+            "detail": flow.get("detail").cloned().unwrap_or(json!("")),
+            "flows": flows,
+            "glyph_s": glyph_s,
+        })
+    } else {
+        json!({
+            "ok": true,
+            "exception": "",
+            "detail": "",
+            "flows": flows,
+            "glyph_s": glyph_s,
+        })
+    };
+    let mut observed = report;
+    observed["seen"] = seen.clone();
+    Ok((observed, seen, None))
+}
+
 fn run_rss(case: &Value, output: &Path) -> Result<(Value, Value, Option<PathBuf>), String> {
     let kind = case.get("kind").and_then(Value::as_str).unwrap_or("");
     if kind == "glype" {
-        let responses = parse_responses(case)?;
-        let server = start_server(responses)?;
-        let (mut request, _path) = glype_request(case, &server.address)?;
-        if let Some(object) = request.as_object_mut() {
-            object.remove("authorization");
-        }
-        let request_text = serde_json::to_string(&request)
-            .map_err(|error| format!("cannot encode glype request: {error}"))?;
-        let port: u16 = server
-            .address
-            .rsplit(':')
-            .next()
-            .and_then(|value| value.parse().ok())
-            .ok_or_else(|| "scripted server address has no port".to_string())?;
-        let authorization = format!(
-            "{{\"allowed_schemes\":[\"http\"],\"allowed_hosts\":[\"127.0.0.1\"],\"allowed_ports\":[{port}],\"allow_private_ips\":true}}"
-        );
-        let raw = xeh_host::run_proxy_scenario(output, &request_text, &authorization)
-            .map_err(|error| format!("RSS glype execution failed: {error}"))?;
-        let seen = normalize_seen(&server.seen(), &server.address);
-        server.stop();
-        let report: Value = serde_json::from_str(&raw)
-            .map_err(|error| format!("RSS glype report is not JSON: {error}\n{raw}"))?;
-        let mut observed = report.clone();
-        observed["seen"] = seen.clone();
-        Ok((observed, seen, None))
+        run_glype_retained(case, output)
     } else {
         let request = case
             .get("request")
@@ -587,6 +841,7 @@ pub fn run_proxy_suite() -> Result<(), String> {
         let (observed, _seen, _) =
             run_rss(case, &case_root).map_err(|error| format!("{id}: {error}"))?;
         assert_case(case, &observed, &mut failures);
+        compare_large_stage(case, &case_root, &mut failures)?;
         fs::write(
             case_root.join("rss-observed.json"),
             serde_json::to_vec_pretty(&observed).map_err(|error| error.to_string())?,
@@ -848,7 +1103,9 @@ pub fn run_proxy_diff() -> Result<(), String> {
         for failure in &case_failures {
             failures.push(format!("{id}{failure}"));
         }
-        if case_failures.is_empty() {
+        let stage_before = failures.len();
+        compare_large_stage(case, &case_root, &mut failures)?;
+        if case_failures.is_empty() && failures.len() == stage_before {
             passed += 1;
         }
         expected.insert(id.to_string(), expected_observable);
