@@ -1,4 +1,9 @@
 use serde_json::{json, Value};
+use std::path::PathBuf;
+use std::time::Duration;
+
+use vm::HttpConfig;
+use xeh_host::{ControlOptions, ProxyServices, TaskControl};
 
 const AUTH: &str = "{\"allowed_schemes\":[\"http\"],\"allowed_hosts\":[\"127.0.0.1\"],\"allowed_ports\":[9],\"allow_private_ips\":true}";
 
@@ -59,16 +64,91 @@ fn policy_matches_source_predicates() {
     assert_eq!(rows[2]["image_only"], json!(true));
 }
 
+fn lease_root(name: &str) -> PathBuf {
+    let base = std::env::var("XEH_LEASE_TMP").expect("XEH_LEASE_TMP");
+    let root = PathBuf::from(base).join(name);
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("fixture root");
+    root
+}
+
+fn http_config(port: u16) -> HttpConfig {
+    HttpConfig {
+        allowed_schemes: vec!["http".to_string()],
+        allowed_hosts: vec!["127.0.0.1".to_string()],
+        allowed_ports: vec![port],
+        allow_private_ips: true,
+        connect_timeout: Duration::from_secs(5),
+        request_timeout: Duration::from_secs(60),
+        stream_idle_timeout: Duration::from_secs(30),
+        max_stream_duration: Duration::from_secs(60),
+        ..HttpConfig::default()
+    }
+}
+
+fn invoke_owner(control: &mut TaskControl, request: Value) -> Value {
+    let raw = control
+        .invoke(&serde_json::to_string(&request).expect("request"))
+        .expect("invoke");
+    serde_json::from_str(&raw).expect("report")
+}
+
+fn value_of(report: &Value) -> Value {
+    serde_json::from_str(report["value"].as_str().expect("value")).expect("value json")
+}
+
+fn retained_owner(name: &str, port: u16) -> TaskControl {
+    let root = lease_root(name);
+    TaskControl::open_with_proxy(
+        &ControlOptions::fixture(&[], 0),
+        None,
+        ProxyServices {
+            root,
+            http: http_config(port),
+            grants: Vec::new(),
+        },
+    )
+    .expect("owner")
+}
+
 #[test]
 fn glyph_mkurl_and_cookie_flow_compiles_and_runs() {
-    let report = run(json!({
-        "operation": "glype",
-        "address": "http://127.0.0.1:9/browse.php?u=x&b=4",
-        "session_headers": [{"name": "User-Agent", "value": "xeh-fixture/1"}],
-        "targets": []
-    }));
-    println!("{}", serde_json::to_string_pretty(&report).expect("pretty"));
-    assert_eq!(report["operation"], json!("glype"));
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let record = seen.clone();
+    let server = serve(move |request| {
+        *record.lock().expect("seen") = request;
+        http(200, "Content-Type: text/html\r\n", "ok")
+    });
+    let mut owner = retained_owner("proxy-rss-glype-mkurl", server.port);
+    let address = format!("http://127.0.0.1:{}/browse.php?u=x&b=4", server.port);
+    let target = format!("http://127.0.0.1:{}/page", server.port);
+    assert_eq!(
+        invoke_owner(&mut owner, json!({"op": "proxy_add", "address": address}))["ok"],
+        json!(true)
+    );
+    let report = invoke_owner(
+        &mut owner,
+        json!({
+            "op": "proxy_request",
+            "url": target,
+            "method": "GET",
+            "header_names": ["Cookie", "User-Agent"],
+            "header_values": ["nw=1", "xeh-fixture/1"],
+            "proxy_image": true,
+            "explicit_allow_redirects": false,
+            "now": 10.0
+        }),
+    );
+    let value = value_of(&report);
+    assert_eq!(report["ok"], json!(true), "{report}");
+    assert_eq!(value["status"], json!(200), "{value}");
+    assert_eq!(value["error"], json!(""), "{value}");
+    let wire = seen.lock().expect("seen").clone();
+    assert!(wire.contains("browse.php"), "{wire}");
+    assert!(
+        wire.contains(&format!("c[127.0.0.1:{}][/][nw]=1", server.port)),
+        "{wire}"
+    );
 }
 
 fn run_port(request: Value, port: u16) -> Value {
@@ -176,17 +256,40 @@ fn glype_session_survives_a_second_owner_and_stale_publish_misses() {
 #[test]
 fn glype_raw_403_is_status_not_connection_error() {
     for status in [403u16, 429, 500] {
-        let server = serve(move |_| http(status, "Content-Type: text/html\r\n", "denied"));
-        let report = run_port(
-            json!({
-                "operation": "glype",
-                "address": format!("http://127.0.0.1:{}/browse.php?u=x&b=4", server.port),
-                "targets": [format!("http://127.0.0.1:{}/page", server.port)]
-            }),
-            server.port,
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let record = seen.clone();
+        let server = serve(move |request| {
+            *record.lock().expect("seen") = request;
+            http(status, "Content-Type: text/html\r\n", "denied")
+        });
+        let mut owner = retained_owner(&format!("proxy-rss-glype-{status}"), server.port);
+        let address = format!("http://127.0.0.1:{}/browse.php?u=x&b=4", server.port);
+        let target = format!("http://127.0.0.1:{}/page", server.port);
+        assert_eq!(
+            invoke_owner(&mut owner, json!({"op": "proxy_add", "address": address}))["ok"],
+            json!(true)
         );
-        assert_eq!(report["flows"][0]["status"], json!(status));
-        assert_eq!(report["flows"][0]["exception"], json!(""));
+        let report = invoke_owner(
+            &mut owner,
+            json!({
+                "op": "proxy_request",
+                "url": target,
+                "method": "GET",
+                "header_names": ["User-Agent"],
+                "header_values": ["xeh-fixture/1"],
+                "proxy_image": true,
+                "explicit_allow_redirects": false,
+                "now": 10.0
+            }),
+        );
+        let value = value_of(&report);
+        assert_eq!(report["ok"], json!(true), "{report}");
+        assert_eq!(value["status"], json!(status), "{value}");
+        assert_eq!(value["error"], json!(""), "{value}");
+        assert!(
+            seen.lock().expect("seen").contains("browse.php"),
+            "raw status must still travel through Glype mkurl"
+        );
     }
 }
 

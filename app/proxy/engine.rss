@@ -2,13 +2,13 @@
 //!
 //! Pool operations are dispatched through `app/domain/state.rss`, so the store
 //! (not a demo pool rebuilt per call) carries counters, disables and the pool's
-//! creation state across every step. Policy and Glype cases call the same
-//! functions the application uses; they do not duplicate selection logic.
+//! creation state across every step. Policy cases call the same functions the
+//! application uses. The glype scenario operation is closed; retained Glype
+//! exchange is `proxy_request` on the task owner.
 use json;
 use xeh_proxy;
 
 use super::domain::state;
-use self::glype;
 use self::policy;
 use self::pool;
 use self::worker;
@@ -149,54 +149,6 @@ fn run_routes(document: map) -> string {
     "{\"operation\":\"routes\",\"routes\":[" + join(rows) + "]}"
 }
 
-fn flow_json(flow: map) -> string {
-    let ok: bool = flow["ok"].copy();
-    let exception: string = flow["exception"].copy();
-    let detail: string = flow["detail"].copy();
-    if flow.has("url") => {
-        let url: string = flow["url"].copy();
-        let status: int = flow["status"].copy();
-        let content_type: string = flow["content_type"].copy();
-        let content: string = flow["content"].copy();
-        let content_bytes: [int] = flow["content_bytes"].copy();
-        let set_cookie: string = flow["set_cookie"].copy();
-        "{\"ok\":" + json::encode(ok)
-            + ",\"exception\":" + json::encode(exception)
-            + ",\"detail\":" + json::encode(detail)
-            + ",\"url\":" + json::encode(url)
-            + ",\"status\":" + json::encode(status)
-            + ",\"content_type\":" + json::encode(content_type)
-            + ",\"content\":" + json::encode(content)
-            + ",\"content_bytes\":" + json::encode(content_bytes)
-            + ",\"set_cookie\":" + json::encode(set_cookie) + "}"
-    } else => {
-        "{\"ok\":" + json::encode(ok)
-            + ",\"exception\":" + json::encode(exception)
-            + ",\"detail\":" + json::encode(detail) + "}"
-    }
-}
-
-fn run_glype(document: map) -> string {
-    let address = field_string(document.copy(), "address", "");
-    let session_headers: [map] = field_maps(document.copy(), "session_headers");
-    let targets: [string] = field_strings(document, "targets");
-    let report = glype::run_flows(address, session_headers, targets);
-    let ok: bool = report["ok"].copy();
-    let exception: string = report["exception"].copy();
-    let detail: string = report["detail"].copy();
-    let glyph_s: string = report["glyph_s"].copy();
-    let flows: [map] = report["flows"].copy();
-    let mut flow_texts: [string] = [];
-    for index in 0..flows.length {
-        flow_texts[flow_texts.length] = flow_json(flows[index].copy());
-    }
-    "{\"operation\":\"glype\",\"ok\":" + json::encode(ok)
-        + ",\"exception\":" + json::encode(exception)
-        + ",\"detail\":" + json::encode(detail)
-        + ",\"flows\":[" + join(flow_texts) + "]"
-        + ",\"glyph_s\":" + json::encode(glyph_s) + "}"
-}
-
 fn run_worker(document: map) -> string {
     let url = field_string(document.copy(), "url", "");
     let method = field_string(document.copy(), "method", "GET");
@@ -287,7 +239,7 @@ pub fn run_scenario(request: string) -> string {
     } else if operation == "routes" => {
         run_routes(document)
     } else if operation == "glype" => {
-        run_glype(document)
+        "{\"operation\":\"glype\",\"ok\":false,\"error\":\"glype_exchange_closed\"}"
     } else if operation == "worker" => {
         run_worker(document)
     } else if operation == "transfer" => {
