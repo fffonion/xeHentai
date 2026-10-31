@@ -600,7 +600,11 @@ PROXY_CASES = {
     "proxy.ban-expiry": ["steps"],
     "proxy.add-validation": ["steps"],
     "proxy.has-available": ["steps"],
-    "proxy.glype-runtime": ["glype.normal", "glype.sslagree-fixed"],
+    "proxy.glype-runtime": [
+        "glype.normal",
+        "glype.sslagree-fixed",
+        "glype.post-fixed",
+    ],
 }
 
 SITE_CASES = {
@@ -1464,26 +1468,36 @@ def _oracle_glype(request, upstream):
             self.calls = []
 
         def request(self, *args, **kwargs):
+            from urllib.parse import urlencode
+
             headers = {
                 key.lower(): value for key, value in kwargs.get("headers", {}).items()
             }
+            data = kwargs.get("data")
+            if isinstance(data, (list, tuple, dict)):
+                body = urlencode(data)
+            elif data is None:
+                body = ""
+            else:
+                body = str(data)
             self.calls.append(
                 {
                     "method": args[0],
                     "url": args[1],
                     "referer": headers.get("referer"),
                     "cookie": headers.get("cookie", ""),
+                    "body": body,
                 }
             )
             return self.responses.pop(0)
 
-    def run(responses, with_caller_kwargs):
+    def run(responses, with_caller_kwargs, method="GET", data=None):
         session = FakeSession(responses)
         handler = proxy_module.glype_proxy(
             request["glype_addr"], lambda addr, **kwargs: (lambda fn: fn)
         )
         fn = handler(session)
-        kwargs = {"stream": False, "data": None, "timeout": 3}
+        kwargs = {"stream": False, "data": data, "timeout": 3}
         if with_caller_kwargs:
             kwargs["allow_redirects"] = False
         from urllib.parse import urlsplit
@@ -1502,12 +1516,13 @@ def _oracle_glype(request, upstream):
                         "path": path,
                         "referer": referer,
                         "cookie": call.get("cookie", ""),
+                        "body": call.get("body", ""),
                     }
                 )
             return out_calls
 
         try:
-            result = fn("GET", request["glype_target"], **kwargs)
+            result = fn(method, request["glype_target"], **kwargs)
             return {
                 "exception": None,
                 "status": result.status_code,
@@ -1548,7 +1563,17 @@ def _oracle_glype(request, upstream):
     ]
     fixed = run([factory() for factory in ssl_responses], False)
     caller = run([factory() for factory in ssl_responses], True)
-    return {"normal": normal, "sslagree_fixed": fixed, "sslagree_caller": caller}
+    post_data = [
+        ("username", "synthetic-user"),
+        ("password", "synthetic-pass"),
+    ]
+    post = run([factory() for factory in ssl_responses], False, "POST", post_data)
+    return {
+        "normal": normal,
+        "sslagree_fixed": fixed,
+        "sslagree_caller": caller,
+        "post_fixed": post,
+    }
 
 
 def compare_proxy(cases, oracle, candidate):
@@ -1599,6 +1624,8 @@ def compare_proxy(cases, oracle, candidate):
     glype_fixed_candidate = candidate_glype.pop("sslagree_fixed", None)
     glype_caller_oracle = oracle_glype.pop("sslagree_caller", {})
     glype_caller_candidate = candidate_glype.pop("sslagree_caller", {})
+    glype_post_oracle = oracle_glype.pop("post_fixed", None)
+    glype_post_candidate = candidate_glype.pop("post_fixed", None)
     diffs, flags = _compare_scenarios(
         {"steps": oracle_steps}, {"steps": candidate_steps}, "proxy"
     )
@@ -1606,6 +1633,7 @@ def compare_proxy(cases, oracle, candidate):
     for name, expected, actual in (
         ("glype.normal", glype_normal_oracle, glype_normal_candidate),
         ("glype.sslagree-fixed", glype_fixed_oracle, glype_fixed_candidate),
+        ("glype.post-fixed", glype_post_oracle, glype_post_candidate),
     ):
         section = compare(expected, actual, f"proxy.{name}")
         diffs.extend(section)
@@ -3560,6 +3588,16 @@ def self_check(suite, oracle, candidate):
         cases = {}
         compare_proxy(cases, oracle, mutated)
         checks.append(("glype-rewrite", not cases["proxy.glype-runtime"]))
+        mutated = copy.deepcopy(candidate)
+        mutated["glype"]["post_fixed"]["calls"][0]["method"] = "GET"
+        cases = {}
+        compare_proxy(cases, oracle, mutated)
+        checks.append(("glype-post-method", not cases["proxy.glype-runtime"]))
+        mutated = copy.deepcopy(candidate)
+        mutated["glype"]["post_fixed"]["calls"][0]["body"] = ""
+        cases = {}
+        compare_proxy(cases, oracle, mutated)
+        checks.append(("glype-post-body", not cases["proxy.glype-runtime"]))
     elif suite == "site":
         mutated = copy.deepcopy(candidate)
         mutated["login.ok"]["callbacks"] = []

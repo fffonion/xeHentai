@@ -2504,7 +2504,7 @@
         "native m3_transport"
       ],
       "assertions": [
-        "Glype URL encoding/referer/cookies/sslagree/text rewrite/error div/403 binary stream."
+        "Glype URL encoding/referer/cookies/sslagree/text rewrite/error div/403 binary stream/POST method+form body."
       ],
       "status": "implemented",
       "delta": null
@@ -2988,7 +2988,7 @@
         "glype scenarios"
       ],
       "assertions": [
-        "URL encoding, Referer, c[site] cookies, sslagree retry/cookie and text rewrite."
+        "URL encoding, Referer, POST method/form bytes, c[site] cookies, sslagree GET/replayed POST and text rewrite."
       ],
       "status": "implemented",
       "delta": null

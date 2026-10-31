@@ -911,7 +911,7 @@ impl Session {
                 .clone()
                 .ok_or_else(|| HttpError::Glype("glype state missing".into()))?;
             return self
-                .fetch_glype_hop(&url, spec, Arc::clone(&state), stream)
+                .fetch_glype_hop(&url, spec, Arc::clone(&state), method, data, stream)
                 .await;
         }
 
@@ -1022,6 +1022,8 @@ impl Session {
         url: &url::Url,
         spec: &GlypeSpec,
         state: Arc<Mutex<GlypeState>>,
+        method: &str,
+        data: Option<&[(String, String)]>,
         stream: bool,
     ) -> Result<FetchedResponse, HttpError> {
         let server =
@@ -1036,6 +1038,34 @@ impl Session {
         let mut headers = {
             let mut guard = state.lock().unwrap();
             spec.rewrite_headers(&self.business_headers(), url.as_str(), &mut guard)
+        };
+        // `requests` prepares the caller `data=` as a form body for every hop
+        // the glype handler forwards, including the sslagree follow-up. The
+        // reference rewrites only args[1], so the method and body survive.
+        let body = match data {
+            Some(pairs) => {
+                let body = url::form_urlencoded::Serializer::<String>::new(String::new())
+                    .extend_pairs(pairs)
+                    .finish()
+                    .into_bytes();
+                if !headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("Content-Type"))
+                {
+                    headers.push((
+                        "Content-Type".into(),
+                        "application/x-www-form-urlencoded".into(),
+                    ));
+                }
+                if !headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("Content-Length"))
+                {
+                    headers.push(("Content-Length".into(), body.len().to_string()));
+                }
+                body
+            }
+            None => Vec::new(),
         };
         let mut tried = 0usize;
         let mut exchange = loop {
@@ -1061,11 +1091,11 @@ impl Session {
                 .exchange(
                     io,
                     form,
-                    "GET",
+                    method,
                     &path,
                     &target,
                     &headers,
-                    Vec::new(),
+                    body.clone(),
                     stream,
                 )
                 .await?;
@@ -1093,7 +1123,7 @@ impl Session {
                         &path_and_query(&follow_parsed),
                         &follow_url,
                         &headers,
-                        Vec::new(),
+                        body.clone(),
                         false,
                     )
                     .await?;
