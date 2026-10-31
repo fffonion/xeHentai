@@ -437,6 +437,9 @@ fn progress_monitor(request: map) -> map {
     let mut checkin = true;
     let mut slow_handled = false;
     let mut slow_seen = false;
+    let mut slow_count = 0;
+    let mut workers_alive = true;
+    let mut running = false;
     let mut steps: [string] = [];
     while tracked {
         intv = intv + 1;
@@ -447,17 +450,21 @@ fn progress_monitor(request: map) -> map {
                 if slow_seen && after_slow == "progress" {
                     steps[steps.length] = "progress";
                     checkin = false;
+                    workers_alive = false;
+                    running = false;
                 }
                 last_change = now;
                 last_finished = finished;
             } else if now - last_change > 90 {
                 if speed > 0 {
                     reason = "slow";
-                    if slow_seen == false {
-                        steps[steps.length] = "slow";
-                    }
+                    steps[steps.length] = "slow";
                     slow_seen = true;
+                    slow_count = slow_count + 1;
                     last_change = now;
+                    if after_slow == "" && slow_count >= 2 {
+                        running = true;
+                    }
                 } else {
                     reason = "stuck";
                     steps[steps.length] = "stuck";
@@ -475,17 +482,22 @@ fn progress_monitor(request: map) -> map {
                     finished = finished + 1;
                 } else if after_slow == "stuck" {
                     speed = 0;
-                } else {
-                    checkin = false;
                 }
             }
             if checkin {
                 last_seen = now;
             }
+            if after_slow == "" && slow_count >= 2 {
+                tracked = false;
+            }
         }
     }
     let mut observable = monitor_observable(reason, [], [], state, stopped, {});
     observable["steps"] = steps;
+    observable["finished"] = finished;
+    observable["total_speed"] = speed;
+    observable["workers_alive"] = workers_alive;
+    observable["running"] = running;
     observable
 }
 

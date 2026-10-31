@@ -19,7 +19,7 @@
         "/queues/metadata": [],
         "/queues/list": [],
         "/queues/scan": [],
-        "/queues/download": [],
+        "/queues/download/0": "https://cdn.example/h/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-1-1-1-jpg",
         "/slots/metadata": 1,
         "/slots/list": 1,
         "/slots/scan": 2,
@@ -28,8 +28,8 @@
         "/observable/spawned_download": 3,
         "/observable/public_has_list_q": false,
         "/observable/public_has_metadata_q": false,
-        "/observable/page_q/0": "https://e-hentai.org/s/aaaaaaaaaa/1-1",
-        "/observable/img_q/0": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg"
+        "/observable/img_q/0": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "/observable/img_q/1": "https://cdn.example/h/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-1-1-1-jpg"
       }
     },
     {
@@ -941,6 +941,56 @@
         "/observable/permit_trace/0": 2,
         "/observable/permit_trace/1": 0,
         "/observable/exit_after_pause": true
+      }
+    },
+    {
+      "id": "download.slots.scan-enqueues-image",
+      "suite": "download",
+      "request": {
+        "operation": "slots",
+        "state": 4,
+        "scan_thread_cnt": 1,
+        "download_thread_cnt": 1,
+        "url": "https://e-hentai.org/g/9/bbbbbbbbbb/",
+        "total": 40,
+        "thumbnail_cnt": 20,
+        "page_q": ["https://e-hentai.org/s/bbbbbbbbbb/9-4"],
+        "img_q": ["https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg"]
+      },
+      "assertions": {
+        "/decisions/0": "slots:separated",
+        "/queues/download/0": "https://cdn.example/h/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-9-4-1-jpg",
+        "/observable/img_q/0": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "/observable/img_q/1": "https://cdn.example/h/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-9-4-1-jpg",
+        "/slots/scan": 1,
+        "/slots/download": 1
+      }
+    },
+    {
+      "id": "download.monitor.slow-keeps-running",
+      "suite": "download",
+      "request": {
+        "operation": "monitor",
+        "kind": "slow",
+        "timeout": 10000,
+        "retry": 0,
+        "clock_step": 10,
+        "finished": 1,
+        "total": 10,
+        "total_speed": 2048,
+        "state": 10,
+        "name": "down-1"
+      },
+      "assertions": {
+        "/decisions/0": "monitor:slow",
+        "/observable/reason": "slow",
+        "/observable/stopped": false,
+        "/observable/finished": 1,
+        "/observable/total_speed": 2048,
+        "/observable/workers_alive": true,
+        "/observable/running": true,
+        "/observable/steps/0": "slow",
+        "/observable/steps/1": "slow"
       }
     }
   ]

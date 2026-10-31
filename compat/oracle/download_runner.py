@@ -8,11 +8,13 @@ other decision calls the fixed upstream objects directly.
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import sys
+import threading
 import time
 import urllib.request
-from queue import Queue
+from queue import Empty, Queue
 from types import SimpleNamespace
 
 
@@ -198,6 +200,34 @@ def retry_label(fail_code, exception, low):
     }.get(fail_code, "retry:quota")
 
 
+def image_from_page(page_url):
+    found = re.search(r"/([a-f0-9]{10})/([0-9]+)-([0-9]+)", page_url or "")
+    if not found:
+        return None
+    short, gid, fid = found.group(1), found.group(2), found.group(3)
+    return "https://cdn.example/h/%s-%s-%s-1-jpg" % (short * 4, gid, fid)
+
+
+def run_worker_body(worker, task):
+    if worker.task_queue is task.page_q:
+        try:
+            url = worker.task_queue.get(False)
+        except Empty:
+            return
+        image = image_from_page(url)
+        if image is None:
+            return
+        worker.f_suc((image, url, "001.jpg"))
+        return
+    if worker.task_queue.empty():
+        return
+    url = list(worker.task_queue.queue)[0]
+    try:
+        worker.f_suc((lambda: iter(()), url, url))
+    except Exception:
+        return
+
+
 def monitor_label(reason):
     return {
         "quota": "monitor:quota-vote",
@@ -236,6 +266,13 @@ def run_slots(request, root, task_mod, core_mod, worker_mod):
 
         def start():
             created.append(worker)
+            thread = threading.Thread(
+                target=run_worker_body,
+                args=(worker, task),
+                name=worker.name,
+            )
+            thread.start()
+            thread.join()
 
         worker.start = start
         return worker
@@ -440,8 +477,6 @@ class Clock(object):
                 self.bumped = True
             elif self.after_slow == "stuck" and self.worker is not None:
                 self.worker.stream_speed = None
-            else:
-                self.release_workers = True
         if self.bumped:
             self.sleeps_after_bump += 1
             if self.sleeps_after_bump >= 11:
@@ -455,15 +490,21 @@ class Clock(object):
             else:
                 for name in list(self.refresh.thread_last_seen):
                     self.refresh.thread_last_seen[name] = self.now
+        if self.after_slow == "" and self._slow_count() >= 2:
+            raise StopIteration()
         if self.stop_after and self.iterations >= self.stop_after:
             raise StopIteration()
 
     def _saw_slow(self):
+        return self._slow_count() > 0
+
+    def _slow_count(self):
+        count = 0
         for message in self.warnings or []:
             text = str(message)
             if "slow" in text and "stuck" not in text:
-                return True
-        return False
+                count += 1
+        return count
 
 
 def monitor_steps(warnings, request, task, initial_finished):
@@ -604,8 +645,11 @@ def run_monitor(request, root, task_mod, worker_mod, const):
         worker_mod.time.time = original
         worker_mod.time.sleep = original_sleep
     stuck = any("stuck" in str(message) for message in warnings)
-    slow = any("slow" in str(message) for message in warnings)
+    slow = any("slow" in str(message) and "stuck" not in str(message) for message in warnings)
     reason = "stuck" if stuck else "slow" if slow else ""
+    reported_speed = speed if worker.stream_speed is not None else 0
+    alive = bool(worker.is_alive())
+    running = (not stuck) and name in monitor.thread_last_seen and alive
     return bundle([monitor_label(reason)], {
         "reason": reason,
         "zombies": [],
@@ -614,6 +658,10 @@ def run_monitor(request, root, task_mod, worker_mod, const):
         "stopped": stuck,
         "votes": {},
         "steps": monitor_steps(warnings, request, task, initial_finished),
+        "finished": int(task.meta["finished"]),
+        "total_speed": reported_speed,
+        "workers_alive": alive,
+        "running": running,
     })
 
 
