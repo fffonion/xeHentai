@@ -242,6 +242,27 @@ NATIVE_CASE_MAP = {
         "config::tests::rss_decoding_reports_compile_runtime_and_shape_errors": [
             "config.rss.invalid-shape"
         ],
+        "config::tests::config_module_cannot_spawn_a_process": [
+            "config.rss.deny-process"
+        ],
+        "config::tests::config_module_cannot_write_files": [
+            "config.rss.deny-file-write"
+        ],
+        "config::tests::config_module_cannot_call_standard_host_functions": [
+            "config.rss.deny-host-imports"
+        ],
+        "config::tests::config_module_cannot_block_on_host_sleep": [
+            "config.rss.deny-host-imports"
+        ],
+        "config::tests::config_module_cannot_reach_the_network": [
+            "config.rss.deny-network"
+        ],
+        "config::tests::hostile_rss_never_reads_python_and_keeps_the_previous_configuration": [
+            "config.rss.deny-loader"
+        ],
+        "config::tests::first_create_revalidates_an_existing_hostile_rss_without_side_effects": [
+            "config.rss.deny-revalidation"
+        ],
         "config::tests::python_import_rejects_everything_outside_the_subset": [
             "config.import.rejects-out-of-subset",
             "config.import.unknown-key",

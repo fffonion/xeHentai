@@ -591,6 +591,84 @@
       "delta": null
     },
     {
+      "id": "config.rss.deny-process",
+      "source": "plan 4.1 minimal configuration catalog",
+      "target": "src/config.rs decode_rss / bind_vm_cached",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "an io::popen call in config.rss is denied at bind before execution",
+        "no process marker file appears"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.rss.deny-file-write",
+      "source": "plan 4.1 minimal configuration catalog",
+      "target": "src/config.rs decode_rss / bind_vm_cached",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "an io::open(..., 'w') call in config.rss is denied at bind before execution",
+        "no marker file is created"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.rss.deny-host-imports",
+      "source": "plan 4.1 minimal configuration catalog",
+      "target": "src/config.rs decode_rss / bind_vm_cached",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "runtime::sleep and println host imports are denied at bind",
+        "the blocking sleep does not execute (decode returns in < 900ms)"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.rss.deny-network",
+      "source": "plan 4.1 minimal configuration catalog",
+      "target": "src/config.rs decode_rss / bind_vm_cached",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "a config.rss http call is refused before execution",
+        "the loopback fixture observes zero connections"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.rss.deny-loader",
+      "source": "plan 4.1 minimal configuration catalog",
+      "target": "src/config.rs load_with_source",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "an existing hostile config.rss is refused",
+        "config.py is never read and neither the rss bytes nor the previous configuration change"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "config.rss.deny-revalidation",
+      "source": "plan 4.1 minimal configuration catalog",
+      "target": "src/config.rs create_with",
+      "suite": "config",
+      "inputs": [],
+      "assertions": [
+        "first-create revalidation of an existing hostile config.rss refuses without side effects",
+        "the existing rss bytes stay untouched"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
       "id": "util.parse_cookie",
       "source": "util/__init__.py:parse_cookie",
       "target": "src/util/mod.rs",
@@ -2391,6 +2469,7 @@
   "notes": [
     "Status implemented/delta means two fresh rounds produced passing evidence.",
     "The en_us-only key z_test_fallback_probe is test-only and is excluded from key-set equality.",
-    "Rust make_ua intentionally reproduces the reference implicit None return."
+    "Rust make_ua intentionally reproduces the reference implicit None return.",
+    "config.rss.deny-* run under the pinned runtime feature set: the http-client feature is off, so the network case proves refusal plus zero loopback contacts rather than a formerly reachable network path; process and file writes are proven reachable under the pre-fix binding by a driven-SDK spike recorded in evidence-r1."
   ]
 }

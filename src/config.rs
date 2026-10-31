@@ -8,9 +8,13 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use regex::Regex;
-use vm::{SourceFlavor, Value, Vm, VmStatus, compile_source_with_flavor};
+use vm::{
+    CompileSourceFileOptions, HostApiCatalog, HostFunctionRegistry, SourceFlavor, Value, Vm,
+    VmStatus, compile_source_with_flavor_and_options,
+};
 
 pub const CONFIG_FILE: &str = "config.rss";
 pub const LEGACY_CONFIG_FILE: &str = "config.py";
@@ -128,6 +132,7 @@ pub enum ConfigError {
     },
     RssCompile(String),
     RssRuntime(String),
+    RssDenied(String),
     RssShape(String),
 }
 
@@ -155,6 +160,12 @@ impl std::fmt::Display for ConfigError {
             Self::Range { key, value } => write!(f, "'{key}' is out of range: {value}"),
             Self::RssCompile(message) => write!(f, "config.rss compile error: {message}"),
             Self::RssRuntime(message) => write!(f, "config.rss runtime error: {message}"),
+            Self::RssDenied(message) => {
+                write!(
+                    f,
+                    "config.rss capability denied before execution: {message}"
+                )
+            }
             Self::RssShape(message) => write!(f, "config.rss shape error: {message}"),
         }
     }
@@ -221,6 +232,28 @@ fn read_text(path: &Path, limit: Option<usize>) -> Result<String, ConfigError> {
         path: path.to_path_buf(),
         message: format!("input is not valid UTF-8: {error}"),
     })
+}
+
+/// The only host catalog configuration modules are compiled against.
+///
+/// A configuration module is a pure data export: it imports no host module and
+/// calls no host function, so the minimal catalog advertises nothing.
+fn config_catalog() -> Arc<HostApiCatalog> {
+    static CATALOG: OnceLock<Arc<HostApiCatalog>> = OnceLock::new();
+    Arc::clone(CATALOG.get_or_init(|| Arc::new(HostApiCatalog::default())))
+}
+
+/// The only host registry configuration modules are bound to.
+///
+/// [`HostFunctionRegistry::restricted`] keeps the standard surface registered
+/// but grants neither builtin nor host-import capabilities; binding through
+/// [`HostFunctionRegistry::bind_vm_cached`] also disables the VM's default host
+/// fallback and installs that empty grant list. A configuration module can
+/// therefore neither spawn a process, touch the filesystem, open a network
+/// surface nor run any other host builtin.
+fn config_registry() -> &'static HostFunctionRegistry {
+    static REGISTRY: OnceLock<HostFunctionRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(HostFunctionRegistry::restricted)
 }
 
 impl Config {
@@ -470,10 +503,20 @@ impl Config {
     }
 
     /// Compile and execute a configuration module through the pinned SDK.
+    ///
+    /// Compilation and binding use one minimal, explicitly restricted host
+    /// surface. Binding happens before execution, so an ungranted capability is
+    /// denied without any process, filesystem or network side effect, and the
+    /// default host fallback is never installed.
     pub fn decode_rss(source: &str) -> Result<Config, ConfigError> {
-        let compiled = compile_source_with_flavor(source, SourceFlavor::RustScript)
-            .map_err(|error| ConfigError::RssCompile(error.to_string()))?;
+        let options = CompileSourceFileOptions::new().with_host_api_catalog(config_catalog());
+        let compiled =
+            compile_source_with_flavor_and_options(source, SourceFlavor::RustScript, options)
+                .map_err(|error| ConfigError::RssCompile(error.to_string()))?;
         let mut vm = Vm::new(compiled.program);
+        config_registry()
+            .bind_vm_cached(&mut vm)
+            .map_err(|error| ConfigError::RssDenied(error.to_string()))?;
         let status = vm
             .run()
             .map_err(|error| ConfigError::RssRuntime(error.to_string()))?;
@@ -1618,6 +1661,227 @@ log_verbose = 3
         };
         let error = config.encode_rss().expect_err("control character");
         assert!(matches!(error, ConfigError::InvalidValue { .. }), "{error}");
+    }
+
+    /// A structurally valid configuration export with one injected statement.
+    ///
+    /// The export is byte-for-byte what [`Config::save`] publishes, so a
+    /// rejection cannot be explained by a malformed configuration shape.
+    fn hostile_rss(import: &str, statement: &str) -> String {
+        let encoded = Config {
+            dir: "hostile".into(),
+            ..Config::default()
+        }
+        .encode_rss()
+        .expect("encode hostile baseline");
+        let injected = encoded.replace("\nconfig();\n", &format!("\n{statement}\nconfig();\n"));
+        assert!(injected.contains(statement), "injection point missing");
+        if import.is_empty() {
+            injected
+        } else {
+            format!("{import}\n{injected}")
+        }
+    }
+
+    /// The refusal must name the capability the module asked for, so a syntax
+    /// or shape failure cannot be mistaken for an authority denial.
+    fn refused_capability(result: Result<Config, ConfigError>, needle: &str) {
+        let error = result.expect_err("hostile configuration must be refused");
+        assert!(
+            matches!(error, ConfigError::RssDenied(_)),
+            "refusal must be an authority denial, got {error}"
+        );
+        let text = error.to_string();
+        assert!(
+            text.contains(needle),
+            "refusal must name {needle:?}: {text}"
+        );
+    }
+
+    /// Waits for a worker thread marker; a spawn that happened slightly after
+    /// the error still counts as a violated boundary.
+    fn marker_shows_up(path: &Path) -> bool {
+        for _ in 0..100 {
+            if path.exists() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        false
+    }
+
+    #[test]
+    fn config_module_cannot_spawn_a_process() {
+        let root = root();
+        let marker = root.path().join("process-marker");
+        let source = hostile_rss(
+            "use io;",
+            &format!(
+                "let child = io::popen(\"printf spawned > '{}'\", \"r\");\nchild;",
+                marker.display()
+            ),
+        );
+        let result = Config::decode_rss(&source);
+        assert!(
+            !marker_shows_up(&marker),
+            "configuration module spawned a process"
+        );
+        refused_capability(result, "io_popen");
+    }
+
+    #[test]
+    fn config_module_cannot_write_files() {
+        let root = root();
+        let marker = root.path().join("written-by-config");
+        let source = hostile_rss(
+            "use io;",
+            &format!(
+                "let handle = io::open(\"{}\", \"w\");\nhandle;",
+                marker.display()
+            ),
+        );
+        let result = Config::decode_rss(&source);
+        assert!(
+            !marker_shows_up(&marker),
+            "configuration module wrote a file"
+        );
+        refused_capability(result, "io_open");
+    }
+
+    #[test]
+    fn config_module_cannot_call_standard_host_functions() {
+        let source = hostile_rss("", "println(\"config said hello\");");
+        let result = Config::decode_rss(&source);
+        let error = result.expect_err("standard host functions must be refused");
+        assert!(
+            matches!(error, ConfigError::RssDenied(_)),
+            "refusal must be an authority denial: {error}"
+        );
+        assert!(error.to_string().contains("print"), "{error}");
+    }
+
+    #[test]
+    fn config_module_cannot_block_on_host_sleep() {
+        let source = hostile_rss("use runtime;", "runtime::sleep(1200);");
+        let started = std::time::Instant::now();
+        let result = Config::decode_rss(&source);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(900),
+            "configuration executed a blocking host function for {elapsed:?}"
+        );
+        refused_capability(result, "runtime::sleep");
+    }
+
+    #[test]
+    fn config_module_cannot_reach_the_network() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback fixture");
+        listener.set_nonblocking(true).expect("nonblocking fixture");
+        let port = listener.local_addr().expect("fixture address").port();
+        let source = hostile_rss(
+            "use http;",
+            &format!("http::get(\"http://127.0.0.1:{port}/config\");"),
+        );
+        let error = Config::decode_rss(&source).expect_err("network configuration was accepted");
+        assert!(
+            matches!(error, ConfigError::RssDenied(_))
+                || matches!(error, ConfigError::RssRuntime(_)),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("http"),
+            "refusal must name the network surface: {error}"
+        );
+        let mut contacts = 0usize;
+        for _ in 0..50 {
+            match listener.accept() {
+                Ok(_) => contacts += 1,
+                Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(_) => break,
+            }
+        }
+        assert_eq!(contacts, 0, "configuration opened a loopback connection");
+    }
+
+    #[test]
+    fn hostile_rss_never_reads_python_and_keeps_the_previous_configuration() {
+        let root = root();
+        let baseline = Config {
+            dir: "baseline".into(),
+            ..Config::default()
+        };
+        baseline.save(root.path()).expect("baseline save");
+        let loaded = Config::load(root.path()).expect("baseline load");
+        assert_eq!(loaded.config, baseline);
+
+        let marker = root.path().join("loader-process-marker");
+        let hostile = hostile_rss(
+            "use io;",
+            &format!(
+                "let child = io::popen(\"printf spawned > '{}'\", \"r\");\nchild;",
+                marker.display()
+            ),
+        );
+        fs::write(root.path().join(CONFIG_FILE), &hostile).expect("hostile rss");
+        fs::write(root.path().join(LEGACY_CONFIG_FILE), "dir = \"python\"\n").expect("python");
+        let before = fs::read(root.path().join(CONFIG_FILE)).expect("hostile bytes");
+
+        let source = Recording::new();
+        let error =
+            Config::load_with_source(root.path(), &source).expect_err("hostile load must fail");
+        assert!(
+            matches!(error, ConfigError::RssDenied(_)),
+            "loader must refuse the ungranted capability: {error}"
+        );
+        assert_eq!(
+            source.opened.borrow().as_slice(),
+            [root.path().join(CONFIG_FILE)],
+            "a refused config.rss must never fall back to reading config.py"
+        );
+        assert_eq!(
+            fs::read(root.path().join(CONFIG_FILE)).unwrap(),
+            before,
+            "a refused load must not rewrite config.rss"
+        );
+        assert_eq!(
+            loaded.config, baseline,
+            "a refused load must not replace the previous configuration"
+        );
+        assert!(!marker_shows_up(&marker), "loader spawned a process");
+    }
+
+    #[test]
+    fn first_create_revalidates_an_existing_hostile_rss_without_side_effects() {
+        let root = root();
+        let marker = root.path().join("create-process-marker");
+        let hostile = hostile_rss(
+            "use io;",
+            &format!(
+                "let child = io::popen(\"printf spawned > '{}'\", \"r\");\nchild;",
+                marker.display()
+            ),
+        );
+        fs::write(root.path().join(CONFIG_FILE), &hostile).expect("hostile rss");
+        let before = fs::read(root.path().join(CONFIG_FILE)).expect("hostile bytes");
+        let candidate = Config {
+            dir: "candidate".into(),
+            ..Config::default()
+        };
+        let error = candidate
+            .create_if_absent(root.path())
+            .expect_err("an existing hostile rss must fail revalidation");
+        assert!(
+            matches!(error, ConfigError::RssDenied(_)),
+            "revalidation must refuse the ungranted capability: {error}"
+        );
+        assert_eq!(
+            fs::read(root.path().join(CONFIG_FILE)).unwrap(),
+            before,
+            "revalidation must leave the existing bytes untouched"
+        );
+        assert!(!marker_shows_up(&marker), "validation spawned a process");
     }
 
     #[test]
