@@ -5,6 +5,7 @@
 use json;
 use xeh_fs;
 use xeh_proxy;
+use xeh_slots;
 use xeh_worker;
 
 use super::proxy::pool;
@@ -129,69 +130,35 @@ fn public_has_queue(name: string) -> bool {
 }
 
 fn run_slots(request: map) -> string {
-    let initial = whole(request, "state", 1);
-    let scan_count = whole(request, "scan_thread_cnt", 0);
-    let download_count = whole(request, "download_thread_cnt", 0);
-    let url = text(request, "url", "");
-    let total = whole(request, "total", 0);
-    let thumbnail = whole(request, "thumbnail_cnt", 20);
-    let page_q = strings(request, "page_q");
-    let img_q = strings(request, "img_q");
-    let mut state = initial;
-    let mut exit = 0;
-    let mut requested: [string] = [];
-    let mut names: [string] = [];
-    let mut spawned_scan = 0;
-    let mut spawned_download = 0;
-    let mut scan_q: [string] = [];
-    let mut download_q: [string] = [];
-    if state == 1 {
-        state = 2;
-    }
-    while exit < 2 && state < 20 {
-        if state == 2 {
-            requested[requested.length] = url.copy();
-            exit = 2;
-        } else if state == 3 {
-            if thumbnail > 0 {
-                let pages = (total + thumbnail - 1) / thumbnail;
-                for index in 0..pages {
-                    requested[requested.length] = url.copy() + "/?p=" + decimal_text(index);
-                    exit = 2;
-                }
-            }
-        } else if state == 4 {
-            for index in 0..scan_count {
-                names[names.length] = "scan-" + decimal_text(index + 1);
-            }
-            spawned_scan = scan_count;
-            state = 9;
-        } else if state == 5 {
-            state = 9;
-        } else if state == 10 {
-            for index in 0..download_count {
-                names[names.length] = "down-" + decimal_text(index + 1);
-            }
-            spawned_download = download_count;
-            break;
-        }
-        state = state + 1;
-    }
+    let walked = xeh_slots::walk(
+        whole(request, "state", 1),
+        whole(request, "scan_thread_cnt", 0),
+        whole(request, "download_thread_cnt", 0),
+        text(request, "url", ""),
+        whole(request, "total", 0),
+        whole(request, "thumbnail_cnt", 20),
+        strings(request, "page_q"),
+        strings(request, "img_q"),
+        whole(request, "fail_download_start", 0)
+    );
+    let names: [string] = walked.worker_names.copy();
+    let metadata_q: [string] = walked.metadata_urls.copy();
+    let list_q: [string] = walked.list_urls.copy();
+    let scan_q: [string] = walked.scan_urls.copy();
+    let download_q: [string] = walked.download_urls.copy();
+    let pending: [string] = walked.pending_list_urls.copy();
+    let page_q: [string] = walked.public_page_q.copy();
+    let img_q: [string] = walked.public_img_q.copy();
+    let spawned_scan: int = walked.spawned_scan;
+    let spawned_download: int = walked.spawned_download;
     let mut queues = empty_queues();
-    if initial == 2 {
-        queues["metadata"] = requested.copy();
-    } else if initial == 3 {
-        queues["list"] = requested.copy();
-    }
+    queues["metadata"] = metadata_q;
+    queues["list"] = list_q;
     queues["scan"] = scan_q;
     queues["download"] = download_q;
     let mut slots = empty_slots();
     slots["scan"] = spawned_scan;
     slots["download"] = spawned_download;
-    let mut pending: [string] = [];
-    if initial == 3 {
-        pending = requested.copy();
-    }
     let mut observable: map = {};
     observable["worker_names"] = names;
     observable["spawned_scan"] = spawned_scan;

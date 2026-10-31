@@ -98,6 +98,12 @@ pub fn compose_application_catalog() -> Arc<HostApiCatalog> {
     for function in crate::worker::permits::functions() {
         builder.function(function);
     }
+    for schema in crate::worker::slots::structs() {
+        builder.named_struct(schema);
+    }
+    for function in crate::worker::slots::functions() {
+        builder.function(function);
+    }
     Arc::new(builder.build().expect("application host catalog"))
 }
 

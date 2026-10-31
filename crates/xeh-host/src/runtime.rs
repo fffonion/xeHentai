@@ -555,6 +555,7 @@ async fn run_download_scenario_async(
     );
     crate::proxy_host::register_proxy(&mut registry, &catalog, host)?;
     crate::worker::permits::register(&mut registry, &catalog)?;
+    crate::worker::slots::register(&mut registry, &catalog)?;
     bind_vm(&mut vm, &registry)?;
     crate::os::fs::install(
         &mut vm,
