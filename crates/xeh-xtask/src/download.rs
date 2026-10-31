@@ -318,11 +318,26 @@ fn run_python_oracle(
         .ok_or_else(|| "download oracle results are missing cases".to_string())
 }
 
-fn observable_of(value: &Value) -> Result<Value, String> {
-    value
-        .get("observable")
-        .cloned()
-        .ok_or_else(|| "download report is missing observable".to_string())
+fn decision_report(value: &Value) -> Result<Value, String> {
+    let mut report = value.clone();
+    if let Some(object) = report.as_object_mut() {
+        object.remove("id");
+    }
+    for key in [
+        "decisions",
+        "queues",
+        "slots",
+        "observable",
+        "submit_ids",
+        "submit_count",
+        "permits_end",
+        "route_kind",
+    ] {
+        if report.get(key).is_none() {
+            return Err(format!("download report is missing {key}"));
+        }
+    }
+    Ok(report)
 }
 
 fn reject_mutant(
@@ -388,12 +403,14 @@ pub fn run_download_diff() -> Result<(), String> {
             .map_err(|error| format!("{id}: RSS execution failed: {error}"))?;
         let report: Value = serde_json::from_str(&raw)
             .map_err(|error| format!("{id}: RSS report is not JSON: {error}\n{raw}"))?;
-        let expected = observable_of(oracle_case)?;
-        let actual = observable_of(&report)?;
+        let expected = decision_report(oracle_case)?;
+        let actual = decision_report(&report)?;
         if expected == actual {
             passed += 1;
         } else {
-            failures.push(format!("{id}: observable mismatch\nexpected {expected}\nactual {actual}"));
+            failures.push(format!(
+                "{id}: decision mismatch\nexpected {expected}\nactual {actual}"
+            ));
         }
         compared.push(ComparedCase {
             id: id.to_string(),
@@ -424,28 +441,28 @@ pub fn run_download_diff() -> Result<(), String> {
 fn run_mutation_gates(compared: &[ComparedCase]) -> Result<usize, String> {
     reject_mutant(compared, "fail-code", "download.retry.connection-error", |actual| {
         let code = actual
-            .pointer_mut("/fail/0")
+            .pointer_mut("/observable/fail/0")
             .ok_or_else(|| "connection-error fail code is absent".to_string())?;
         *code = json!(code.as_i64().unwrap_or_default() + 1);
         Ok(())
     })?;
     reject_mutant(compared, "requeue", "download.retry.key-expired", |actual| {
         let url = actual
-            .get_mut("requeue_url")
+            .pointer_mut("/observable/requeue_url")
             .ok_or_else(|| "key-expired requeue url is absent".to_string())?;
         *url = json!("https://mutated.example/reload");
         Ok(())
     })?;
     reject_mutant(compared, "vote", "download.monitor.quota-vote", |actual| {
         let state = actual
-            .get_mut("task_state")
+            .pointer_mut("/observable/task_state")
             .ok_or_else(|| "quota vote state is absent".to_string())?;
         *state = json!(10);
         Ok(())
     })?;
     reject_mutant(compared, "finished", "download.duplicates.finish-first", |actual| {
         let finished = actual
-            .get_mut("finished")
+            .pointer_mut("/observable/finished")
             .and_then(Value::as_array_mut)
             .ok_or_else(|| "finish-first finished list is absent".to_string())?;
         finished.push(json!(9));
@@ -453,10 +470,22 @@ fn run_mutation_gates(compared: &[ComparedCase]) -> Result<usize, String> {
     })?;
     reject_mutant(compared, "hop-path", "download.hop.direct", |actual| {
         let path = actual
-            .get_mut("path")
+            .pointer_mut("/observable/path")
             .ok_or_else(|| "direct hop path is absent".to_string())?;
         *path = json!("proxied");
         Ok(())
     })?;
-    Ok(5)
+    reject_mutant(
+        compared,
+        "decisions-only",
+        "download.slots.scan-and-download",
+        |actual| {
+            let decision = actual
+                .pointer_mut("/decisions/0")
+                .ok_or_else(|| "slots decision is absent".to_string())?;
+            *decision = json!("slots:mutated");
+            Ok(())
+        },
+    )?;
+    Ok(6)
 }

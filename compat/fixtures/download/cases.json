@@ -24,10 +24,6 @@
         "/slots/list": 1,
         "/slots/scan": 2,
         "/slots/download": 3,
-        "/observable/worker_names/0": "down-1",
-        "/observable/worker_names/2": "down-3",
-        "/observable/worker_names/3": "scan-1",
-        "/observable/worker_names/4": "scan-2",
         "/observable/spawned_scan": 2,
         "/observable/spawned_download": 3,
         "/observable/public_has_list_q": false,
@@ -60,7 +56,6 @@
         "/slots/list": 1,
         "/slots/scan": 0,
         "/slots/download": 0,
-        "/observable/worker_names": [],
         "/observable/spawned_scan": 0,
         "/observable/spawned_download": 0,
         "/observable/public_has_list_q": false,
@@ -89,7 +84,6 @@
         "/queues/scan": [],
         "/slots/list": 1,
         "/slots/scan": 0,
-        "/observable/worker_names": [],
         "/observable/pending_list_urls/0": "https://e-hentai.org/g/1/aaaaaaaaaa/?p=0",
         "/observable/pending_list_urls/1": "https://e-hentai.org/g/1/aaaaaaaaaa/?p=1",
         "/observable/spawned_scan": 0,
@@ -280,7 +274,15 @@
         "content_length": null,
         "text": "",
         "reload_url": "https://e-hentai.org/s/0123456789/99-2?nl=aa",
-        "fname": "002.jpg"
+        "fname": "002.jpg",
+        "threshold": 1024,
+        "chunks": [
+          {"t": 2, "bytes": 100},
+          {"t": 4, "bytes": 100},
+          {"t": 6, "bytes": 100},
+          {"t": 8, "bytes": 100},
+          {"t": 10, "bytes": 100}
+        ]
       },
       "assertions": {
         "/decisions/0": "retry:low-speed",
@@ -572,7 +574,8 @@
         "operation": "pages",
         "kind": "last-page",
         "total": 5,
-        "finished": []
+        "finished": [],
+        "present_last": true
       },
       "assertions": {
         "/decisions/0": "page:last-excluded",
@@ -608,7 +611,162 @@
         "/submit_ids/0": "down-1",
         "/submit_ids/1": "down-2",
         "/submit_count": 2,
-        "/permits_end": 0
+        "/permits_end": 0,
+        "/observable/permit_trace/0": 2,
+        "/observable/permit_trace/1": 0
+      }
+    },
+    {
+      "id": "download.slots.archive-jump",
+      "suite": "download",
+      "request": {
+        "operation": "slots",
+        "state": 5,
+        "scan_thread_cnt": 2,
+        "download_thread_cnt": 3,
+        "url": "https://e-hentai.org/g/123/aaaaaaaaaa/",
+        "total": 40,
+        "thumbnail_cnt": 20,
+        "page_q": ["https://e-hentai.org/s/aaaaaaaaaa/123-1"],
+        "img_q": ["https://cdn.example/a.jpg"]
+      },
+      "assertions": {
+        "/decisions/0": "slots:separated",
+        "/slots/scan": 0,
+        "/slots/download": 3,
+        "/observable/spawned_scan": 0,
+        "/observable/spawned_download": 3,
+        "/queues/scan": [],
+        "/queues/download/0": "https://cdn.example/a.jpg",
+        "/observable/public_has_list_q": false,
+        "/observable/public_has_metadata_q": false
+      }
+    },
+    {
+      "id": "download.retry.status-over-kind",
+      "suite": "download",
+      "request": {
+        "operation": "retry",
+        "kind": "connection-error",
+        "status_code": 403,
+        "requested_url": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "real_url": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "content_length": null,
+        "text": "",
+        "reload_url": "https://e-hentai.org/s/0123456789/99-2?nl=aa",
+        "fname": "002.jpg"
+      },
+      "assertions": {
+        "/decisions/0": "retry:key-expired",
+        "/observable/fail/0": 1007,
+        "/observable/exception": null
+      }
+    },
+    {
+      "id": "download.retry.fast-labeled-low-speed",
+      "suite": "download",
+      "request": {
+        "operation": "retry",
+        "kind": "low-speed",
+        "status_code": 600,
+        "threshold": 1,
+        "chunks": [
+          {"t": 2, "bytes": 3000},
+          {"t": 4, "bytes": 3000},
+          {"t": 6, "bytes": 3000},
+          {"t": 8, "bytes": 3000},
+          {"t": 10, "bytes": 3000}
+        ],
+        "requested_url": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "real_url": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "content_length": null,
+        "text": "",
+        "reload_url": "https://e-hentai.org/s/0123456789/99-2?nl=aa",
+        "fname": "002.jpg"
+      },
+      "assertions": {
+        "/decisions/0": "retry:connection-error",
+        "/observable/fail/0": 1009,
+        "/observable/exception": null
+      }
+    },
+    {
+      "id": "download.monitor.quota-ignored",
+      "suite": "download",
+      "request": {
+        "operation": "monitor",
+        "kind": "quota-vote",
+        "state": 10,
+        "votes": {"1006": 2},
+        "thread_count": 2,
+        "ignored_errors": [1006]
+      },
+      "assertions": {
+        "/decisions/0": "monitor:clear",
+        "/observable/reason": "",
+        "/observable/stopped": false,
+        "/observable/task_state": 10
+      }
+    },
+    {
+      "id": "download.monitor.default-timeout-stuck",
+      "suite": "download",
+      "request": {
+        "operation": "monitor",
+        "kind": "slow",
+        "clock_step": 10,
+        "finished": 1,
+        "total_speed": 0,
+        "state": 10,
+        "name": "down-1"
+      },
+      "assertions": {
+        "/decisions/0": "monitor:stuck",
+        "/observable/reason": "stuck",
+        "/observable/stopped": true,
+        "/observable/task_state": 10
+      }
+    },
+    {
+      "id": "download.duplicates.finish-later-pending",
+      "suite": "download",
+      "request": {
+        "operation": "duplicates",
+        "kind": "finish-later",
+        "old_exists": false,
+        "download_ori": false,
+        "total": 12,
+        "title": "gallery",
+        "img_url": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
+        "reload_url": "https://e-hentai.org/s/0123456789/99-2?nl=aa",
+        "fname": "002.jpg",
+        "old_fid": 1,
+        "old_reload_url": "https://e-hentai.org/s/0123456789/99-1?nl=aa",
+        "old_fname": "001.jpg",
+        "save_original": false
+      },
+      "assertions": {
+        "/decisions/0": "duplicate:pending",
+        "/observable/finished": [],
+        "/observable/duplicate_map/1/0": 2,
+        "/observable/img_q": [],
+        "/observable/copied": false
+      }
+    },
+    {
+      "id": "download.pages.last-unseen",
+      "suite": "download",
+      "request": {
+        "operation": "pages",
+        "kind": "last-page",
+        "total": 5,
+        "finished": [],
+        "present_last": false
+      },
+      "assertions": {
+        "/decisions/0": "page:last-excluded",
+        "/observable/scanned_includes_last": false,
+        "/observable/finished_count": 0
       }
     },
     {

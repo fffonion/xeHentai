@@ -25,6 +25,7 @@ use crate::transfer::{register_transfer, transfer_catalog, TransferHost};
 
 pub(crate) mod cancellation;
 pub(crate) mod events;
+pub(crate) mod permits;
 
 use cancellation::Admission;
 use events::EventBus;

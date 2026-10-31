@@ -3,7 +3,9 @@
 //! Direct hops use the admitted exchange. Proxied hops use the retained
 //! proxy request. Queue names stay page_q and img_q in the public task.
 use json;
+use xeh_fs;
 use xeh_proxy;
+use xeh_worker;
 
 use super::proxy::pool;
 use super::proxy::policy;
@@ -122,6 +124,10 @@ fn empty_slots() -> map {
     slots
 }
 
+fn public_has_queue(name: string) -> bool {
+    name == "page_q" || name == "img_q"
+}
+
 fn run_slots(request: map) -> string {
     let state = whole(request, "state", 1);
     let scan_count = whole(request, "scan_thread_cnt", 0);
@@ -134,16 +140,6 @@ fn run_slots(request: map) -> string {
     let mut names: [string] = [];
     let mut spawned_scan = 0;
     let mut spawned_download = 0;
-    if state >= 4 {
-        spawned_download = download_count;
-        spawned_scan = scan_count;
-        for index in 0..download_count {
-            names[names.length] = "down-" + decimal_text(index + 1);
-        }
-        for index in 0..scan_count {
-            names[names.length] = "scan-" + decimal_text(index + 1);
-        }
-    }
     let mut pending: [string] = [];
     if state == 3 && thumbnail > 0 {
         let pages = (total + thumbnail - 1) / thumbnail;
@@ -151,15 +147,33 @@ fn run_slots(request: map) -> string {
             pending[pending.length] = url.copy() + "/?p=" + decimal_text(index);
         }
     }
+    if state >= 4 {
+        for index in 0..download_count {
+            names[names.length] = "down-" + decimal_text(index + 1);
+        }
+        for index in 0..scan_count {
+            names[names.length] = "scan-" + decimal_text(index + 1);
+        }
+    }
+    if state == 4 {
+        spawned_scan = scan_count;
+    }
+    if state == 4 || state == 5 || state >= 10 {
+        spawned_download = download_count;
+    }
     let mut queues = empty_queues();
     if state == 2 {
-        queues["metadata"] = [url.copy()];
+        let mut metadata: [string] = [];
+        metadata[metadata.length] = url.copy();
+        queues["metadata"] = metadata;
     }
     if state == 3 {
         queues["list"] = pending.copy();
     }
-    if state >= 4 {
+    if spawned_scan > 0 {
         queues["scan"] = page_q.copy();
+    }
+    if spawned_download > 0 {
         queues["download"] = img_q.copy();
     }
     let mut slots = empty_slots();
@@ -169,8 +183,8 @@ fn run_slots(request: map) -> string {
     observable["worker_names"] = names;
     observable["spawned_scan"] = spawned_scan;
     observable["spawned_download"] = spawned_download;
-    observable["public_has_list_q"] = false;
-    observable["public_has_metadata_q"] = false;
+    observable["public_has_list_q"] = public_has_queue("list_q");
+    observable["public_has_metadata_q"] = public_has_queue("metadata_q");
     observable["page_q"] = page_q;
     observable["img_q"] = img_q;
     observable["pending_list_urls"] = pending;
@@ -198,19 +212,69 @@ fn optional_length(request: map) -> int? {
     }
 }
 
-fn retry_decision(kind: string) -> string {
-    if kind == "connection-error" => {
-        "retry:connection-error"
-    } else if kind == "key-expired" => {
-        "retry:key-expired"
-    } else if kind == "not-found" => {
-        "retry:not-found"
-    } else if kind == "wrong-length" || kind == "broken-stream" => {
-        "retry:broken"
-    } else if kind == "low-speed" => {
+fn speed_samples(chunks: [map]) -> [int] {
+    let mut last_tm = 0;
+    let mut last_bytes = 0;
+    let mut current_bytes = 0;
+    let mut buffer: [int] = [];
+    for index in 0..chunks.length {
+        let chunk: map = chunks[index].copy();
+        let at = whole(chunk, "t", 0);
+        let size = whole(chunk, "bytes", 0);
+        current_bytes = current_bytes + size;
+        if at - last_tm > 1 {
+            buffer[buffer.length] = (current_bytes - last_bytes) * 1000 / (at - last_tm);
+            if buffer.length > 5 {
+                let a = buffer[1].copy();
+                let b = buffer[2].copy();
+                let c = buffer[3].copy();
+                let d = buffer[4].copy();
+                let e = buffer[5].copy();
+                buffer = [a, b, c, d, e];
+            }
+            last_tm = at;
+            last_bytes = current_bytes;
+        }
+    }
+    buffer
+}
+
+fn average_of(buffer: [int]) -> int {
+    let mut sum = 0;
+    for index in 0..buffer.length {
+        sum = sum + buffer[index].copy();
+    }
+    if buffer.length == 0 => {
+        0
+    } else => {
+        sum / buffer.length
+    }
+}
+
+fn checker_is_low(request: map) -> bool {
+    if request.has("chunks") == false => {
+        false
+    } else => {
+        let threshold = whole(request, "threshold", 0);
+        let samples = speed_samples(maps(request, "chunks"));
+        let average = average_of(samples);
+        threshold > 0 && samples.length >= 5 && average > 0 && average < threshold * 1000
+    }
+}
+
+fn retry_label(fail_code: int, exception: string, low: bool) -> string {
+    if low => {
         "retry:low-speed"
-    } else if kind == "failed-reload" => {
+    } else if exception == "KeyError" => {
         "retry:failed-reload"
+    } else if fail_code == 1009 => {
+        "retry:connection-error"
+    } else if fail_code == 1007 => {
+        "retry:key-expired"
+    } else if fail_code == 1011 => {
+        "retry:not-found"
+    } else if fail_code == 1012 => {
+        "retry:broken"
     } else => {
         "retry:quota"
     }
@@ -226,10 +290,10 @@ fn with_null(text: string, key: string) -> string {
     }
 }
 
-fn retry_report(kind: string, queues: map, observable: map) -> string {
+fn retry_report(decision: string, queues: map, observable: map) -> string {
     let observable_json = with_null(with_null(json::encode(observable), "exception"), "requeue_url");
     let mut output: map = {};
-    output["decisions"] = [retry_decision(kind)];
+    output["decisions"] = [decision];
     output["queues"] = queues;
     output["slots"] = empty_slots();
     output["submit_ids"] = [];
@@ -241,24 +305,33 @@ fn retry_report(kind: string, queues: map, observable: map) -> string {
     (&encoded)[0:(length - 1)] + ",\"observable\":" + observable_json + "}"
 }
 
+fn absent_length() -> int? {
+    null
+}
+
 fn run_retry(request: map) -> string {
-    let kind = text(request, "kind", "");
+    let low = checker_is_low(request);
     let requested = text(request, "requested_url", "");
     let real = text(request, "real_url", "");
-    let broken = flag(request, "stream_broken", false);
+    let broken = flag(request, "stream_broken", false) && low == false;
     let events = if broken => {
         "[{\"kind\":\"connection-error\",\"bytes\":[],\"callback_return\":\"\"}]"
     } else => {
         "[]"
     };
+    let status = if low => { 600 } else => { whole(request, "status_code", 0) };
+    let body = if low => { "" } else => { text(request, "text", "") };
+    let length = if low => { absent_length() } else => { optional_length(request) };
+    let header_names = strings(request, "header_names");
+    let header_values = strings(request, "header_values");
     let raw = download::run_download(
-        whole(request, "status_code", 0),
+        status,
         requested.copy(),
         real.copy(),
-        optional_length(request),
-        strings(request, "header_names"),
-        strings(request, "header_values"),
-        text(request, "text", ""),
+        length,
+        header_names,
+        header_values,
+        body,
         broken,
         events,
         [],
@@ -304,45 +377,27 @@ fn run_retry(request: map) -> string {
         observable["exception"] = "DownloadAbortedException";
     }
     observable["page_q"] = page_q;
-    retry_report(kind, empty_queues(), observable)
+    let exception = if hash_missing => {
+        "IndexError"
+    } else if reload_missing => {
+        "KeyError"
+    } else if broken => {
+        "DownloadAbortedException"
+    } else => {
+        ""
+    };
+    retry_report(retry_label(fail_code, exception, low), empty_queues(), observable)
 }
 
 fn run_speed(request: map) -> string {
     let threshold = whole(request, "threshold", 0);
-    let chunks = maps(request, "chunks");
-    let mut last_tm = 0;
-    let mut last_bytes = 0;
-    let mut current_bytes = 0;
-    let mut buffer: [int] = [];
-    for index in 0..chunks.length {
-        let chunk: map = chunks[index].copy();
-        let at = whole(chunk, "t", 0);
-        let size = whole(chunk, "bytes", 0);
-        current_bytes = current_bytes + size;
-        if at - last_tm > 1 {
-            buffer[buffer.length] = (current_bytes - last_bytes) * 1000 / (at - last_tm);
-            if buffer.length > 5 {
-                let a = buffer[1].copy();
-                let b = buffer[2].copy();
-                let c = buffer[3].copy();
-                let d = buffer[4].copy();
-                let e = buffer[5].copy();
-                buffer = [a, b, c, d, e];
-            }
-            last_tm = at;
-            last_bytes = current_bytes;
-        }
-    }
-    let mut sum = 0;
-    for index in 0..buffer.length {
-        sum = sum + buffer[index].copy();
-    }
-    let average = if buffer.length == 0 => { 0 } else => { sum / buffer.length };
-    let low = buffer.length >= 5 && average > 0 && average < threshold * 1000;
+    let samples = speed_samples(maps(request, "chunks"));
+    let average = average_of(samples);
+    let low = threshold > 0 && samples.length >= 5 && average > 0 && average < threshold * 1000;
     let decision = if low => { "speed:low" } else => { "speed:ok" };
     let mut observable: map = {};
     observable["low_speed"] = low;
-    observable["sample_count"] = buffer.length;
+    observable["sample_count"] = samples.length;
     observable["average_milli"] = average;
     report([decision], empty_queues(), empty_slots(), observable, [], 0, 0, "")
 }
@@ -358,6 +413,33 @@ fn monitor_observable(reason: string, zombies: [string], swept: [string], task_s
     observable
 }
 
+fn error_ignored(request: map, code: int) -> bool {
+    let codes = ints(request, "ignored_errors");
+    let mut found = false;
+    for index in 0..codes.length {
+        if codes[index].copy() == code {
+            found = true;
+        }
+    }
+    found
+}
+
+fn monitor_label(reason: string) -> string {
+    if reason == "quota" => {
+        "monitor:quota-vote"
+    } else if reason == "zombie" => {
+        "monitor:zombie"
+    } else if reason == "sweep" => {
+        "monitor:sweep"
+    } else if reason == "slow" => {
+        "monitor:slow"
+    } else if reason == "stuck" => {
+        "monitor:stuck"
+    } else => {
+        "monitor:clear"
+    }
+}
+
 fn progress_monitor(request: map) -> map {
     let finished = whole(request, "finished", 0);
     let speed = whole(request, "total_speed", 0);
@@ -365,31 +447,42 @@ fn progress_monitor(request: map) -> map {
     let threshold = whole(request, "timeout", 10) * (whole(request, "retry", 0) + 1);
     let state = whole(request, "state", 10);
     let mut now = 0;
+    let mut last_seen = 0;
     let mut last_change = 0;
     let mut last_finished = -1;
+    let mut intv = 0;
     let mut reason = "";
     let mut stopped = false;
-    let mut done = false;
-    for iteration in 1..41 {
-        if done == false {
-            if now - 0 > threshold {
-                done = true;
-            } else if iteration % 10 == 0 && last_finished != finished {
+    let mut alive = true;
+    let mut guard = 0;
+    while alive && guard < 500 {
+        guard = guard + 1;
+        intv = intv + 1;
+        if now - last_seen > threshold {
+            alive = false;
+            stopped = true;
+        } else if intv == 10 {
+            if last_finished != finished {
                 last_change = now;
                 last_finished = finished;
-            } else if iteration % 10 == 0 && now - last_change > 90 {
+            } else if now - last_change > 90 {
                 if speed > 0 {
                     reason = "slow";
-                    stopped = false;
+                    last_change = now;
                 } else {
                     reason = "stuck";
                     stopped = true;
+                    alive = false;
                 }
-                done = true;
             }
-            if done == false {
-                now = now + step;
-            }
+            intv = 0;
+        }
+        if alive {
+            now = now + step;
+            last_seen = now;
+        }
+        if reason == "slow" {
+            alive = false;
         }
     }
     monitor_observable(reason, [], [], state, stopped, {})
@@ -398,22 +491,11 @@ fn progress_monitor(request: map) -> map {
 fn run_monitor(request: map) -> string {
     let kind = text(request, "kind", "");
     let state = whole(request, "state", 4);
-    let decision = if kind == "quota-vote" => {
-        "monitor:quota-vote"
-    } else if kind == "zombie" => {
-        "monitor:zombie"
-    } else if kind == "sweep" => {
-        "monitor:sweep"
-    } else if kind == "slow" => {
-        "monitor:slow"
-    } else => {
-        "monitor:stuck"
-    };
     let observable = if kind == "quota-vote" => {
         let votes: map = request["votes"].copy();
         let count = whole(votes, "1006", 0);
         let threads = whole(request, "thread_count", 0);
-        let failed = count >= threads && threads > 0;
+        let failed = error_ignored(request, 1006) == false && count >= threads && threads > 0;
         let next_state = if failed => { -1 } else => { state };
         let reason = if failed => { "quota" } else => { "" };
         monitor_observable(reason, [], [], next_state, failed, votes)
@@ -436,7 +518,8 @@ fn run_monitor(request: map) -> string {
     } else => {
         progress_monitor(request)
     };
-    report([decision], empty_queues(), empty_slots(), observable, [], 0, 0, "")
+    let reason: string = observable["reason"].copy();
+    report([monitor_label(reason)], empty_queues(), empty_slots(), observable, [], 0, 0, "")
 }
 
 fn sorted_insert(values: [int], fid: int) -> [int] {
@@ -466,22 +549,27 @@ fn run_duplicates(request: map) -> string {
     let mut decisions: [string] = [];
     let mut finished: [int] = [];
     let mut copied = false;
+    let mut duplicate_map: map = {};
     if old_exists && new_fid != old_fid {
         decisions[decisions.length] = "duplicate:copied";
         finished = sorted_insert(finished, new_fid);
         copied = true;
     } else if new_fid != old_fid {
         decisions[decisions.length] = "duplicate:pending";
+        let mut fids: [int] = [];
+        fids[fids.length] = new_fid;
+        duplicate_map[decimal_text(old_fid)] = fids;
         if save_original {
             decisions[decisions.length] = "duplicate:saved-copy";
             finished = sorted_insert(finished, old_fid);
             finished = sorted_insert(finished, new_fid);
             copied = true;
+            duplicate_map = {};
         }
     }
     let mut observable: map = {};
     observable["finished"] = finished;
-    observable["duplicate_map"] = {};
+    observable["duplicate_map"] = duplicate_map;
     observable["img_q"] = [];
     observable["copied"] = copied;
     report(decisions, empty_queues(), empty_slots(), observable, [], 0, 0, "")
@@ -493,6 +581,29 @@ fn range_pairs(request: map) -> [[int]] {
         typed
     } else => {
         []
+    }
+}
+
+fn fid_pad(fid: int, total: int) -> string {
+    let total_text = decimal_text(total);
+    let width = (&total_text).length;
+    let fid_text = decimal_text(fid);
+    let mut pad = "";
+    let missing = width - (&fid_text).length;
+    for _index in 0..missing {
+        pad = pad + "0";
+    }
+    pad + fid_text + ".jpg"
+}
+
+fn scanned_last_page(request: map, total: int) -> bool {
+    let present_last = flag(request, "present_last", false);
+    let probe_dir = text(request, "probe_dir", "");
+    if present_last && probe_dir != "" => {
+        let stat = xeh_fs::stat(probe_dir + "/" + fid_pad(total, total));
+        stat.exists && stat.size > 0
+    } else => {
+        false
     }
 }
 
@@ -566,7 +677,7 @@ fn run_pages(request: map) -> string {
     observable["state"] = 1;
     observable["unfinished"] = unfinished;
     observable["unfinished_count"] = unfinished.length;
-    observable["scanned_includes_last"] = kind == "last-page";
+    observable["scanned_includes_last"] = scanned_last_page(request, total);
     report(decisions, empty_queues(), empty_slots(), observable, [], 0, 0, "")
 }
 
@@ -575,19 +686,19 @@ fn run_lifecycle(request: map) -> string {
     let download_count = whole(request, "download_thread_cnt", 0);
     let steps = strings(request, "steps");
     let mut submit_ids: [string] = [];
-    let mut permits = 0;
     let mut codes: [int] = [];
     let mut details: [string?] = [];
     let mut states: [int] = [];
     let mut queue_puts = 0;
     let mut exit_after_pause = false;
     let mut started = false;
+    let mut permit_trace: [int] = [];
     for index in 0..steps.length {
         let step: string = steps[index].copy();
         if step == "start" && started == false && state == 10 {
+            let _held = xeh_worker::acquire(download_count);
             for worker in 0..download_count {
                 submit_ids[submit_ids.length] = "down-" + decimal_text(worker + 1);
-                permits = permits + 1;
             }
             started = true;
         }
@@ -599,7 +710,7 @@ fn run_lifecycle(request: map) -> string {
             if rejected == false {
                 exit_after_pause = true;
                 state = 0;
-                permits = 0;
+                let _released = xeh_worker::release_all();
                 codes[codes.length] = 0;
             }
             details[details.length] = detail_value(rejected == false);
@@ -621,10 +732,12 @@ fn run_lifecycle(request: map) -> string {
             states[states.length] = state;
         }
         if step == "exit" {
-            permits = 0;
+            let _released = xeh_worker::release_all();
             exit_after_pause = true;
         }
+        permit_trace[permit_trace.length] = xeh_worker::permits();
     }
+    let permits_end = xeh_worker::permits();
     let mut observable: map = {};
     observable["codes"] = codes;
     observable["details"] = details;
@@ -632,7 +745,8 @@ fn run_lifecycle(request: map) -> string {
     observable["queue_puts"] = queue_puts;
     observable["exit_after_pause"] = exit_after_pause;
     observable["finished"] = whole(request, "finished", 0);
-    report(["lifecycle:no-double-submit"], empty_queues(), empty_slots(), observable, submit_ids, submit_ids.length, permits, "")
+    observable["permit_trace"] = permit_trace;
+    report(["lifecycle:no-double-submit"], empty_queues(), empty_slots(), observable, submit_ids, submit_ids.length, permits_end, "")
 }
 
 fn exchange_status(url: string) -> int {

@@ -95,6 +95,9 @@ pub fn compose_application_catalog() -> Arc<HostApiCatalog> {
         builder.function(function);
     }
     builder.function(admit_function());
+    for function in crate::worker::permits::functions() {
+        builder.function(function);
+    }
     Arc::new(builder.build().expect("application host catalog"))
 }
 

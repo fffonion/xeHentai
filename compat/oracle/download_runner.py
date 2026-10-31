@@ -6,7 +6,6 @@ other decision calls the fixed upstream objects directly.
 """
 
 import json
-import math
 import os
 from pathlib import Path
 import socket
@@ -99,42 +98,168 @@ def public_flags(task):
     }
 
 
-def worker_names(state, scan_count, download_count):
-    if state < 4:
-        return []
-    names = ["down-%d" % (index + 1) for index in range(download_count)]
-    names.extend("scan-%d" % (index + 1) for index in range(scan_count))
-    return names
+def empty_queues():
+    return {"metadata": [], "list": [], "scan": [], "download": []}
 
 
-def list_urls(task):
-    count = int(math.ceil(1.0 * task.meta["total"] / int(task.meta["thumbnail_cnt"])))
-    return ["%s/?p=%d" % (task.url, index) for index in range(count)]
+def empty_slots():
+    return {"metadata": 1, "list": 1, "scan": 0, "download": 0}
 
 
-def run_slots(request, root, task_mod):
+def bundle(decisions, observable, queues=None, slots=None, submit_ids=None, submit_count=0, permits_end=0, route_kind=""):
+    return {
+        "decisions": list(decisions),
+        "queues": queues if queues is not None else empty_queues(),
+        "slots": slots if slots is not None else empty_slots(),
+        "observable": observable,
+        "submit_ids": list(submit_ids or []),
+        "submit_count": submit_count,
+        "permits_end": permits_end,
+        "route_kind": route_kind,
+    }
+
+
+def prepare_task_config(task, request):
+    task.config["make_archive"] = False
+    task.config["proxy_image"] = bool(request.get("proxy_image", False))
+    task.config["proxy_image_only"] = bool(request.get("proxy_image_only", False))
+    task.config["download_timeout"] = int(request.get("timeout", 10))
+    task.config["low_speed_threshold"] = int(request.get("low_speed_threshold", 0))
+    task.config["ignored_errors"] = request.get("ignored_errors") or []
+
+
+def make_core(task, core_mod):
+    core = core_mod.xeHentai.__new__(core_mod.xeHentai)
+    core._exit = 0
+    core._all_threads = [[] for _ in range(21)]
+    core._all_tasks = {task.guid: task}
+    core.logger = logger()
+    core.headers = {}
+    core.proxy = None
+    core.has_login = False
+    core.tasks = Queue()
+    return core
+
+
+def alive_workers(core):
+    return sum(
+        1
+        for bucket in core._all_threads
+        for thread in bucket
+        if thread.__class__.__name__ == "HttpWorker" and thread.is_alive()
+    )
+
+
+def join_started(core, timeout=3):
+    threads = [thread for bucket in core._all_threads for thread in bucket]
+    for thread in threads:
+        if thread.__class__.__name__ == "HttpWorker":
+            thread.join(timeout)
+    for thread in threads:
+        if thread.__class__.__name__ == "Monitor":
+            thread.join(timeout)
+
+
+def started_worker_names(core):
+    return [
+        thread.name
+        for bucket in core._all_threads
+        for thread in bucket
+        if thread.__class__.__name__ == "HttpWorker"
+    ]
+
+
+def retry_label(fail_code, exception, low):
+    if low:
+        return "retry:low-speed"
+    if exception == "KeyError":
+        return "retry:failed-reload"
+    return {
+        1009: "retry:connection-error",
+        1007: "retry:key-expired",
+        1011: "retry:not-found",
+        1012: "retry:broken",
+        1006: "retry:quota",
+    }.get(fail_code, "retry:quota")
+
+
+def monitor_label(reason):
+    return {
+        "quota": "monitor:quota-vote",
+        "zombie": "monitor:zombie",
+        "sweep": "monitor:sweep",
+        "slow": "monitor:slow",
+        "stuck": "monitor:stuck",
+    }.get(reason, "monitor:clear")
+
+
+def run_slots(request, root, task_mod, core_mod, worker_mod):
     task = task_for(request, root, task_mod)
+    prepare_task_config(task, request)
     for url in request.get("page_q") or []:
         task.page_q.put(url)
     for url in request.get("img_q") or []:
         task.img_q.put(url)
-    pending = list_urls(task) if task.state == 3 else []
-    names = worker_names(
-        task.state,
-        int(request.get("scan_thread_cnt", 0)),
-        int(request.get("download_thread_cnt", 0)),
-    )
+    task.list_q = Queue()
+    task.list_q.put("decoy-list")
+    initial_state = task.state
+    core = make_core(task, core_mod)
+    requested = []
+
+    class RecordingReq(object):
+        def request(self, method, url, flt, suc, fail, **kwargs):
+            requested.append(url)
+            core._exit = 2
+            return None
+
+    core._get_httpreq = lambda policy: RecordingReq()
+    created = []
+    real_get = core_mod.xeHentai._get_httpworker
+
+    def wrapped(self, tid, task_q, *args, **kwargs):
+        worker = real_get(self, tid, task_q, *args, **kwargs)
+        worker.start = lambda: created.append(worker)
+        return worker
+
+    core._get_httpworker = wrapped.__get__(core, core_mod.xeHentai)
+    monitors = []
+    original_start = worker_mod.Monitor.start
+
+    def no_start(self):
+        monitors.append(self)
+
+    worker_mod.Monitor.start = no_start
+    try:
+        core._do_task(task.guid)
+    finally:
+        worker_mod.Monitor.start = original_start
+    names = list(monitors[0].thread_last_seen.keys()) if monitors else []
+    spawned_scan = sum(1 for worker in created if str(worker.name).startswith("scan-"))
+    spawned_download = sum(1 for worker in created if str(worker.name).startswith("down-"))
+    queues = empty_queues()
+    if initial_state == 2:
+        queues["metadata"] = list(requested)
+    elif initial_state == 3:
+        queues["list"] = list(requested)
+    if spawned_scan:
+        queues["scan"] = queue_items(task.page_q)
+    if spawned_download:
+        queues["download"] = queue_items(task.img_q)
+    slots = empty_slots()
+    slots["scan"] = spawned_scan
+    slots["download"] = spawned_download
     flags = public_flags(task)
-    return {
+    observable = {
         "worker_names": names,
-        "spawned_scan": int(request.get("scan_thread_cnt", 0)) if task.state >= 4 else 0,
-        "spawned_download": int(request.get("download_thread_cnt", 0)) if task.state >= 4 else 0,
+        "spawned_scan": spawned_scan,
+        "spawned_download": spawned_download,
         "public_has_list_q": flags["public_has_list_q"],
         "public_has_metadata_q": flags["public_has_metadata_q"],
         "page_q": flags["page_q"],
         "img_q": flags["img_q"],
-        "pending_list_urls": pending,
+        "pending_list_urls": list(requested) if initial_state == 3 else [],
     }
+    return bundle(["slots:separated"], observable, queues=queues, slots=slots)
 
 
 class Response(object):
@@ -183,11 +308,34 @@ def register_reload(task, request):
         task.reload_map[key] = [reload_url, request.get("fname") or ""]
 
 
-def run_retry(request, root, task_mod, filters, const):
+def checker_is_low(request, worker_mod):
+    chunks = request.get("chunks") or []
+    threshold = int(request.get("threshold", 0))
+    if not chunks or threshold <= 0:
+        return False
+    clock = Clock(0, 0)
+    original = worker_mod.time.time
+    worker_mod.time.time = clock.time
+    try:
+        checker = worker_mod.speed_checker()
+        for chunk in chunks:
+            clock.now = int(chunk["t"])
+            checker.check(int(chunk["bytes"]))
+        average = checker.calc(full=True)
+    finally:
+        worker_mod.time.time = original
+    return 0 < average < threshold
+
+
+def run_retry(request, root, task_mod, filters, const, worker_mod):
     task = task_for(request, root, task_mod)
     register_reload(task, request)
-    response = Response(request)
-    install_header_get(response)
+    low = checker_is_low(request, worker_mod)
+    if low:
+        response = worker_mod._FakeResponse(request.get("requested_url") or "")
+    else:
+        response = Response(request)
+        install_header_get(response)
     fails = []
     exception = None
 
@@ -200,7 +348,7 @@ def run_retry(request, root, task_mod, filters, const):
 
     holder = {"value": None}
     download = filters.download_file_wrapper(str(root))
-    if request.get("stream_broken"):
+    if request.get("stream_broken") and not low:
         def iter_content(_size=16384):
             raise filters_connection_error()
 
@@ -229,12 +377,13 @@ def run_retry(request, root, task_mod, filters, const):
     except Exception as error:
         exception = exception or type(error).__name__
     fail_value = fails[0] if fails else [0, "", ""]
-    return {
+    observable = {
         "fail": fail_value,
         "requeue_url": requeue_url,
         "exception": exception,
         "page_q": page_q,
     }
+    return bundle([retry_label(fail_value[0], exception or "", low)], observable)
 
 
 def filters_connection_error():
@@ -249,6 +398,8 @@ class Clock(object):
         self.step = step
         self.iterations = 0
         self.stop_after = 0
+        self.refresh = None
+        self.warnings = None
 
     def time(self):
         return self.now
@@ -256,7 +407,16 @@ class Clock(object):
     def sleep(self, _seconds):
         self.iterations += 1
         self.now += self.step
+        if self.refresh is not None:
+            for name in list(self.refresh.thread_last_seen):
+                self.refresh.thread_last_seen[name] = self.now
+        if self.warnings is not None and any(
+            "slow" in str(message) or "stuck" in str(message) for message in self.warnings
+        ):
+            raise StopIteration()
         if self.stop_after and self.iterations >= self.stop_after:
+            raise StopIteration()
+        if self.iterations > 500:
             raise StopIteration()
 
 
@@ -273,11 +433,13 @@ def run_speed(request, worker_mod):
     finally:
         worker_mod.time.time = original
     threshold = int(request.get("threshold", 0))
-    return {
-        "low_speed": bool(0 < average < threshold),
+    low = bool(0 < average < threshold)
+    decision = "speed:low" if low else "speed:ok"
+    return bundle([decision], {
+        "low_speed": low,
         "sample_count": len(checker.speed_buffer),
         "average_milli": int(round(average * 1000)),
-    }
+    })
 
 
 def monitor_for(request, root, task_mod, worker_mod):
@@ -297,14 +459,15 @@ def run_monitor(request, root, task_mod, worker_mod, const):
         monitor.vote_result = votes
         monitor.thread_last_seen = {"down-%d" % (index + 1): 0 for index in range(int(request.get("thread_count", 0)))}
         monitor._check_vote()
-        return {
-            "reason": "quota" if task.state == const.TASK_STATE_FAILED else "",
+        reason = "quota" if task.state == const.TASK_STATE_FAILED else ""
+        return bundle([monitor_label(reason)], {
+            "reason": reason,
             "zombies": [],
             "swept": [],
             "task_state": task.state,
             "stopped": task.state == const.TASK_STATE_FAILED,
             "votes": json_value(monitor.vote_result),
-        }
+        })
 
     if kind in ("zombie", "sweep"):
         name = request.get("name") or "down-1"
@@ -329,15 +492,15 @@ def run_monitor(request, root, task_mod, worker_mod, const):
             worker_mod.time.sleep = original_sleep
         zombies = sorted(monitor.thread_zombie)
         swept = [name] if name not in monitor.thread_last_seen and name not in zombies else []
-        reason = "zombie" if zombies else "sweep"
-        return {
+        reason = "zombie" if zombies else "sweep" if name not in monitor.thread_last_seen else ""
+        return bundle([monitor_label(reason)], {
             "reason": reason,
             "zombies": zombies,
             "swept": swept,
             "task_state": task.state,
             "stopped": name not in monitor.thread_last_seen,
             "votes": {},
-        }
+        })
 
     name = request.get("name") or "down-1"
     threshold = int(request.get("timeout", 10)) * (int(request.get("retry", 0)) + 1)
@@ -352,13 +515,14 @@ def run_monitor(request, root, task_mod, worker_mod, const):
     task.meta["finished"] = int(request.get("finished", 0))
     task.meta["total"] = max(task.meta["finished"] + 1, int(request.get("total", task.meta["finished"] + 1)))
     clock = Clock(0, int(request.get("clock_step", 10)))
-    clock.stop_after = 40
+    clock.refresh = monitor
     original = worker_mod.time.time
     original_sleep = worker_mod.time.sleep
     worker_mod.time.time = clock.time
     worker_mod.time.sleep = clock.sleep
     monitor.set_vote_ns([name])
     warnings = []
+    clock.warnings = warnings
     monitor.logger.warning = lambda message, *args: warnings.append(message)
     try:
         monitor.run()
@@ -370,14 +534,14 @@ def run_monitor(request, root, task_mod, worker_mod, const):
     stuck = any("stuck" in str(message) for message in warnings)
     slow = any("slow" in str(message) for message in warnings)
     reason = "stuck" if stuck else "slow" if slow else ""
-    return {
+    return bundle([monitor_label(reason)], {
         "reason": reason,
         "zombies": [],
         "swept": [],
         "task_state": task.state,
         "stopped": stuck,
         "votes": {},
-    }
+    })
 
 
 def run_duplicates(request, root, task_mod, const):
@@ -391,19 +555,25 @@ def run_duplicates(request, root, task_mod, const):
         folder.mkdir(parents=True, exist_ok=True)
         (folder / task.get_fidpad(int(request["old_fid"]))).write_bytes(b"old")
     task.put_img_queue(request["img_url"], request["reload_url"], request["fname"])
-    copied = request.get("old_exists", False)
+    decisions = []
+    new_fid = int(task_mod.RE_GALLERY.findall(request["reload_url"])[0][1])
+    if new_fid in task._flist_done and request.get("old_exists"):
+        decisions.append("duplicate:copied")
+    elif int(request["old_fid"]) in task.duplicate_map:
+        decisions.append("duplicate:pending")
     if request.get("save_original"):
         def binary():
             yield b"img"
 
         task.save_file(request["img_url"], request["img_url"], binary)
-        copied = True
-    return {
+        if int(request["old_fid"]) in task._flist_done and new_fid in task._flist_done:
+            decisions.append("duplicate:saved-copy")
+    return bundle(decisions, {
         "finished": sorted(task._flist_done),
         "duplicate_map": json_value(task.duplicate_map) if task.duplicate_map else {},
         "img_q": queue_items(task.img_q),
-        "copied": bool(copied),
-    }
+        "copied": new_fid in task._flist_done,
+    })
 
 
 def run_pages(request, root, task_mod):
@@ -416,14 +586,21 @@ def run_pages(request, root, task_mod):
         task.scan_downloaded()
     unfinished = task.get_fid_unfinished()
     scanned_last = False
-    if kind == "last-page":
+    if request.get("present_last"):
         probe = task_for(request, root / "probe", task_mod)
         folder = Path(probe.get_fpath())
         folder.mkdir(parents=True, exist_ok=True)
         (folder / probe.get_fidpad(int(request["total"]))).write_bytes(b"last")
         probe.scan_downloaded()
         scanned_last = int(request["total"]) in probe._flist_done
-    return {
+    decisions = []
+    if kind in ("repeated-unfinished", "repeated-finished"):
+        decisions.append("page:queued" if task.page_q.qsize() else "page:skipped")
+    elif kind == "out-of-range":
+        decisions.append("page:out-of-range")
+    elif kind == "last-page":
+        decisions.append("page:last-excluded")
+    return bundle(decisions, {
         "page_q": queue_items(task.page_q),
         "queued_count": task.page_q.qsize(),
         "finished": sorted(task._flist_done),
@@ -432,37 +609,66 @@ def run_pages(request, root, task_mod):
         "unfinished": unfinished,
         "unfinished_count": len(unfinished),
         "scanned_includes_last": scanned_last,
-    }
+    })
 
 
-def run_lifecycle(request, root, task_mod, core_mod):
+def run_lifecycle(request, root, task_mod, core_mod, worker_mod):
     task = task_for(request, root, task_mod)
-    task._monitor = SimpleNamespace(_exit=lambda _value: False)
-    owner = SimpleNamespace(_all_tasks={task.guid: task}, tasks=Queue())
+    prepare_task_config(task, request)
+    core = make_core(task, core_mod)
+    core._get_httpreq = lambda _policy: SimpleNamespace()
     codes = []
     details = []
     states = []
-    for step in request.get("steps") or []:
-        if step == "start":
-            continue
-        if step == "pause":
-            code, detail = core_mod.xeHentai.pause_task(owner, task.guid)
-        elif step == "resume":
-            code, detail = core_mod.xeHentai.resume_task(owner, task.guid)
-        else:
-            task._monitor._exit = lambda _value: True
-            continue
-        codes.append(code)
-        details.append(detail if detail is not None else None)
-        states.append(task.state)
-    return {
+    submit_ids = []
+    permit_trace = []
+    started = False
+    original_sleep = worker_mod.time.sleep
+    worker_mod.time.sleep = lambda _seconds: None
+    try:
+        for step in request.get("steps") or []:
+            if step == "start" and not started and task.state == 10:
+                core._do_task(task.guid)
+                submit_ids = started_worker_names(core)
+                started = True
+            elif step == "pause":
+                code, detail = core_mod.xeHentai.pause_task(core, task.guid)
+                join_started(core)
+                codes.append(code)
+                details.append(detail if detail is not None else None)
+                states.append(task.state)
+            elif step == "resume":
+                code, detail = core_mod.xeHentai.resume_task(core, task.guid)
+                codes.append(code)
+                details.append(detail if detail is not None else None)
+                states.append(task.state)
+            elif step == "exit":
+                if getattr(task, "_monitor", None):
+                    task._monitor._exit = lambda _value: True
+                for bucket in core._all_threads:
+                    for thread in bucket:
+                        thread._exit = lambda _value: True
+                join_started(core)
+            permit_trace.append(alive_workers(core))
+    finally:
+        worker_mod.time.sleep = original_sleep
+        join_started(core)
+    observable = {
         "codes": codes,
         "details": json_value(details),
         "states": states,
-        "queue_puts": owner.tasks.qsize(),
-        "exit_after_pause": bool(task._monitor._exit(None)),
+        "queue_puts": core.tasks.qsize(),
+        "exit_after_pause": bool(getattr(task, "_monitor", None) and task._monitor._exit(None)),
         "finished": int(request.get("finished", 0)),
+        "permit_trace": permit_trace,
     }
+    return bundle(
+        ["lifecycle:no-double-submit"],
+        observable,
+        submit_ids=submit_ids,
+        submit_count=len(submit_ids),
+        permits_end=alive_workers(core),
+    )
 
 
 def serve_ok():
@@ -525,16 +731,20 @@ def run_hop(request, util):
     finally:
         server.close()
         thread.join(timeout=2)
-    return {"path": path, "status": int(status)}
+    return bundle(
+        ["hop:proxy_request" if path == "proxied" else "hop:admit+exchange"],
+        {"path": path, "status": int(status)},
+        route_kind="http" if path == "proxied" else "direct",
+    )
 
 
 def observable_for(case, root, modules):
     request = case["request"]
     operation = request["operation"]
     if operation == "slots":
-        return run_slots(request, root, modules["task"])
+        return run_slots(request, root, modules["task"], modules["core"], modules["worker"])
     if operation == "retry":
-        return run_retry(request, root, modules["task"], modules["filters"], modules["const"])
+        return run_retry(request, root, modules["task"], modules["filters"], modules["const"], modules["worker"])
     if operation == "speed":
         return run_speed(request, modules["worker"])
     if operation == "monitor":
@@ -544,7 +754,7 @@ def observable_for(case, root, modules):
     if operation == "pages":
         return run_pages(request, root, modules["task"])
     if operation == "lifecycle":
-        return run_lifecycle(request, root, modules["task"], modules["core"])
+        return run_lifecycle(request, root, modules["task"], modules["core"], modules["worker"])
     if operation == "hop":
         return run_hop(request, modules["util"])
     raise RuntimeError("unknown download operation %s" % operation)
@@ -575,7 +785,10 @@ def main():
         case_root = fixture_root / ("case-%03d" % index)
         case_root.mkdir()
         os.chdir(case_root)
-        results.append({"id": case["id"], "observable": observable_for(case, case_root, modules)})
+        report = observable_for(case, case_root, modules)
+        row = {"id": case["id"]}
+        row.update(report)
+        results.append(row)
     result_path.write_text(
         json.dumps({"cases": results}, ensure_ascii=True, sort_keys=True) + "\n",
         encoding="utf-8",

@@ -487,11 +487,50 @@ pub fn run_download_scenario(
     runtime.block_on(run_download_scenario_async(root, request, authorization))
 }
 
+fn legalpath(text: &str) -> String {
+    text.chars()
+        .filter(|ch| *ch != '/' && *ch != ':' && *ch != '\\')
+        .collect()
+}
+
+fn prepare_download_request(root: &Path, request: &str) -> Result<String, HostError> {
+    let mut value: serde_json::Value = serde_json::from_str(request)
+        .map_err(|error| HostError::runtime(format!("download request is not JSON: {error}")))?;
+    let present_last = value
+        .get("present_last")
+        .and_then(|item| item.as_bool())
+        .unwrap_or(false);
+    if present_last {
+        let total = value
+            .get("total")
+            .and_then(|item| item.as_i64())
+            .unwrap_or(1)
+            .max(1);
+        let title = value
+            .get("title")
+            .and_then(|item| item.as_str())
+            .unwrap_or("gallery");
+        let dir = root.join("probe").join(legalpath(title));
+        std::fs::create_dir_all(&dir).map_err(|error| {
+            HostError::runtime(format!("cannot create scan probe directory: {error}"))
+        })?;
+        let width = total.to_string().len();
+        let name = format!("{total:0width$}.jpg");
+        std::fs::write(dir.join(name), b"last").map_err(|error| {
+            HostError::runtime(format!("cannot write scan probe file: {error}"))
+        })?;
+        value["probe_dir"] = serde_json::Value::String(dir.to_string_lossy().into_owned());
+    }
+    serde_json::to_string(&value)
+        .map_err(|error| HostError::runtime(format!("cannot encode download request: {error}")))
+}
+
 async fn run_download_scenario_async(
     root: &Path,
     request: &str,
     authorization: &str,
 ) -> Result<String, HostError> {
+    let request = prepare_download_request(root, request)?;
     let http = authorization_config(authorization)?;
     let grants = download_grants(authorization)?;
     let catalog = crate::proxy_host::proxy_catalog();
@@ -515,7 +554,13 @@ async fn run_download_scenario_async(
         grants,
     );
     crate::proxy_host::register_proxy(&mut registry, &catalog, host)?;
+    crate::worker::permits::register(&mut registry, &catalog)?;
     bind_vm(&mut vm, &registry)?;
+    crate::os::fs::install(
+        &mut vm,
+        crate::os::fs::FsState::new(vec![root.to_path_buf()], None, None),
+    );
+    crate::worker::permits::install(&mut vm);
     attach_timer(&mut vm, Arc::new(EmbeddingTimer::new()));
     drive_to_halt(&mut vm).await?;
     let callable = vm
