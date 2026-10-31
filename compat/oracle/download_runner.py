@@ -8,7 +8,6 @@ other decision calls the fixed upstream objects directly.
 import json
 import os
 from pathlib import Path
-import re
 import socket
 import sys
 import threading
@@ -200,32 +199,67 @@ def retry_label(fail_code, exception, low):
     }.get(fail_code, "retry:quota")
 
 
-def image_from_page(page_url):
-    found = re.search(r"/([a-f0-9]{10})/([0-9]+)-([0-9]+)", page_url or "")
-    if not found:
+def extract_page_image(url, body, filters):
+    if not body:
         return None
-    short, gid, fid = found.group(1), found.group(2), found.group(3)
-    return "https://cdn.example/h/%s-%s-%s-1-jpg" % (short * 4, gid, fid)
+    response = SimpleNamespace(
+        status_code=200,
+        url=url,
+        _real_url=url,
+        text=body,
+        content_length=1024,
+        headers={"content-type": "text/html"},
+    )
+    found = {}
+
+    def suc(value):
+        if value:
+            found["src"] = value[0]
+        return None
+
+    def fail(_value):
+        return None
+
+    try:
+        filters.flt_imgurl_wrapper(False)(response, suc, fail)
+    except Exception:
+        return None
+    return found.get("src")
 
 
-def run_worker_body(worker, task):
+def run_worker_body(worker, task, request, filters):
     if worker.task_queue is task.page_q:
         try:
-            url = worker.task_queue.get(False)
+            page = worker.task_queue.get(False)
         except Empty:
             return
-        image = image_from_page(url)
-        if image is None:
-            return
-        worker.f_suc((image, url, "001.jpg"))
+
+        def scan_callback(page_url):
+            src = extract_page_image(page_url, request.get("page_body") or "", filters)
+            if not src or src in queue_items(task.img_q):
+                return
+            task.img_q.put(src)
+
+        scan_callback(page)
         return
-    if worker.task_queue.empty():
-        return
-    url = list(worker.task_queue.queue)[0]
     try:
-        worker.f_suc((lambda: iter(()), url, url))
-    except Exception:
+        url = list(worker.task_queue.queue)[0]
+    except IndexError:
         return
+
+    def download_callback(value):
+        try:
+            worker.f_suc(value)
+        except Exception:
+            pass
+        try:
+            front = worker.task_queue.get(False)
+        except Empty:
+            return
+        if front != url:
+            worker.task_queue.queue.appendleft(front)
+
+    download_callback((lambda: iter(()), url, url))
 
 
 def monitor_label(reason):
@@ -238,7 +272,7 @@ def monitor_label(reason):
     }.get(reason, "monitor:clear")
 
 
-def run_slots(request, root, task_mod, core_mod, worker_mod):
+def run_slots(request, root, task_mod, core_mod, worker_mod, filters):
     task = task_for(request, root, task_mod)
     prepare_task_config(task, request)
     for url in request.get("page_q") or []:
@@ -268,7 +302,7 @@ def run_slots(request, root, task_mod, core_mod, worker_mod):
             created.append(worker)
             thread = threading.Thread(
                 target=run_worker_body,
-                args=(worker, task),
+                args=(worker, task, request, filters),
                 name=worker.name,
             )
             thread.start()
@@ -490,8 +524,6 @@ class Clock(object):
             else:
                 for name in list(self.refresh.thread_last_seen):
                     self.refresh.thread_last_seen[name] = self.now
-        if self.after_slow == "" and self._slow_count() >= 2:
-            raise StopIteration()
         if self.stop_after and self.iterations >= self.stop_after:
             raise StopIteration()
 
@@ -628,6 +660,10 @@ def run_monitor(request, root, task_mod, worker_mod, const):
     clock.after_slow = request.get("after_slow") or ""
     clock.task = task
     clock.worker = worker
+    sample_limit = request.get("sample_limit")
+    if sample_limit is None and not clock.after_slow:
+        sample_limit = 40
+    clock.stop_after = int(sample_limit or 0)
     initial_finished = int(task.meta["finished"])
     original = worker_mod.time.time
     original_sleep = worker_mod.time.sleep
@@ -662,6 +698,7 @@ def run_monitor(request, root, task_mod, worker_mod, const):
         "total_speed": reported_speed,
         "workers_alive": alive,
         "running": running,
+        "tracked": name in monitor.thread_last_seen,
     })
 
 
@@ -863,7 +900,7 @@ def observable_for(case, root, modules):
     request = case["request"]
     operation = request["operation"]
     if operation == "slots":
-        return run_slots(request, root, modules["task"], modules["core"], modules["worker"])
+        return run_slots(request, root, modules["task"], modules["core"], modules["worker"], modules["filters"])
     if operation == "retry":
         return run_retry(request, root, modules["task"], modules["filters"], modules["const"], modules["worker"])
     if operation == "speed":

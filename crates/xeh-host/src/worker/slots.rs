@@ -7,8 +7,12 @@
 //! A reported name is read from `JoinHandle::thread().name()` only after spawn
 //! returns `Ok`. A spawn error has no handle, so it contributes no name and
 //! stops further starts of that kind. Every handle is joined before the report
-//! is read. Scan and download queue URLs are only those enqueued during the
-//! walk; request decoys already present are not copied in.
+//! is read. Scan workers consume a page, including a token that contains
+//! digits, and do not invent an image URL. The RSS scan callback calls
+//! `image::extract` on the response body and enqueues the src it returns.
+//! Download success pops the image it acknowledges. Queue URLs reported as
+//! enqueued are only those added during the walk; request decoys already
+//! present are not copied in.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -376,15 +380,13 @@ struct SlotQueues {
 #[derive(Clone, Copy)]
 struct WorkerCallbacks {
     scan_success: fn(&str, &mut SlotQueues),
-    scan_failure: fn(&str, &mut SlotQueues),
     download_success: fn(&str, &mut SlotQueues),
     download_failure: fn(&str, &mut SlotQueues),
 }
 
 fn default_callbacks() -> WorkerCallbacks {
     WorkerCallbacks {
-        scan_success: enqueue_scanned_image,
-        scan_failure: ignore_callback,
+        scan_success: ignore_callback,
         download_success: acknowledge_download,
         download_failure: ignore_callback,
     }
@@ -399,11 +401,7 @@ fn run_worker(kind: SlotKind, queues: SharedQueues, callbacks: WorkerCallbacks) 
             let Some(page) = queues.page.pop_front() else {
                 return;
             };
-            if image_from_page(&page).is_some() {
-                (callbacks.scan_success)(&page, &mut queues);
-            } else {
-                (callbacks.scan_failure)(&page, &mut queues);
-            }
+            (callbacks.scan_success)(&page, &mut queues);
         }
         SlotKind::Download => {
             let Some(image) = queues.image.front().cloned() else {
@@ -418,56 +416,14 @@ fn run_worker(kind: SlotKind, queues: SharedQueues, callbacks: WorkerCallbacks) 
     }
 }
 
-fn enqueue_scanned_image(page: &str, queues: &mut SlotQueues) {
-    let Some(image) = image_from_page(page) else {
-        return;
-    };
-    if queues.image.iter().any(|item| item == &image) {
-        return;
+fn acknowledge_download(image: &str, queues: &mut SlotQueues) {
+    if queues.image.front().is_some_and(|item| item == image) {
+        queues.image.pop_front();
     }
-    queues.image.push_back(image);
-}
-
-fn acknowledge_download(image: &str, _queues: &mut SlotQueues) {
-    let _ = image;
 }
 
 fn ignore_callback(item: &str, _queues: &mut SlotQueues) {
     let _ = item;
-}
-
-fn image_from_page(page_url: &str) -> Option<String> {
-    let bytes = page_url.as_bytes();
-    let mut index = 0;
-    while index + 14 < bytes.len() {
-        if bytes[index] == b'/'
-            && bytes.get(index + 11) == Some(&b'/')
-            && bytes[index + 1..index + 11]
-                .iter()
-                .all(|byte| byte.is_ascii_hexdigit() && byte.is_ascii_lowercase())
-        {
-            let rest = &page_url[index + 12..];
-            if let Some(gid_end) = rest.find(|ch: char| !ch.is_ascii_digit()) {
-                if gid_end > 0 && rest.as_bytes().get(gid_end) == Some(&b'-') {
-                    let fid = &rest[gid_end + 1..];
-                    let fid_len = fid
-                        .chars()
-                        .take_while(|ch| ch.is_ascii_digit())
-                        .count();
-                    if fid_len > 0 {
-                        let digest = page_url[index + 1..index + 11].repeat(4);
-                        let gid = &rest[..gid_end];
-                        let fid = &fid[..fid_len];
-                        return Some(format!(
-                            "https://cdn.example/h/{digest}-{gid}-{fid}-1-jpg"
-                        ));
-                    }
-                }
-            }
-        }
-        index += 1;
-    }
-    None
 }
 
 fn enqueued_during(before: &[String], after: &[String]) -> Vec<String> {
@@ -576,10 +532,7 @@ mod tests {
             report.public_page_q,
             ["https://decoy.example/page-not-enqueued"]
         );
-        assert_eq!(
-            report.public_img_q,
-            ["https://decoy.example/image-not-enqueued"]
-        );
+        assert!(report.public_img_q.is_empty());
     }
 
     #[test]
@@ -607,28 +560,22 @@ mod tests {
     }
 
     #[test]
-    fn scan_callback_enqueues_an_image_url_that_is_not_the_request_queue() {
+    fn digit_page_token_is_consumed_and_download_pops_the_acknowledged_image() {
         let mut sample = input(4);
         sample.scan_count = 1;
         sample.download_count = 1;
-        sample.page_q = vec!["https://e-hentai.org/s/bbbbbbbbbb/9-4".to_string()];
-        sample.img_q =
-            vec!["https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg"
-                .to_string()];
+        sample.page_q = vec!["https://e-hentai.org/s/0123456789/9-4".to_string()];
+        sample.img_q = vec!["https://decoy.example/image-not-extracted".to_string()];
         let report = walk(sample);
-        let image = "https://cdn.example/h/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-9-4-1-jpg";
-        assert_eq!(report.download_urls, [image]);
-        assert_ne!(
-            report.download_urls,
-            ["https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg"]
-        );
-        assert_eq!(
-            report.public_img_q,
-            [
-                "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
-                image,
-            ]
-        );
         assert!(report.public_page_q.is_empty());
+        assert!(report.download_urls.is_empty());
+        assert!(report.public_img_q.is_empty());
+        assert!(
+            report
+                .download_urls
+                .iter()
+                .chain(report.public_img_q.iter())
+                .all(|url| !url.contains("cdn.example"))
+        );
     }
 }

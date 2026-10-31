@@ -19,7 +19,7 @@
         "/queues/metadata": [],
         "/queues/list": [],
         "/queues/scan": [],
-        "/queues/download/0": "https://cdn.example/h/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-1-1-1-jpg",
+        "/queues/download": [],
         "/slots/metadata": 1,
         "/slots/list": 1,
         "/slots/scan": 2,
@@ -28,8 +28,8 @@
         "/observable/spawned_download": 3,
         "/observable/public_has_list_q": false,
         "/observable/public_has_metadata_q": false,
-        "/observable/img_q/0": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
-        "/observable/img_q/1": "https://cdn.example/h/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-1-1-1-jpg"
+        "/observable/page_q": [],
+        "/observable/img_q": []
       }
     },
     {
@@ -830,7 +830,7 @@
         "/observable/spawned_download": 3,
         "/observable/worker_names": ["down-1", "down-2", "down-3"],
         "/observable/page_q/0": "https://decoy.example/page-not-enqueued",
-        "/observable/img_q/0": "https://decoy.example/image-not-enqueued"
+        "/observable/img_q": []
       }
     },
     {
@@ -959,9 +959,33 @@
       },
       "assertions": {
         "/decisions/0": "slots:separated",
-        "/queues/download/0": "https://cdn.example/h/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-9-4-1-jpg",
-        "/observable/img_q/0": "https://cdn.example/h/0123456789abcdef0123456789abcdef01234567-100-10-10-jpg",
-        "/observable/img_q/1": "https://cdn.example/h/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-9-4-1-jpg",
+        "/queues/download": [],
+        "/observable/img_q": [],
+        "/observable/page_q": [],
+        "/slots/scan": 1,
+        "/slots/download": 1
+      }
+    },
+    {
+      "id": "download.slots.scan-extracts-keystamp",
+      "suite": "download",
+      "request": {
+        "operation": "slots",
+        "state": 4,
+        "scan_thread_cnt": 1,
+        "download_thread_cnt": 1,
+        "url": "https://e-hentai.org/g/9/0123456789/",
+        "total": 40,
+        "thumbnail_cnt": 20,
+        "page_q": ["https://e-hentai.org/s/0123456789/9-4"],
+        "page_body": "<img src=\"https://img.test/path/file.jpg?keystamp=stamp\" style=\"x\"></a></div><div>file.jpg :: x :: y</di class=\"mr\" x <a href=\"https://img.test/original.jpg\" >Download original return nl('nonce-123')",
+        "img_q": ["https://decoy.example/image-not-extracted"]
+      },
+      "assertions": {
+        "/decisions/0": "slots:separated",
+        "/queues/download/0": "https://img.test/path/file.jpg?keystamp=stamp",
+        "/observable/img_q/0": "https://img.test/path/file.jpg?keystamp=stamp",
+        "/observable/page_q": [],
         "/slots/scan": 1,
         "/slots/download": 1
       }
@@ -979,7 +1003,8 @@
         "total": 10,
         "total_speed": 2048,
         "state": 10,
-        "name": "down-1"
+        "name": "down-1",
+        "sample_limit": 40
       },
       "assertions": {
         "/decisions/0": "monitor:slow",
@@ -989,8 +1014,10 @@
         "/observable/total_speed": 2048,
         "/observable/workers_alive": true,
         "/observable/running": true,
+        "/observable/tracked": true,
         "/observable/steps/0": "slow",
-        "/observable/steps/1": "slow"
+        "/observable/steps/1": "slow",
+        "/observable/steps/2": "slow"
       }
     }
   ]

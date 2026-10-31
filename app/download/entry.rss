@@ -12,6 +12,7 @@ use super::proxy::pool;
 use super::proxy::policy;
 use super::proxy::request;
 use super::rules::download;
+use super::site::image;
 use super::site::support;
 
 fn text(value: map, key: string, fallback: string) -> string {
@@ -129,6 +130,79 @@ fn public_has_queue(name: string) -> bool {
     name == "page_q" || name == "img_q"
 }
 
+fn contains_text(items: [string], target: string) -> bool {
+    let mut found = false;
+    for index in 0..items.length {
+        if items[index].copy() == target {
+            found = true;
+        }
+    }
+    found
+}
+
+fn drop_first(items: [string], target: string) -> [string] {
+    let mut next: [string] = [];
+    let mut dropped = false;
+    for index in 0..items.length {
+        let item = items[index].copy();
+        if dropped == false && item == target {
+            dropped = true;
+        } else {
+            next[next.length] = item;
+        }
+    }
+    next
+}
+
+fn consumed_pages(before: [string], after: [string]) -> [string] {
+    let mut remaining = after.copy();
+    let mut popped: [string] = [];
+    for index in 0..before.length {
+        let item = before[index].copy();
+        let next = drop_first(remaining.copy(), item.copy());
+        if next.length == remaining.length {
+            popped[popped.length] = item;
+        } else {
+            remaining = next;
+        }
+    }
+    popped
+}
+
+fn scan_callback(page: string, body: string) -> string {
+    if body == "" => {
+        ""
+    } else => {
+        let suc_returns: [string] = [];
+        let fail_returns: [string] = [];
+        let extracted = image::extract(
+            body.copy(),
+            page.copy(),
+            page.copy(),
+            false,
+            suc_returns,
+            fail_returns
+        );
+        let callbacks: [map] = extracted["callbacks"].copy();
+        if callbacks.length == 0 => {
+            ""
+        } else => {
+            let event: map = callbacks[0].copy();
+            let kind: string = event["kind"].copy();
+            if kind != "suc" => {
+                ""
+            } else => {
+                let value: [string] = event["value"].copy();
+                if value.length == 0 => {
+                    ""
+                } else => {
+                    value[0].copy()
+                }
+            }
+        }
+    }
+}
+
 fn run_slots(request: map) -> string {
     let walked = xeh_slots::walk(
         whole(request, "state", 1),
@@ -147,14 +221,24 @@ fn run_slots(request: map) -> string {
     let download_q: [string] = walked.download_urls.copy();
     let pending: [string] = walked.pending_list_urls.copy();
     let page_q: [string] = walked.public_page_q.copy();
-    let img_q: [string] = walked.public_img_q.copy();
+    let mut img_q: [string] = walked.public_img_q.copy();
     let spawned_scan: int = walked.spawned_scan;
     let spawned_download: int = walked.spawned_download;
+    let mut download_listed: [string] = download_q.copy();
+    let body = text(request, "page_body", "");
+    let popped = consumed_pages(strings(request, "page_q"), page_q.copy());
+    for index in 0..popped.length {
+        let src = scan_callback(popped[index].copy(), body.copy());
+        if src != "" && contains_text(img_q.copy(), src.copy()) == false {
+            img_q[img_q.length] = src.copy();
+            download_listed[download_listed.length] = src.copy();
+        }
+    }
     let mut queues = empty_queues();
     queues["metadata"] = metadata_q;
     queues["list"] = list_q;
     queues["scan"] = scan_q;
-    queues["download"] = download_q;
+    queues["download"] = download_listed;
     let mut slots = empty_slots();
     slots["scan"] = spawned_scan;
     slots["download"] = spawned_download;
@@ -437,21 +521,25 @@ fn progress_monitor(request: map) -> map {
     let mut checkin = true;
     let mut slow_handled = false;
     let mut slow_seen = false;
-    let mut slow_count = 0;
     let mut workers_alive = true;
-    let mut running = false;
     let mut steps: [string] = [];
-    while tracked {
+    let mut looping = true;
+    let mut samples = 0;
+    let mut sample_limit = whole(request, "sample_limit", 0);
+    if after_slow == "" && sample_limit == 0 {
+        sample_limit = 40;
+    }
+    while looping {
         intv = intv + 1;
         if checkin == false || now - last_seen > threshold {
             tracked = false;
+            looping = false;
         } else if intv == 10 {
             if last_finished != finished {
                 if slow_seen && after_slow == "progress" {
                     steps[steps.length] = "progress";
                     checkin = false;
                     workers_alive = false;
-                    running = false;
                 }
                 last_change = now;
                 last_finished = finished;
@@ -460,21 +548,17 @@ fn progress_monitor(request: map) -> map {
                     reason = "slow";
                     steps[steps.length] = "slow";
                     slow_seen = true;
-                    slow_count = slow_count + 1;
                     last_change = now;
-                    if after_slow == "" && slow_count >= 2 {
-                        running = true;
-                    }
                 } else {
                     reason = "stuck";
                     steps[steps.length] = "stuck";
                     stopped = true;
-                    tracked = false;
+                    looping = false;
                 }
             }
             intv = 0;
         }
-        if tracked {
+        if looping {
             now = now + step;
             if slow_seen && slow_handled == false {
                 slow_handled = true;
@@ -487,17 +571,20 @@ fn progress_monitor(request: map) -> map {
             if checkin {
                 last_seen = now;
             }
-            if after_slow == "" && slow_count >= 2 {
-                tracked = false;
+            samples = samples + 1;
+            if sample_limit > 0 && samples >= sample_limit {
+                looping = false;
             }
         }
     }
+    let running = workers_alive && stopped == false && checkin;
     let mut observable = monitor_observable(reason, [], [], state, stopped, {});
     observable["steps"] = steps;
     observable["finished"] = finished;
     observable["total_speed"] = speed;
     observable["workers_alive"] = workers_alive;
     observable["running"] = running;
+    observable["tracked"] = tracked;
     observable
 }
 
