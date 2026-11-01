@@ -178,11 +178,92 @@ impl Drop for DownloadStage {
 /// Tracks filesystem opens that are already queued on the blocking pool.
 /// A pause can wait for these owners to retire instead of claiming quiescence
 /// while an OS open is still in flight (an OS open itself cannot be aborted).
+///
+/// It also owns the RPC media layer's native workers. The collection only
+/// ever holds records: each record's `JoinHandle` is awaited IN PLACE under
+/// its own async mutex, so a cancelled observation drops only its guard and
+/// never hides or detaches the worker from later drains.
 #[derive(Clone, Default)]
 pub struct StageDrain {
     count: Arc<AtomicUsize>,
     notify: Arc<tokio::sync::Notify>,
+    native: Arc<Mutex<Vec<Arc<NativeSlot>>>>,
 }
+
+/// One owned native RPC worker. `joined` becomes true only after the actual
+/// `JoinHandle` resolved to Ready; a worker return or channel send is not
+/// join evidence. Records are removed only after that actual join.
+pub(crate) struct NativeSlot {
+    handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    joined: AtomicBool,
+}
+
+impl NativeSlot {
+    /// Await this record's own handle without taking it out. Dropping the
+    /// guard (cancelled observer) leaves the handle visible for the next
+    /// observer; awaiting a second time is safe because the handle never
+    /// moves.
+    async fn wait_joined(&self) {
+        if self.joined.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut guard = self.handle.lock().await;
+        if self.joined.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Some(handle) = guard.as_mut() {
+            let _ = handle.await;
+        }
+        self.joined.store(true, Ordering::SeqCst);
+    }
+
+    /// Reap a record whose worker already finished, without waiting for an
+    /// active worker. Returns true when this observation actually joined it.
+    async fn join_if_finished(&self) -> bool {
+        if self.joined.load(Ordering::SeqCst) {
+            return true;
+        }
+        let Ok(mut guard) = self.handle.try_lock() else {
+            return false;
+        };
+        if self.joined.load(Ordering::SeqCst) {
+            return true;
+        }
+        match guard.as_mut() {
+            Some(handle) if handle.is_finished() => {
+                let _ = handle.await;
+                self.joined.store(true, Ordering::SeqCst);
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// One submitted native job. The typed result travels through a oneshot; the
+/// owner awaits the result and then joins the SAME owner-held handle. Both
+/// steps are cancellation-safe: the record stays until an actual join.
+pub(crate) struct NativeHandle<T> {
+    drain: StageDrain,
+    slot: Arc<NativeSlot>,
+    result: tokio::sync::oneshot::Receiver<T>,
+}
+
+impl<T> NativeHandle<T> {
+    /// Receive the typed result, then join the actual worker. A channel
+    /// failure (panic before send) still performs the real join.
+    pub(crate) async fn join(self) -> Result<T, NativeJoinError> {
+        let result = self.result.await;
+        self.slot.wait_joined().await;
+        self.drain.reap_native();
+        result.map_err(|_| NativeJoinError)
+    }
+}
+
+/// The native worker ended without delivering a typed result (panic or
+/// dropped sender); the actual join still happened before this is returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NativeJoinError;
 
 pub struct StageGuard {
     drain: StageDrain,
@@ -209,6 +290,106 @@ impl StageDrain {
                 return;
             }
             notified.await;
+        }
+    }
+
+    /// Spawn one owned native job and keep its handle in this drain. Must be
+    /// called synchronously by the admission section (no await between the
+    /// caller's check and this registration). `undelivered` receives the
+    /// typed result when the owner's receiver is already gone, so an owned
+    /// result (for example a private archive stage) can still be discarded
+    /// explicitly.
+    pub(crate) fn spawn_native<T, F, D>(&self, job: F, undelivered: D) -> NativeHandle<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+        D: FnOnce(T) + Send + 'static,
+    {
+        let (sender, result) = tokio::sync::oneshot::channel();
+        let slot = Arc::new(NativeSlot {
+            handle: tokio::sync::Mutex::new(None),
+            joined: AtomicBool::new(false),
+        });
+        let handle = tokio::task::spawn_blocking(move || {
+            let outcome = job();
+            if let Err(outcome) = sender.send(outcome) {
+                undelivered(outcome);
+            }
+        });
+        // The slot is not published yet, so this try_lock is uncontended and
+        // cannot block the LocalSet thread.
+        {
+            let mut owned = slot.handle.try_lock().expect("fresh native slot");
+            *owned = Some(handle);
+        }
+        self.native
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(Arc::clone(&slot));
+        NativeHandle {
+            drain: self.clone(),
+            slot,
+            result,
+        }
+    }
+
+    fn native_snapshot(&self) -> Vec<Arc<NativeSlot>> {
+        self.native
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    /// Number of native records whose actual join has not been observed yet.
+    pub(crate) fn native_pending(&self) -> usize {
+        self.native
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .len()
+    }
+
+    /// Remove only records already joined by an actual `JoinHandle` Ready.
+    fn reap_native(&self) -> usize {
+        let mut native = self
+            .native
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let before = native.len();
+        native.retain(|slot| !slot.joined.load(Ordering::SeqCst));
+        before - native.len()
+    }
+
+    /// Join records whose workers already retired, then reap them. This keeps
+    /// the record vector bounded during ordinary traffic, including requests
+    /// abandoned by their observer.
+    pub(crate) async fn reap_native_finished(&self) -> usize {
+        let mut joined = 0;
+        for slot in self.native_snapshot() {
+            if slot.join_if_finished().await {
+                joined += 1;
+            }
+        }
+        self.reap_native();
+        joined
+    }
+
+    /// Await every owned native worker's actual retirement. Records admitted
+    /// while this drain is running (a live server pause) are observed by the
+    /// next round; cancelled observers only drop their own guard.
+    pub(crate) async fn wait_native(&self) -> usize {
+        let mut joined = 0;
+        loop {
+            let snapshot = self.native_snapshot();
+            if snapshot.is_empty() {
+                return joined;
+            }
+            for slot in &snapshot {
+                if !slot.joined.load(Ordering::SeqCst) {
+                    joined += 1;
+                }
+                slot.wait_joined().await;
+            }
+            self.reap_native();
         }
     }
 }

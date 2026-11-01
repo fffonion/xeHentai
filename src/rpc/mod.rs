@@ -2417,20 +2417,59 @@ pub fn run_with_rpc(app: crate::core::App, root: &Path) -> i32 {
     tokio_runtime.block_on(local.run_until(async move {
         // spawn_local must happen inside the LocalSet that owns the runtime.
         let (task_loop, handle) = runtime.spawn();
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let rpc = handle.serve_rpc(shutdown_rx, PRODUCTION_STATIC_ORIGIN.to_string());
-        tokio::pin!(rpc);
-        tokio::select! {
-            result = &mut rpc => match result {
-                Ok(()) => 0,
-                Err(error) => {
-                    eprintln!("xeHentai: RPC server error: {error}");
-                    1
-                }
-            },
-            _ = task_loop => 0,
-        }
+        supervise(task_loop, rpc, shutdown_tx, &handle).await
     }))
+}
+
+/// Own both children of the M5 startup hook. Whichever future finishes first,
+/// the existing shutdown watch signal is sent and BOTH children are awaited;
+/// a completed `select!` branch never drops its live sibling. If the RPC side
+/// ended first (normal stop or a real bind/serve error), admission is closed
+/// and the task loop cancelled through the existing `AppHandle::shutdown`
+/// owner path before its cleanup is joined. A completed task loop already
+/// closed admission through `Runtime::cleanup`.
+async fn supervise<F>(
+    mut task_loop: tokio::task::JoinHandle<()>,
+    rpc: F,
+    shutdown: tokio::sync::watch::Sender<bool>,
+    handle: &crate::core::runtime::AppHandle,
+) -> i32
+where
+    F: std::future::Future<Output = Result<(), ServerError>>,
+{
+    tokio::pin!(rpc);
+    let mut rpc_result = None;
+    let mut task_finished = false;
+    tokio::select! {
+        result = &mut rpc => rpc_result = Some(result),
+        result = &mut task_loop => {
+            let _ = result;
+            task_finished = true;
+        }
+    }
+    let _ = shutdown.send(true);
+    if !task_finished {
+        let _ = handle.shutdown().await;
+    }
+    let rpc_result = match rpc_result {
+        Some(result) => result,
+        None => rpc.await,
+    };
+    if !task_finished {
+        let _ = task_loop.await;
+    }
+    if task_finished {
+        return 0;
+    }
+    match rpc_result {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("xeHentai: RPC server error: {error}");
+            1
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2671,5 +2710,105 @@ mod tests {
         assert_eq!(image_mime("jepg"), "image/jpeg");
         assert_eq!(image_mime("PNG"), "image/png");
         assert_eq!(image_mime("xyz"), "application/octet-stream");
+    }
+
+    /// M5 R3-A startup owner: a real bind error keeps status 1 AND retires
+    /// the task loop through its cleanup before `run_with_rpc` returns. The
+    /// observable cleanup is the session file written by `Runtime::cleanup`.
+    #[test]
+    fn r3a_run_with_rpc_bind_error_retires_the_task_loop() {
+        let root = tempfile::tempdir().expect("root");
+        let occupied = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("occupy port");
+        let port = occupied.local_addr().expect("addr").port();
+        let base = root.path().to_path_buf();
+        assert!(!base.join(crate::core::SESSION_FILE).exists());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker_base = base.clone();
+        let worker = std::thread::spawn(move || {
+            let config = crate::config::Config {
+                rpc_interface: "127.0.0.1".to_string(),
+                rpc_port: Some(port as i64),
+                ..Default::default()
+            };
+            let logger = crate::util::logger::Logger::with_output(Box::new(Vec::new()), false);
+            let app =
+                crate::core::App::new(config, logger, &worker_base, &worker_base).expect("app");
+            let code = crate::rpc::run_with_rpc(app, &worker_base);
+            let _ = sender.send(code);
+        });
+        let code = receiver
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("run_with_rpc returns on the bind error");
+        assert_eq!(code, 1, "the real bind-error exit status is preserved");
+        worker.join().expect("startup thread");
+        assert!(
+            base.join(crate::core::SESSION_FILE).exists(),
+            "the task loop retired through its cleanup before return"
+        );
+        drop(occupied);
+    }
+
+    /// The task-loop-first outcome must not drop the live server future: the
+    /// shutdown signal retires the real listener and `supervise` awaits it
+    /// before returning the normal status.
+    #[test]
+    fn r3a_supervise_retires_the_server_after_task_loop_completion() {
+        use crate::rpc::server::{SharedRpc, bind, serve_until_closed};
+        use std::sync::Arc;
+        let root = tempfile::tempdir().expect("root");
+        let cache = tempfile::tempdir().expect("cache").keep();
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let config = crate::config::Config::default();
+        let logger = crate::util::logger::Logger::with_output(Box::new(Vec::new()), false);
+        let app = crate::core::App::new(config, logger, root.path(), root.path()).expect("app");
+        let local = tokio::task::LocalSet::new();
+        let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        tokio_runtime.block_on(local.run_until(async move {
+            let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
+            let (task_loop, handle) = runtime.spawn();
+            let listener = bind("127.0.0.1", 0).await.expect("bind");
+            let shared = std::rc::Rc::new(std::cell::RefCell::new(
+                SharedRpc::new(
+                    manifest,
+                    &cache,
+                    Arc::new(crate::worker::RealClock),
+                    None,
+                    "http://127.0.0.1:9".to_string(),
+                )
+                .expect("shared"),
+            ));
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let serve_done = Arc::clone(&done);
+            let server_handle = handle.clone();
+            let serve = async move {
+                let result = serve_until_closed(
+                    listener,
+                    shutdown_rx,
+                    server_handle,
+                    shared,
+                    "http://127.0.0.1:9".to_string(),
+                )
+                .await;
+                serve_done.store(true, std::sync::atomic::Ordering::SeqCst);
+                result
+            };
+            // The task loop exits through the ordinary soft-stop condition
+            // before the server; the supervisor must still retire the server.
+            handle.borrow_app_mut(|app| app.set_exit(crate::r#const::XEH_STATE_SOFT_EXIT));
+            let code = supervise(task_loop, serve, shutdown_tx, &handle).await;
+            assert_eq!(code, 0);
+            assert!(
+                done.load(std::sync::atomic::Ordering::SeqCst),
+                "the live server future was awaited, not dropped"
+            );
+            assert_eq!(
+                handle.borrow_app(|app| app.exit_state()),
+                crate::r#const::XEH_STATE_CLEAN
+            );
+        }));
     }
 }

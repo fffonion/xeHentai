@@ -116,7 +116,7 @@ enum ArchiveAdmission {
 
 /// Result of the synchronous publication boundary. `Stale` hands the
 /// unpublished container back so its owner can remove the private stage.
-enum ArchiveCommit {
+pub(crate) enum ArchiveCommit {
     Committed(CommittedArchive),
     Stale(PreparedArchive),
 }
@@ -363,21 +363,24 @@ impl RuntimeInner {
 
     /// Publish a prepared container for the exact run that was admitted.
     /// Identity validation and the bounded namespace effects share one
-    /// borrow, so an invalidated run can never publish in between.
+    /// borrow, so an invalidated run can never publish in between. The
+    /// minimum state is parameterized: the M4 worker publishes at
+    /// MAKE_ARCHIVE, the RPC reader at FINISHED.
     fn commit_archive(
         &self,
         guid: &str,
         token: (u64, u64),
         prepared: PreparedArchive,
+        min_state: i64,
     ) -> Result<ArchiveCommit, TaskError> {
         // An immutable RefCell borrow still excludes every mutation for the
         // duration of the bounded rename/removal, so a validated run cannot
         // be replaced between validation and publication.
         let app = self.app.borrow();
         let current = app.exit_state() < consts::XEH_STATE_FULL_EXIT
-            && app.task(guid).is_some_and(|task| {
-                task.token() == token && task.state >= consts::TASK_STATE_MAKE_ARCHIVE
-            });
+            && app
+                .task(guid)
+                .is_some_and(|task| task.token() == token && task.state >= min_state);
         if !current {
             return Ok(ArchiveCommit::Stale(prepared));
         }
@@ -547,6 +550,7 @@ impl Runtime {
         // every drain uses, so entries disappear only after actual completion.
         inner.wait_and_reap(inner.snapshot_all_slots()).await;
         inner.stage.wait_zero().await;
+        inner.stage.wait_native().await;
         inner.save_session();
         inner.app.borrow_mut().set_exit(consts::XEH_STATE_CLEAN);
     }
@@ -1079,6 +1083,7 @@ pub struct AppHandle {
 pub struct DrainReport {
     pub joined: usize,
     pub blocking_pending: usize,
+    pub native_pending: usize,
 }
 
 impl AppHandle {
@@ -1111,6 +1116,7 @@ impl AppHandle {
             return Ok(DrainReport {
                 joined: 0,
                 blocking_pending: self.inner.stage.pending(),
+                native_pending: self.inner.stage.native_pending(),
             });
         }
         let mut joined = 0usize;
@@ -1124,6 +1130,7 @@ impl AppHandle {
         Ok(DrainReport {
             joined,
             blocking_pending: self.inner.stage.pending(),
+            native_pending: self.inner.stage.native_pending(),
         })
     }
 
@@ -1308,12 +1315,72 @@ impl AppHandle {
         // so this future stays pending until every owned worker retires.
         let joined = self.inner.wait_and_reap(waiting).await;
         self.inner.stage.wait_zero().await;
+        self.inner.stage.wait_native().await;
         self.inner.save_session();
         self.inner.save_session();
         DrainReport {
             joined,
             blocking_pending: self.inner.stage.pending(),
+            native_pending: self.inner.stage.native_pending(),
         }
+    }
+
+    /// Join every owned native media worker's actual retirement. Explicit
+    /// public drain used by the server's own stop path and by tests; a
+    /// cancelled observer leaves the records visible for the next drain.
+    pub async fn wait_native(&self) -> usize {
+        self.inner.stage.wait_native().await
+    }
+
+    /// Reap native records whose workers already finished, without waiting
+    /// for active ones. Called before a new submission and by ordinary
+    /// traffic so abandoned requests cannot grow the record vector.
+    pub(crate) async fn reap_native_finished(&self) {
+        self.inner.stage.reap_native_finished().await;
+    }
+
+    /// Admit one RPC native job. The caller has already captured the exact
+    /// task owner/run in a short borrow and acquired its heavy permit; this
+    /// section checks the live App is still RUNNING and that the exact run
+    /// still owns the guid, then spawns and registers with no await gap.
+    pub(crate) fn spawn_native_job<T, F, D>(
+        &self,
+        guid: &str,
+        token: (u64, u64),
+        job: F,
+        undelivered: D,
+    ) -> Option<super::NativeHandle<T>>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+        D: FnOnce(T) + Send + 'static,
+    {
+        let app = self.inner.app.borrow();
+        if app.exit_state() != consts::XEH_STATE_RUNNING || !app.task_run_matches(guid, token) {
+            return None;
+        }
+        let handle = self.inner.stage.spawn_native(job, undelivered);
+        drop(app);
+        Some(handle)
+    }
+
+    /// Publish an RPC-prepared archive only for the exact captured run and
+    /// minimum state (FINISHED for the reader). One borrow covers identity,
+    /// state and the bounded namespace effects.
+    pub(crate) fn commit_archive_exact(
+        &self,
+        guid: &str,
+        token: (u64, u64),
+        prepared: crate::task::PreparedArchive,
+        min_state: i64,
+    ) -> Result<ArchiveCommit, crate::task::TaskError> {
+        self.inner.commit_archive(guid, token, prepared, min_state)
+    }
+
+    /// Test-only native record count.
+    #[cfg(test)]
+    pub fn native_pending(&self) -> usize {
+        self.inner.stage.native_pending()
     }
 }
 
@@ -2426,7 +2493,7 @@ async fn archive_worker(
             return;
         }
     };
-    match inner.commit_archive(&guid, token, prepared) {
+    match inner.commit_archive(&guid, token, prepared, consts::TASK_STATE_MAKE_ARCHIVE) {
         Ok(ArchiveCommit::Committed(committed)) => {
             // Test-only barrier between publication and detached-tree
             // cleanup; unarmed runs pass straight through.
@@ -2475,8 +2542,14 @@ async fn archive_worker(
         Ok(ArchiveCommit::Stale(prepared)) => {
             // The run was invalidated after the private container was built:
             // only its owner may remove that stage, and nothing public is
-            // touched.
-            discard_prepared(prepared);
+            // touched. A real unlink error is recorded, never claimed as
+            // successful removal.
+            if let Err(error) = discard_prepared(prepared) {
+                inner.record(
+                    "archive.discard_failed",
+                    json!({"task": guid, "error": error.to_string()}),
+                );
+            }
             inner.record(
                 "archive.stale",
                 json!({"task": guid, "stage": "publication"}),

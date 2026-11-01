@@ -369,12 +369,15 @@ pub(crate) struct MediaGate {
 }
 
 /// One armed TEST-ONLY media gate: the worker start signal plus the test
-/// release channel, keyed by gallery-root marker.
+/// release channel, keyed by gallery-root marker. `ignore_cancel` arms a
+/// genuinely non-interruptible body: the worker exits only on an explicit
+/// release, never because the request observation was cancelled.
 #[cfg(test)]
 type MediaGateArmed = (
     String,
     tokio::sync::oneshot::Sender<()>,
     std::sync::mpsc::Receiver<()>,
+    bool,
 );
 
 #[cfg(test)]
@@ -382,12 +385,24 @@ static MEDIA_GATES: std::sync::Mutex<Vec<MediaGateArmed>> = std::sync::Mutex::ne
 
 #[cfg(test)]
 pub(crate) fn arm_media_worker_gate(marker: &str) -> MediaGate {
+    arm_media_worker_gate_with(marker, false)
+}
+
+/// Arm a non-interruptible worker body: only the explicit release ends it,
+/// even after the request observation is dropped and its cancel flag set.
+#[cfg(test)]
+pub(crate) fn arm_media_worker_gate_ignoring_cancel(marker: &str) -> MediaGate {
+    arm_media_worker_gate_with(marker, true)
+}
+
+#[cfg(test)]
+fn arm_media_worker_gate_with(marker: &str, ignore_cancel: bool) -> MediaGate {
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     MEDIA_GATES
         .lock()
         .unwrap()
-        .push((marker.to_string(), started_tx, release_rx));
+        .push((marker.to_string(), started_tx, release_rx, ignore_cancel));
     MediaGate {
         started: started_rx,
         release: release_tx,
@@ -404,19 +419,19 @@ fn media_worker_hold(marker: &str, cancel: &CancelFlag) -> bool {
         let mut gates = MEDIA_GATES.lock().unwrap();
         gates
             .iter()
-            .position(|(armed, _, _)| armed == marker)
+            .position(|(armed, _, _, _)| armed == marker)
             .map(|index| gates.remove(index))
     };
-    let Some((_, started, release)) = channels else {
+    let Some((_, started, release, ignore_cancel)) = channels else {
         return false;
     };
     let _ = started.send(());
     loop {
-        if cancel.load(Ordering::Relaxed) {
+        if !ignore_cancel && cancel.load(Ordering::Relaxed) {
             return true;
         }
         match release.recv_timeout(std::time::Duration::from_millis(20)) {
-            Ok(()) => return cancel.load(Ordering::Relaxed),
+            Ok(()) => return !ignore_cancel && cancel.load(Ordering::Relaxed),
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return true,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
         }
@@ -460,16 +475,25 @@ async fn run_image(
     }
     // Snapshot under a SHORT borrow; released before any disk read. The
     // snapshot carries the gallery root FD identity plus the sibling-parent
-    // identity so the worker can bind both opens.
-    let snap = handle.borrow_app(|app| snapshot_gallery_file(app, guid, fid));
-    let snap = match snap {
-        Ok(snap) => snap,
+    // identity so the worker can bind both opens, together with the exact
+    // task owner/run that must still own this guid at admission.
+    let (snap, token) = match handle.borrow_app(|app| {
+        app.task(guid)
+            .ok_or(GalleryFail::NotFound)
+            .and_then(|task| snapshot_gallery_file(app, guid, fid).map(|snap| (snap, task.token())))
+    }) {
+        Ok(found) => found,
         Err(fail) => return gallery_fail(fail),
     };
     let parent_id = snap.root.parent().and_then(crate::task::dir_identity);
+    // Bound the abandoned-record set before acquiring capacity: records whose
+    // workers already finished are joined and dropped at the submission
+    // boundary instead of accumulating until shutdown.
+    handle.reap_native_finished().await;
     // The permit is acquired before any file open, read, ZIP decompress,
-    // spool write or decode, and moves into the worker: it stays held until
-    // the worker actually finishes, never released by dropping the waiter.
+    // spool write or decode, and moves into the owned native worker: it stays
+    // held until the worker actually finishes, never released by dropping
+    // the request observation.
     let permit = match Arc::clone(&permits).acquire_owned().await {
         Ok(permit) => permit,
         Err(_) => {
@@ -491,7 +515,14 @@ async fn run_image(
         parent_id,
         cancel,
     };
-    let joined = tokio::task::spawn_blocking(move || image_worker(job, permit)).await;
+    // Check + spawn + register in one synchronous admission section: the
+    // App must still be RUNNING and the captured run must still own the guid.
+    let Some(native) =
+        handle.spawn_native_job(guid, token, move || image_worker(job, permit), |_| {})
+    else {
+        return text_html(404);
+    };
+    let joined = native.join().await;
     drop(guard);
     match joined {
         Err(_) => Response {
@@ -750,14 +781,19 @@ async fn run_archive(
     }
     // Snapshot under a SHORT borrow; the writer never touches task state.
     // The reserved set and the sibling-parent identity for the final
-    // confined open are captured here as well (all owned, Send).
-    let snapshot = handle.borrow_app(|app| {
+    // confined open are captured here as well (all owned, Send), together
+    // with the exact task owner/run that must still own this guid at both
+    // native admissions and at publication.
+    let (snapshot, token) = match handle.borrow_app(|app| {
         app.task(guid)
             .ok_or(GalleryFail::NotFound)
-            .and_then(|task| task.archive_snapshot().map_err(task_fail))
-    });
-    let snapshot = match snapshot {
-        Ok(snapshot) => snapshot,
+            .and_then(|task| {
+                task.archive_snapshot()
+                    .map(|snapshot| (snapshot, task.token()))
+                    .map_err(task_fail)
+            })
+    }) {
+        Ok(found) => found,
         Err(fail) => {
             return Response {
                 status: fail.status(),
@@ -787,10 +823,13 @@ async fn run_archive(
             snapshot.arc.parent().and_then(crate::task::dir_identity),
         )
     });
-    // Heavy build on the blocking pool behind the heavy permit. The task
-    // file lock is taken inside that thread, like the M4 worker path. The
-    // permit moves into the worker and comes back with the result, so it
-    // stays owned until the worker actually finishes.
+    // Bound abandoned native records before taking capacity.
+    handle.reap_native_finished().await;
+    // Heavy build as an owned native worker behind the heavy permit. The
+    // task file lock is taken inside that thread, like the M4 worker path.
+    // The permit moves into the worker and comes back with the result, so it
+    // stays owned until the worker actually finishes; dropping the request
+    // observation never releases it early.
     let cancel: CancelFlag = Arc::new(false.into());
     let guard = CancelOnDrop(Arc::clone(&cancel));
     let permit = match Arc::clone(&permits).acquire_owned().await {
@@ -804,12 +843,27 @@ async fn run_archive(
             };
         }
     };
-    let prepared = tokio::task::spawn_blocking(move || {
-        let outcome = crate::task::prepare_archive_snapshot(&snapshot, false);
-        (permit, outcome)
-    })
-    .await;
-    let (permit, prepared) = match prepared {
+    use crate::core::runtime::ArchiveCommit;
+    use crate::task::PreparedArchive;
+    let Some(prepare) = handle.spawn_native_job(
+        guid,
+        token,
+        move || {
+            let outcome = crate::task::prepare_archive_snapshot(&snapshot, false);
+            (permit, outcome)
+        },
+        |(permit, outcome)| {
+            drop(permit);
+            if let Ok(prepared) = outcome {
+                // The owner observation is gone: remove this attempt's
+                // private stage explicitly instead of leaving it behind.
+                let _ = crate::task::discard_prepared(prepared);
+            }
+        },
+    ) else {
+        return text_html(404);
+    };
+    let (permit, prepared) = match prepare.join().await {
         Err(_) => {
             return Response {
                 status: 500,
@@ -832,23 +886,35 @@ async fn run_archive(
         }
         Ok(prepared) => prepared,
     };
-    use crate::task::PreparedArchive;
     let path = match prepared {
         PreparedArchive::Existing(path) => path,
         PreparedArchive::Staged(stage) => {
-            // Re-validate the exact task before publishing, then commit the
-            // bounded namespace step on the owner thread.
-            let live = handle.borrow_app(|app| app.task(guid).is_some());
-            if !live {
-                crate::task::discard_prepared(PreparedArchive::Staged(stage));
-                return Response {
-                    status: 404,
-                    reason: reason_of(404),
-                    mime: None,
-                    body: ResponseBody::Inline(Vec::new()),
-                };
-            }
-            match crate::task::commit_prepared(PreparedArchive::Staged(stage)) {
+            // Publish only while the exact captured run still owns the task
+            // at FINISHED (the reader's minimum state). Validation, state
+            // and the bounded namespace step share one borrow.
+            match handle.commit_archive_exact(
+                guid,
+                token,
+                PreparedArchive::Staged(stage),
+                consts::TASK_STATE_FINISHED,
+            ) {
+                Ok(ArchiveCommit::Committed(committed)) => committed.path,
+                Ok(ArchiveCommit::Stale(prepared)) => {
+                    if crate::task::discard_prepared(prepared).is_err() {
+                        return Response {
+                            status: 500,
+                            reason: reason_of(500),
+                            mime: None,
+                            body: ResponseBody::Inline(Vec::new()),
+                        };
+                    }
+                    return Response {
+                        status: 404,
+                        reason: reason_of(404),
+                        mime: None,
+                        body: ResponseBody::Inline(Vec::new()),
+                    };
+                }
                 Err(error) => {
                     let fail = task_fail(error);
                     return Response {
@@ -858,30 +924,37 @@ async fn run_archive(
                         body: ResponseBody::Inline(Vec::new()),
                     };
                 }
-                Ok(committed) => committed.path,
             }
         }
     };
-    // The committed sibling opens through the anchored confined open on
-    // the blocking pool, never a raw check-then-reopen: the permit covers
-    // the final open too and stays owned until the open actually finishes.
-    let opened = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        let (parent, leaf) = match (
-            path.parent(),
-            path.file_name().and_then(|name| name.to_str()),
-        ) {
-            (Some(parent), Some(leaf)) => (parent.to_path_buf(), leaf.to_string()),
-            _ => return Err(GalleryFail::NotFound),
-        };
-        let file = match crate::task::open_confined_regular(&parent, parent_id, &leaf, &reserved) {
-            Ok(Some(file)) => file,
-            Ok(None) | Err(_) => return Err(GalleryFail::NotFound),
-        };
-        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
-        Ok((file, len))
-    })
-    .await;
+    // The committed sibling opens through the anchored confined open inside
+    // its own owned native worker, never a raw check-then-reopen: the permit
+    // covers the final open too and stays owned until it actually finishes.
+    let Some(open) = handle.spawn_native_job(
+        guid,
+        token,
+        move || {
+            let _permit = permit;
+            let (parent, leaf) = match (
+                path.parent(),
+                path.file_name().and_then(|name| name.to_str()),
+            ) {
+                (Some(parent), Some(leaf)) => (parent.to_path_buf(), leaf.to_string()),
+                _ => return Err(GalleryFail::NotFound),
+            };
+            let file =
+                match crate::task::open_confined_regular(&parent, parent_id, &leaf, &reserved) {
+                    Ok(Some(file)) => file,
+                    Ok(None) | Err(_) => return Err(GalleryFail::NotFound),
+                };
+            let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+            Ok((file, len))
+        },
+        |_| {},
+    ) else {
+        return text_html(404);
+    };
+    let opened = open.join().await;
     drop(guard);
     let (file, len) = match opened {
         Ok(Ok(found)) => found,
@@ -1664,6 +1737,90 @@ pub async fn bind(interface: &str, port: u16) -> Result<TcpListener, std::io::Er
     TcpListener::bind((interface, port)).await
 }
 
+/// TEST-ONLY accept-fault seam: after `accepts` real accepts on `port`, the
+/// next accept waits interruptibly until the test triggers one synthetic I/O
+/// error. Scoped by the listener's own port so parallel tests on other
+/// listeners never consume it.
+#[cfg(test)]
+struct ArmedAcceptFault {
+    port: u16,
+    remaining: usize,
+}
+
+#[cfg(test)]
+static ACCEPT_FAULTS: std::sync::Mutex<Option<ArmedAcceptFault>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+static ACCEPT_FAULT_NOTIFY: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+#[cfg(test)]
+pub(crate) fn arm_accept_fault_after(port: u16, accepts: usize) {
+    *ACCEPT_FAULTS.lock().unwrap() = Some(ArmedAcceptFault {
+        port,
+        remaining: accepts,
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn trigger_accept_fault(port: u16) {
+    let armed = {
+        let mut faults = ACCEPT_FAULTS.lock().unwrap();
+        let matches = faults
+            .as_ref()
+            .is_some_and(|armed| armed.port == port && armed.remaining == 0);
+        if matches {
+            *faults = None;
+        }
+        matches
+    };
+    if armed {
+        ACCEPT_FAULT_NOTIFY.notify_one();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn clear_accept_fault(port: u16) {
+    let mut faults = ACCEPT_FAULTS.lock().unwrap();
+    if faults.as_ref().is_some_and(|armed| armed.port == port) {
+        *faults = None;
+    }
+}
+
+/// Accept one connection through the listener. Production always forwards to
+/// the real accept; tests may arm one deterministic error to exercise the
+/// owned cleanup path.
+async fn accept_one(
+    listener: &TcpListener,
+) -> std::io::Result<(tokio::net::TcpStream, std::net::SocketAddr)> {
+    #[cfg(test)]
+    {
+        let port = listener.local_addr().map(|addr| addr.port()).unwrap_or(0);
+        let wait_for_fault = {
+            let mut faults = ACCEPT_FAULTS.lock().unwrap();
+            match faults.as_mut() {
+                Some(armed) if armed.port == port => {
+                    if armed.remaining > 0 {
+                        armed.remaining -= 1;
+                        None
+                    } else {
+                        Some(())
+                    }
+                }
+                _ => None,
+            }
+        };
+        if wait_for_fault.is_some() {
+            return tokio::select! {
+                result = listener.accept() => result,
+                _ = ACCEPT_FAULT_NOTIFY.notified() => {
+                    Err(std::io::Error::other("injected accept failure"))
+                }
+            };
+        }
+    }
+    listener.accept().await
+}
+
 /// Accept loop with owned shutdown: closing the sender drains the listener
 /// and every connection task it owns before returning. All connection tasks
 /// run `spawn_local` on this thread, so the `!Send` App/dispatcher borrows
@@ -1684,18 +1841,26 @@ pub async fn serve_until_closed(
     use tokio::task::JoinSet;
     let mut owned = JoinSet::new();
     let mut active: usize = 0;
+    let mut accept_error: Option<std::io::Error> = None;
     loop {
         if active == 0 {
             tokio::select! {
-                incoming = listener.accept() => {
-                    let (mut stream, _) = incoming?;
-                    let handle = handle.clone();
-                    let shared = Rc::clone(&shared);
-                    let static_origin = static_origin.clone();
-                    owned.spawn_local(async move {
-                        let _ = serve_one(&mut stream, handle, shared, static_origin).await;
-                    });
-                    active += 1;
+                incoming = accept_one(&listener) => {
+                    match incoming {
+                        Ok((mut stream, _)) => {
+                            let handle = handle.clone();
+                            let shared = Rc::clone(&shared);
+                            let static_origin = static_origin.clone();
+                            owned.spawn_local(async move {
+                                let _ = serve_one(&mut stream, handle, shared, static_origin).await;
+                            });
+                            active += 1;
+                        }
+                        Err(error) => {
+                            accept_error = Some(error);
+                            break;
+                        }
+                    }
                 }
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
@@ -1719,15 +1884,22 @@ pub async fn serve_until_closed(
             }
         } else {
             tokio::select! {
-                incoming = listener.accept() => {
-                    let (mut stream, _) = incoming?;
-                    let handle = handle.clone();
-                    let shared = Rc::clone(&shared);
-                    let static_origin = static_origin.clone();
-                    owned.spawn_local(async move {
-                        let _ = serve_one(&mut stream, handle, shared, static_origin).await;
-                    });
-                    active += 1;
+                incoming = accept_one(&listener) => {
+                    match incoming {
+                        Ok((mut stream, _)) => {
+                            let handle = handle.clone();
+                            let shared = Rc::clone(&shared);
+                            let static_origin = static_origin.clone();
+                            owned.spawn_local(async move {
+                                let _ = serve_one(&mut stream, handle, shared, static_origin).await;
+                            });
+                            active += 1;
+                        }
+                        Err(error) => {
+                            accept_error = Some(error);
+                            break;
+                        }
+                    }
                 }
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
@@ -1742,8 +1914,19 @@ pub async fn serve_until_closed(
             }
         }
     }
+    // Stop queued heavy admission before draining: an `acquire_owned()`
+    // still waiting for capacity fails instead of entering a server that
+    // will never accept again.
+    shared.borrow().media_permits.close();
+    // Every owned connection is awaited, not aborted: its native media worker
+    // is joined by the same owner future. Only then are abandoned native
+    // records (cancelled/aborted observations) joined from the drain.
     while owned.join_next().await.is_some() {}
-    Ok(())
+    handle.wait_native().await;
+    match accept_error {
+        Some(error) => Err(ServerError::Io(error.to_string())),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -2058,6 +2241,9 @@ mod tests {
         // A valid /zip signature streams the built archive bytes.
         let mut app = test_app();
         let zip_guid = task_with_image(&mut app, "1.jpg", &png_bytes(8, 8));
+        // The reader publishes only at the FINISHED fence; this fixture is a
+        // completed gallery served on demand.
+        app.task_mut(&zip_guid).expect("task").state = consts::TASK_STATE_FINISHED;
         let zip_path = format!("/zip/{}/{zip_guid}/gallery.zip", hash_link(None, &zip_guid));
         let (status, mime, bytes) = serve_media_bytes(app, None, &zip_path);
         assert_eq!(status, 200);
@@ -3935,6 +4121,9 @@ mod tests {
         let mut app = test_app();
         let big = pattern_bytes(4 * 1024 * 1024);
         let guid = task_with_image(&mut app, "big.jpg", &big);
+        // The reader publishes only at the FINISHED fence; this fixture is a
+        // completed gallery served on demand.
+        app.task_mut(&guid).expect("task").state = consts::TASK_STATE_FINISHED;
         let target = format!("/zip/{}/{guid}/gallery.zip", hash_link(None, &guid));
         let (status, mime, bytes) = serve_media_bytes(app, None, &target);
         assert_eq!(status, 200);
@@ -5364,6 +5553,525 @@ mod tests {
                 }
                 other => panic!("request C must stream, got {other:?}"),
             }
+        }));
+    }
+
+    // --- M5 R3-A RED: cancellation-safe native media custody ---
+
+    /// Release a TEST-ONLY gate even when an assertion unwinds, so a failed
+    /// case can never leave the blocking worker (or the suite) hanging.
+    struct ReleaseOnDrop(std::sync::mpsc::Sender<()>);
+
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    /// Clear an armed accept-fault on unwind so a failed case cannot affect
+    /// another listener that later reuses the port.
+    struct ClearAcceptFault(u16);
+
+    impl Drop for ClearAcceptFault {
+        fn drop(&mut self) {
+            clear_accept_fault(self.0);
+        }
+    }
+
+    /// Poll the blocking archive-writer start signal (the production seam is
+    /// mpsc because the writer runs natively).
+    async fn wait_archive_started(started: &std::sync::mpsc::Receiver<()>) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while started.try_recv().is_err() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "archive writer never reached its gate: {:?}",
+                started.try_recv()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Returns entries a private stage/cleanup could leave in `dir`: the
+    /// attempt-owned prefixes only, never public gallery/archive names.
+    fn private_stage_entries(dir: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .filter(|name| {
+                        name.starts_with(".xehentai-archive-")
+                            || name.starts_with(".xehentai-detached-")
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn finished_archive_fixture(app: &mut App, title: &str) -> (String, std::path::PathBuf) {
+        let bytes = png_bytes(18, 18);
+        let guid = task_with_image_named(app, title, "1.jpg", &bytes);
+        let gallery = app.task(&guid).expect("task").get_fpath().expect("fpath");
+        app.task_mut(&guid).expect("task").state = consts::TASK_STATE_FINISHED;
+        (guid, gallery)
+    }
+
+    /// Both native archive jobs (private preparation, final confined open)
+    /// are owner-joined: a normal reader completion leaves no record, no
+    /// permit and exactly the published public archive.
+    #[test]
+    fn r3a_rpc_archive_reader_joins_both_native_jobs() {
+        let mut app = test_app();
+        let (guid, gallery) = finished_archive_fixture(&mut app, "gallery-r3a-archive");
+        let zip = gallery.with_extension("zip");
+        let signature = hash_link(None, &guid);
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
+        let handle = runtime.handle();
+        let permits = Arc::new(tokio::sync::Semaphore::new(super::super::MAX_HEAVY_WORKERS));
+        let local = tokio::task::LocalSet::new();
+        block_on(local.run_until(async {
+            let response = run_archive(
+                handle.clone(),
+                Arc::clone(&permits),
+                None,
+                &guid,
+                &signature,
+            )
+            .await;
+            assert_eq!(response.status, 200);
+            let len = match response.body {
+                ResponseBody::Stream(stream) => stream.len,
+                other => panic!("expected a streamed archive, got {other:?}"),
+            };
+            assert!(len > 0);
+            assert!(zip.exists(), "the public archive is published");
+            assert!(gallery.is_dir(), "a non-removing reader keeps the gallery");
+            assert_eq!(handle.native_pending(), 0);
+            assert_eq!(permits.available_permits(), 2);
+            // The already-present archive serves again (existing path), still
+            // through the owned native open.
+            let again = run_archive(
+                handle.clone(),
+                Arc::clone(&permits),
+                None,
+                &guid,
+                &signature,
+            )
+            .await;
+            assert_eq!(again.status, 200);
+            assert_eq!(handle.native_pending(), 0);
+            assert_eq!(permits.available_permits(), 2);
+            assert!(private_stage_entries(gallery.parent().expect("parent")).is_empty());
+        }));
+    }
+
+    /// A same-guid replacement run during private preparation cannot publish
+    /// the old container: the commit is fenced by the exact captured
+    /// owner/run and FINISHED state, the stale stage is discarded, and the
+    /// replacement gallery is untouched.
+    #[test]
+    fn r3a_rpc_archive_stale_run_cannot_publish_or_leave_a_private_stage() {
+        use crate::task::arm_archive_gate;
+        let mut app = test_app();
+        let (guid, gallery) = finished_archive_fixture(&mut app, "gallery-r3a-stale");
+        let zip = gallery.with_extension("zip");
+        let signature = hash_link(None, &guid);
+        let gate = arm_archive_gate(&gallery.to_string_lossy());
+        let release = gate.release.clone();
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
+        let handle = runtime.handle();
+        let permits = Arc::new(tokio::sync::Semaphore::new(super::super::MAX_HEAVY_WORKERS));
+        let local = tokio::task::LocalSet::new();
+        block_on(local.run_until(async {
+            let _release = ReleaseOnDrop(release);
+            let request_guid = guid.clone();
+            let request_signature = signature.clone();
+            let request_handle = handle.clone();
+            let request_permits = Arc::clone(&permits);
+            let request = tokio::task::spawn_local(async move {
+                run_archive(
+                    request_handle,
+                    request_permits,
+                    None,
+                    &request_guid,
+                    &request_signature,
+                )
+                .await
+            });
+            wait_archive_started(&gate.started).await;
+            // Real mutation: a resumed/re-added same-guid run advances the
+            // token while the old private container is still being built.
+            handle.borrow_app_mut(|app| {
+                app.task_mut(&guid).expect("task").bump_run();
+            });
+            gate.release.send(()).expect("release writer");
+            let response = tokio::time::timeout(std::time::Duration::from_secs(10), request)
+                .await
+                .expect("stale request retires")
+                .expect("request task joins");
+            assert_eq!(response.status, 404, "a stale run answers NotFound");
+            assert!(
+                !zip.exists(),
+                "a stale run must not publish a public archive"
+            );
+            assert!(gallery.is_dir(), "the replacement gallery is untouched");
+            assert!(
+                private_stage_entries(gallery.parent().expect("parent")).is_empty(),
+                "the stale private stage is discarded"
+            );
+            assert_eq!(handle.native_pending(), 0);
+            assert_eq!(permits.available_permits(), 2);
+        }));
+    }
+
+    /// A dropped archive-request observation (disconnect) before the writer
+    /// result is received leaves no private stage: the abandoned native
+    /// record is joined by the public drain and its result discarded.
+    #[test]
+    fn r3a_rpc_archive_abandoned_observation_leaves_no_private_stage() {
+        use crate::task::arm_archive_gate;
+        let mut app = test_app();
+        let (guid, gallery) = finished_archive_fixture(&mut app, "gallery-r3a-unsent");
+        let zip = gallery.with_extension("zip");
+        let signature = hash_link(None, &guid);
+        let gate = arm_archive_gate(&gallery.to_string_lossy());
+        let release = gate.release.clone();
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
+        let handle = runtime.handle();
+        let permits = Arc::new(tokio::sync::Semaphore::new(super::super::MAX_HEAVY_WORKERS));
+        let local = tokio::task::LocalSet::new();
+        block_on(local.run_until(async {
+            let _release = ReleaseOnDrop(release);
+            let request_guid = guid.clone();
+            let request_signature = signature.clone();
+            let request_handle = handle.clone();
+            let request_permits = Arc::clone(&permits);
+            let request = tokio::task::spawn_local(async move {
+                run_archive(
+                    request_handle,
+                    request_permits,
+                    None,
+                    &request_guid,
+                    &request_signature,
+                )
+                .await
+            });
+            wait_archive_started(&gate.started).await;
+            request.abort();
+            assert!(request.await.is_err(), "request observation dropped");
+            gate.release.send(()).expect("release writer");
+            let joined =
+                tokio::time::timeout(std::time::Duration::from_secs(10), handle.wait_native())
+                    .await
+                    .expect("public drain joins the abandoned writer");
+            assert_eq!(joined, 1, "the abandoned record was really joined");
+            assert_eq!(handle.native_pending(), 0);
+            assert!(!zip.exists(), "an unobserved result never publishes");
+            assert!(gallery.is_dir());
+            assert!(
+                private_stage_entries(gallery.parent().expect("parent")).is_empty(),
+                "the unobserved private stage is removed"
+            );
+            assert_eq!(permits.available_permits(), 2);
+        }));
+    }
+
+    /// Ordinary completions, abandoned requests, a panicking native job and
+    /// an erroring worker must not accumulate native records: every later
+    /// submission observes and reaps already-finished records, and the same
+    /// task/permit pool stays reusable.
+    #[test]
+    fn r3a_native_records_do_not_accumulate_across_reuse() {
+        use crate::rpc::snapshot_gallery_file;
+        let mut app = test_app();
+        let png = png_bytes(20, 20);
+        let guid = task_with_image_named(&mut app, "gallery-r3a-reuse", "1.jpg", &png);
+        let root = snapshot_gallery_file(&app, &guid, "1").expect("snap").root;
+        let target = format!("/img/{}/{guid}/1", hash_link(None, &format!("{guid}/1")));
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
+        let handle = runtime.handle();
+        let permits = Arc::new(tokio::sync::Semaphore::new(super::super::MAX_HEAVY_WORKERS));
+        let local = tokio::task::LocalSet::new();
+        block_on(local.run_until(async {
+            for _ in 0..3 {
+                let response =
+                    run_media(handle.clone(), Arc::clone(&permits), media_action(&target)).await;
+                assert_eq!(response.status, 200);
+                assert_eq!(
+                    handle.native_pending(),
+                    0,
+                    "an ordinary completion must be joined and reaped"
+                );
+            }
+            // Abandoned (disconnected) request: the cooperative gate exits on
+            // the cancel flag, but no observer remains to join it.
+            let gate = arm_media_worker_gate(&root.to_string_lossy());
+            let release = gate.release.clone();
+            let _release = ReleaseOnDrop(release);
+            let request = tokio::task::spawn_local(run_media(
+                handle.clone(),
+                Arc::clone(&permits),
+                media_action(&target),
+            ));
+            tokio::time::timeout(std::time::Duration::from_secs(10), gate.started)
+                .await
+                .expect("abandoned worker started")
+                .expect("hold");
+            request.abort();
+            assert!(request.await.is_err());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while permits.available_permits() < 2 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "abandoned worker never released its permit"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            // The next ordinary submission must reap the abandoned record.
+            let response =
+                run_media(handle.clone(), Arc::clone(&permits), media_action(&target)).await;
+            assert_eq!(response.status, 200);
+            assert_eq!(
+                handle.native_pending(),
+                0,
+                "the submission boundary must join finished abandoned records"
+            );
+            // A panicking native job on the same custody path joins as an
+            // error and leaves no record behind.
+            let token = handle
+                .borrow_app(|app| app.task_token(&guid))
+                .expect("token");
+            let native = handle
+                .spawn_native_job(
+                    &guid,
+                    token,
+                    || -> () { panic!("synthetic native panic") },
+                    |_| {},
+                )
+                .expect("admitted");
+            assert!(native.join().await.is_err(), "panic maps to join error");
+            assert_eq!(handle.native_pending(), 0);
+            // A worker error (gallery bytes vanished after the snapshot) is
+            // still joined and reaped, and the task stays reusable.
+            std::fs::remove_file(root.join("1.jpg")).expect("remove image");
+            let response =
+                run_media(handle.clone(), Arc::clone(&permits), media_action(&target)).await;
+            assert_eq!(response.status, 404);
+            assert_eq!(handle.native_pending(), 0);
+        }));
+        assert_eq!(permits.available_permits(), 2);
+    }
+
+    /// A dropped request observation must not release native ownership: the
+    /// public shutdown stays pending until the real blocking worker exits,
+    /// then joins it and recovers the heavy permit.
+    #[test]
+    fn r3a_cancelled_image_request_retires_before_shutdown_returns() {
+        use crate::rpc::snapshot_gallery_file;
+        let mut app = test_app();
+        let png = png_bytes(24, 24);
+        let guid = task_with_image_named(&mut app, "gallery-r3a", "1.jpg", &png);
+        let root = snapshot_gallery_file(&app, &guid, "1").expect("snap").root;
+        let gate = arm_media_worker_gate_ignoring_cancel(&root.to_string_lossy());
+        let release = gate.release.clone();
+        let target = format!("/img/{}/{guid}/1", hash_link(None, &format!("{guid}/1")));
+        let media = media_action(&target);
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
+        let handle = runtime.handle();
+        let permits = Arc::new(tokio::sync::Semaphore::new(super::super::MAX_HEAVY_WORKERS));
+        let local = tokio::task::LocalSet::new();
+        block_on(local.run_until(async {
+            // Inside the runtime future so an assertion unwind releases the
+            // blocking worker before the runtime drops its blocking pool.
+            let _release = ReleaseOnDrop(release);
+            let request =
+                tokio::task::spawn_local(run_media(handle.clone(), Arc::clone(&permits), media));
+            tokio::time::timeout(std::time::Duration::from_secs(10), gate.started)
+                .await
+                .expect("image worker started")
+                .expect("hold");
+            assert_eq!(permits.available_permits(), 1);
+            request.abort();
+            assert!(request.await.is_err(), "request observation cancelled");
+            let mut shutdown = Box::pin(handle.shutdown());
+            let early =
+                tokio::time::timeout(std::time::Duration::from_millis(300), &mut shutdown).await;
+            assert!(
+                early.is_err(),
+                "shutdown returned while the cancelled request's worker still owned the permit"
+            );
+            gate.release.send(()).expect("release worker");
+            let report = tokio::time::timeout(std::time::Duration::from_secs(10), shutdown)
+                .await
+                .expect("shutdown joins the real worker");
+            assert_eq!(report.native_pending, 0, "{report:?}");
+            assert_eq!(permits.available_permits(), 2, "{report:?}");
+        }));
+    }
+
+    /// A listener accept error must flow through the same owned cleanup as a
+    /// normal stop: the connection and its native worker are joined, the
+    /// permit is recovered, and only then does the server return its real
+    /// error instead of dropping the JoinSet.
+    #[test]
+    fn r3a_server_accept_error_drains_owned_native_worker() {
+        use crate::rpc::snapshot_gallery_file;
+        let mut app = test_app();
+        let png = png_bytes(22, 22);
+        let guid = task_with_image_named(&mut app, "gallery-r3a-accept", "1.jpg", &png);
+        let root = snapshot_gallery_file(&app, &guid, "1").expect("snap").root;
+        let gate = arm_media_worker_gate_ignoring_cancel(&root.to_string_lossy());
+        let release = gate.release.clone();
+        let target = format!("/img/{}/{guid}/1", hash_link(None, &format!("{guid}/1")));
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
+        let handle = runtime.handle();
+        let cache_dir = tempfile::tempdir().expect("cache").keep();
+        let shared = Rc::new(RefCell::new(
+            SharedRpc::new(
+                manifest,
+                &cache_dir,
+                Arc::new(crate::worker::RealClock),
+                None,
+                "http://127.0.0.1:9".to_string(),
+            )
+            .expect("shared"),
+        ));
+        let local = tokio::task::LocalSet::new();
+        block_on(local.run_until(async {
+            let _release = ReleaseOnDrop(release);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("listener");
+            let port = listener.local_addr().expect("addr").port();
+            let _fault_guard = ClearAcceptFault(port);
+            arm_accept_fault_after(port, 1);
+            let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            let serve = tokio::task::spawn_local(serve_until_closed(
+                listener,
+                shutdown_rx,
+                handle.clone(),
+                Rc::clone(&shared),
+                "http://127.0.0.1:9".to_string(),
+            ));
+            let mut client = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .expect("client");
+            {
+                use tokio::io::AsyncWriteExt;
+                client
+                    .write_all(
+                        format!("GET {target} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                            .as_bytes(),
+                    )
+                    .await
+                    .expect("request");
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(10), gate.started)
+                .await
+                .expect("image worker started")
+                .expect("hold");
+            // The injected accept error must not abort the owned connection,
+            // nor detach its native worker.
+            trigger_accept_fault(port);
+            let mut serve = serve;
+            let early =
+                tokio::time::timeout(std::time::Duration::from_millis(300), &mut serve).await;
+            assert!(
+                early.is_err(),
+                "accept error returned before the owned native worker retired"
+            );
+            gate.release.send(()).expect("release worker");
+            let result = tokio::time::timeout(std::time::Duration::from_secs(10), serve)
+                .await
+                .expect("server retires after the worker")
+                .expect("serve task joins");
+            assert!(
+                matches!(result, Err(crate::rpc::ServerError::Io(_))),
+                "the real accept error is preserved: {result:?}"
+            );
+            let mut raw = Vec::new();
+            {
+                use tokio::io::AsyncReadExt;
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    client.read_to_end(&mut raw),
+                )
+                .await
+                .expect("client read")
+                .expect("bytes");
+            }
+            let text = String::from_utf8_lossy(&raw);
+            assert!(text.starts_with("HTTP/1.0 200 OK"), "{text}");
+            assert!(
+                raw.windows(png.len())
+                    .any(|window| window == png.as_slice()),
+                "the exact image bytes are present after the head"
+            );
+            assert_eq!(shared.borrow().media_permits.available_permits(), 2);
+            assert_eq!(handle.native_pending(), 0);
+        }));
+    }
+
+    /// Cancelling one drain observation must not take ownership away: a
+    /// second drain still waits for the SAME real worker, then observes its
+    /// actual join and the recovered permit.
+    #[test]
+    fn r3a_cancelled_drain_observer_leaves_native_ownership_to_the_next() {
+        use crate::rpc::snapshot_gallery_file;
+        let mut app = test_app();
+        let png = png_bytes(21, 21);
+        let guid = task_with_image_named(&mut app, "gallery-r3a-drain2", "1.jpg", &png);
+        let root = snapshot_gallery_file(&app, &guid, "1").expect("snap").root;
+        let gate = arm_media_worker_gate_ignoring_cancel(&root.to_string_lossy());
+        let release = gate.release.clone();
+        let target = format!("/img/{}/{guid}/1", hash_link(None, &format!("{guid}/1")));
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
+        let handle = runtime.handle();
+        let permits = Arc::new(tokio::sync::Semaphore::new(super::super::MAX_HEAVY_WORKERS));
+        let local = tokio::task::LocalSet::new();
+        block_on(local.run_until(async {
+            let _release = ReleaseOnDrop(release);
+            let request = tokio::task::spawn_local(run_media(
+                handle.clone(),
+                Arc::clone(&permits),
+                media_action(&target),
+            ));
+            tokio::time::timeout(std::time::Duration::from_secs(10), gate.started)
+                .await
+                .expect("image worker started")
+                .expect("hold");
+            request.abort();
+            assert!(request.await.is_err());
+            // First public drain observes the pending worker, then its
+            // observer is cancelled.
+            let mut first = Box::pin(handle.shutdown());
+            let cancelled =
+                tokio::time::timeout(std::time::Duration::from_millis(150), &mut first).await;
+            assert!(cancelled.is_err(), "the first drain waited on the worker");
+            drop(first);
+            // The second drain must still own the same completion.
+            let mut second = Box::pin(handle.wait_native());
+            let pending =
+                tokio::time::timeout(std::time::Duration::from_millis(300), &mut second).await;
+            assert!(
+                pending.is_err(),
+                "cancelling the first observer released the second drain early"
+            );
+            gate.release.send(()).expect("release worker");
+            let joined = tokio::time::timeout(std::time::Duration::from_secs(10), second)
+                .await
+                .expect("second drain joins the same worker");
+            assert_eq!(joined, 1, "exactly the owned record was joined");
+            assert_eq!(handle.native_pending(), 0);
+            assert_eq!(permits.available_permits(), 2);
         }));
     }
 

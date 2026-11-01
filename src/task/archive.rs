@@ -42,14 +42,17 @@ pub struct ArchiveSnapshot {
 }
 
 /// A finished container built in this attempt's own staging file. The stage
-/// is always consumed explicitly (renamed by [`commit_prepared`] or removed by
-/// [`discard_prepared`]/the prepare guard), never by a hidden destructor.
+/// is consumed explicitly (renamed by [`commit_prepared`] or removed by
+/// [`discard_prepared`]); the armed private cleanup guard stays inside this
+/// value so an unobserved/abandoned result still removes exactly its own
+/// unpublished file on drop.
 pub struct PreparedStage {
     stage: PathBuf,
     arc: PathBuf,
     gallery: PathBuf,
     lock: Arc<Mutex<()>>,
     remove: bool,
+    cleanup: Option<StageCleanup>,
 }
 
 /// What [`prepare_archive_snapshot`] produced. `Existing` mirrors the
@@ -186,7 +189,7 @@ pub fn prepare_archive_snapshot(
     let stage = file_ops::create_stage_with_prefix(parent, ".xehentai-archive-")?;
     // Owns the private stage until the container is complete. Any error or
     // panic in this thread removes exactly this attempt's file.
-    let mut cleanup = StageCleanup {
+    let cleanup = StageCleanup {
         path: stage.clone(),
         armed: true,
     };
@@ -263,13 +266,16 @@ pub fn prepare_archive_snapshot(
             None => {}
         }
     }
-    cleanup.armed = false;
+    // Transfer the armed guard into the value: commit/discard disarm it at
+    // the completed ownership boundary; an unobserved drop still unlinks
+    // exactly this attempt's private stage.
     Ok(PreparedArchive::Staged(PreparedStage {
         stage,
         arc: arc.clone(),
         gallery: dpath.clone(),
         lock: Arc::clone(&snapshot.lock),
         remove,
+        cleanup: Some(cleanup),
     }))
 }
 
@@ -277,7 +283,7 @@ pub fn prepare_archive_snapshot(
 /// task owner/run synchronously before entering this function; every step is
 /// a bounded namespace operation.
 pub fn commit_prepared(prepared: PreparedArchive) -> Result<CommittedArchive, TaskError> {
-    let stage = match prepared {
+    let mut stage = match prepared {
         PreparedArchive::Existing(path) => {
             return Ok(CommittedArchive {
                 path,
@@ -287,12 +293,13 @@ pub fn commit_prepared(prepared: PreparedArchive) -> Result<CommittedArchive, Ta
         PreparedArchive::Staged(stage) => stage,
     };
     let _guard = stage.lock.lock().unwrap_or_else(|error| error.into_inner());
+    let mut cleanup = stage.cleanup.take();
     let detached = if stage.remove {
         match detach_gallery(&stage.gallery) {
             Ok(detached) => detached,
             Err(error) => {
                 // Nothing was published: this attempt removes its own stage.
-                let _ = fs::remove_file(&stage.stage);
+                remove_stage_file(&stage.stage, &mut cleanup);
                 return Err(error);
             }
         }
@@ -300,10 +307,17 @@ pub fn commit_prepared(prepared: PreparedArchive) -> Result<CommittedArchive, Ta
         None
     };
     match file_ops::publish(&stage.stage, &stage.arc) {
-        Ok(()) => Ok(CommittedArchive {
-            path: stage.arc,
-            detached,
-        }),
+        Ok(()) => {
+            // Publication completed: the stage file no longer exists under
+            // this name, so its cleanup guard is disarmed, never fired.
+            if let Some(mut guard) = cleanup.take() {
+                guard.disarm();
+            }
+            Ok(CommittedArchive {
+                path: stage.arc,
+                detached,
+            })
+        }
         Err(error) => {
             // The bound run keeps its images: put the detached gallery back
             // and remove only this attempt's staging file. If the restore
@@ -312,27 +326,46 @@ pub fn commit_prepared(prepared: PreparedArchive) -> Result<CommittedArchive, Ta
             if let Some(owned) = detached {
                 match owned.restore() {
                     Ok(()) => {
-                        let _ = fs::remove_file(&stage.stage);
+                        remove_stage_file(&stage.stage, &mut cleanup);
                         Err(error)
                     }
                     Err(restore) => {
-                        let _ = fs::remove_file(&stage.stage);
+                        remove_stage_file(&stage.stage, &mut cleanup);
                         Err(restore)
                     }
                 }
             } else {
-                let _ = fs::remove_file(&stage.stage);
+                remove_stage_file(&stage.stage, &mut cleanup);
                 Err(error)
             }
         }
     }
 }
 
+/// Remove this attempt's private stage once. A guard (when present) is
+/// disarmed after the attempt so drop never repeats the unlink.
+fn remove_stage_file(path: &Path, cleanup: &mut Option<StageCleanup>) {
+    match cleanup {
+        Some(guard) => {
+            let _ = guard.remove();
+        }
+        None => {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 /// Remove the private staging file of a container that was never published.
-/// A single unlink is bounded; the ZIP bytes are never copied here.
-pub fn discard_prepared(prepared: PreparedArchive) {
-    if let PreparedArchive::Staged(stage) = prepared {
-        let _ = fs::remove_file(&stage.stage);
+/// A single unlink is bounded; the ZIP bytes are never copied here. The real
+/// filesystem outcome is returned so a caller never claims removal happened
+/// while the private file remains.
+pub fn discard_prepared(prepared: PreparedArchive) -> std::io::Result<()> {
+    match prepared {
+        PreparedArchive::Existing(_) => Ok(()),
+        PreparedArchive::Staged(mut stage) => match stage.cleanup.take() {
+            Some(mut guard) => guard.remove(),
+            None => fs::remove_file(&stage.stage),
+        },
     }
 }
 
@@ -467,6 +500,18 @@ fn take_detach_candidate(parent: &Path) -> Option<String> {
 struct StageCleanup {
     path: PathBuf,
     armed: bool,
+}
+
+impl StageCleanup {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    /// Remove the owned private file once and report the real outcome.
+    fn remove(&mut self) -> std::io::Result<()> {
+        self.armed = false;
+        fs::remove_file(&self.path)
+    }
 }
 
 impl Drop for StageCleanup {
@@ -736,5 +781,95 @@ impl Drop for WriterProbe {
         if let Some(stats) = WRITER_STATS.lock().unwrap().get_mut(&self.scope) {
             stats.active = stats.active.saturating_sub(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Synthetic English fixture: one gallery file in a temp root, no task
+    /// object and no public archive.
+    fn snapshot(root: &Path) -> ArchiveSnapshot {
+        let gallery = root.join("gallery");
+        fs::create_dir_all(&gallery).expect("gallery");
+        fs::write(gallery.join("1.jpg"), b"synthetic-bytes").expect("image");
+        ArchiveSnapshot {
+            fpath: gallery.clone(),
+            arc: gallery.with_extension("zip"),
+            comment: "synthetic archive comment".to_string(),
+            lock: Arc::new(Mutex::new(())),
+        }
+    }
+
+    fn staged(prepared: PreparedArchive) -> PreparedStage {
+        match prepared {
+            PreparedArchive::Staged(stage) => stage,
+            PreparedArchive::Existing(_) => panic!("expected a private stage"),
+        }
+    }
+
+    /// A prepared-but-unobserved container (for example a result buffered in
+    /// a channel whose receiver was dropped) owns its private stage through
+    /// the RAII guard: dropping it removes exactly that file and never
+    /// touches the gallery or the public archive path.
+    #[test]
+    fn prepared_stage_guard_removes_only_its_unpublished_container() {
+        let root = tempfile::tempdir().expect("root");
+        let snapshot = snapshot(root.path());
+        let stage = staged(prepare_archive_snapshot(&snapshot, false).expect("prepare"));
+        let stage_path = stage.stage.clone();
+        assert!(
+            stage_path.exists(),
+            "the private stage exists before observation"
+        );
+        assert!(snapshot.fpath.is_dir());
+        drop(stage);
+        assert!(
+            !stage_path.exists(),
+            "an unobserved prepared stage must remove its own private file"
+        );
+        assert!(snapshot.fpath.is_dir(), "the gallery is never touched");
+        assert!(!snapshot.arc.exists(), "no public archive is created");
+    }
+
+    struct RestoreMode(PathBuf);
+
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// Explicit discard reports the real unlink outcome instead of claiming
+    /// success when the filesystem still holds an error.
+    #[test]
+    fn discard_prepared_reports_real_removal_outcome() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().expect("root");
+        let snapshot = snapshot(root.path());
+        let stage = staged(prepare_archive_snapshot(&snapshot, false).expect("prepare"));
+        let stage_path = stage.stage.clone();
+        assert!(
+            discard_prepared(PreparedArchive::Staged(stage)).is_ok(),
+            "a writable parent removes the private stage"
+        );
+        assert!(!stage_path.exists());
+
+        let stage = staged(prepare_archive_snapshot(&snapshot, false).expect("prepare"));
+        let stage_path = stage.stage.clone();
+        let _restore = RestoreMode(stage_path.parent().expect("parent").to_path_buf());
+        fs::set_permissions(
+            stage_path.parent().expect("parent"),
+            fs::Permissions::from_mode(0o555),
+        )
+        .expect("read-only parent");
+        let result = discard_prepared(PreparedArchive::Staged(stage));
+        assert!(
+            result.is_err(),
+            "a failed unlink must be reported, not claimed as removal"
+        );
+        assert!(stage_path.exists(), "the file remains when unlink failed");
     }
 }
