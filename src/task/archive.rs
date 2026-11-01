@@ -30,15 +30,22 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
 use super::file_ops;
-use super::{Task, TaskError};
+use super::{GalleryGrant, Task, TaskError};
 
 /// Everything the archive writer needs, captured while the task is borrowed.
+///
+/// The writer never touches task or App state. `grant` is the frozen read
+/// authority (task root provenance, the validated gallery component, the
+/// pre-permit directory observations and the private-path policy); the gallery
+/// descriptor itself is captured inside the writer under the task file lock, so
+/// the original `task.py:401` critical section keeps covering the archive I/O.
 #[derive(Clone)]
 pub struct ArchiveSnapshot {
     pub fpath: PathBuf,
     pub arc: PathBuf,
     pub comment: String,
     pub lock: Arc<Mutex<()>>,
+    pub grant: GalleryGrant,
 }
 
 /// A finished container built in this attempt's own staging file. The stage
@@ -110,7 +117,8 @@ impl Task {
     /// Capture the immutable archive inputs. The title and URL are copied, so
     /// the writer never touches task state from the blocking pool.
     pub fn archive_snapshot(&self) -> Result<ArchiveSnapshot, TaskError> {
-        let dpath = self.get_fpath()?;
+        let grant = self.read_grant()?;
+        let dpath = grant.gallery_path();
         let arc = file_ops::zip_path(&dpath)?;
         let title = self.meta_str("title")?.to_string();
         let comment = format!(
@@ -124,6 +132,7 @@ impl Task {
             arc,
             comment,
             lock: self.files().lock_handle(),
+            grant,
         })
     }
 
@@ -200,52 +209,42 @@ pub fn prepare_archive_snapshot(
     })?;
     let mut writer = ZipWriter::new(file);
     writer.set_comment(snapshot.comment.as_str());
-    let mut entries: Vec<std::ffi::OsString> = fs::read_dir(dpath)
-        .map_err(|source| TaskError::Io {
+    // Descriptor-relative enumeration of the captured gallery. No ambient
+    // `read_dir`, no payload-path metadata probe and no second path authority:
+    // names keep their raw bytes and the bytewise ordering of the reference.
+    let captured = snapshot.grant.capture_gallery_dir()?;
+    let Some(captured) = captured else {
+        return Err(TaskError::Io {
             path: dpath.clone(),
-            source,
-        })?
-        .map(|entry| {
-            entry
-                .map(|entry| entry.file_name())
-                .map_err(|source| TaskError::Io {
-                    path: dpath.clone(),
-                    source,
-                })
-        })
-        .collect::<Result<_, _>>()?;
-    entries.sort_by(|left, right| left.as_encoded_bytes().cmp(right.as_encoded_bytes()));
+            source: std::io::Error::from(std::io::ErrorKind::NotFound),
+        });
+    };
+    let entries = captured.names()?;
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
     for name in entries {
         let full = dpath.join(&name);
-        let metadata = fs::symlink_metadata(&full).map_err(|source| TaskError::Io {
-            path: full.clone(),
-            source,
-        })?;
-        if metadata.file_type().is_symlink() {
-            return Err(TaskError::UnsafePath {
-                path: full,
-                reason: "refusing to archive a symlink entry",
-            });
-        }
-        let name = name.to_str().ok_or_else(|| TaskError::UnsafePath {
-            path: full.clone(),
+        // The entry descriptor is validated (single raw leaf, no symlink
+        // follow, non-blocking) and classified from that same descriptor, so
+        // a FIFO/socket/device can never be read as payload and a symlink is
+        // the existing `UnsafePath` error instead of being skipped.
+        let opened = captured.open_entry(&name)?;
+        let name = name.to_str().ok_or(TaskError::UnsafePath {
+            path: full,
             reason: "archive entry name is not UTF-8",
         })?;
-        if metadata.is_dir() {
-            writer
-                .add_directory(format!("{name}/"), options)
-                .map_err(|error| TaskError::Zip(error.to_string()))?;
-        } else {
-            writer
-                .start_file(name, options)
-                .map_err(|error| TaskError::Zip(error.to_string()))?;
-            let mut source = File::open(&full).map_err(|source| TaskError::Io {
-                path: full.clone(),
-                source,
-            })?;
-            std::io::copy(&mut source, &mut writer)
-                .map_err(|error| TaskError::Zip(error.to_string()))?;
+        match opened {
+            crate::task::OpenedEntry::Directory => {
+                writer
+                    .add_directory(format!("{name}/"), options)
+                    .map_err(|error| TaskError::Zip(error.to_string()))?;
+            }
+            crate::task::OpenedEntry::File(mut source) => {
+                writer
+                    .start_file(name, options)
+                    .map_err(|error| TaskError::Zip(error.to_string()))?;
+                std::io::copy(&mut source, &mut writer)
+                    .map_err(|error| TaskError::Zip(error.to_string()))?;
+            }
         }
     }
     let file = writer
@@ -794,11 +793,19 @@ mod tests {
         let gallery = root.join("gallery");
         fs::create_dir_all(&gallery).expect("gallery");
         fs::write(gallery.join("1.jpg"), b"synthetic-bytes").expect("image");
+        let grant = crate::task::GalleryGrant::new(
+            root.to_path_buf(),
+            std::ffi::OsString::from("gallery"),
+            crate::task::observe_directory(root),
+            crate::task::observe_directory(&gallery),
+            crate::task::PrivatePolicy::freeze(crate::task::PrivatePaths::for_base(root)),
+        );
         ArchiveSnapshot {
             fpath: gallery.clone(),
             arc: gallery.with_extension("zip"),
             comment: "synthetic archive comment".to_string(),
             lock: Arc::new(Mutex::new(())),
+            grant,
         }
     }
 

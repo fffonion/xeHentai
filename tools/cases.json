@@ -4787,6 +4787,21 @@
       ],
       "status": "implemented",
       "delta": null
+    },
+    {
+      "id": "delta.fd-outside-referent-denial",
+      "source": "approved security hardening: M5 FD product read boundary (task-root FD authority)",
+      "target": "src/task/file_ops.rs GalleryGrant::open_leaf",
+      "suite": "gallery",
+      "inputs": [],
+      "assertions": [
+        "a mapped gallery leaf that links to a literal path outside the gallery is denied before any lookup or fallback, even when the outside referent does not exist",
+        "expected outcome: HTTP 404 with an empty body, zero sibling-ZIP fallback, zero outside payload opens",
+        "expected poststate: the outside referent is untouched, the gallery and the sibling archive are unchanged, and a fresh unrelated request still serves its exact bytes",
+        "the pinned reference resolves the leaf with os.path.join/open, so its follow-open reports the outside referent as absent and it serves the matching sibling ZIP entry"
+      ],
+      "status": "delta",
+      "delta": "the reference may serve the matching sibling ZIP entry for an outside dangling link; the product denies instead. No blanket alias change: internal dangling links keep the reference ZIP fallback and legal internal relative/absolute aliases still serve their exact bytes"
     }
   ],
   "oracle": {

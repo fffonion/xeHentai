@@ -1298,24 +1298,19 @@ impl GalleryFail {
 }
 
 /// Owned gallery snapshot captured under a SHORT App borrow and released
-/// before any disk read, ZIP build, decode or network work. Only the task
-/// directory, the validated file name and the reserved persistence set move
-/// out; no borrow and no task handle is kept.
+/// before any disk read, ZIP build, decode or network work.
+///
+/// The snapshot carries the frozen read grant — the task's fixed download root
+/// provenance, the validated gallery component, the mandatory pre-permit
+/// directory observations and the task's private-path policy — plus the
+/// validated mapped leaf name. No App borrow and no task handle is kept.
 #[derive(Clone, Debug)]
 pub struct GallerySnap {
+    /// The gallery directory spelling, kept for logging and test markers. It is
+    /// never used as a payload path authority; every open goes through `grant`.
     pub root: PathBuf,
     pub name: String,
-    pub reserved: Vec<PathBuf>,
-    /// Frozen observation of the gallery root taken at this boundary. A
-    /// `Present` identity is re-validated by the confined open; `Missing` and
-    /// `Unavailable` stay frozen for the whole request, so a directory that
-    /// appears during a later wait can never become authority here.
-    pub root_id: crate::task::DirectoryObservation,
-    /// Frozen observation of the gallery parent, i.e. the directory that owns
-    /// the sibling `<gallery>.zip`. It is captured at the same pre-permit
-    /// moment as `root_id`: a parent that was missing or unavailable then can
-    /// never grant sibling-archive authority later in this request.
-    pub parent: crate::task::DirectoryObservation,
+    pub grant: crate::task::GalleryGrant,
 }
 
 /// What opening a snapshot found: an owned regular file, a genuinely missing
@@ -1358,73 +1353,36 @@ pub fn snapshot_gallery_file(
             .map_err(|_| GalleryFail::NotFound)?,
     };
     refuse_unsafe_name(&name)?;
-    let root = task.get_fpath().map_err(|_| GalleryFail::NotFound)?;
-    // Reserved persistence that must never serve as gallery bytes, even if a
-    // link ever resolved inside the gallery root.
-    let base = app.base_dir().to_path_buf();
-    let log_path = Path::new(&app.cfg.log_path);
-    let log_path = if log_path.is_absolute() {
-        log_path.to_path_buf()
-    } else {
-        base.join(log_path)
-    };
-    let reserved = vec![
-        base.join(crate::core::SESSION_FILE),
-        log_path,
-        base.join(crate::config::CONFIG_FILE),
-        base.join(crate::config::LEGACY_CONFIG_FILE),
-    ];
-    // The observation is the snapshot boundary: captured here, under the same
-    // short borrow, before any permit, read or network work.
-    #[cfg(test)]
-    crate::task::run_observation_swap(&root);
-    let root_id = crate::task::observe_directory(&root);
-    Ok(GallerySnap {
-        root_id,
-        parent: observe_sibling_parent(&root),
-        root,
-        name,
-        reserved,
-    })
+    // The grant is the snapshot boundary: the task root provenance, the
+    // validated gallery component, both directory observations and the
+    // private-path policy are frozen here, under the same short borrow, before
+    // any permit, read or network work.
+    let grant = task.read_grant().map_err(|_| GalleryFail::NotFound)?;
+    let root = grant.gallery_path();
+    Ok(GallerySnap { root, name, grant })
 }
 
-/// Frozen observation of the sibling-archive parent for `root`, or
-/// `Unavailable(Unsupported)` when the path has no parent at all (there is no
-/// sibling archive authority then). Used at the snapshot boundary so the
-/// fallback never re-observes the parent after a wait.
-pub fn observe_sibling_parent(root: &Path) -> crate::task::DirectoryObservation {
-    match root.parent() {
-        Some(parent) => crate::task::observe_directory(parent),
-        None => crate::task::DirectoryObservation::Unavailable(std::io::ErrorKind::Unsupported),
-    }
-}
-
-/// Validate the final target against the owned gallery root and open it.
+/// Validate the final target against the frozen read grant and open it.
 ///
-/// The open is anchored: the leaf opens relative to a pinned root directory
-/// FD and the OPENED descriptor's identity is validated against the owned
-/// root and the reserved persistence set, so a regular inside-gallery file
-/// swapped for an outside/reserved symlink (or a swapped parent/root)
-/// between check and open cannot smuggle bytes in. A symlink leaf is denied
-/// on the fast path; an inside-root alias is served only when the opened
-/// FD is that contained, non-reserved target. Outside/reserved targets,
-/// pipes, FIFOs, devices, sockets and directories are denied before any
-/// read. A genuinely missing file (or root) reports `Missing` so the
-/// reference ZIP fallback still applies; every confinement failure reports
-/// `Denied` with no fallback.
+/// The open is anchored: the trusted task root is captured as a directory FD,
+/// the validated gallery component is captured NOFOLLOW beneath it and both are
+/// compared against the snapshot observations, so a root/parent swap between
+/// the snapshot and the open fails closed. The leaf then resolves through the
+/// accepted mature resolver, and the OPENED descriptor is checked for type and
+/// for the current private identity before any byte is read. Outside literals,
+/// magic links, pipes, FIFOs, devices, sockets and directories are denied
+/// without a payload read. A genuinely missing file (or gallery) reports
+/// `Missing` so the reference ZIP fallback still applies; every confinement or
+/// policy failure reports `Denied` with no fallback.
 pub fn probe_gallery_file(snap: &GallerySnap) -> Result<OpenOutcome, GalleryFail> {
-    let opened = match crate::task::open_confined_regular(
-        &snap.root,
-        snap.root_id,
-        &snap.name,
-        &snap.reserved,
-    ) {
+    let opened = match snap.grant.open_leaf(std::ffi::OsStr::new(&snap.name)) {
         Ok(None) => return Ok(OpenOutcome::Missing),
         Ok(Some(file)) => file,
         Err(_) => return Ok(OpenOutcome::Denied),
     };
-    // The confined open already validated the descriptor (regular file,
-    // contained, non-reserved); the length is taken from the same handle.
+    // The grant already validated the descriptor (regular file, inside the
+    // captured gallery, off the current private policy); the length is taken
+    // from the same handle.
     let len = opened.metadata().map_err(|_| GalleryFail::NotFound)?.len();
     let mime = Path::new(&snap.name)
         .extension()
@@ -1439,11 +1397,11 @@ pub fn probe_gallery_file(snap: &GallerySnap) -> Result<OpenOutcome, GalleryFail
 }
 
 /// Resolve one gallery file for `/img` without touching URL path text as a
-/// filesystem authority: the fid comes from the integer segment, the file
-/// name from the owned task record, and the final target is confined to the
-/// owned gallery root with reserved persistence denied. Directory traversal,
-/// symlink escape and reserved persistence access are refused; the reference
-/// ZIP fallback is preserved for genuinely missing files.
+/// filesystem authority: the fid comes from the integer segment, the file name
+/// from the owned task record, and the final target is confined to the captured
+/// gallery descriptor with the current private persistence denied. Directory
+/// traversal, symlink escape and private persistence access are refused; the
+/// reference ZIP fallback is preserved for genuinely missing files.
 pub fn read_gallery_file(
     app: &crate::core::App,
     guid: &str,
@@ -1489,34 +1447,14 @@ pub(crate) fn refuse_unsafe_name(name: &str) -> Result<(), GalleryFail> {
 /// swapped sibling or parent between check and open cannot smuggle bytes
 /// in. Shared by the buffered probe path and the streaming server path.
 pub fn read_zip_fallback(snap: &GallerySnap) -> Result<(Vec<u8>, String), GalleryFail> {
-    let suffixed = PathBuf::from(format!("{}.zip", snap.root.display()));
-    let parent = suffixed.parent().ok_or(GalleryFail::NotFound)?;
-    let leaf = suffixed
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or(GalleryFail::NotFound)?;
-    // The parent observation is the one frozen with the snapshot: re-observing
-    // here (after any permit wait) is exactly the retrospective grant this
-    // boundary forbids.
-    let file = match crate::task::open_confined_regular(parent, snap.parent, leaf, &snap.reserved) {
+    // The task-minted exact sibling, opened from the separately authorized
+    // gallery parent whose observation was frozen with the snapshot. Nothing
+    // here re-observes or re-resolves the parent after a permit wait.
+    let file = match snap.grant.open_sibling_archive() {
         Ok(Some(file)) => file,
         Ok(None) | Err(_) => return Err(GalleryFail::NotFound),
     };
     read_zip_entry_bounded(file, &snap.name)
-}
-
-fn read_zip_entry(zip_path: &Path, name: &str) -> Result<(Vec<u8>, String), GalleryFail> {
-    let parent = zip_path.parent().ok_or(GalleryFail::NotFound)?;
-    let leaf = zip_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or(GalleryFail::NotFound)?;
-    let parent_id = crate::task::observe_directory(parent);
-    let file = match crate::task::open_confined_regular(parent, parent_id, leaf, &[]) {
-        Ok(Some(file)) => file,
-        Ok(None) | Err(_) => return Err(GalleryFail::NotFound),
-    };
-    read_zip_entry_bounded(file, name)
 }
 
 /// Bounded ZIP-image entry read for the gallery fallback: the declared
@@ -1558,20 +1496,16 @@ fn read_zip_entry_bounded(
 pub fn read_archive(app: &crate::core::App, guid: &str) -> Result<Vec<u8>, GalleryFail> {
     use crate::task::TaskError;
     let task = app.task(guid).ok_or(GalleryFail::NotFound)?;
-    let path = task
-        .archive_snapshot()
-        .and_then(|snapshot| crate::task::make_archive_snapshot(&snapshot, false))
-        .map_err(|error| match &error {
-            TaskError::UnsafePath { .. } => GalleryFail::NotFound,
-            _ => GalleryFail::Server(error.to_string()),
-        })?;
-    let parent = path.parent().ok_or(GalleryFail::NotFound)?;
-    let leaf = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or(GalleryFail::NotFound)?;
-    let parent_id = crate::task::observe_directory(parent);
-    let mut file = match crate::task::open_confined_regular(parent, parent_id, leaf, &[]) {
+    // One snapshot for both the build and the final read: the writer and the
+    // reader share the same root provenance, frozen observations and private
+    // policy, so a name that becomes private between build and read is still
+    // denied at the returned descriptor.
+    let snapshot = task.archive_snapshot().map_err(|_| GalleryFail::NotFound)?;
+    crate::task::make_archive_snapshot(&snapshot, false).map_err(|error| match &error {
+        TaskError::UnsafePath { .. } => GalleryFail::NotFound,
+        _ => GalleryFail::Server(error.to_string()),
+    })?;
+    let mut file = match snapshot.grant.open_sibling_archive() {
         Ok(Some(file)) => file,
         Ok(None) | Err(_) => return Err(GalleryFail::NotFound),
     };

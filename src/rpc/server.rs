@@ -446,7 +446,6 @@ struct ImageJob {
     snap: GallerySnap,
     width: Option<u32>,
     height: Option<u32>,
-    parent_id: crate::task::DirectoryObservation,
     gate: String,
     cancel: CancelFlag,
 }
@@ -485,7 +484,6 @@ async fn run_image(
         Ok(found) => found,
         Err(fail) => return gallery_fail(fail),
     };
-    let parent_id = snap.parent;
     // Bound the abandoned-record set before acquiring capacity: records whose
     // workers already finished are joined and dropped at the submission
     // boundary instead of accumulating until shutdown.
@@ -512,7 +510,6 @@ async fn run_image(
         snap,
         width,
         height,
-        parent_id,
         cancel,
     };
     // Check + spawn + register in one synchronous admission section: the
@@ -624,20 +621,13 @@ fn image_worker(job: ImageJob, _permit: tokio::sync::OwnedSemaphorePermit) -> Re
 fn zip_fallback_worker(job: &ImageJob) -> Response {
     use std::io::{Read, Seek, Write};
     use std::sync::atomic::Ordering;
-    let suffixed = format!("{}.zip", job.snap.root.display());
-    let suffixed = Path::new(&suffixed);
-    let (parent, leaf) = match (
-        suffixed.parent(),
-        suffixed.file_name().and_then(|n| n.to_str()),
-    ) {
-        (Some(parent), Some(leaf)) => (parent, leaf),
-        _ => return gallery_fail(GalleryFail::NotFound),
+    // The task-minted exact sibling, opened from the gallery parent whose
+    // observation was frozen with the snapshot. A denial here never falls back
+    // and never reaches a payload byte.
+    let file = match job.snap.grant.open_sibling_archive() {
+        Ok(Some(file)) => file,
+        Ok(None) | Err(_) => return gallery_fail(GalleryFail::NotFound),
     };
-    let file =
-        match crate::task::open_confined_regular(parent, job.parent_id, leaf, &job.snap.reserved) {
-            Ok(Some(file)) => file,
-            Ok(None) | Err(_) => return gallery_fail(GalleryFail::NotFound),
-        };
     let mut archive = match zip::ZipArchive::new(file) {
         Ok(archive) => archive,
         Err(_) => return gallery_fail(GalleryFail::NotFound),
@@ -780,10 +770,10 @@ async fn run_archive(
         return text_html(403);
     }
     // Snapshot under a SHORT borrow; the writer never touches task state.
-    // The reserved set and the sibling-parent identity for the final
-    // confined open are captured here as well (all owned, Send), together
-    // with the exact task owner/run that must still own this guid at both
-    // native admissions and at publication.
+    // The frozen read grant (task root provenance, validated gallery
+    // component, pre-permit observations and the live private-path policy)
+    // moves out with it, together with the exact task owner/run that must
+    // still own this guid at both native admissions and at publication.
     let (snapshot, token) = match handle.borrow_app(|app| {
         app.task(guid)
             .ok_or(GalleryFail::NotFound)
@@ -803,32 +793,9 @@ async fn run_archive(
             };
         }
     };
-    let (reserved, parent_id) = handle.borrow_app(|app| {
-        let base = app.base_dir().to_path_buf();
-        let log_path = {
-            let log_path = Path::new(&app.cfg.log_path);
-            if log_path.is_absolute() {
-                log_path.to_path_buf()
-            } else {
-                base.join(log_path)
-            }
-        };
-        (
-            vec![
-                base.join(crate::core::SESSION_FILE),
-                log_path,
-                base.join(crate::config::CONFIG_FILE),
-                base.join(crate::config::LEGACY_CONFIG_FILE),
-            ],
-            snapshot
-                .arc
-                .parent()
-                .map(crate::task::observe_directory)
-                .unwrap_or(crate::task::DirectoryObservation::Unavailable(
-                    std::io::ErrorKind::Unsupported,
-                )),
-        )
-    });
+    // The final sibling open uses the same snapshot grant: it must survive the
+    // heavy build, so take an owned copy before the build moves the snapshot.
+    let grant = snapshot.grant.clone();
     // Bound abandoned native records before taking capacity.
     handle.reap_native_finished().await;
     // Heavy build as an owned native worker behind the heavy permit. The
@@ -892,8 +859,8 @@ async fn run_archive(
         }
         Ok(prepared) => prepared,
     };
-    let path = match prepared {
-        PreparedArchive::Existing(path) => path,
+    match prepared {
+        PreparedArchive::Existing(_) => {}
         PreparedArchive::Staged(stage) => {
             // Publish only while the exact captured run still owns the task.
             // The frozen reader (`rpc.py:477-486`) has no task-state gate, so
@@ -901,7 +868,7 @@ async fn run_archive(
             // valid owner/run is not a new permission grant. Validation and
             // the bounded namespace step share one borrow.
             match handle.commit_archive_exact(guid, token, PreparedArchive::Staged(stage), None) {
-                Ok(ArchiveCommit::Committed(committed)) => committed.path,
+                Ok(ArchiveCommit::Committed(_)) => {}
                 Ok(ArchiveCommit::Stale(prepared)) => {
                     if crate::task::discard_prepared(prepared).is_err() {
                         return Response {
@@ -938,18 +905,12 @@ async fn run_archive(
         token,
         move || {
             let _permit = permit;
-            let (parent, leaf) = match (
-                path.parent(),
-                path.file_name().and_then(|name| name.to_str()),
-            ) {
-                (Some(parent), Some(leaf)) => (parent.to_path_buf(), leaf.to_string()),
-                _ => return Err(GalleryFail::NotFound),
+            // Same frozen grant, same exact sibling name, no path authority
+            // reconstructed from `path`.
+            let file = match grant.open_sibling_archive() {
+                Ok(Some(file)) => file,
+                Ok(None) | Err(_) => return Err(GalleryFail::NotFound),
             };
-            let file =
-                match crate::task::open_confined_regular(&parent, parent_id, &leaf, &reserved) {
-                    Ok(Some(file)) => file,
-                    Ok(None) | Err(_) => return Err(GalleryFail::NotFound),
-                };
             let len = file.metadata().map(|m| m.len()).unwrap_or(0);
             Ok((file, len))
         },
@@ -4054,9 +4015,9 @@ mod tests {
     /// `Missing`.
     #[test]
     fn m5_unavailable_observation_denies_without_fallback() {
-        use crate::rpc::read_zip_fallback;
         use crate::task::{
-            DirectoryObservation, TaskError, observe_directory, open_confined_regular,
+            DirectoryObservation, GalleryGrant, PrivatePaths, PrivatePolicy, TaskError,
+            observe_directory,
         };
 
         let mut app = test_app();
@@ -4075,31 +4036,31 @@ mod tests {
             observe_directory(&gallery.join("1.jpg")),
             DirectoryObservation::Unavailable(std::io::ErrorKind::NotADirectory)
         );
-        match snap.root_id {
-            DirectoryObservation::Present(_) => {}
-            other => panic!("a real gallery directory must observe Present, got {other:?}"),
-        }
 
-        // The non-Unix entry point denies, without falling back to the ZIP.
-        let denied = GallerySnap {
-            root_id: DirectoryObservation::Unavailable(std::io::ErrorKind::Unsupported),
-            parent: DirectoryObservation::Unavailable(std::io::ErrorKind::Unsupported),
-            ..snap.clone()
-        };
-        assert!(
-            matches!(probe_gallery_file(&denied), Ok(OpenOutcome::Denied)),
-            "an Unsupported observation must be a denial, not a missing leaf"
+        // The non-Unix entry point denies, without falling back to the ZIP:
+        // an `Unavailable` observation must never open, enumerate or grant the
+        // sibling archive.
+        let denied = GalleryGrant::new(
+            app.base_dir().join("downloads"),
+            std::ffi::OsString::from("gallery-title"),
+            DirectoryObservation::Unavailable(std::io::ErrorKind::Unsupported),
+            DirectoryObservation::Unavailable(std::io::ErrorKind::Unsupported),
+            PrivatePolicy::freeze(PrivatePaths::for_base(app.base_dir())),
         );
-        assert!(
-            read_zip_fallback(&denied).is_err(),
-            "an Unsupported parent observation must not grant the sibling archive"
-        );
-        let error =
-            open_confined_regular(&denied.root, denied.root_id, &denied.name, &denied.reserved)
-                .expect_err("Unsupported observation must not open anything");
+        let error = denied
+            .open_leaf(std::ffi::OsStr::new("1.jpg"))
+            .expect_err("Unsupported observation must not open anything");
         assert!(
             matches!(error, TaskError::UnsafePath { .. }),
             "Unsupported observation must be a typed denial, got {error:?}"
+        );
+        assert!(
+            denied.open_sibling_archive().is_err(),
+            "an Unsupported root observation must not grant the sibling archive"
+        );
+        assert!(
+            denied.capture_gallery_dir().is_err(),
+            "an Unsupported gallery observation must not enumerate anything"
         );
         // Control: the real Present snapshot is untouched.
         assert!(matches!(
@@ -6996,5 +6957,464 @@ mod tests {
             let fresh = run_media(handle, Arc::new(tokio::sync::Semaphore::new(2)), media).await;
             assert_eq!(fresh.status, 200);
         }));
+    }
+
+    // --- M5 FD product read boundary: vertical tracers -----------------------
+
+    /// Build a real task whose gallery directory exists and is empty, plus a
+    /// helper that maps one fid to one raw gallery file name.
+    fn fd_gallery(app: &mut App, title: &str) -> (String, std::path::PathBuf) {
+        use crate::task::{Task, TaskConfig};
+        let base = app.base_dir().to_path_buf();
+        let mut config = TaskConfig::from_app(&app.cfg, &JsonMap::new()).expect("config");
+        config.dir = "downloads".to_string();
+        let mut task = Task::new(
+            "http://e-hentai.org/g/123/abcdef0123/",
+            config,
+            format!("guid-fd-{title}"),
+            &base,
+        )
+        .expect("task");
+        task.meta
+            .insert("title".to_string(), Value::String(title.to_string()));
+        task.meta.insert("total".to_string(), Value::from(32));
+        let gallery = task.get_fpath().expect("fpath");
+        std::fs::create_dir_all(&gallery).expect("gallery");
+        let guid = task.guid.clone();
+        app.insert_task_for_test(task);
+        (guid, gallery)
+    }
+
+    fn fd_map(app: &mut App, guid: &str, fid: i64, name: &str) {
+        use crate::task::FidKey;
+        app.task_mut(guid)
+            .expect("task")
+            .renamed_map
+            .insert(FidKey::Text(fid.to_string()), name.to_string());
+    }
+
+    /// Add a task through the REAL `App::add_task` entry, so it shares the
+    /// App's live private-path cell exactly like a production task (a task
+    /// built by `Task::new` owns the standalone base policy instead).
+    fn fd_add_task(app: &mut App, title: &str, total: i64) -> (String, std::path::PathBuf) {
+        app.cfg.dir = "downloads".to_string();
+        std::fs::create_dir_all(app.base_dir().join("downloads")).expect("downloads");
+        let (code, guid) = app
+            .add_task("http://e-hentai.org/g/123/abcdef0123/", JsonMap::new())
+            .expect("add_task");
+        assert_eq!(
+            code, 0,
+            "the real add_task entry must accept the fixture URL"
+        );
+        let guid = guid.expect("a real task guid");
+        let gallery = {
+            let task = app.task_mut(&guid).expect("task");
+            task.meta
+                .insert("title".to_string(), Value::String(title.to_string()));
+            task.meta.insert("total".to_string(), Value::from(total));
+            let gallery = task.get_fpath().expect("fpath");
+            std::fs::create_dir_all(&gallery).expect("gallery");
+            gallery
+        };
+        (guid, gallery)
+    }
+
+    fn fd_status(app: &App, guid: &str, fid: &str) -> std::result::Result<Vec<u8>, u16> {
+        match read_gallery_file(app, guid, fid) {
+            Ok((bytes, _mime)) => Ok(bytes),
+            Err(fail) => Err(fail.status()),
+        }
+    }
+
+    /// M5 FD tracer A: the live log pathname moves onto a mapped gallery file
+    /// while the request is parked on heavy capacity.
+    ///
+    /// The snapshot is taken before the permit wait, so the frozen private set
+    /// can only contain the OLD spelling. Serving the mapped image afterwards
+    /// would read private persistence bytes, and the ZIP fallback must not be
+    /// used as a second chance.
+    #[test]
+    fn m5_fd_live_log_path_is_denied() {
+        let mut app = test_app();
+        let png = png_bytes(16, 16);
+        let (guid, gallery) = fd_add_task(&mut app, "live-log-gallery", 3);
+        std::fs::write(gallery.join("1.jpg"), &png).expect("mapped image");
+        let other_png = png_noise_bytes(24, 24);
+        let (other, other_gallery) = fd_add_task(&mut app, "other-gallery", 3);
+        std::fs::write(other_gallery.join("1.jpg"), &other_png).expect("other image");
+        let mapped = gallery.join("1.jpg");
+        assert!(mapped.is_file(), "fixture must map a real gallery file");
+        let target = format!("/img/{}/{guid}/1", hash_link(None, &format!("{guid}/1")));
+        let other_target = format!("/img/{}/{other}/1", hash_link(None, &format!("{other}/1")));
+        let media = media_action(&target);
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
+        let handle = runtime.handle();
+        let permits = Arc::new(tokio::sync::Semaphore::new(super::super::MAX_HEAVY_WORKERS));
+        let request_handle = handle.clone();
+        let request_permits = Arc::clone(&permits);
+        let log_value = mapped.to_string_lossy().into_owned();
+        block_on(async move {
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async move {
+                    let first = request_permits
+                        .clone()
+                        .acquire_owned()
+                        .await
+                        .expect("permit");
+                    let second = request_permits
+                        .clone()
+                        .acquire_owned()
+                        .await
+                        .expect("permit");
+                    let mut request = Box::pin(run_media(
+                        request_handle.clone(),
+                        Arc::clone(&request_permits),
+                        media,
+                    ));
+                    assert!(
+                        tokio::time::timeout(std::time::Duration::from_millis(400), &mut request)
+                            .await
+                            .is_err(),
+                        "the request must be parked on heavy capacity with its snapshot taken"
+                    );
+                    // The real same-App configuration path: the log pathname
+                    // becomes the mapped gallery image while the request waits.
+                    let mut patch = JsonMap::new();
+                    patch.insert("log_path".to_string(), Value::String(log_value));
+                    request_handle
+                        .update_config(patch)
+                        .expect("the real set_config path must accept the log path");
+                    // Real peer progress on the same executor while parked.
+                    let peer = tokio::task::spawn_local(async { 7u8 });
+                    assert_eq!(peer.await.expect("peer task"), 7);
+                    drop(first);
+                    drop(second);
+                    let response = request.await;
+                    assert_eq!(
+                        response.status, 404,
+                        "a gallery file that became the live log path must never be served"
+                    );
+                    assert!(
+                        response_body(response).is_empty(),
+                        "a denied private read must not carry a body"
+                    );
+                })
+                .await;
+        });
+        // A fresh, unrelated image in another gallery still serves exactly.
+        let media = media_action(&other_target);
+        let (status, body) = block_on(async {
+            let response = run_media(handle, Arc::clone(&permits), media).await;
+            let status = response.status;
+            (status, response_body(response))
+        });
+        assert_eq!(status, 200, "an unrelated gallery image must still serve");
+        assert_eq!(body, other_png);
+    }
+
+    /// M5 FD tracer B: a mapped leaf that is a link to a literal path OUTSIDE
+    /// the gallery, whose target does not exist, must be denied before any
+    /// lookup or fallback — even when the sibling archive has a matching entry.
+    ///
+    /// A canonicalize-first alias proof classifies the follow-open `ENOENT` of
+    /// the outside literal as a missing payload and serves the ZIP entry.
+    #[test]
+    fn m5_fd_outside_dangling_alias_denies_without_zip_fallback() {
+        use crate::rpc::{OpenOutcome, probe_gallery_file, snapshot_gallery_file};
+        let mut app = test_app();
+        let (guid, gallery) = fd_gallery(&mut app, "alias-gallery");
+        let outside = app.base_dir().join("outside").join("absent.jpg");
+        assert!(!outside.exists(), "the outside literal must not exist");
+        let mapped = gallery.join("1.jpg");
+        std::os::unix::fs::symlink(&outside, &mapped).expect("outside link");
+        fd_map(&mut app, &guid, 1, "1.jpg");
+        let zip = gallery.with_extension("zip");
+        m5_write_zip(&zip, "1.jpg", b"ZIP-FALLBACK-BYTES");
+
+        // Expected: a typed denial, never the sibling entry bytes.
+        match fd_status(&app, &guid, "1") {
+            Err(status) => assert_eq!(status, 404),
+            Ok(bytes) => panic!(
+                "an outside dangling alias served {} bytes instead of denying",
+                bytes.len()
+            ),
+        }
+        let snap = snapshot_gallery_file(&app, &guid, "1").expect("snap");
+        assert!(
+            matches!(probe_gallery_file(&snap), Ok(OpenOutcome::Denied)),
+            "an outside referent must be denied, not reported missing"
+        );
+        // The denial is final: `read_gallery_file` only consults the sibling
+        // archive after a `Missing` probe, so a denied probe can never serve a
+        // ZIP byte for this request (the 404 above is the flow-level proof).
+
+        // Control: an outside literal that DOES exist is denied as well, so no
+        // outside payload byte can be served.
+        let outside_secret = app.base_dir().join("outside-secret.jpg");
+        std::fs::write(&outside_secret, b"OUTSIDE-SECRET-BYTES").expect("secret");
+        let mapped_secret = gallery.join("2.jpg");
+        std::os::unix::fs::symlink(&outside_secret, &mapped_secret).expect("secret link");
+        fd_map(&mut app, &guid, 2, "2.jpg");
+        assert_eq!(fd_status(&app, &guid, "2"), Err(404));
+
+        // Positive: an INTERNAL dangling alias keeps the reference fallback.
+        let dangling = gallery.join("3.jpg");
+        std::os::unix::fs::symlink("4.jpg", &dangling).expect("internal link");
+        fd_map(&mut app, &guid, 3, "3.jpg");
+        m5_write_zip(&zip, "3.jpg", b"INTERNAL-DANGLING-ZIP");
+        let bytes = fd_status(&app, &guid, "3").expect("internal dangling keeps the ZIP fallback");
+        assert_eq!(bytes, b"INTERNAL-DANGLING-ZIP");
+
+        // Positive: valid relative, direct-absolute, absolute-with-intermediate,
+        // nested-reset and parent-spelling aliases serve the exact bytes.
+        let downloads = std::fs::canonicalize(gallery.parent().expect("parent")).expect("root");
+        let canonical_gallery = downloads.join("alias-gallery");
+        let target = gallery.join("5.jpg");
+        std::fs::write(&target, b"RELATIVE-ALIAS-BYTES").expect("target");
+        fd_map(&mut app, &guid, 5, "5.jpg");
+        std::os::unix::fs::symlink("5.jpg", gallery.join("6.jpg")).expect("relative");
+        fd_map(&mut app, &guid, 6, "6.jpg");
+        assert_eq!(
+            fd_status(&app, &guid, "6").expect("relative alias"),
+            b"RELATIVE-ALIAS-BYTES"
+        );
+        std::os::unix::fs::symlink(canonical_gallery.join("5.jpg"), gallery.join("7.jpg"))
+            .expect("direct absolute");
+        fd_map(&mut app, &guid, 7, "7.jpg");
+        assert_eq!(
+            fd_status(&app, &guid, "7").expect("direct absolute alias"),
+            b"RELATIVE-ALIAS-BYTES"
+        );
+        std::fs::create_dir_all(gallery.join("real")).expect("real dir");
+        std::fs::write(gallery.join("real").join("8.jpg"), b"INTERMEDIATE-BYTES")
+            .expect("intermediate target");
+        std::os::unix::fs::symlink("real", gallery.join("linkdir")).expect("intermediate link");
+        std::os::unix::fs::symlink(
+            canonical_gallery.join("linkdir").join("8.jpg"),
+            gallery.join("9.jpg"),
+        )
+        .expect("absolute intermediate");
+        fd_map(&mut app, &guid, 9, "9.jpg");
+        assert_eq!(
+            fd_status(&app, &guid, "9").expect("absolute intermediate alias"),
+            b"INTERMEDIATE-BYTES"
+        );
+        std::fs::write(gallery.join("11.jpg"), b"NESTED-RESET-BYTES").expect("nested target");
+        std::os::unix::fs::symlink(canonical_gallery.join("11.jpg"), gallery.join("10.jpg"))
+            .expect("nested first hop");
+        std::os::unix::fs::symlink(canonical_gallery.join("10.jpg"), gallery.join("12.jpg"))
+            .expect("nested second hop");
+        fd_map(&mut app, &guid, 12, "12.jpg");
+        assert_eq!(
+            fd_status(&app, &guid, "12").expect("nested reset alias"),
+            b"NESTED-RESET-BYTES"
+        );
+        std::fs::write(gallery.join("13.jpg"), b"PARENT-SPELLING-BYTES").expect("spelling target");
+        let spelling = downloads.join(".").join("alias-gallery").join("13.jpg");
+        std::os::unix::fs::symlink(&spelling, gallery.join("14.jpg")).expect("spelling alias");
+        fd_map(&mut app, &guid, 14, "14.jpg");
+        assert_eq!(
+            fd_status(&app, &guid, "14").expect("parent spelling alias"),
+            b"PARENT-SPELLING-BYTES"
+        );
+    }
+
+    /// M5 FD tracer C (on-demand RPC producer): a private persistence file
+    /// hardlinked as an ordinary gallery entry must be denied before any byte is
+    /// copied, with no archive published and no stage left behind.
+    #[test]
+    fn m5_fd_archive_private_hardlink_is_denied() {
+        let mut app = test_app();
+        let (guid, gallery) = fd_gallery(&mut app, "hardlink-gallery");
+        let private = app.base_dir().join(crate::core::SESSION_FILE);
+        std::fs::write(&private, b"PRIVATE-SESSION-BYTES").expect("session");
+        std::fs::write(gallery.join("2.jpg"), b"ORDINARY-BYTES").expect("ordinary");
+        std::fs::hard_link(&private, gallery.join("1.jpg")).expect("hardlink");
+        fd_map(&mut app, &guid, 1, "1.jpg");
+        let zip = gallery.with_extension("zip");
+
+        match read_archive(&app, &guid) {
+            Err(fail) => assert_eq!(fail.status(), 404),
+            Ok(bytes) => panic!(
+                "a private hardlink was copied into a {} byte archive",
+                bytes.len()
+            ),
+        }
+        assert!(
+            !zip.exists(),
+            "a denied archive build must not publish the public sibling"
+        );
+        let stages: Vec<_> = std::fs::read_dir(gallery.parent().expect("parent"))
+            .expect("parent dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".xehentai-archive-"))
+            .collect();
+        assert!(
+            stages.is_empty(),
+            "a denied archive build must remove its own staging file: {stages:?}"
+        );
+        // The same producer through the direct TaskAPI must deny as well.
+        let direct = app
+            .task_mut(&guid)
+            .expect("task")
+            .make_archive(false)
+            .expect_err("the direct TaskAPI archive producer must deny the hardlink");
+        assert!(
+            !direct.to_string().is_empty(),
+            "the denial must keep a real diagnostic"
+        );
+        assert!(
+            !zip.exists(),
+            "no archive may appear after the direct denial"
+        );
+    }
+
+    const M5_CHILD_ARCHIVE_FIFO: &str = "rpc::server::tests::m5_child_archive_fifo";
+
+    /// Child half of [`m5_archive_fifo_entry_is_bounded`]: a real gallery with
+    /// one ordinary image and one FIFO entry, then the real archive producer.
+    #[test]
+    #[ignore = "bounded child helper driven by m5_archive_fifo_entry_is_bounded"]
+    fn m5_child_archive_fifo() {
+        use crate::task::{Task, TaskConfig};
+        let base = std::path::PathBuf::from(
+            std::env::var("XE_M5_ARCHIVE_BASE").expect("XE_M5_ARCHIVE_BASE"),
+        );
+        let ready =
+            std::path::PathBuf::from(std::env::var("XE_M5_READY_FILE").expect("XE_M5_READY_FILE"));
+        let mut config = TaskConfig::from_app(&crate::config::Config::default(), &JsonMap::new())
+            .expect("config");
+        config.dir = "downloads".to_string();
+        let mut task = Task::new(
+            "http://e-hentai.org/g/123/abcdef0123/",
+            config,
+            "guid-archive-fifo".to_string(),
+            &base,
+        )
+        .expect("task");
+        task.meta.insert(
+            "title".to_string(),
+            Value::String("fifo-archive".to_string()),
+        );
+        task.meta.insert("total".to_string(), Value::from(2));
+        let gallery = task.get_fpath().expect("fpath");
+        std::fs::create_dir_all(&gallery).expect("gallery");
+        std::fs::write(gallery.join("1.jpg"), png_bytes(8, 8)).expect("image");
+        make_fifo(&gallery.join("2.jpg"));
+        std::fs::write(&ready, b"ready").expect("READY marker");
+        let outcome = task.make_archive(false);
+        assert!(
+            outcome.is_err(),
+            "a FIFO gallery entry must be denied, never archived or blocked on"
+        );
+        println!("m5-child: archive FIFO entry denied without a payload read");
+    }
+
+    /// A FIFO as an ordinary archive entry must be denied from the returned
+    /// descriptor without a payload read. The real producer runs in an owned
+    /// bounded child of this test binary, so a blocking open can be killed and
+    /// actually reaped instead of hanging the suite.
+    #[test]
+    #[cfg(all(unix, not(target_vendor = "apple")))]
+    fn m5_archive_fifo_entry_is_bounded() {
+        let fixture = tempfile::tempdir().expect("fixture root");
+        let base = fixture.path().join("base");
+        std::fs::create_dir_all(base.join("downloads").join("fifo-archive")).expect("dirs");
+        let out_path = fixture.path().join("child.stdout");
+        let err_path = fixture.path().join("child.stderr");
+        let ready_path = fixture.path().join("child.ready");
+        let exclusive = |path: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .expect("exclusive child stream file")
+        };
+        let mut child = std::process::Command::new(std::env::current_exe().expect("current_exe"))
+            .arg("--exact")
+            .arg(M5_CHILD_ARCHIVE_FIFO)
+            .arg("--ignored")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env("XE_M5_ARCHIVE_BASE", &base)
+            .env("XE_M5_READY_FILE", &ready_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(exclusive(&out_path))
+            .stderr(exclusive(&err_path))
+            .spawn()
+            .expect("spawn bounded child");
+        let mut entered = false;
+        let ready_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < ready_deadline {
+            if ready_path.exists() {
+                entered = true;
+                break;
+            }
+            if child.try_wait().expect("try_wait").is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let mut finished = None;
+        if entered {
+            let bound = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while std::time::Instant::now() < bound {
+                if let Some(status) = child.try_wait().expect("try_wait") {
+                    finished = Some(status);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        let timed_out = entered && finished.is_none();
+        if !entered || timed_out {
+            let _ = child.kill();
+        }
+        // Actual wait/reap FIRST: the status and the exclusive stream files are
+        // only consumed after the child can no longer write them.
+        let status = child.wait().expect("reap bounded child");
+        let out = std::fs::read_to_string(&out_path).unwrap_or_default();
+        let err = std::fs::read_to_string(&err_path).unwrap_or_default();
+        let report = || {
+            format!(
+                "child status={status:?} entered={entered} timed_out={timed_out}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+                m5_tail(&out, 4000),
+                m5_tail(&err, 4000)
+            )
+        };
+        assert!(
+            entered,
+            "child never entered the real archive producer: {}",
+            report()
+        );
+        assert!(
+            !timed_out,
+            "the archive producer did not return within 20s for a FIFO entry (killed and reaped): {}",
+            report()
+        );
+        assert!(status.success(), "child failed: {}", report());
+        assert!(
+            out.contains("m5-child: archive FIFO entry denied without a payload read"),
+            "child did not reach the denial assertion: {}",
+            report()
+        );
+        let gallery = base.join("downloads").join("fifo-archive");
+        assert!(
+            !gallery.with_extension("zip").exists(),
+            "a denied archive build must not publish the public sibling"
+        );
+        let stages: Vec<_> = std::fs::read_dir(base.join("downloads"))
+            .expect("downloads")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".xehentai-archive-"))
+            .collect();
+        assert!(
+            stages.is_empty(),
+            "the bounded child must leave no staging file behind: {stages:?}"
+        );
     }
 }

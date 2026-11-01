@@ -612,6 +612,13 @@ pub struct App {
     /// Transport settings used when a session is created. Production keeps the
     /// default; local protocol tests inject their test CA/DNS mapping here.
     session_config: SessionConfig,
+    /// The live private persistence spellings every task read is checked
+    /// against: the session file, `config.rss`, the legacy `config.py`, the
+    /// resolved `log_path` and the legacy cookie file. `set_config` replaces it
+    /// BEFORE the logger is reopened, so a pathname that becomes private at
+    /// runtime is protected from that moment on while older snapshots keep
+    /// their own captured names.
+    private_paths: Arc<crate::task::PrivatePaths>,
 }
 
 #[derive(Debug)]
@@ -691,6 +698,13 @@ impl App {
         logger.set_verbosity(cfg.log_verbose);
         let authorized_dir = resolve_dir(base_dir, &cfg.dir);
         let base_root = boundary_path(base_dir).unwrap_or_else(|_| normalize(base_dir));
+        // Initialized BEFORE any task/session admission, so a task restored or
+        // added below already reads under the current policy.
+        let private_paths = crate::task::PrivatePaths::new(Self::private_spellings_for(
+            base_dir,
+            filepath,
+            &cfg.log_path,
+        ));
         let mut app = Self {
             cfg,
             logger,
@@ -728,6 +742,7 @@ impl App {
             proxy: None,
             session: None,
             session_config: SessionConfig::default(),
+            private_paths,
         };
         // The configured download root is an explicit user choice, so it may
         // be an external absolute directory. A directory read from h.json is
@@ -822,6 +837,27 @@ impl App {
 
     pub fn base_dir(&self) -> &Path {
         &self.base_dir
+    }
+
+    /// The exact private persistence spellings this App currently owns.
+    ///
+    /// The log path is resolved the same way the logger reopen resolves it, and
+    /// the cookie file lives next to the configuration file path, exactly as
+    /// `core.py`/`util` read it.
+    fn private_spellings_for(base: &Path, filepath: &Path, log_path: &str) -> Vec<PathBuf> {
+        let log_path = Path::new(log_path);
+        let log_path = if log_path.is_absolute() {
+            log_path.to_path_buf()
+        } else {
+            base.join(log_path)
+        };
+        vec![
+            base.join(SESSION_FILE),
+            base.join(crate::config::CONFIG_FILE),
+            base.join(crate::config::LEGACY_CONFIG_FILE),
+            log_path,
+            filepath.join(LEGACY_COOKIE_FILE),
+        ]
     }
 
     pub fn filepath(&self) -> &Path {
@@ -1042,6 +1078,16 @@ impl App {
         } else {
             self.base_dir.join(log_path)
         };
+        // Update the live private-path cell BEFORE the logger is reopened:
+        // the new name becomes private state before the first byte can be
+        // written to it, while the captured names of an in-flight read keep
+        // protecting the previous spelling. A patch that fails earlier returns
+        // above without touching either the cell or the old logger.
+        self.private_paths.replace(Self::private_spellings_for(
+            &self.base_dir,
+            &self.filepath,
+            &self.cfg.log_path,
+        ));
         if let Err(error) = self.logger.set_logfile(&log_path) {
             let _ = self.logger.warning(&format!(
                 "cannot open log file {}: {error}",
@@ -1069,7 +1115,13 @@ impl App {
         }
         let guid = self.guid_source.next_guid();
         let task_root = resolve_dir(&self.base_dir, &config.dir);
-        let task = Task::new(url, config, guid.clone(), &self.base_dir)?;
+        let task = Task::new_with_private_paths(
+            url,
+            config,
+            guid.clone(),
+            &self.base_dir,
+            Arc::clone(&self.private_paths),
+        )?;
         // A task argument is an explicit user choice and keeps its directory
         // usable for the lifetime of this App, even if the global dir changes.
         self.trust_dir(&task_root);
@@ -2111,8 +2163,12 @@ impl App {
                     .ok_or_else(|| SessionError::Shape("tasks is not an object".into()))?;
                 let mut pending: Vec<Task> = Vec::new();
                 for value in tasks.values() {
-                    let mut task =
-                        Task::from_wire(value, &self.base_dir).map_err(SessionError::Task)?;
+                    let mut task = Task::from_wire_with_private_paths(
+                        value,
+                        &self.base_dir,
+                        Arc::clone(&self.private_paths),
+                    )
+                    .map_err(SessionError::Task)?;
                     let authorized = match self.task_dir_is_authorized(task.files().root()) {
                         Ok(authorized) => authorized,
                         Err(error) => {

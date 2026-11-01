@@ -6,14 +6,19 @@
 //! children) are refused instead of being followed like the reference did.
 #![allow(dead_code)]
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use regex::Regex;
+
+#[cfg(unix)]
+use cap_primitives::fs as capfs;
+#[cfg(unix)]
+use cap_primitives::fs::OpenOptionsExt as _;
 
 use super::{FidKey, RenameError, Task, TaskError};
 
@@ -86,15 +91,45 @@ pub struct TaskFiles {
     root: PathBuf,
     f_lock: Arc<Mutex<()>>,
     cnt_lock: Mutex<()>,
+    /// This task's read view of the application private-path policy. App-owned
+    /// tasks share the App's live cell; a standalone task owns the fixed
+    /// base-derived names.
+    private: Arc<PrivatePaths>,
 }
 
 impl TaskFiles {
-    pub fn new(root: PathBuf) -> Arc<Self> {
+    /// A standalone task whose private-path policy is the fixed, NONEMPTY set
+    /// the reference resolves against its configuration base. App-owned tasks
+    /// are built with [`TaskFiles::with_private_paths`] and share the App cell.
+    pub fn new(root: PathBuf, base: &Path) -> Arc<Self> {
+        Self::with_private_paths(root, PrivatePaths::for_base(base))
+    }
+
+    /// Build a task file owner that reads through the application's live
+    /// private-path cell.
+    pub fn with_private_paths(root: PathBuf, private: Arc<PrivatePaths>) -> Arc<Self> {
         Arc::new(Self {
             root,
             f_lock: Arc::new(Mutex::new(())),
             cnt_lock: Mutex::new(()),
+            private,
         })
+    }
+
+    /// Freeze one gallery read grant.
+    ///
+    /// `component` is the validated single gallery component and `path` its
+    /// spelling under the fixed authorized root. Both directory observations
+    /// are taken here, at the snapshot boundary, before any permit or heavy
+    /// work.
+    pub fn grant(&self, component: &str, path: &Path) -> GalleryGrant {
+        GalleryGrant::new(
+            self.root.clone(),
+            OsString::from(component),
+            observe_directory(&self.root),
+            observe_directory(path),
+            PrivatePolicy::freeze(Arc::clone(&self.private)),
+        )
     }
 
     pub fn root(&self) -> &Path {
@@ -381,326 +416,781 @@ fn unavailable_reason(kind: std::io::ErrorKind) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
-// Race-safe confined open (M5 R2 B3.2).
+// Task-root read authority (M5 FD product integration).
+//
+// One coherent boundary for every production read consumer: loose gallery
+// image, sibling-archive fallback, final archive stream, descriptor-relative
+// archive enumeration and every archive entry. It replaces the ambient
+// check-then-reopen and the canonicalized-payload-path alias proof with:
+//
+// 1. a mandatory App-owned live private-path policy plus the private names and
+//    identities frozen into one read snapshot (see [`PrivatePaths`]);
+// 2. the owning `TaskFiles` fixed download root and the validated single
+//    gallery component as the only root provenance;
+// 3. the frozen pre-permit directory observations as the only binding;
+// 4. the accepted mature `cap-primitives` 4.0.3 resolver for the loose leaf
+//    (including the reviewed Linux `open_with_absolute_prefix` literal
+//    rebase) and for descriptor-relative enumeration;
+// 5. a single-component `openat` for archive entries, with the same-descriptor
+//    type and private-identity verdict before any byte is copied.
 // ---------------------------------------------------------------------------
 
-/// Open `root/name` as a regular file confined to the owned gallery root,
-/// validating the OPENED file descriptor (never just the prechecked path),
-/// so a swap between check and open cannot smuggle bytes in.
-///
-/// `snapshot` is the frozen observation captured before any heavy permit.
-/// `Missing` returns `Ok(None)` and `Unavailable` returns a typed denial, both
-/// WITHOUT opening or re-observing the path, so a later filesystem change can
-/// never grant this request authority. `Present` carries the exact expected
-/// identity that the open below re-validates.
-///
-/// The leaf is opened relative to a pinned root directory FD. A symlink
-/// leaf is denied on the fast path; an inside-root alias is served only
-/// when the opened FD's identity matches the resolved target and the
-/// target stays inside the freshly canonicalized root and off the reserved
-/// persistence set. Magic links, outside targets and reserved targets are
-/// denied before any read, as are non-regular files (directories, pipes,
-/// devices, sockets). The opened root FD must also still be the freshly
-/// canonicalized root AND the snapshot-time identity, so parent/root swaps
-/// fail closed. `O_NONBLOCK` avoids hangs on FIFOs during the open; it is
-/// cleared before the handle is returned.
-///
-/// Returns `Ok(None)` only when the leaf (or the root itself) is genuinely
-/// missing, so the caller can apply the reference ZIP fallback; every
-/// confinement failure is `Err` (denied: no fallback, no bytes).
-/// No production debug hook exists; the `#[cfg(test)]` seams in this module
-/// are the only deterministic windows and are compiled out of production
-/// builds.
-pub fn open_confined_regular(
-    root: &Path,
-    snapshot: DirectoryObservation,
-    name: &str,
-    reserved: &[PathBuf],
-) -> Result<Option<std::fs::File>, TaskError> {
-    check_component(name)?;
-    match snapshot {
-        DirectoryObservation::Missing => Ok(None),
-        DirectoryObservation::Unavailable(kind) => Err(unavailable_denial(root, kind)),
-        DirectoryObservation::Present(expected) => {
-            open_confined_present(root, expected, name, reserved)
+/// `(device, inode)` identity. Always taken from a descriptor or a metadata
+/// probe; never used as a containment proof on its own.
+pub type FileId = (u64, u64);
+
+fn dedupe_paths(paths: &mut Vec<PathBuf>) {
+    let mut unique: Vec<PathBuf> = Vec::with_capacity(paths.len());
+    for path in paths.drain(..) {
+        if !unique.contains(&path) {
+            unique.push(path);
         }
+    }
+    *paths = unique;
+}
+
+fn push_unique_id(ids: &mut Vec<FileId>, id: FileId) {
+    if !ids.contains(&id) {
+        ids.push(id);
     }
 }
 
-/// The confined open itself. Only reachable from a `Present` observation, so
-/// the expected snapshot identity is mandatory here: there is no public
-/// "no binding" entry point.
 #[cfg(unix)]
-fn open_confined_present(
-    root: &Path,
-    expected: DirIdentity,
-    name: &str,
-    reserved: &[PathBuf],
-) -> Result<Option<std::fs::File>, TaskError> {
-    use rustix::fs::{Mode, OFlags};
-    let root_fd = match rustix::fs::open(
-        root,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-    ) {
-        Ok(fd) => fd,
-        // The observation said Present and the path is gone now: this is the
-        // ordinary "gallery archived away between observation and open"
-        // demotion, which grants nothing beyond what a Missing observation
-        // grants (the reference ZIP fallback), never a gallery-file read.
-        Err(error) if error == rustix::io::Errno::NOENT => return Ok(None),
-        Err(error) => {
-            return Err(TaskError::Io {
-                path: root.to_path_buf(),
-                source: std::io::Error::from_raw_os_error(error.raw_os_error()),
-            });
-        }
-    };
-    let root_stat = rustix::fs::fstat(&root_fd).map_err(|error| TaskError::Io {
-        path: root.to_path_buf(),
-        source: std::io::Error::from_raw_os_error(error.raw_os_error()),
-    })?;
-    if rustix::fs::FileType::from_raw_mode(root_stat.st_mode) != rustix::fs::FileType::Directory {
-        return Err(TaskError::UnsafePath {
-            path: root.to_path_buf(),
-            reason: "confined root is not a directory",
-        });
+fn observe_identity(path: &Path) -> Result<FileId, std::io::ErrorKind> {
+    use std::os::unix::fs::MetadataExt;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok((metadata.dev(), metadata.ino())),
+        Err(error) => Err(error.kind()),
     }
-    #[cfg(test)]
-    run_preopen_seam(root, name);
-    let leaf = match rustix::fs::openat(
-        &root_fd,
-        name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
-        Mode::empty(),
-    ) {
-        Ok(fd) => fd,
-        Err(error) if error == rustix::io::Errno::LOOP => {
-            return open_confined_alias(&root_fd, root, expected, name, reserved);
-        }
-        Err(error) if error == rustix::io::Errno::NOENT => return Ok(None),
-        Err(error) => {
-            return Err(TaskError::Io {
-                path: root.join(name),
-                source: std::io::Error::from_raw_os_error(error.raw_os_error()),
-            });
-        }
-    };
-    finish_confined_leaf(root_fd, leaf, root, expected, name, reserved)
 }
 
-/// No confined Unix backend on this platform: deny with the shared
-/// `Unsupported` shape instead of opening or reading anything ambient.
 #[cfg(not(unix))]
-fn open_confined_present(
-    root: &Path,
-    _expected: DirIdentity,
-    _name: &str,
-    _reserved: &[PathBuf],
-) -> Result<Option<std::fs::File>, TaskError> {
-    Err(unavailable_denial(root, std::io::ErrorKind::Unsupported))
+fn observe_identity(_path: &Path) -> Result<FileId, std::io::ErrorKind> {
+    Err(std::io::ErrorKind::Unsupported)
 }
 
-/// Symlink-leaf path: the leaf is a link. Follow it, then serve the opened
-/// FD only when its identity matches the contained, non-reserved resolved
-/// target. Any mismatch (including a link swap racing the resolve) denies.
-#[cfg(unix)]
-fn open_confined_alias(
-    root_fd: &rustix::fd::OwnedFd,
-    root: &Path,
-    expected: DirIdentity,
-    name: &str,
-    reserved: &[PathBuf],
-) -> Result<Option<std::fs::File>, TaskError> {
-    use rustix::fs::{Mode, OFlags};
-    let leaf = match rustix::fs::openat(
-        root_fd,
-        name,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
-        Mode::empty(),
-    ) {
-        Ok(fd) => fd,
-        Err(error) if error == rustix::io::Errno::NOENT => return Ok(None),
-        Err(error) => {
-            return Err(TaskError::Io {
-                path: root.join(name),
-                source: std::io::Error::from_raw_os_error(error.raw_os_error()),
-            });
-        }
-    };
-    let leaf_stat = rustix::fs::fstat(&leaf).map_err(|error| TaskError::Io {
-        path: root.join(name),
-        source: std::io::Error::from_raw_os_error(error.raw_os_error()),
-    })?;
-    if rustix::fs::FileType::from_raw_mode(leaf_stat.st_mode) != rustix::fs::FileType::RegularFile {
-        return Err(TaskError::UnsafePath {
-            path: root.join(name),
-            reason: "confined alias target is not a regular file",
-        });
-    }
-    // Resolve the link through the pinned root FD and require containment;
-    // the opened FD must then BE that resolved target (dev, ino).
-    let target =
-        rustix::fs::readlinkat(root_fd, name, Vec::new()).map_err(|error| TaskError::Io {
-            path: root.join(name),
-            source: std::io::Error::from_raw_os_error(error.raw_os_error()),
-        })?;
-    let target = target.to_string_lossy();
-    let fresh_real = canonical_root(root)?;
-    let resolved = if Path::new(target.as_ref()).is_absolute() {
-        normalize(Path::new(target.as_ref()))
-    } else {
-        normalize(&fresh_real.join(Path::new(target.as_ref())))
-    };
-    if !path_within(&fresh_real, &resolved) {
-        return Err(TaskError::UnsafePath {
-            path: root.join(name),
-            reason: "link target escapes the gallery root",
-        });
-    }
-    let resolved_stat = std::fs::metadata(&resolved).map_err(|_| TaskError::UnsafePath {
-        path: root.join(name),
-        reason: "link target cannot be stated",
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if (resolved_stat.dev(), resolved_stat.ino()) != (leaf_stat.st_dev, leaf_stat.st_ino) {
-            return Err(TaskError::UnsafePath {
-                path: root.join(name),
-                reason: "link target changed under the open",
-            });
-        }
-    }
-    deny_reserved(&leaf_stat, root.join(name), reserved)?;
-    bind_root(root_fd, &root_stat_of(root_fd)?, root, expected)?;
-    Ok(Some(clear_nonblock(leaf, root.join(name))?))
+/// This application's current private persistence spellings, shared by every
+/// task that lives in the same App.
+///
+/// The set is small and bounded by the fixed persistence names: the session
+/// file, `config.rss`, the legacy `config.py`, the resolved `log_path` and the
+/// legacy cookie file. `set_config` replaces it BEFORE the logger is reopened,
+/// so a name that changes at runtime is protected from the moment it becomes
+/// private, while an older snapshot keeps its own captured names.
+#[derive(Debug)]
+pub struct PrivatePaths {
+    spellings: RwLock<Vec<PathBuf>>,
 }
 
-/// Validate the fast-path (non-link) leaf: regular file, off the reserved
-/// set, root still bound; then clear `O_NONBLOCK` and hand over the file.
-#[cfg(unix)]
-fn finish_confined_leaf(
-    root_fd: rustix::fd::OwnedFd,
-    leaf: rustix::fd::OwnedFd,
-    root: &Path,
-    expected: DirIdentity,
-    name: &str,
-    reserved: &[PathBuf],
-) -> Result<Option<std::fs::File>, TaskError> {
-    let leaf_stat = rustix::fs::fstat(&leaf).map_err(|error| TaskError::Io {
-        path: root.join(name),
-        source: std::io::Error::from_raw_os_error(error.raw_os_error()),
-    })?;
-    if rustix::fs::FileType::from_raw_mode(leaf_stat.st_mode) != rustix::fs::FileType::RegularFile {
-        return Err(TaskError::UnsafePath {
-            path: root.join(name),
-            reason: "confined target is not a regular file",
-        });
+impl PrivatePaths {
+    /// Build the live cell from the exact spellings this App owns today.
+    pub fn new(mut spellings: Vec<PathBuf>) -> Arc<Self> {
+        dedupe_paths(&mut spellings);
+        Arc::new(Self {
+            spellings: RwLock::new(spellings),
+        })
     }
-    deny_reserved(&leaf_stat, root.join(name), reserved)?;
-    let root_stat = rustix::fs::fstat(&root_fd).map_err(|error| TaskError::Io {
-        path: root.to_path_buf(),
-        source: std::io::Error::from_raw_os_error(error.raw_os_error()),
-    })?;
-    bind_root(&root_fd, &root_stat_of_fd(&root_stat), root, expected)?;
-    Ok(Some(clear_nonblock(leaf, root.join(name))?))
+
+    /// The standalone (non-App) base policy: the fixed persistence names the
+    /// reference resolves against its configuration base. Deliberately
+    /// NONEMPTY — there is no empty production policy and no unchecked empty
+    /// constructor.
+    pub fn for_base(base: &Path) -> Arc<Self> {
+        Self::new(vec![
+            base.join(crate::core::SESSION_FILE),
+            base.join(crate::config::CONFIG_FILE),
+            base.join(crate::config::LEGACY_CONFIG_FILE),
+            // `Config::default().log_path` (`eh.log`), resolved against base.
+            base.join("eh.log"),
+            base.join(crate::core::LEGACY_COOKIE_FILE),
+        ])
+    }
+
+    /// Replace the live set. Called before a logger reopen or any other
+    /// private-file creation, and before the corresponding borrow ends.
+    pub fn replace(&self, mut spellings: Vec<PathBuf>) {
+        dedupe_paths(&mut spellings);
+        let mut current = self
+            .spellings
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        *current = spellings;
+    }
+
+    /// A bounded clone of the current spellings. The lock is released before
+    /// the caller performs any filesystem work.
+    pub fn spellings(&self) -> Vec<PathBuf> {
+        self.spellings
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
 }
 
-/// Deny when the opened leaf IS a reserved persistence file (dev, ino).
-#[cfg(unix)]
-fn deny_reserved(
-    leaf_stat: &rustix::fs::Stat,
-    path: PathBuf,
-    reserved: &[PathBuf],
-) -> Result<(), TaskError> {
-    for entry in reserved {
-        let Ok(metadata) = std::fs::metadata(entry) else {
-            continue;
-        };
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if (metadata.dev(), metadata.ino()) == (leaf_stat.st_dev, leaf_stat.st_ino) {
-                return Err(TaskError::UnsafePath {
-                    path,
-                    reason: "target is reserved persistence",
-                });
+/// The private-path policy frozen into one read snapshot.
+///
+/// It keeps three things: the names captured at the snapshot boundary, the
+/// private identities those names had at that moment, and a handle to the
+/// live current names. A gate therefore denies both an OLD private inode that
+/// was hardlinked into the gallery after its private pathname was atomically
+/// replaced (captured identity) and the NEW inode that the captured or current
+/// spelling now names (fresh resolution at the returned descriptor).
+///
+/// Metadata capture is ordinary filesystem I/O, exactly like the `6a`
+/// directory observations: it is not a pure or latency-free operation. Only a
+/// genuine `NotFound` may be absent from the policy; every other probe failure
+/// freezes a denial instead of weakening the set.
+#[derive(Clone, Debug)]
+pub struct PrivatePolicy {
+    captured: Vec<PathBuf>,
+    captured_ids: Vec<FileId>,
+    current: Arc<PrivatePaths>,
+    frozen: Option<std::io::ErrorKind>,
+}
+
+impl PrivatePolicy {
+    /// Freeze the current spellings and the identities they have right now.
+    pub fn freeze(current: Arc<PrivatePaths>) -> Self {
+        let captured = current.spellings();
+        let mut captured_ids = Vec::new();
+        let mut frozen = None;
+        for path in &captured {
+            match observe_identity(path) {
+                Ok(id) => push_unique_id(&mut captured_ids, id),
+                Err(std::io::ErrorKind::NotFound) => {}
+                Err(kind) => {
+                    if frozen.is_none() {
+                        frozen = Some(kind);
+                    }
+                }
             }
         }
-    }
-    Ok(())
-}
-
-/// Bind the pinned root FD to the freshly canonicalized root and to the exact
-/// snapshot-time identity the `Present` observation carried. Any replacement
-/// of the root (or of a parent component) between snapshot and open fails
-/// closed; the identity is mandatory, never optional.
-#[cfg(unix)]
-fn bind_root(
-    _root_fd: &rustix::fd::OwnedFd,
-    root_stat: &DirIdentity,
-    root: &Path,
-    expected: DirIdentity,
-) -> Result<(), TaskError> {
-    if *root_stat != expected {
-        return Err(TaskError::UnsafePath {
-            path: root.to_path_buf(),
-            reason: "gallery root changed since the snapshot",
-        });
-    }
-    let fresh_real = canonical_root(root)?;
-    let fresh_stat = std::fs::metadata(&fresh_real).map_err(|_| TaskError::UnsafePath {
-        path: root.to_path_buf(),
-        reason: "gallery root cannot be stated",
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if (fresh_stat.dev(), fresh_stat.ino()) != *root_stat {
-            return Err(TaskError::UnsafePath {
-                path: root.to_path_buf(),
-                reason: "gallery root changed under the open",
-            });
+        Self {
+            captured,
+            captured_ids,
+            current,
+            frozen,
         }
     }
+
+    /// Deny a descriptor identity that is private persistence.
+    ///
+    /// Runs at every returned-FD gate, after the descriptor is open and before
+    /// any payload byte is read. The current-name clone happens under a short
+    /// lock that is released BEFORE the fresh metadata probes.
+    pub fn deny(&self, id: FileId, path: &Path) -> Result<(), TaskError> {
+        if self.frozen.is_some() {
+            return Err(TaskError::UnsafePath {
+                path: path.to_path_buf(),
+                reason: "private persistence identities could not be observed",
+            });
+        }
+        if self.captured_ids.contains(&id) {
+            return Err(TaskError::UnsafePath {
+                path: path.to_path_buf(),
+                reason: "target is reserved persistence",
+            });
+        }
+        let mut names = self.captured.clone();
+        names.extend(self.current.spellings());
+        dedupe_paths(&mut names);
+        for name in &names {
+            match observe_identity(name) {
+                Ok(found) if found == id => {
+                    return Err(TaskError::UnsafePath {
+                        path: path.to_path_buf(),
+                        reason: "target is reserved persistence",
+                    });
+                }
+                Ok(_) => {}
+                Err(std::io::ErrorKind::NotFound) => {}
+                Err(_) => {
+                    return Err(TaskError::UnsafePath {
+                        path: path.to_path_buf(),
+                        reason: "private persistence identities could not be observed",
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug)]
+/// Frozen read authority for exactly one gallery.
+///
+/// Minted from the owning [`TaskFiles`] fixed authorized download root plus the
+/// validated single gallery component, together with the mandatory pre-permit
+/// directory observations. A `Missing` gallery grants no gallery descriptor and
+/// no enumeration; an `Unavailable` one denies outright. Neither can be
+/// promoted by a later filesystem change inside the same request.
+pub struct GalleryGrant {
+    root: PathBuf,
+    gallery: OsString,
+    root_obs: DirectoryObservation,
+    gallery_obs: DirectoryObservation,
+    private: PrivatePolicy,
+}
+
+#[cfg(unix)]
+impl GalleryGrant {
+    pub fn new(
+        root: PathBuf,
+        gallery: OsString,
+        root_obs: DirectoryObservation,
+        gallery_obs: DirectoryObservation,
+        private: PrivatePolicy,
+    ) -> Self {
+        Self {
+            root,
+            gallery,
+            root_obs,
+            gallery_obs,
+            private,
+        }
+    }
+
+    /// The fixed authorized download root (the gallery's parent).
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The gallery directory spelled from the task root and component.
+    pub fn gallery_path(&self) -> PathBuf {
+        self.root.join(&self.gallery)
+    }
+
+    /// The task-minted sibling archive name, `<gallery>.zip`.
+    pub fn sibling_name(&self) -> OsString {
+        let mut name = self.gallery.clone();
+        name.push(".zip");
+        name
+    }
+
+    /// Open one validated leaf inside the gallery.
+    ///
+    /// `Ok(None)` is a genuine missing payload: the reference ZIP fallback may
+    /// apply. A confinement denial is `Err` and never falls back.
+    pub fn open_leaf(&self, leaf: &OsStr) -> Result<Option<File>, TaskError> {
+        check_leaf(leaf)?;
+        // Test-only deterministic window: the fixture change lands between the
+        // snapshot observation and the descriptor capture, exactly where the
+        // real race would be. A no-op unless armed, and compiled out of
+        // production builds.
+        #[cfg(test)]
+        run_preopen_seam(&self.gallery_path(), &leaf.to_string_lossy());
+        let Some(rooted) = self.capture()? else {
+            return Ok(None);
+        };
+        let Some(gallery) = rooted.gallery.as_ref() else {
+            return Ok(None);
+        };
+        match capfs::open_with_absolute_prefix(
+            gallery,
+            Path::new(leaf),
+            &leaf_options(),
+            &rooted.gallery_spelling,
+        ) {
+            Ok(file) => Ok(Some(self.finish(file, &self.gallery_path().join(leaf))?)),
+            // Genuine absence inside the gallery: an internal dangling alias or
+            // a file that was never there. The reference ZIP fallback applies.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            // Everything else is a confinement/policy denial: outside literals,
+            // magic links, non-regular descriptors. Never a fallback.
+            Err(error) => Err(TaskError::UnsafePath {
+                path: self.gallery_path().join(leaf),
+                reason: leaf_denial_reason(&error),
+            }),
+        }
+    }
+
+    /// Open the task-minted sibling archive, `<gallery>.zip`, from the
+    /// separately authorized gallery parent.
+    ///
+    /// Only the exact sibling name is ever opened, and only a `Present` parent
+    /// observation grants it. A `Missing`/`Unavailable` gallery still allows the
+    /// sibling (the archive is a sibling of the directory), but a parent that
+    /// was missing or unavailable at snapshot time grants nothing.
+    pub fn open_sibling_archive(&self) -> Result<Option<File>, TaskError> {
+        let name = self.sibling_name();
+        #[cfg(test)]
+        run_preopen_seam(&self.root, &name.to_string_lossy());
+        let Some(rooted) = self.capture()? else {
+            return Ok(None);
+        };
+        let path = self.root.join(&name);
+        match capfs::open(&rooted.parent, Path::new(&name), &leaf_options()) {
+            Ok(file) => Ok(Some(self.finish(file, &path)?)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(TaskError::UnsafePath {
+                path,
+                reason: leaf_denial_reason(&error),
+            }),
+        }
+    }
+
+    /// Capture the gallery directory for descriptor-relative enumeration.
+    ///
+    /// `Ok(None)` only when the gallery was genuinely absent at the snapshot
+    /// boundary (or disappeared before the descriptor was taken); an
+    /// `Unavailable` observation is a denial, never an empty directory.
+    pub fn capture_gallery_dir(&self) -> Result<Option<CapturedGalleryDir>, TaskError> {
+        let Some(rooted) = self.capture()? else {
+            return Ok(None);
+        };
+        let Some(dir) = rooted.gallery else {
+            return Ok(None);
+        };
+        Ok(Some(CapturedGalleryDir {
+            dir,
+            spelling: rooted.gallery_spelling,
+            private: self.private.clone(),
+        }))
+    }
+
+    /// Capture the trusted root descriptor and, when the gallery was `Present`,
+    /// its child descriptor — both compared against the frozen observations.
+    fn capture(&self) -> Result<Option<Rooted>, TaskError> {
+        // The gallery component is validated again at the descriptor boundary:
+        // even a grant constructed directly can never reach a
+        // descriptor-relative open with `..`, a separator or a NUL byte.
+        check_leaf(&self.gallery)?;
+        let expected_root = match self.root_obs {
+            DirectoryObservation::Present(identity) => identity,
+            DirectoryObservation::Missing => return Ok(None),
+            DirectoryObservation::Unavailable(kind) => {
+                return Err(unavailable_denial(&self.root, kind));
+            }
+        };
+        // Trusted-root canonical spelling: a binding/prefix LABEL only. No
+        // payload target is ever canonicalized, and no containment verdict is
+        // ever taken from this spelling.
+        let spelling = match boundary_path(&self.root) {
+            Ok(path) => path,
+            Err(_) => {
+                return Err(TaskError::UnsafePath {
+                    path: self.root.clone(),
+                    reason: "trusted download root cannot be resolved",
+                });
+            }
+        };
+        let parent = match capfs::open_ambient_dir(&spelling, cap_primitives::ambient_authority()) {
+            Ok(dir) => dir,
+            // The trusted root disappeared between snapshot and open: this is
+            // the ordinary "gallery archived away" demotion, which grants
+            // nothing beyond what a Missing observation grants.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(TaskError::UnsafePath {
+                    path: self.root.clone(),
+                    reason: root_denial_reason(&error),
+                });
+            }
+        };
+        let parent_id = descriptor_identity(&parent, &self.root)?;
+        if parent_id != expected_root {
+            return Err(TaskError::UnsafePath {
+                path: self.root.clone(),
+                reason: "trusted download root changed since the snapshot",
+            });
+        }
+        let gallery_spelling = spelling.join(&self.gallery);
+        let gallery = match self.gallery_obs {
+            DirectoryObservation::Missing => None,
+            DirectoryObservation::Unavailable(kind) => {
+                return Err(unavailable_denial(&gallery_spelling, kind));
+            }
+            DirectoryObservation::Present(expected) => {
+                match capfs::open_dir_nofollow(&parent, Path::new(&self.gallery)) {
+                    Ok(dir) => {
+                        if descriptor_identity(&dir, &gallery_spelling)? != expected {
+                            return Err(TaskError::UnsafePath {
+                                path: gallery_spelling,
+                                reason: "gallery root changed since the snapshot",
+                            });
+                        }
+                        Some(dir)
+                    }
+                    // Genuinely gone since the observation: the snapshot grants
+                    // no gallery, but the sibling-archive parent grant stands.
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => {
+                        return Err(TaskError::UnsafePath {
+                            path: gallery_spelling,
+                            reason: capture_denial_reason(&error),
+                        });
+                    }
+                }
+            }
+        };
+        Ok(Some(Rooted {
+            parent,
+            gallery,
+            gallery_spelling,
+        }))
+    }
+
+    /// The returned-descriptor gate: type, then current private identity, then
+    /// ordinary blocking semantics. Never a second path lookup.
+    fn finish(&self, file: File, path: &Path) -> Result<File, TaskError> {
+        let (id, is_regular) = descriptor_verdict(&file, path)?;
+        if !is_regular {
+            return Err(TaskError::UnsafePath {
+                path: path.to_path_buf(),
+                reason: "target is not a regular file",
+            });
+        }
+        self.private.deny(id, path)?;
+        clear_nonblock(file, path)
+    }
+}
+
+#[cfg(unix)]
+/// The captured descriptors behind one [`GalleryGrant`].
+struct Rooted {
+    parent: File,
+    gallery: Option<File>,
+    gallery_spelling: PathBuf,
+}
+
+#[cfg(unix)]
+/// A captured gallery directory for descriptor-relative enumeration.
+pub struct CapturedGalleryDir {
+    dir: File,
+    spelling: PathBuf,
+    private: PrivatePolicy,
+}
+
+#[cfg(unix)]
+/// What one archive entry descriptor turned out to be.
+pub enum OpenedEntry {
+    Directory,
+    File(File),
+}
+
+#[cfg(unix)]
+impl CapturedGalleryDir {
+    /// Entry names as raw `OsString` bytes, sorted bytewise. `.`/`..` are
+    /// filtered by the resolver.
+    pub fn names(&self) -> Result<Vec<std::ffi::OsString>, TaskError> {
+        let entries =
+            capfs::read_dir(&self.dir, Path::new(".")).map_err(|source| TaskError::Io {
+                path: self.spelling.clone(),
+                source,
+            })?;
+        let mut names = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| TaskError::Io {
+                path: self.spelling.clone(),
+                source,
+            })?;
+            names.push(entry.file_name());
+        }
+        names.sort_by(|left, right| left.as_encoded_bytes().cmp(right.as_encoded_bytes()));
+        Ok(names)
+    }
+
+    /// Open exactly one enumerated leaf relative to the captured descriptor.
+    ///
+    /// A symlink is an existing `UnsafePath` error (never skipped or followed),
+    /// a FIFO/socket/device is denied from the returned descriptor without a
+    /// payload read, and a directory is reported as such and never read.
+    pub fn open_entry(&self, name: &OsStr) -> Result<OpenedEntry, TaskError> {
+        check_leaf(name)?;
+        let full = self.spelling.join(name);
+        let fd = match rustix::fs::openat(
+            &self.dir,
+            name,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::NONBLOCK
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(error) if error == rustix::io::Errno::LOOP => {
+                return Err(TaskError::UnsafePath {
+                    path: full,
+                    reason: "refusing to archive a symlink entry",
+                });
+            }
+            Err(error) => {
+                return Err(TaskError::Io {
+                    path: full,
+                    source: std::io::Error::from_raw_os_error(error.raw_os_error()),
+                });
+            }
+        };
+        let stat = rustix::fs::fstat(&fd).map_err(|error| TaskError::Io {
+            path: full.clone(),
+            source: std::io::Error::from_raw_os_error(error.raw_os_error()),
+        })?;
+        let id = (stat.st_dev, stat.st_ino);
+        match rustix::fs::FileType::from_raw_mode(stat.st_mode) {
+            rustix::fs::FileType::Directory => Ok(OpenedEntry::Directory),
+            rustix::fs::FileType::RegularFile => {
+                self.private.deny(id, &full)?;
+                rustix::fs::fcntl_setfl(&fd, rustix::fs::OFlags::empty()).map_err(|error| {
+                    TaskError::Io {
+                        path: full.clone(),
+                        source: std::io::Error::from_raw_os_error(error.raw_os_error()),
+                    }
+                })?;
+                Ok(OpenedEntry::File(File::from(fd)))
+            }
+            _ => Err(TaskError::UnsafePath {
+                path: full,
+                reason: "archive entry is not a regular file",
+            }),
+        }
+    }
+}
+
+/// A validated single path component as an `OsStr`, taken from the task record
+/// or from a descriptor-relative enumeration. Never a multi-component path.
+fn check_leaf(leaf: &OsStr) -> Result<(), TaskError> {
+    let bytes = leaf.as_encoded_bytes();
+    if bytes.is_empty()
+        || bytes == b"."
+        || bytes == b".."
+        || bytes.contains(&b'/')
+        || bytes.contains(&0)
+        || (cfg!(windows) && bytes.contains(&b'\\'))
+    {
+        return Err(TaskError::UnsafePath {
+            path: PathBuf::from(leaf),
+            reason: "not a single normal path component",
+        });
+    }
     Ok(())
 }
 
-/// Canonicalize the root for the containment/binding checks. Fail closed:
-/// any canonicalization failure denies instead of serving.
+/// Read-only, non-blocking open options for every payload descriptor. O_NONBLOCK
+/// only exists to keep a FIFO from stalling the open; it is cleared from the
+/// returned descriptor after the regular-file and private-identity verdicts.
 #[cfg(unix)]
-fn canonical_root(root: &Path) -> Result<PathBuf, TaskError> {
-    boundary_path(root).map_err(|_| TaskError::UnsafePath {
-        path: root.to_path_buf(),
-        reason: "gallery root cannot be canonicalized",
-    })
+fn leaf_options() -> capfs::OpenOptions {
+    let mut options = capfs::OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
+    options
 }
 
+#[cfg(not(unix))]
+fn leaf_options() -> capfs::OpenOptions {
+    let mut options = capfs::OpenOptions::new();
+    options.read(true);
+    options
+}
+
+/// Identity and regularity of an opened descriptor, taken from that descriptor.
 #[cfg(unix)]
-fn root_stat_of(root_fd: &rustix::fd::OwnedFd) -> Result<DirIdentity, TaskError> {
-    let stat = rustix::fs::fstat(root_fd).map_err(|error| TaskError::Io {
-        path: PathBuf::from("<gallery root>"),
-        source: std::io::Error::from_raw_os_error(error.raw_os_error()),
+fn descriptor_verdict(file: &File, path: &Path) -> Result<(FileId, bool), TaskError> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file.metadata().map_err(|source| TaskError::Io {
+        path: path.to_path_buf(),
+        source,
     })?;
-    Ok(root_stat_of_fd(&stat))
+    let file_type = metadata.file_type();
+    Ok((
+        (metadata.dev(), metadata.ino()),
+        !file_type.is_symlink() && file_type.is_file(),
+    ))
+}
+
+#[cfg(not(unix))]
+fn descriptor_verdict(_file: &File, path: &Path) -> Result<(FileId, bool), TaskError> {
+    Err(unavailable_denial(path, std::io::ErrorKind::Unsupported))
 }
 
 #[cfg(unix)]
-fn root_stat_of_fd(stat: &rustix::fs::Stat) -> DirIdentity {
-    (stat.st_dev, stat.st_ino)
+fn descriptor_identity(file: &File, path: &Path) -> Result<FileId, TaskError> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file.metadata().map_err(|source| TaskError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn descriptor_identity(_file: &File, path: &Path) -> Result<FileId, TaskError> {
+    Err(unavailable_denial(path, std::io::ErrorKind::Unsupported))
 }
 
 /// Clear `O_NONBLOCK` (set only to avoid hangs while opening) so the
 /// returned file has ordinary blocking semantics for the streaming reader.
 #[cfg(unix)]
-fn clear_nonblock(leaf: rustix::fd::OwnedFd, path: PathBuf) -> Result<std::fs::File, TaskError> {
-    use rustix::fs::OFlags;
-    rustix::fs::fcntl_setfl(&leaf, OFlags::empty()).map_err(|error| TaskError::Io {
-        path: path.clone(),
+fn clear_nonblock(file: File, path: &Path) -> Result<File, TaskError> {
+    rustix::fs::fcntl_setfl(&file, rustix::fs::OFlags::empty()).map_err(|error| TaskError::Io {
+        path: path.to_path_buf(),
         source: std::io::Error::from_raw_os_error(error.raw_os_error()),
     })?;
-    Ok(std::fs::File::from(leaf))
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn clear_nonblock(file: File, _path: &Path) -> Result<File, TaskError> {
+    Ok(file)
+}
+
+#[cfg(unix)]
+/// Diagnosis for a denied gallery leaf. The variant is a label; the contract is
+/// "denied, no bytes, no fallback".
+fn leaf_denial_reason(error: &std::io::Error) -> &'static str {
+    match error.raw_os_error() {
+        Some(code) if code == rustix_errno(rustix::io::Errno::LOOP) => {
+            "target is a symlink loop or a magic link"
+        }
+        Some(code) if code == rustix_errno(rustix::io::Errno::ISDIR) => {
+            "gallery target is not a regular file"
+        }
+        Some(code) if code == rustix_errno(rustix::io::Errno::XDEV) => {
+            "link target leaves the gallery root"
+        }
+        Some(code) if code == rustix_errno(rustix::io::Errno::PERM) => {
+            "link target leaves the gallery root"
+        }
+        _ => "gallery target is not available to this request",
+    }
+}
+
+#[cfg(unix)]
+fn root_denial_reason(error: &std::io::Error) -> &'static str {
+    match error.raw_os_error() {
+        Some(code) if code == rustix_errno(rustix::io::Errno::LOOP) => {
+            "trusted download root is a symlink loop or a magic link"
+        }
+        _ => "trusted download root is not an available directory",
+    }
+}
+
+#[cfg(unix)]
+fn capture_denial_reason(error: &std::io::Error) -> &'static str {
+    match error.raw_os_error() {
+        Some(code) if code == rustix_errno(rustix::io::Errno::NOTDIR) => {
+            "gallery root is not a directory"
+        }
+        Some(code) if code == rustix_errno(rustix::io::Errno::LOOP) => "gallery root is a symlink",
+        _ => "gallery root is not an available directory for this request",
+    }
+}
+
+#[cfg(unix)]
+fn rustix_errno(errno: rustix::io::Errno) -> i32 {
+    errno.raw_os_error()
+}
+
+#[cfg(not(unix))]
+fn rustix_errno(_errno: u32) -> i32 {
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Non-Unix surface: every payload read is an explicit `Unsupported` denial
+// BEFORE any ambient open. There is no portable fallback, no ambient re-open
+// and no forged cross-platform PASS; the full non-Linux functional port stays
+// an M8 item.
+// ---------------------------------------------------------------------------
+
+#[cfg(not(unix))]
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub struct GalleryGrant {
+    root: PathBuf,
+    gallery: OsString,
+    root_obs: DirectoryObservation,
+    gallery_obs: DirectoryObservation,
+    private: PrivatePolicy,
+}
+
+#[cfg(not(unix))]
+impl GalleryGrant {
+    pub fn new(
+        root: PathBuf,
+        gallery: OsString,
+        root_obs: DirectoryObservation,
+        gallery_obs: DirectoryObservation,
+        private: PrivatePolicy,
+    ) -> Self {
+        Self {
+            root,
+            gallery,
+            root_obs,
+            gallery_obs,
+            private,
+        }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn gallery_path(&self) -> PathBuf {
+        self.root.join(&self.gallery)
+    }
+
+    pub fn sibling_name(&self) -> OsString {
+        let mut name = self.gallery.clone();
+        name.push(".zip");
+        name
+    }
+
+    pub fn open_leaf(&self, leaf: &OsStr) -> Result<Option<File>, TaskError> {
+        check_leaf(leaf)?;
+        Err(unavailable_denial(
+            &self.gallery_path(),
+            std::io::ErrorKind::Unsupported,
+        ))
+    }
+
+    pub fn open_sibling_archive(&self) -> Result<Option<File>, TaskError> {
+        Err(unavailable_denial(
+            &self.root,
+            std::io::ErrorKind::Unsupported,
+        ))
+    }
+
+    pub fn capture_gallery_dir(&self) -> Result<Option<CapturedGalleryDir>, TaskError> {
+        Err(unavailable_denial(
+            &self.gallery_path(),
+            std::io::ErrorKind::Unsupported,
+        ))
+    }
+}
+
+#[cfg(not(unix))]
+#[allow(dead_code)]
+pub struct CapturedGalleryDir {
+    dir: File,
+    spelling: PathBuf,
+    private: PrivatePolicy,
+}
+
+#[cfg(not(unix))]
+#[allow(dead_code)]
+pub enum OpenedEntry {
+    Directory,
+    File(File),
+}
+
+#[cfg(not(unix))]
+impl CapturedGalleryDir {
+    pub fn names(&self) -> Result<Vec<OsString>, TaskError> {
+        Err(unavailable_denial(
+            &self.spelling,
+            std::io::ErrorKind::Unsupported,
+        ))
+    }
+
+    pub fn open_entry(&self, _name: &OsStr) -> Result<OpenedEntry, TaskError> {
+        Err(unavailable_denial(
+            &self.spelling,
+            std::io::ErrorKind::Unsupported,
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -48,9 +48,10 @@ pub struct RenameError {
     pub message: String,
 }
 pub use file_ops::resolve_dir;
+#[cfg(test)]
+pub use file_ops::{DirectoryObservation, PrivatePolicy, observe_directory};
 pub use file_ops::{
-    DirectoryObservation, boundary_path, normalize, observe_directory, open_confined_regular,
-    path_within,
+    GalleryGrant, OpenedEntry, PrivatePaths, boundary_path, normalize, path_within,
 };
 #[cfg(test)]
 pub(crate) use file_ops::{
@@ -520,6 +521,19 @@ impl Task {
         guid: String,
         base: &Path,
     ) -> Result<Self, TaskError> {
+        Self::new_with_private_paths(url, config, guid, base, PrivatePaths::for_base(base))
+    }
+
+    /// Build a task that reads through `private`, the application's live
+    /// private-path cell. `App::add_task` and session restore use this entry, so
+    /// the policy is in place BEFORE any scan, native read or publication.
+    pub fn new_with_private_paths(
+        url: &str,
+        config: TaskConfig,
+        guid: String,
+        base: &Path,
+        private: Arc<PrivatePaths>,
+    ) -> Result<Self, TaskError> {
         let root = file_ops::resolve_dir(base, &config.dir);
         // A writable cfg.dir may not point into an owned detached container:
         // reject the task before any gallery/file admission.
@@ -539,7 +553,7 @@ impl Task {
             img_q: None,
             page_q: None,
             flist_done: BTreeSet::new(),
-            files: TaskFiles::new(root),
+            files: TaskFiles::with_private_paths(root, private),
             owner: TASK_OWNER_COUNTER.fetch_add(1, Ordering::Relaxed),
             run_marker: 0,
             page_notify: Notify::new(),
@@ -578,6 +592,17 @@ impl Task {
     /// Reference `from_dict`: only attributes the fresh `Task("")` has are
     /// copied, then `gid`/`sethash` are recomputed from the URL.
     pub fn from_wire(value: &Value, base: &Path) -> Result<Self, TaskLoadError> {
+        Self::from_wire_with_private_paths(value, base, PrivatePaths::for_base(base))
+    }
+
+    /// Restore a task that reads through the application's live private-path
+    /// cell. `App::load_session` uses this entry, so a restored historical root
+    /// reads under the same current policy as a freshly added task.
+    pub fn from_wire_with_private_paths(
+        value: &Value,
+        base: &Path,
+        private: Arc<PrivatePaths>,
+    ) -> Result<Self, TaskLoadError> {
         let object = value
             .as_object()
             .ok_or_else(|| TaskLoadError::Shape("task is not an object".into()))?;
@@ -596,7 +621,7 @@ impl Task {
             .ok_or(TaskLoadError::Missing("config"))?;
         let config: TaskConfig = serde_json::from_value(config_value.clone())
             .map_err(|error| TaskLoadError::Shape(format!("task config: {error}")))?;
-        let mut task = Self::new(&url, config, guid, base)
+        let mut task = Self::new_with_private_paths(&url, config, guid, base, private)
             .map_err(|error| TaskLoadError::Shape(error.to_string()))?;
         if let Some(value) = object.get("failcode") {
             task.failcode = value
@@ -1011,6 +1036,22 @@ impl Task {
     pub fn get_fpath(&self) -> Result<PathBuf, TaskError> {
         let title = self.meta_str("title")?;
         self.files.task_dir(&util::legalpath(title))
+    }
+
+    /// Freeze one gallery read grant: the fixed authorized download root, the
+    /// validated single gallery component, the mandatory pre-permit directory
+    /// observations and this task's private-path policy.
+    ///
+    /// The component still passes the existing `task_dir` admission checks
+    /// (traversal, symlink gallery, owned detached container) before the
+    /// observation boundary, exactly like the earlier snapshot scope.
+    pub fn read_grant(&self) -> Result<GalleryGrant, TaskError> {
+        let title = self.meta_str("title")?;
+        let component = util::legalpath(title);
+        let path = self.files.task_dir(&component)?;
+        #[cfg(test)]
+        crate::task::run_observation_swap(&path);
+        Ok(self.files.grant(&component, &path))
     }
 
     pub fn get_fidpad(&self, fid: i64, ext: &str) -> Result<String, TaskError> {
