@@ -4423,4 +4423,472 @@ mod tests {
             "login route must survive the pause mutant, got {action:?}"
         );
     }
+
+    // --- M5 R2 B3 RED: owned heavy I/O, race-safe opens, private spool ---
+    // These capture the four remaining B3 defects on the candidate: they
+    // FAIL here (RED) and flip to GREEN with the minimal fix, unchanged.
+
+    fn task_with_zip(app: &mut App, name: &str, bytes: &[u8]) -> String {
+        use crate::task::{FidKey, Task, TaskConfig};
+        let root = app.base_dir().to_path_buf();
+        let mut config = TaskConfig::from_app(&app.cfg, &JsonMap::new()).expect("config");
+        config.dir = "downloads".to_string();
+        let mut task = Task::new(
+            "http://e-hentai.org/g/123/abcdef0123/",
+            config,
+            format!("guid-{name}"),
+            &root,
+        )
+        .expect("task");
+        task.meta.insert(
+            "title".to_string(),
+            Value::String("gallery-title".to_string()),
+        );
+        task.meta.insert("total".to_string(), Value::from(3));
+        let dir = task.get_fpath().expect("fpath");
+        std::fs::create_dir_all(&dir).expect("dir");
+        // No loose file: only the sibling `<gallery>.zip` with one entry,
+        // so the reference ZIP fallback path serves it.
+        let zip_path = dir.with_extension("zip");
+        let file = std::fs::File::create(&zip_path).expect("zip");
+        let mut writer = zip::ZipWriter::new(file);
+        writer
+            .start_file(name, zip::write::SimpleFileOptions::default())
+            .expect("entry");
+        use std::io::Write;
+        writer.write_all(bytes).expect("bytes");
+        writer.finish().expect("finish");
+        let guid = task.guid.clone();
+        task.renamed_map
+            .insert(FidKey::Text("5".to_string()), name.to_string());
+        app.insert_task_for_test(task);
+        guid
+    }
+
+    fn media_action(target: &str) -> MediaRequest {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cache_dir = tempfile::tempdir().expect("cache").keep();
+        let mut cache = StaticCache::load(
+            &cache_dir.join(crate::rpc::STATIC_CACHE_NAME),
+            Arc::new(crate::worker::RealClock),
+        );
+        let _ = manifest;
+        match dispatch_get(&mut cache, target, None) {
+            RequestAction::Media(media) => media,
+            other => panic!("expected media, got {other:?}"),
+        }
+    }
+
+    fn thread_rchar() -> u64 {
+        let tid = rustix::thread::gettid();
+        let text = std::fs::read_to_string(format!(
+            "/proc/self/task/{}/io",
+            tid.as_raw_nonzero().get()
+        ))
+        .expect("task io");
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix("rchar: ") {
+                return rest.trim().parse().expect("rchar");
+            }
+        }
+        panic!("no rchar in task io");
+    }
+
+    #[test]
+    fn b3_1_zip_fallback_waits_for_heavy_permit() {
+        // With both heavy permits held, the ZIP fallback must stay pending:
+        // file open, ZIP decompress and spool all run under the owned
+        // permit on the blocking pool. The candidate answers inline with
+        // no permit at all, so this is RED until the offload lands.
+        let mut app = test_app();
+        let png = png_bytes(32, 32);
+        let guid = task_with_zip(&mut app, "1.jpg", &png);
+        let target = format!("/img/{}/{guid}/1", hash_link(None, &format!("{guid}/1")));
+        let media = media_action(&target);
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
+        let handle = runtime.handle();
+        let permits = Arc::new(tokio::sync::Semaphore::new(super::super::MAX_HEAVY_WORKERS));
+        block_on(async {
+            let first = permits.clone().acquire_owned().await.expect("permit");
+            let second = permits.clone().acquire_owned().await.expect("permit");
+            assert_eq!(permits.available_permits(), 0);
+            let gated = tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                run_media(handle.clone(), Arc::clone(&permits), media),
+            )
+            .await;
+            assert!(
+                gated.is_err(),
+                "ZIP fallback must wait for the heavy permit instead of answering inline"
+            );
+            drop(first);
+            drop(second);
+        });
+        // Released permits serve the exact entry bytes, 200 with the entry
+        // MIME.
+        let media = media_action(&target);
+        let (status, mime, bytes) = block_on(async {
+            let response = run_media(handle, Arc::clone(&permits), media).await;
+            let status = response.status;
+            let mime = response.mime.clone();
+            let body = match response.body {
+                ResponseBody::Inline(body) => body,
+                ResponseBody::Stream(mut stream) => {
+                    use std::io::Read;
+                    let mut file = stream.file.take().expect("stream file");
+                    let mut out = Vec::new();
+                    file.read_to_end(&mut out).expect("stream read");
+                    out
+                }
+            };
+            (status, mime, body)
+        });
+        assert_eq!(status, 200);
+        assert_eq!(mime.as_deref(), Some("image/png"));
+        assert_eq!(bytes, png);
+    }
+
+    #[test]
+    fn b3_1_thumb_source_read_holds_permit() {
+        // The thumbnail source read must happen under the owned heavy
+        // permit: with both permits held, the serving thread must perform
+        // NO source read (per-thread rchar unchanged) while the request
+        // stays pending. The candidate reads the file inline before ever
+        // touching a permit, so per-thread rchar grows: RED.
+        let mut app = test_app();
+        let png = png_bytes(64, 64);
+        let guid = task_with_image(&mut app, "1.jpg", &png);
+        let target = format!(
+            "/img/{}/{guid}/1?w=16&h=16",
+            hash_link(None, &format!("{guid}/1"))
+        );
+        let media = media_action(&target);
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
+        let handle = runtime.handle();
+        let permits = Arc::new(tokio::sync::Semaphore::new(super::super::MAX_HEAVY_WORKERS));
+        block_on(async {
+            let first = permits.clone().acquire_owned().await.expect("permit");
+            let second = permits.clone().acquire_owned().await.expect("permit");
+            assert_eq!(permits.available_permits(), 0);
+            let before = thread_rchar();
+            let gated = tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                run_media(handle.clone(), Arc::clone(&permits), media),
+            )
+            .await;
+            let delta = thread_rchar().saturating_sub(before);
+            assert!(
+                gated.is_err(),
+                "thumbnail request must wait for the heavy permit"
+            );
+            assert_eq!(
+                delta, 0,
+                "no source byte may be read before the heavy permit is held (read {delta}B)"
+            );
+            drop(first);
+            drop(second);
+        });
+    }
+
+    #[test]
+    fn b3_2_preopen_swap_is_denied_before_read() {
+        use crate::rpc::{probe_gallery_file, read_zip_fallback, snapshot_gallery_file};
+        use crate::task::{PreopenSwap, arm_preopen_swap};
+        // (a) Regular file swapped for an outside symlink between check and
+        // open: no outside byte may be served. The candidate opens the swap
+        // and returns the outside bytes: RED.
+        let mut app = test_app();
+        let png = png_bytes(16, 16);
+        let guid = task_with_image(&mut app, "1.jpg", &png);
+        let outside = app.base_dir().join("outside.jpg");
+        std::fs::write(&outside, b"OUTSIDE-UNAUTHORIZED-BYTES").expect("outside");
+        let snap = snapshot_gallery_file(&app, &guid, "1").expect("snap");
+        arm_preopen_swap(
+            &snap.root,
+            &snap.name,
+            PreopenSwap::LeafLink(outside.clone()),
+        );
+        match probe_gallery_file(&snap) {
+            Ok(crate::rpc::OpenOutcome::Denied) => {}
+            Ok(crate::rpc::OpenOutcome::Missing) => {
+                panic!("swapped outside link must be denied, not treated as missing")
+            }
+            Ok(crate::rpc::OpenOutcome::File(mut opened)) => {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                opened.file.read_to_end(&mut bytes).expect("read");
+                panic!(
+                    "swapped outside link served {} unauthorized bytes",
+                    bytes.len()
+                );
+            }
+            Err(error) => panic!("swapped outside link must be denied, got {error:?}"),
+        }
+        // (b) Swapped for a reserved persistence symlink: denied as well.
+        let mut app = test_app();
+        let png = png_bytes(16, 16);
+        let guid = task_with_image(&mut app, "1.jpg", &png);
+        let reserved = app
+            .base_dir()
+            .join(crate::core::SESSION_FILE);
+        std::fs::write(&reserved, b"RESERVED-SECRET").expect("reserved");
+        let snap = snapshot_gallery_file(&app, &guid, "1").expect("snap");
+        arm_preopen_swap(
+            &snap.root,
+            &snap.name,
+            PreopenSwap::LeafLink(reserved.clone()),
+        );
+        match probe_gallery_file(&snap) {
+            Ok(crate::rpc::OpenOutcome::Denied) => {}
+            Ok(_) => panic!("swapped reserved link must be denied"),
+            Err(error) => panic!("swapped reserved link must be denied, got {error:?}"),
+        }
+        // (c) Sibling archive swapped for an outside zip: the fallback must
+        // refuse instead of serving the foreign entry. RED on the candidate.
+        let mut app = test_app();
+        let png = png_bytes(16, 16);
+        let guid = task_with_zip(&mut app, "1.jpg", &png);
+        let evil = app.base_dir().join("evil.zip");
+        {
+            let file = std::fs::File::create(&evil).expect("evil");
+            let mut writer = zip::ZipWriter::new(file);
+            writer
+                .start_file("1.jpg", zip::write::SimpleFileOptions::default())
+                .expect("entry");
+            use std::io::Write;
+            writer.write_all(b"EVIL-ENTRY-BYTES").expect("bytes");
+            writer.finish().expect("finish");
+        }
+        let snap = snapshot_gallery_file(&app, &guid, "1").expect("snap");
+        let parent = snap.root.parent().expect("parent").to_path_buf();
+        let zip_leaf = format!(
+            "{}.zip",
+            snap.root.file_name().expect("name").to_string_lossy()
+        );
+        arm_preopen_swap(&parent, &zip_leaf, PreopenSwap::LeafLink(evil));
+        match read_zip_fallback(&snap) {
+            Err(_) => {}
+            Ok((bytes, _)) => panic!(
+                "swapped sibling archive served {} foreign bytes",
+                bytes.len()
+            ),
+        }
+        // (d) Gallery root itself swapped for a link to a hostile dir: the
+        // opened bytes must not serve. RED on the candidate.
+        let mut app = test_app();
+        let png = png_bytes(16, 16);
+        let guid = task_with_image(&mut app, "1.jpg", &png);
+        let snap = snapshot_gallery_file(&app, &guid, "1").expect("snap");
+        let hostile = app.base_dir().join("hostile-gallery");
+        std::fs::create_dir_all(&hostile).expect("hostile");
+        std::fs::write(hostile.join(&snap.name), b"HOSTILE-BYTES").expect("hostile file");
+        arm_preopen_swap(&snap.root, &snap.name, PreopenSwap::RootLink(hostile));
+        match probe_gallery_file(&snap) {
+            Ok(crate::rpc::OpenOutcome::Denied) => {}
+            Ok(crate::rpc::OpenOutcome::File(mut opened)) => {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                opened.file.read_to_end(&mut bytes).expect("read");
+                panic!(
+                    "swapped gallery root served {} hostile bytes",
+                    bytes.len()
+                );
+            }
+            Ok(crate::rpc::OpenOutcome::Missing) => {
+                panic!("swapped gallery root must be denied, not missing")
+            }
+            Err(error) => panic!("swapped gallery root must be denied, got {error:?}"),
+        }
+        // (e) Control: a legitimate inside-root alias still serves, and a
+        // normal regular file is unaffected.
+        let mut app = test_app();
+        let png = png_bytes(16, 16);
+        let guid = task_with_image(&mut app, "1.jpg", &png);
+        let snap = snapshot_gallery_file(&app, &guid, "1").expect("snap");
+        let real = snap.root.join("real.jpg");
+        std::fs::rename(snap.root.join(&snap.name), &real).expect("move");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("real.jpg", snap.root.join(&snap.name)).expect("alias");
+        match probe_gallery_file(&snap) {
+            Ok(crate::rpc::OpenOutcome::File(mut opened)) => {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                opened.file.read_to_end(&mut bytes).expect("read");
+                assert_eq!(bytes, png);
+            }
+            _ => panic!("inside-root alias must serve"),
+        }
+        let mut app = test_app();
+        let png = png_bytes(16, 16);
+        let guid = task_with_image(&mut app, "1.jpg", &png);
+        let snap = snapshot_gallery_file(&app, &guid, "1").expect("snap");
+        match probe_gallery_file(&snap) {
+            Ok(crate::rpc::OpenOutcome::File(mut opened)) => {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                opened.file.read_to_end(&mut bytes).expect("read");
+                assert_eq!(bytes, png);
+            }
+            _ => panic!("regular file must serve"),
+        }
+    }
+
+    fn gallery_names(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("read_dir")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn b3_3_spool_lives_outside_gallery_and_archive() {
+        use crate::rpc::{read_archive, snapshot_gallery_file};
+        // A live ZIP-fallback response must never stage inside the gallery:
+        // while it is held, the gallery listing and a concurrent archive
+        // must show exactly the real images, no spool. The candidate spools
+        // `.xehentai-spool-*` INTO the gallery, so the archive picks it up:
+        // RED. After the fix the spool is a private anonymous file.
+        let mut app = test_app();
+        let png1 = png_bytes(24, 24);
+        let png2 = png_bytes(12, 12);
+        let guid = task_with_image(&mut app, "1.jpg", &png1);
+        let snap2 = snapshot_gallery_file(&app, &guid, "2").expect("snap2");
+        let dir = snap2.root.clone();
+        let zip_path = dir.with_extension("zip");
+        {
+            let file = std::fs::File::create(&zip_path).expect("zip");
+            let mut writer = zip::ZipWriter::new(file);
+            writer
+                .start_file(&snap2.name, zip::write::SimpleFileOptions::default())
+                .expect("entry");
+            use std::io::Write;
+            writer.write_all(&png2).expect("bytes");
+            writer.finish().expect("finish");
+        }
+        let target = format!("/img/{}/{guid}/2", hash_link(None, &format!("{guid}/2")));
+        let media = media_action(&target);
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
+        let handle = runtime.handle();
+        let permits = Arc::new(tokio::sync::Semaphore::new(super::super::MAX_HEAVY_WORKERS));
+        let response = block_on(async { run_media(handle.clone(), Arc::clone(&permits), media).await });
+        assert_eq!(response.status, 200);
+        // Hold the live response: no spool may appear in the gallery.
+        let names = gallery_names(&dir);
+        assert!(
+            !names.iter().any(|name| name.starts_with(".xehentai-spool-")),
+            "live spool response leaked into the gallery: {names:?}"
+        );
+        assert_eq!(names, vec!["1.jpg".to_string()]);
+        // A concurrent archive over the same gallery is exact: only the
+        // real image with its bytes, plus the reference comment, and no
+        // spool/config/session/private artifacts.
+        let archive = handle.borrow_app(|app| read_archive(app, &guid).expect("archive"));
+        let mut reader =
+            zip::ZipArchive::new(std::io::Cursor::new(archive)).expect("archive zip");
+        let mut entry_names: Vec<String> = (0..reader.len())
+            .map(|index| reader.by_index(index).expect("index").name().to_string())
+            .collect();
+        entry_names.sort();
+        assert_eq!(entry_names, vec!["1.jpg".to_string()]);
+        let mut entry = reader.by_name("1.jpg").expect("entry");
+        assert_eq!(entry.name(), "1.jpg");
+        let mut contents = Vec::new();
+        use std::io::Read;
+        entry.read_to_end(&mut contents).expect("contents");
+        assert_eq!(contents, png1);
+        drop(entry);
+        drop(reader);
+        // Retire the live response: the gallery stays exact and a fresh
+        // request still serves (healthy reuse, no abort-before-probe).
+        drop(response);
+        assert_eq!(gallery_names(&dir), vec!["1.jpg".to_string()]);
+        let media = media_action(&format!(
+            "/img/{}/{guid}/1",
+            hash_link(None, &format!("{guid}/1"))
+        ));
+        let (status, _, _) = serve_media_bytes_like(handle, permits, media);
+        assert_eq!(status, 200);
+    }
+
+    fn serve_media_bytes_like(
+        handle: crate::core::runtime::AppHandle,
+        permits: Arc<tokio::sync::Semaphore>,
+        media: MediaRequest,
+    ) -> (u16, Option<String>, Vec<u8>) {
+        block_on(async {
+            let response = run_media(handle, permits, media).await;
+            let status = response.status;
+            let mime = response.mime.clone();
+            let bytes = match response.body {
+                ResponseBody::Inline(body) => body,
+                ResponseBody::Stream(mut stream) => {
+                    use std::io::Read;
+                    let mut file = stream.file.take().expect("stream file");
+                    let mut out = Vec::new();
+                    file.read_to_end(&mut out).expect("stream read");
+                    out
+                }
+            };
+            (status, mime, bytes)
+        })
+    }
+
+    #[test]
+    fn b3_4_thumbnail_box_matches_pil_oracle() {
+        // Single-axis bounds form a SQUARE box from the given axis
+        // (`rpc.py:85-105`: `size=(w or h, h or w)`), then PIL fits inside
+        // preserving aspect with floor/ceil aspect-best rounding (ties go to
+        // floor), never upscaling. Table captured from Pillow 13.0.0
+        // (`evidence-m5-r2/oracle_thumb.py`). The candidate scales by the
+        // only axis given, so landscape-height-only and portrait-width-only
+        // (and odd ratios) diverge: RED.
+        let cases: &[(&str, u32, u32, Option<u32>, Option<u32>, (u32, u32))] = &[
+            ("landscape-both", 100, 50, Some(20), Some(20), (20, 10)),
+            ("landscape-onlyw", 100, 50, Some(50), None, (50, 25)),
+            ("landscape-onlyh", 100, 50, None, Some(25), (25, 13)),
+            ("portrait-both", 50, 100, Some(20), Some(20), (10, 20)),
+            ("portrait-onlyw", 50, 100, Some(25), None, (12, 25)),
+            ("portrait-onlyh", 50, 100, None, Some(50), (25, 50)),
+            ("square-onlyw", 64, 64, Some(32), None, (32, 32)),
+            ("square-onlyh", 64, 64, None, Some(32), (32, 32)),
+            ("square-both", 64, 64, Some(20), Some(20), (20, 20)),
+            ("odd-landscape-onlyh", 101, 51, None, Some(25), (25, 13)),
+            ("odd-portrait-onlyw", 51, 101, Some(25), None, (13, 25)),
+            ("even-landscape-onlyw", 200, 100, Some(60), None, (60, 30)),
+            ("even-portrait-onlyh", 100, 200, None, Some(60), (30, 60)),
+            ("rect-box", 100, 50, Some(30), Some(20), (30, 15)),
+            ("rect-box-portrait", 50, 100, Some(20), Some(30), (15, 30)),
+        ];
+        for (name, src_w, src_h, width, height, expected) in cases {
+            let source = png_bytes(*src_w, *src_h);
+            let (resized, mime) = thumbnail(&source, *width, *height)
+                .unwrap_or_else(|error| panic!("{name} thumbnail failed: {error:?}"));
+            assert_eq!(mime, "image/png", "{name}");
+            assert_eq!(image_dims(&resized), *expected, "{name}");
+        }
+        // Never upscale: a box at or beyond the source serves the original
+        // bytes, and equal-size is a passthrough of the source dimensions.
+        for (name, width, height) in [
+            ("no-upscale-both", Some(1000), Some(1000)),
+            ("no-upscale-onlyw", Some(200), None),
+            ("no-upscale-onlyh", None, Some(200)),
+            ("same-size", Some(100), Some(50)),
+        ] {
+            let source = png_bytes(100, 50);
+            let (resized, _) = thumbnail(&source, width, height)
+                .unwrap_or_else(|error| panic!("{name} thumbnail failed: {error:?}"));
+            assert_eq!(image_dims(&resized), (100, 50), "{name}");
+        }
+    }
 }

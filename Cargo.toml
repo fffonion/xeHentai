@@ -35,7 +35,8 @@ httparse = "1"
 percent-encoding = "2"
 image = "0.25"
 md5 = "0.7"
+rustix = { version = "1", features = ["fs", "thread"] }
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }

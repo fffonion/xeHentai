@@ -303,6 +303,70 @@ pub fn path_within(root: &Path, candidate: &Path) -> bool {
     candidate.starts_with(root)
 }
 
+// ---------------------------------------------------------------------------
+// TEST-ONLY deterministic barrier between precheck and open.
+// ---------------------------------------------------------------------------
+
+/// TEST-ONLY swap performed on the calling thread between the link precheck
+/// and the open, so a regular inside-gallery file becomes an outside or
+/// reserved symlink (or a swapped parent) exactly in the race window. Armed
+/// once per `(root, name)` open attempt; a no-op unless armed. Production
+/// builds contain no hook at all.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) enum PreopenSwap {
+    /// Replace `root/name` with a symlink to `target`.
+    LeafLink(PathBuf),
+    /// Rename `root` aside and replace it with a symlink to `target`.
+    RootLink(PathBuf),
+}
+
+#[cfg(test)]
+static PREOPEN_SEAMS: Mutex<Vec<(String, String, PreopenSwap)>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) fn arm_preopen_swap(root: &Path, name: &str, swap: PreopenSwap) {
+    PREOPEN_SEAMS.lock().unwrap().push((
+        root.to_string_lossy().into_owned(),
+        name.to_string(),
+        swap,
+    ));
+}
+
+#[cfg(test)]
+fn take_preopen_swap(root: &Path, name: &str) -> Option<PreopenSwap> {
+    let key = root.to_string_lossy().into_owned();
+    let mut seams = PREOPEN_SEAMS.lock().unwrap();
+    seams
+        .iter()
+        .position(|(scope, leaf, _)| *scope == key && *leaf == name)
+        .map(|index| seams.remove(index).2)
+}
+
+/// Run the armed swap for this open attempt, if any. Called by the gallery
+/// and sibling-archive open paths between their precheck and their open, on
+/// the same thread, so the swap lands deterministically inside the window.
+#[cfg(test)]
+pub(crate) fn run_preopen_seam(root: &Path, name: &str) {
+    match take_preopen_swap(root, name) {
+        None => {}
+        Some(PreopenSwap::LeafLink(target)) => {
+            let path = root.join(name);
+            let _ = fs::remove_file(&path);
+            #[cfg(unix)]
+            let _ = std::os::unix::fs::symlink(&target, &path);
+        }
+        Some(PreopenSwap::RootLink(target)) => {
+            let backup = root.with_extension("seambak");
+            let _ = fs::remove_dir_all(&backup);
+            if fs::rename(root, &backup).is_ok() {
+                #[cfg(unix)]
+                let _ = std::os::unix::fs::symlink(&target, root);
+            }
+        }
+    }
+}
+
 pub(super) fn gallery_identifier(url: &str) -> (Option<String>, Option<String>) {
     static INDEX: std::sync::LazyLock<Regex> =
         std::sync::LazyLock::new(|| Regex::new(r".+/(\d+)/([^/]+)/*").expect("index regex"));

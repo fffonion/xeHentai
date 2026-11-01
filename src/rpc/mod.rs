@@ -1399,6 +1399,12 @@ pub fn probe_gallery_file(snap: &GallerySnap) -> Result<OpenOutcome, GalleryFail
             return Ok(OpenOutcome::Denied);
         }
     }
+    #[cfg(test)]
+    {
+        // Deterministic TEST-ONLY race window: an armed swap lands here,
+        // between the precheck above and the authority open below.
+        crate::task::run_preopen_seam(&snap.root, &snap.name);
+    }
     let file = std::fs::File::open(&path).map_err(|_| GalleryFail::NotFound)?;
     let opened = file.metadata().map_err(|_| GalleryFail::NotFound)?;
     if !opened.is_file() {
@@ -1492,6 +1498,15 @@ fn read_zip_entry(zip_path: &Path, name: &str) -> Result<(Vec<u8>, String), Gall
 /// incomplete or corrupt content.
 fn read_zip_entry_bounded(zip_path: &Path, name: &str) -> Result<(Vec<u8>, String), GalleryFail> {
     use std::io::Read;
+    #[cfg(test)]
+    {
+        // Same deterministic TEST-ONLY window for the sibling archive: the
+        // armed swap lands between the precheck in `read_zip_fallback` and
+        // this authority open.
+        if let (Some(parent), Some(leaf)) = (zip_path.parent(), zip_path.file_name()) {
+            crate::task::run_preopen_seam(parent, &leaf.to_string_lossy());
+        }
+    }
     let file = std::fs::File::open(zip_path).map_err(|_| GalleryFail::NotFound)?;
     let mut archive = zip::ZipArchive::new(file).map_err(|_| GalleryFail::NotFound)?;
     let entry = archive.by_name(name).map_err(|_| GalleryFail::NotFound)?;

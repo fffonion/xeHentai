@@ -2573,6 +2573,7 @@ dependencies = [
  "rcgen",
  "regex",
  "rust-i18n",
+ "rustix",
  "rustls",
  "serde",
  "serde_json",
