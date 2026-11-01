@@ -4,13 +4,26 @@ This repository is the Rust + RustScript rewrite of
 [fffonion/xeHentai](https://github.com/fffonion/xeHentai). The Python release
 remains the behavioural reference.
 
-**Current status: foundation only.** The implemented scope is the configuration
-pipeline (`config.py` one-time regex import and `config.rss` load/save through
-the pinned RustScript SDK), the reference constants, utility functions,
-translation resources, logger, and a minimal persistent Tokio worker wrapper.
-The downloader, proxy layer, RPC server, WebUI and updater are **not**
-implemented yet; the binary exits with status 2 after initializing
-configuration and logging and says so explicitly.
+**Current status: through M5 (RSS RPC, gallery and frozen original WebUI).**
+The implemented scope is the configuration pipeline (`config.py` one-time regex
+import and `config.rss` load/save through the pinned RustScript SDK), the
+reference constants, utility functions, translation resources, logger, the
+persistent Tokio worker/task foundation, and the real RPC/gallery server:
+the 13 original JSON-RPC methods with their config/task/session/login effects,
+signed `/img` and `/zip` routes, native thumbnails, the 1-hour static cache and
+the frozen original WebUI pack in `ui/`. Business decisions live in
+`rss/rpc/handlers.rss`. The full downloader wiring, CLI/signal lifecycle and
+updater are **not** implemented yet; without `rpc_port` the binary exits with
+status 2 after initializing configuration and logging and says so explicitly.
+
+## RPC and WebUI (M5)
+
+Set `rpc_interface`, `rpc_port` and optionally `rpc_secret` in `config.rss`.
+The server binds the listener first (an occupied or invalid port is a real
+startup error), serves the original frozen WebUI at `http://<interface>:<port>/ui/`
+and the original JSON-RPC endpoint at `/jsonrpc`. With a secret configured,
+clients pass `token:<secret>` as the first parameter, exactly like the Python
+reference. Full command-line flags and daemon lifecycle arrive in M6.
 
 ## Configuration
 

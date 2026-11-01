@@ -18,7 +18,8 @@ pub(crate) use archive::{
 };
 pub use archive::{ArchiveSnapshot, CommittedArchive, PreparedArchive};
 pub(crate) use archive::{
-    commit_prepared, discard_prepared, prepare_archive_snapshot, remove_detached,
+    commit_prepared, discard_prepared, make_archive_snapshot, prepare_archive_snapshot,
+    remove_detached,
 };
 
 use std::collections::{BTreeSet, VecDeque};

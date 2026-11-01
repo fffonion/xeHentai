@@ -59,6 +59,30 @@ fn sdk_exports_named_structs_with_optional_and_array_fields() {
 }
 
 #[test]
+fn update_config_stores_rpc_start_values_without_unavailable() {
+    let root = tempfile::tempdir().expect("root");
+    let logger = crate::util::logger::Logger::with_output(Box::new(Vec::new()), false);
+    let mut app =
+        crate::core::App::new(Config::default(), logger, root.path(), root.path()).expect("app");
+    let mut patch = serde_json::Map::new();
+    patch.insert("rpc_interface".into(), serde_json::json!("127.0.0.1"));
+    patch.insert("rpc_port".into(), serde_json::json!(8123));
+    patch.insert("rpc_secret".into(), serde_json::json!("s3cret"));
+    app.update_config(patch)
+        .expect("rpc start values must be accepted");
+    assert_eq!(app.cfg.rpc_interface, "127.0.0.1");
+    assert_eq!(app.cfg.rpc_port, Some(8123));
+    assert_eq!(app.cfg.rpc_secret.as_deref(), Some("s3cret"));
+    let mut clear = serde_json::Map::new();
+    clear.insert("rpc_port".into(), serde_json::Value::Null);
+    app.update_config(clear).expect("null clears the port");
+    assert_eq!(app.cfg.rpc_port, None);
+    let mut invalid = serde_json::Map::new();
+    invalid.insert("rpc_port".into(), serde_json::json!("not a port"));
+    assert!(app.update_config(invalid).is_err());
+}
+
+#[test]
 fn migration_then_save_then_reload_survives_python_changes() {
     let root = tempfile::tempdir().expect("root");
     let python = root.path().join(crate::config::LEGACY_CONFIG_FILE);
@@ -371,6 +395,9 @@ fn compat_probe() {
         "transport" => compat_transport(&request["inputs"]),
         "monitor" => compat_monitor(&request["inputs"]),
         "download" => compat_download(&request["inputs"]),
+        "rpc" => compat_rpc(&request["inputs"]),
+        "gallery" => compat_gallery(&request["inputs"]),
+        "webui" => compat_webui(&request["inputs"]),
         other => panic!("unknown probe suite {other}"),
     };
     let output = std::env::var("XEH_COMPAT_OUTPUT").expect("probe output");
@@ -11084,4 +11111,439 @@ mod m4 {
         );
         assert_eq!(std::fs::read(&gallery).unwrap(), b"squatter");
     }
+}
+fn compat_rpc_app(root: &std::path::Path, inputs: &serde_json::Value) -> crate::core::App {
+    use crate::config::Config;
+    use crate::task::{FidKey, Task, TaskConfig};
+    let mut config = Config::default();
+    config.dir = root.join("downloads").to_string_lossy().into_owned();
+    std::fs::create_dir_all(root.join("downloads")).unwrap();
+    let logger = crate::util::logger::Logger::with_output(Box::new(Vec::new()), false);
+    let mut app = crate::core::App::new(config, logger, root, root).expect("rpc probe app");
+    for task_value in inputs["tasks"].as_array().cloned().unwrap_or_default() {
+        let guid = task_value["guid"]
+            .as_str()
+            .unwrap_or("probe-guid")
+            .to_string();
+        let task_config =
+            TaskConfig::from_app(&app.cfg, &serde_json::Map::new()).expect("task config");
+        let mut task = Task::new(
+            task_value["url"]
+                .as_str()
+                .unwrap_or("http://e-hentai.org/g/123/abcdef0123/"),
+            task_config,
+            guid.clone(),
+            root,
+        )
+        .expect("probe task");
+        if let Some(meta) = task_value.get("meta").and_then(|meta| meta.as_object()) {
+            for (key, value) in meta {
+                task.meta.insert(key.clone(), value.clone());
+            }
+        }
+        let meta_title = task_value
+            .get("meta")
+            .and_then(|meta| meta.get("title"))
+            .and_then(|title| title.as_str())
+            .unwrap_or("probe-gallery");
+        task.meta
+            .insert("title".to_string(), serde_json::json!(meta_title));
+        let dir = task.get_fpath().expect("probe fpath");
+        std::fs::create_dir_all(&dir).unwrap();
+        if let Some(files) = task_value.get("files").and_then(|files| files.as_object()) {
+            for (name, content) in files {
+                // Fixtures transmit raw image bytes as latin-1 code points;
+                // restore bytes instead of writing UTF-8 text.
+                let text = content.as_str().unwrap_or("");
+                let raw: Vec<u8> = text.chars().map(|ch| u32::from(ch) as u8).collect();
+                std::fs::write(dir.join(name), raw).unwrap();
+            }
+        }
+        if let Some(renamed) = task_value
+            .get("renamed")
+            .and_then(|value| value.as_object())
+        {
+            for (fid, name) in renamed {
+                task.renamed_map.insert(
+                    FidKey::Text(fid.clone()),
+                    name.as_str().unwrap_or("").to_string(),
+                );
+            }
+        }
+        if let Some(state) = task_value.get("state").and_then(|value| value.as_i64()) {
+            task.state = state;
+        }
+        app.insert_task_for_test(task);
+        // The oracle registers fixtures without queueing them; drain the
+        // test-insert queue so both sides start unqueued. last_task_guid is
+        // not observable on any RPC method.
+        let mut _drain_current = None;
+        while app.pop_queued_task(&mut _drain_current).is_some() {}
+        if task_value
+            .get("zip_build")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+        {
+            let built = crate::rpc::read_archive(&app, &guid).expect("probe zip build");
+            assert!(built.starts_with(b"PK"));
+            if let Some(remove) = task_value
+                .get("zip_remove")
+                .and_then(|value| value.as_array())
+            {
+                let dir = app.task(&guid).expect("task").get_fpath().expect("fpath");
+                for name in remove {
+                    if let Some(name) = name.as_str() {
+                        let _ = std::fs::remove_file(dir.join(name));
+                    }
+                }
+            }
+        }
+    }
+    app
+}
+
+fn latin1(bytes: &[u8]) -> String {
+    // The oracle probe decodes response bytes as latin-1; mirror that so
+    // arbitrary gallery/archive bytes survive the JSON transcript exactly.
+    bytes.iter().map(|&byte| byte as char).collect()
+}
+
+/// Real HTTP fixture backend for the browser evidence run. Inert in normal
+/// test runs; started explicitly with `--ignored` and XEH_BROWSER_REQUEST.
+/// Serves the compiled RSS dispatcher, the real App and the frozen UI on a
+/// real TCP listener. Tasks are seeded through the same compat fixture seam
+/// the differential suites use, so no network fetch is attempted: this
+/// process intentionally runs no task loop.
+#[test]
+#[ignore = "browser evidence harness, started explicitly"]
+fn browser_fixture_server() {
+    use crate::core::Runtime;
+    use crate::rpc::server::{SharedRpc, bind, serve_until_closed};
+    use std::sync::Arc;
+
+    let request_path = std::env::var("XEH_BROWSER_REQUEST").expect("XEH_BROWSER_REQUEST");
+    let request: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&request_path).expect("request")).expect("json");
+    let root = std::path::PathBuf::from(request["root"].as_str().expect("root"));
+    let resource_root =
+        std::path::PathBuf::from(request["resource_root"].as_str().expect("resource_root"));
+    let ready = std::path::PathBuf::from(request["ready"].as_str().expect("ready"));
+    let shutdown = std::path::PathBuf::from(request["shutdown"].as_str().expect("shutdown"));
+    let port = request["port"].as_u64().unwrap_or(8010) as u16;
+    let secret = request["secret"].as_str().map(str::to_string);
+    let app = compat_rpc_app(&root, &request);
+    let runtime = Runtime::new(app, resource_root.clone());
+    let handle = runtime.handle();
+    let local = tokio::task::LocalSet::new();
+    let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    tokio_runtime.block_on(local.run_until(async move {
+        let listener = bind("127.0.0.1", port).await.expect("fixture bind");
+        let actual = listener.local_addr().expect("addr").port();
+        fs::write(
+            &ready,
+            serde_json::json!({"port": actual, "pid": std::process::id()}).to_string(),
+        )
+        .expect("ready");
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let origin = "http://127.0.0.1:9".to_string();
+        let shared = std::rc::Rc::new(std::cell::RefCell::new(
+            SharedRpc::new(
+                &resource_root,
+                &root,
+                Arc::new(crate::worker::RealClock),
+                secret,
+                origin.clone(),
+            )
+            .expect("shared rpc"),
+        ));
+        let server = serve_until_closed(listener, shutdown_rx, handle, shared, origin);
+        tokio::pin!(server);
+        loop {
+            tokio::select! {
+                result = &mut server => {
+                    result.expect("fixture server");
+                    break;
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
+                    if shutdown.exists() {
+                        let _ = shutdown_tx.send(true);
+                    }
+                }
+            }
+        }
+    }));
+}
+
+fn compat_rpc(inputs: &serde_json::Value) -> serde_json::Value {
+    use crate::rpc::server::{SharedRpc, serve_one};
+    let root = std::path::PathBuf::from(inputs["root"].as_str().expect("root"));
+    let secret = inputs["secret"].as_str().map(str::to_string);
+    let app = compat_rpc_app(&root, inputs);
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let shared = std::rc::Rc::new(std::cell::RefCell::new(
+        SharedRpc::new(
+            manifest,
+            &root,
+            std::sync::Arc::new(crate::worker::RealClock),
+            secret,
+            "http://127.0.0.1:9".to_string(),
+        )
+        .expect("shared"),
+    ));
+    let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
+    let handle = runtime.handle();
+    let local = tokio::task::LocalSet::new();
+    let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("probe runtime");
+    fn snapshot(handle: &crate::core::runtime::AppHandle) -> serde_json::Value {
+        handle.borrow_app(|app| {
+            let mut states = serde_json::Map::new();
+            for guid in app.all_task_guids() {
+                if let Some(task) = app.task(&guid) {
+                    states.insert(guid, serde_json::json!(task.state));
+                }
+            }
+            serde_json::json!({
+                "cfg_dir": app.cfg.dir,
+                "proxy_count": app.proxy_count(),
+                "states": states,
+                "queue_len": app.queue_len(),
+                "has_login": app.has_login(),
+                "cookies": app.cookies().to_vec(),
+            })
+        })
+    }
+    let mut transcripts = Vec::new();
+    for case in inputs["cases"].as_array().cloned().unwrap_or_default() {
+        let id = case["id"].as_str().unwrap_or("?").to_string();
+        let head = if let Some(raw) = case["raw_head"].as_str() {
+            raw.to_string()
+        } else {
+            let target = case["target"].as_str().unwrap_or("/jsonrpc");
+            let body = case["body"].as_str().unwrap_or("");
+            format!(
+                "{} {} HTTP/1.0\r\nHost: x\r\nContent-Length: {}\r\n\r\n{}",
+                case["method"].as_str().unwrap_or("POST"),
+                target,
+                body.len(),
+                body
+            )
+        };
+        let transcript = tokio_runtime.block_on(local.run_until(async {
+            let (mut client, mut server) = tokio::io::duplex(256 * 1024);
+            {
+                use tokio::io::AsyncWriteExt;
+                client.write_all(head.as_bytes()).await.expect("write");
+            }
+            let before = snapshot(&handle);
+            let result = serve_one(
+                &mut server,
+                handle.clone(),
+                std::rc::Rc::clone(&shared),
+                "http://127.0.0.1:9".to_string(),
+            )
+            .await;
+            let after = snapshot(&handle);
+            drop(server);
+            let mut raw = Vec::new();
+            {
+                use tokio::io::AsyncReadExt;
+                client.read_to_end(&mut raw).await.expect("read");
+            }
+            match result {
+                Err(error) => serde_json::json!({"id": id, "error": error.to_string()}),
+                Ok(()) => match raw.windows(4).position(|window| window == b"\r\n\r\n") {
+                    None => serde_json::json!({
+                        "id": id, "dropped": true,
+                        "before": before, "after": after,
+                    }),
+                    Some(end) => {
+                        let head_text = String::from_utf8_lossy(&raw[..end]).into_owned();
+                        let mut lines = head_text.split("\r\n");
+                        let status = lines.next().unwrap_or("").to_string();
+                        let mut headers = Vec::new();
+                        for line in lines {
+                            if let Some((name, value)) = line.split_once(':') {
+                                headers.push(vec![
+                                    name.trim().to_lowercase(),
+                                    value.trim().to_string(),
+                                ]);
+                            }
+                        }
+                        let declared = headers
+                            .iter()
+                            .find(|entry| entry[0] == "content-length")
+                            .and_then(|entry| entry[1].parse::<usize>().ok())
+                            .unwrap_or(0);
+                        let rest = &raw[end + 4..];
+                        let body_text = latin1(&rest[..declared.min(rest.len())]);
+                        let trailing_newline =
+                            rest.get(declared).is_some_and(|byte| *byte == b'\n');
+                        serde_json::json!({
+                            "id": id,
+                            "status": status,
+                            "headers": headers,
+                            "body": body_text,
+                            "trailing_newline": trailing_newline,
+                            "before": before,
+                            "after": after,
+                        })
+                    }
+                },
+            }
+        }));
+        transcripts.push(transcript);
+    }
+    serde_json::json!({
+        "root": root.to_string_lossy(),
+        "cases": transcripts,
+    })
+}
+
+fn compat_gallery(inputs: &serde_json::Value) -> serde_json::Value {
+    use crate::rpc::{read_archive, read_gallery_file, thumbnail};
+    let root = std::path::PathBuf::from(inputs["root"].as_str().expect("root"));
+    let app = compat_rpc_app(&root, inputs);
+    let mut reads = Vec::new();
+    for query in inputs["reads"].as_array().cloned().unwrap_or_default() {
+        let guid = query["guid"].as_str().unwrap_or("");
+        let fid = query["fid"].as_str().unwrap_or("1");
+        match read_gallery_file(&app, guid, fid) {
+            Err(fail) => reads.push(serde_json::json!({
+                "guid": guid, "fid": fid, "status": fail.status(),
+            })),
+            Ok((bytes, mime)) => reads.push(serde_json::json!({
+                "guid": guid, "fid": fid, "status": 200u16,
+                "mime": mime, "bytes": latin1(&bytes),
+            })),
+        }
+    }
+    let mut thumbs = Vec::new();
+    for query in inputs["thumbs"].as_array().cloned().unwrap_or_default() {
+        let guid = query["guid"].as_str().unwrap_or("");
+        let fid = query["fid"].as_str().unwrap_or("1");
+        let sizes = match crate::rpc::parse_thumb_query(query["query"].as_str().unwrap_or("")) {
+            Err(_) => {
+                thumbs.push(serde_json::json!({
+                    "guid": guid, "fid": fid, "query": query["query"].as_str().unwrap_or(""), "outcome": "bad_query",
+                }));
+                continue;
+            }
+            Ok(sizes) => sizes,
+        };
+        match read_gallery_file(&app, guid, fid) {
+            Err(fail) => thumbs.push(serde_json::json!({
+                "guid": guid, "fid": fid, "query": query["query"].as_str().unwrap_or(""), "outcome": "not_found", "status": fail.status(),
+            })),
+            Ok((bytes, mime)) => match thumbnail(&bytes, sizes.0, sizes.1) {
+                Err(crate::rpc::ThumbError::Passthrough) => thumbs.push(serde_json::json!({
+                    "guid": guid, "fid": fid, "query": query["query"].as_str().unwrap_or(""), "outcome": "passthrough",
+                    "mime": mime, "bytes": latin1(&bytes),
+                })),
+                Err(crate::rpc::ThumbError::BadRequest(message)) => {
+                    thumbs.push(serde_json::json!({
+                        "guid": guid, "fid": fid, "query": query["query"].as_str().unwrap_or(""), "outcome": "bad_request", "message": message,
+                    }))
+                }
+                Err(crate::rpc::ThumbError::Decode(message)) => thumbs.push(serde_json::json!({
+                    "guid": guid, "fid": fid, "query": query["query"].as_str().unwrap_or(""), "outcome": "decode_error", "message": message,
+                })),
+                Ok((resized, mime)) => {
+                    let (width, height) = match image::load_from_memory(&resized) {
+                        Ok(image) => (image.width(), image.height()),
+                        Err(_) => (0, 0),
+                    };
+                    thumbs.push(serde_json::json!({
+                        "guid": guid, "fid": fid, "outcome": "resized",
+                        "mime": mime, "width": width, "height": height,
+                    }))
+                }
+            },
+        }
+    }
+    let mut archives = Vec::new();
+    for query in inputs["archives"].as_array().cloned().unwrap_or_default() {
+        let guid = query["guid"].as_str().unwrap_or("");
+        match read_archive(&app, guid) {
+            Err(fail) => archives.push(serde_json::json!({
+                "guid": guid, "status": fail.status(),
+            })),
+            Ok(bytes) => {
+                let cursor = std::io::Cursor::new(&bytes);
+                match zip::ZipArchive::new(cursor) {
+                    Err(_) => archives.push(serde_json::json!({
+                        "guid": guid, "status": "bad_zip",
+                    })),
+                    Ok(mut archive) => {
+                        let mut names = Vec::new();
+                        let mut contents = serde_json::Map::new();
+                        for index in 0..archive.len() {
+                            if let Ok(mut entry) = archive.by_index(index) {
+                                let name = entry.name().to_string();
+                                let mut bytes = Vec::new();
+                                use std::io::Read;
+                                if entry.read_to_end(&mut bytes).is_ok() {
+                                    contents.insert(
+                                        name.clone(),
+                                        serde_json::Value::String(latin1(&bytes)),
+                                    );
+                                }
+                                names.push(name);
+                            }
+                        }
+                        names.sort();
+                        archives.push(serde_json::json!({
+                            "guid": guid, "status": 200u16,
+                            "names": names, "contents": contents,
+                            "comment": String::from_utf8_lossy(archive.comment()).into_owned(),
+                        }))
+                    }
+                }
+            }
+        }
+    }
+    serde_json::json!({"reads": reads, "thumbs": thumbs, "archives": archives})
+}
+
+fn compat_webui(_inputs: &serde_json::Value) -> serde_json::Value {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let pack = manifest.join("ui");
+    let mut files = Vec::new();
+    if pack.is_dir() {
+        let mut stack = vec![pack.clone()];
+        while let Some(dir) = stack.pop() {
+            let mut entries: Vec<_> = std::fs::read_dir(&dir)
+                .expect("ui dir")
+                .map(|entry| entry.expect("entry").path())
+                .collect();
+            entries.sort();
+            for path in entries {
+                if path.is_dir() {
+                    stack.push(path);
+                } else if let Ok(bytes) = std::fs::read(&path) {
+                    files.push(serde_json::json!({
+                        "name": path.strip_prefix(&pack).expect("prefix")
+                            .to_string_lossy().replace('\\', "/"),
+                        "size": bytes.len(),
+                    }));
+                }
+            }
+        }
+    }
+    files.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
+    let index = pack.join("index.html");
+    let index_text = std::fs::read_to_string(&index).unwrap_or_default();
+    serde_json::json!({
+        "files": files,
+        "index_markers": {
+            "has_title": index_text.contains("<title"),
+            "has_app": index_text.contains("/static/js/app"),
+            "has_auth_host": index_text.contains("host="),
+        },
+    })
 }

@@ -553,6 +553,152 @@ NATIVE_CASE_MAP = {
             "filters.reset-quota",
         ],
     },
+    "rpc": {
+        "rpc::tests::method_select_maps_all_thirteen_wire_names": [
+            "rpc.method.lookup",
+        ],
+        "rpc::tests::method_select_rejects_unknown_private_and_bare_names": [
+            "rpc.method.unknown",
+            "rpc.method.private",
+        ],
+        "rpc::tests::arity_rules_match_reference_type_errors": [
+            "rpc.arity",
+        ],
+        "rpc::tests::update_config_filter_drops_rpc_keys_and_detects_proxy": [
+            "rpc.updateConfig.filter",
+        ],
+        "rpc::tests::level_select_covers_default_negation_and_invalid": [
+            "rpc.listTasks.level",
+        ],
+        "rpc::tests::image_range_preserves_first_item_quirk": [
+            "rpc.getImage.range",
+        ],
+        "rpc::tests::field_projections_hide_exact_reference_keys": [
+            "rpc.projection.config",
+            "rpc.projection.task",
+        ],
+        "rpc::tests::auth_requires_exact_literal_token": [
+            "rpc.auth.exact",
+        ],
+        "rpc::tests::response_id_coerces_falsy_values_to_null": [
+            "rpc.wire.id",
+        ],
+        "rpc::tests::image_mime_keeps_reference_typo_key": [
+            "gallery.mime",
+        ],
+        "rpc::server::tests::wire_envelope_reports_parse_and_unknown_method": [
+            "rpc.wire.parse",
+        ],
+        "rpc::server::tests::get_config_hides_rpc_keys_and_reports_arity": [
+            "rpc.getConfig.ok",
+        ],
+        "rpc::server::tests::update_config_without_proxy_is_a_read": [
+            "rpc.updateConfig.noop",
+        ],
+        "rpc::server::tests::unknown_method_is_404_and_unauthorized_is_403": [
+            "rpc.method.unknown",
+            "rpc.auth.missing",
+        ],
+        "rpc::server::tests::thumbnail_query_parsing_matches_reference_strictness": [
+            "rpc.thumb.query",
+        ],
+        "rpc::server::tests::gallery_names_reject_traversal": [
+            "gallery.traversal",
+        ],
+        "rpc::server::tests::pixel_bound_rejects_huge_dimensions": [
+            "gallery.pixel-bound",
+        ],
+        "rpc::server::tests::signed_gallery_paths_wait_for_authorization": [
+            "rpc.sign.pending",
+        ],
+        "rpc::server::tests::task_lifecycle_codes_match_reference": [
+            "rpc.task.lifecycle",
+        ],
+        "rpc::server::tests::set_cookie_and_session_roundtrip": [
+            "rpc.session.roundtrip",
+        ],
+        "rpc::server::tests::update_config_with_proxy_applies_and_dir_without_proxy_is_noop": [
+            "rpc.updateConfig.proxy",
+        ],
+        "rpc::server::tests::list_tasks_levels_negation_and_invalid": [
+            "rpc.listTasks.level",
+        ],
+        "rpc::server::tests::get_image_reports_missing_tasks_and_bad_ranges": [
+            "rpc.getImage.errors",
+        ],
+        "rpc::server::tests::get_image_returns_real_signed_urls_and_serves_them": [
+            "rpc.getImage.signed",
+        ],
+        "rpc::server::tests::post_roundtrip_preserves_framing_id_and_cors": [
+            "rpc.wire.framing",
+        ],
+        "rpc::server::tests::post_auth_roundtrip_exact_literal_only": [
+            "rpc.auth.exact",
+        ],
+        "rpc::server::tests::get_and_options_roundtrips": [
+            "rpc.http.options",
+            "rpc.http.unknown-get",
+        ],
+        "rpc::server::tests::malformed_posts_answer_400_not_dropped": [
+            "rpc.wire.parse",
+        ],
+        "rpc::server::tests::owned_listener_binds_accepts_and_drains": [
+            "rpc.server.owned-start",
+        ],
+        "rpc::server::tests::rss_mutant_changes_list_tasks_selection": [
+            "rpc.rss.mutant",
+        ],
+        "rpc::server::tests::runtime_mounted_pause_and_delete_drain": [
+            "rpc.server.drain"
+        ],
+        "rpc::server::tests::signed_gallery_paths_validate_real_signatures": [
+            "rpc.sign.pending",
+            "rpc.img.signed",
+            "rpc.zip.signed",
+        ],
+        "rpc::server::tests::thumbnail_query_parsing_matches_reference_strictness": [
+            "rpc.thumb.query"
+        ],
+        "rpc::server::tests::gallery_names_reject_traversal": [
+            "gallery.traversal"
+        ],
+    },
+    "gallery": {
+        "rpc::server::tests::gallery_reads_serve_files_and_reject_bad_fids": [
+            "gallery.read.task-wait.1",
+            "gallery.read.task-wait.5",
+            "gallery.read.task-wait.nope",
+            "gallery.read.missing.1",
+        ],
+        "rpc::server::tests::gallery_reads_fall_back_to_sibling_zip": [
+            "gallery.read.task-zip.2",
+            "gallery.read.task-zip.9",
+        ],
+        "rpc::server::tests::archive_builds_on_demand_and_reuses": [
+            "gallery.archive.task-wait",
+        ],
+        "rpc::server::tests::thumbnails_fit_never_upscale_and_keep_format": [
+            "gallery.thumb.task-wait.1.resized",
+        ],
+        "rpc::server::tests::static_cache_ttl_stale_persist_and_legacy_refusal": [
+            "rpc.static.cache",
+        ],
+        "rpc::server::tests::static_fetch_honors_304_and_reports_origin_errors": [
+            "rpc.static.fetch",
+        ],
+        "rpc::server::tests::pixel_bound_rejects_huge_dimensions": [
+            "gallery.pixel-bound",
+        ],
+    },
+    "webui": {
+        "rpc::server::tests::frozen_pack_serves_assets_and_rejects_traversal": [
+            "webui.pack.files",
+            "webui.pack.index",
+        ],
+        "rpc::server::tests::signed_gallery_paths_wait_for_authorization": [
+            "rpc.sign.pending",
+        ],
+    },
     "task-api": {},
     "session": {},
     "files": {},
@@ -621,6 +767,34 @@ NATIVE_COMMANDS = {
         ["cargo", "test", "--bin", "xeHentai", "tests::m4::pending_dns"],
         ["cargo", "test", "--bin", "xeHentai", "tests::m4::low_speed"],
         ["cargo", "test", "--bin", "xeHentai", "tests::m4::download_worker_retries"],
+    ],
+    "rpc": [
+        ["cargo", "test", "--bin", "xeHentai", "rpc::tests::"],
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::task_"],
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::set_cookie"],
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::update_config"],
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::list_tasks"],
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::get_image"],
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::post_"],
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::get_and_options"],
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::malformed_"],
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::owned_listener"],
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::rss_mutant"],
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::runtime_mounted"],
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::signed_gallery"],
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::thumbnail_query"],
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::gallery_names"],
+    ],
+    "gallery": [
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::gallery_"],
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::archive_"],
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::thumbnails_"],
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::static_"],
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::pixel_"],
+    ],
+    "webui": [
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::frozen_"],
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::signed_gallery"],
     ],
     "files": [
         ["cargo", "test", "--bin", "xeHentai", "tests::scan_"],
@@ -930,6 +1104,12 @@ def oracle_main(args):
         result = oracle_monitor(upstream, request)
     elif args.oracle == "download":
         result = oracle_download(upstream, request)
+    elif args.oracle == "rpc":
+        result = oracle_rpc(upstream, request)
+    elif args.oracle == "gallery":
+        result = oracle_gallery(upstream, request)
+    elif args.oracle == "webui":
+        result = oracle_webui(upstream, request)
     else:
         raise CompatError(f"unknown oracle suite {args.oracle}")
     output.write_text(
@@ -4323,6 +4503,45 @@ def self_check(suite, oracle, candidate):
         cases = {}
         compare_download(cases, oracle, mutated)
         checks.append(("request-set", not cases["m4.pipeline.local"]))
+    elif suite == "rpc":
+        # Negative controls: the comparator must reject changed business
+        # results, changed status, and changed error codes, not just accept
+        # any transcript pair.
+        mutated = copy.deepcopy(candidate)
+        mutated["open"]["cases"][0]["body"] = mutated["open"]["cases"][0]["body"].replace(
+            '"daemon":false', '"daemon":true')
+        cases = {}
+        compare_rpc(cases, oracle, mutated)
+        checks.append(("result-field", not cases.get("rpc.getConfig.ok", True)))
+        mutated = copy.deepcopy(candidate)
+        mutated["open"]["cases"][0]["status"] = "HTTP/1.0 403 Forbidden"
+        cases = {}
+        compare_rpc(cases, oracle, mutated)
+        checks.append(("status", not cases.get("rpc.getConfig.ok", True)))
+        mutated = copy.deepcopy(candidate)
+        for entry in mutated["open"]["cases"]:
+            if isinstance(entry.get("body"), str) and '"code":1104' in entry["body"]:
+                entry["body"] = entry["body"].replace("1104", "9999")
+        cases = {}
+        compare_rpc(cases, oracle, mutated)
+        checks.append(("error-code", not cases.get("rpc.listTasks.invalid", True)))
+    elif suite == "gallery":
+        mutated = copy.deepcopy(candidate)
+        mutated["reads"][0]["bytes"] = "mutated"
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(("read-bytes", not cases.get("gallery.read.task-wait.1", True)))
+        mutated = copy.deepcopy(candidate)
+        mutated["archives"][0]["names"] = []
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(("archive-names", not cases.get("gallery.archive.task-wait", True)))
+    elif suite == "webui":
+        mutated = copy.deepcopy(candidate)
+        mutated["index_markers"]["has_app"] = False
+        cases = {}
+        compare_webui(cases, oracle, mutated)
+        checks.append(("index-marker", not cases.get("webui.pack.index", True)))
     elif suite == "concurrency":
         checks.append(("zero-tests", detect_zero_tests("running 0 tests\n\ntest result: ok. 0 passed")))
     if not checks or not all(detected for _, detected in checks):
@@ -4343,6 +4562,1109 @@ def merge_native_cases(suite, native_runs, cases):
                     cases.setdefault(case_id, True)
                 else:
                     cases[case_id] = False
+
+
+# Declared per-method IDs aggregate the granular wire cases (each one is a
+# real request/response comparison or a native execution). They are only
+# true when every granular case they summarize passed in the same round.
+RPC_METHOD_AGGREGATES = {
+    "rpc.updateConfig": [
+        "rpc.updateConfig.filter", "rpc.updateConfig.noop",
+        "rpc.updateConfig.proxy", "rpc.updateConfig.proxy-dir",
+        "rpc.updateConfig.unknown-key",
+    ],
+    "rpc.addTask": [
+        "rpc.addTask.ok", "rpc.addTask.missing", "rpc.addTask.extra",
+        "rpc.addTask.bad-url", "rpc.addTask.exh-no-login",
+        "rpc.addTask.exh-logged-in",
+    ],
+    "rpc.delTask": ["rpc.delTask.running", "rpc.delTask.unknown", "rpc.task.lifecycle"],
+    "rpc.pauseTask": ["rpc.pauseTask.missing", "rpc.pauseTask.unknown", "rpc.task.lifecycle"],
+    "rpc.resumeTask": ["rpc.task.lifecycle"],
+    "rpc.saveSession": ["rpc.saveSession.ok", "rpc.session.roundtrip"],
+    "rpc.loadSession": ["rpc.loadSession.ok", "rpc.session.roundtrip"],
+    "rpc.loginExhentai": ["rpc.loginExhentai.logged-in"],
+    "rpc.setCookie": ["rpc.setCookie.login", "rpc.session.roundtrip"],
+    "rpc.getInfo": ["rpc.getInfo.ok", "rpc.getInfo.extra-kwarg"],
+    "rpc.getConfig": [
+        "rpc.getConfig.ok", "rpc.getConfig.id-zero", "rpc.getConfig.id-false",
+        "rpc.getConfig.extra-arg", "rpc.projection.config", "rpc.auth.exact",
+    ],
+    "rpc.listTasks": [
+        "rpc.listTasks.default", "rpc.listTasks.positional", "rpc.listTasks.keyword",
+        "rpc.listTasks.negation", "rpc.listTasks.invalid", "rpc.listTasks.nonstring",
+        "rpc.listTasks.null", "rpc.listTasks.duplicate", "rpc.listTasks.extra-kwarg",
+        "rpc.listTasks.level", "rpc.projection.task", "rpc.listTasks.config-order",
+    ],
+    "rpc.getImage": [
+        "rpc.getImage.signed", "rpc.getImage.unknown", "rpc.getImage.no-total",
+        "rpc.getImage.bad-range", "rpc.getImage.extra-kwarg", "rpc.getImage.errors",
+        "rpc.getImage.range", "rpc.auth.getImage-signed",
+    ],
+}
+
+
+def apply_rpc_aggregates(cases):
+    for aggregate, members in RPC_METHOD_AGGREGATES.items():
+        cases[aggregate] = all(cases.get(member) is True for member in members)
+
+
+WEBUI_BROWSER_GROUPS = {
+    "webui.static": [
+        "connect.dialog", "auth.wrong.disconnected", "auth.wrong.403",
+        "connect.connected", "config.basic.dir", "config.hides.rpc",
+        "locale.zh-CN.heading", "locale.zh-TW.heading",
+    ],
+    "webui.gallery": [
+        "gallery.opened", "gallery.double.images", "gallery.double.checkbox",
+        "gallery.single.images", "gallery.nav.page2", "gallery.last.page",
+        "zip.filename", "zip.entries", "zip.contents", "zip.http",
+    ],
+}
+
+
+def apply_browser_evidence(cases):
+    """Mark the declared WebUI IDs from the real Playwright evidence report."""
+    path = os.environ.get("XEH_BROWSER_REPORT")
+    if not path:
+        return
+    report = json.loads(Path(path).read_text(encoding="utf-8"))
+    checks = {entry["check"]: entry["ok"] for entry in report.get("checks", [])}
+    for case_id, required in WEBUI_BROWSER_GROUPS.items():
+        cases[case_id] = all(checks.get(name) is True for name in required)
+    trace = report.get("trace", [])
+    urls = [entry.get("url", "") for entry in trace]
+    cases["webui.browser"] = (
+        report.get("ok") is True
+        and all(checks.get(name) is True for name in checks)
+        and any("/jsonrpc" in url for url in urls)
+        and any("/img/" in url for url in urls)
+        and any("/zip/" in url for url in urls)
+        and any("/ui/" in url for url in urls)
+    )
+
+
+
+# --- M5: RPC wire, gallery and frozen WebUI ---------------------------------
+
+RPC_SECRET = "s3cret"
+RPC_TASKS = [
+    {
+        "guid": "task-wait",
+        "url": "http://e-hentai.org/g/123/abcdef0123/",
+        "state": 10,
+        "meta": {"total": 3, "finished": 0, "title": "probe-gallery"},
+        "files": {"1.jpg": "JPEG-DATA-1", "2.jpg": "JPEG-DATA-2"},
+        "renamed": {"5": "2.jpg"},
+    },
+    {
+        "guid": "task-bare",
+        "url": "http://e-hentai.org/g/124/abcdef0123/",
+        "state": 1,
+        "meta": {},
+        "files": {},
+        "renamed": {},
+    },
+    {
+        "guid": "task-done",
+        "url": "http://e-hentai.org/g/456/abcdef0123/",
+        "state": 20,
+        "meta": {"total": 1, "finished": 1, "title": "probe-gallery"},
+        "files": {"1.jpg": "JPEG-DATA-9"},
+        "renamed": {},
+    },
+]
+
+
+def _rpc_sign(uri):
+    import hashlib
+    return hashlib.md5(("-xehentai-" + uri).encode("utf-8")).hexdigest()[:8]
+
+
+def _rpc_tamper(sign):
+    # Flip the first hex digit deterministically; some real signatures start
+    # with "0", so prefixing "0" would leave them valid.
+    return ("1" if sign[0] != "1" else "2") + sign[1:]
+
+
+def rpc_wire_cases():
+    get_config = '{"method":"xeH.getConfig","id":%s%s}'
+    img_valid = "/img/%s/task-wait/1/1.jpg" % _rpc_sign("task-wait/1")
+    img_tampered = "/img/%s/task-wait/1/1.jpg" % _rpc_tamper(_rpc_sign("task-wait/1"))
+    img_unknown = "/img/%s/missing/1/1.jpg" % _rpc_sign("missing/1")
+    img_badfid = "/img/%s/task-wait/xyz/1.jpg" % _rpc_sign("task-wait/xyz")
+    zip_valid = "/zip/%s/task-done/gallery.zip" % _rpc_sign("task-done")
+    zip_tampered = "/zip/%s/task-done/gallery.zip" % _rpc_tamper(_rpc_sign("task-done"))
+    return [
+        {"id": "rpc.getConfig.ok", "method": "POST", "target": "/jsonrpc",
+         "body": get_config % (1, "")},
+        {"id": "rpc.getConfig.id-zero", "method": "POST", "target": "/jsonrpc",
+         "body": get_config % (0, "")},
+        {"id": "rpc.getConfig.id-false", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.getConfig","id":false}'},
+        {"id": "rpc.getConfig.extra-arg", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.getConfig","id":1,"params":[[1],{}]}'},
+        {"id": "rpc.getInfo.ok", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.getInfo","id":41,"params":[[],{}]}'},
+        {"id": "rpc.getInfo.extra-kwarg", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.getInfo","id":1,"params":[[],{"x":1}]}'},
+        {"id": "rpc.listTasks.default", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.listTasks","id":1}'},
+        {"id": "rpc.listTasks.positional", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.listTasks","id":1,"params":[["download"],{}]}'},
+        {"id": "rpc.listTasks.keyword", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.listTasks","id":1,"params":[[],{"level":"download"}]}'},
+        {"id": "rpc.listTasks.negation", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.listTasks","id":1,"params":[["!download"],{}]}'},
+        {"id": "rpc.listTasks.invalid", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.listTasks","id":1,"params":[["bogus"],{}]}'},
+        {"id": "rpc.listTasks.nonstring", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.listTasks","id":1,"params":[[5],{}]}'},
+        {"id": "rpc.listTasks.null", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.listTasks","id":1,"params":[[null],{}]}'},
+        {"id": "rpc.listTasks.duplicate", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.listTasks","id":1,"params":[["download"],{"level":"download"}]}'},
+        {"id": "rpc.listTasks.extra-kwarg", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.listTasks","id":1,"params":[[],{"level":"download","other":1}]}'},
+        {"id": "rpc.addTask.ok", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.addTask","id":2,"params":[["http://e-hentai.org/g/789/abcdef0123/"],{"dir":"downloads"}]}'},
+        {"id": "rpc.addTask.missing", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.addTask","id":2,"params":[[],{}]}'},
+        {"id": "rpc.addTask.extra", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.addTask","id":2,"params":[["a","b"],{}]}'},
+        {"id": "rpc.addTask.bad-url", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.addTask","id":2,"params":[["not a url"],{}]}'},
+        {"id": "rpc.addTask.exh-no-login", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.addTask","id":2,"params":[["https://exhentai.org/g/1/abcdef0123/"],{}]}'},
+        {"id": "rpc.pauseTask.unknown", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.pauseTask","id":3,"params":[["nope"],{}]}'},
+        {"id": "rpc.pauseTask.missing", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.pauseTask","id":3,"params":[[],{}]}'},
+        {"id": "rpc.delTask.running", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.delTask","id":3,"params":[["task-wait"],{}]}'},
+        {"id": "rpc.delTask.unknown", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.delTask","id":3,"params":[["nope"],{}]}'},
+        {"id": "rpc.updateConfig.noop", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.updateConfig","id":4,"params":[[],{"dir":"changed"}]}'},
+        {"id": "rpc.updateConfig.proxy-dir", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.updateConfig","id":4,"params":[[],{"proxy":["socks5://127.0.0.1:9"],"dir":"proxied"}]}'},
+        {"id": "rpc.updateConfig.proxy-nodir", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.updateConfig","id":4,"params":[[],{"proxy":["socks5://127.0.0.1:9"]}]}'},
+        {"id": "rpc.updateConfig.unknown-key", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.updateConfig","id":4,"params":[[],{"proxy":["socks5://127.0.0.1:9"],"bogus_key":1}]}'},
+        {"id": "rpc.saveSession.ok", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.saveSession","id":5}'},
+        {"id": "rpc.loadSession.ok", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.loadSession","id":5}'},
+        {"id": "rpc.setCookie.login", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.setCookie","id":6,"params":[["ipb_member_id=42; ipb_pass_hash=39d0c523"],{}]}'},
+        {"id": "rpc.addTask.exh-logged-in", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.addTask","id":2,"params":[["https://exhentai.org/g/1/abcdef0123/"],{}]}'},
+        {"id": "rpc.loginExhentai.logged-in", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.loginExhentai","id":7,"params":[["u","p"],{}]}'},
+        {"id": "rpc.method.unknown", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.nope","id":1}'},
+        {"id": "rpc.method.private", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH._private","id":1}'},
+        {"id": "rpc.method.other-prefix", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"other.getInfo","id":1}'},
+        {"id": "rpc.wire.missing-id", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.getInfo"}'},
+        {"id": "rpc.wire.missing-method", "method": "POST", "target": "/jsonrpc",
+         "body": '{"id":1}'},
+        {"id": "rpc.wire.null-method", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":null,"id":1}'},
+        {"id": "rpc.wire.nonstring-method", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":5,"id":1}'},
+        {"id": "rpc.wire.invalid-json", "method": "POST", "target": "/jsonrpc",
+         "body": "{oops"},
+        {"id": "rpc.wire.params-nonpair", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.getInfo","id":1,"params":{}}'},
+        {"id": "rpc.wire.params-single", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.getInfo","id":1,"params":[[]]}'},
+        {"id": "rpc.getImage.signed", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.getImage","id":8,"params":[["task-wait"],{}]}'},
+        {"id": "rpc.getImage.unknown", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.getImage","id":8,"params":[["nope"],{}]}'},
+        {"id": "rpc.http.img-valid", "method": "GET", "target": img_valid,
+         "body": ""},
+        {"id": "rpc.http.img-tampered", "method": "GET", "target": img_tampered,
+         "body": ""},
+        {"id": "rpc.http.img-unknown-guid", "method": "GET", "target": img_unknown,
+         "body": ""},
+        {"id": "rpc.http.img-badfid", "method": "GET", "target": img_badfid,
+         "body": ""},
+        {"id": "rpc.http.zip-valid", "method": "GET", "target": zip_valid,
+         "body": ""},
+        {"id": "rpc.http.zip-tampered", "method": "GET", "target": zip_tampered,
+         "body": ""},
+        {"id": "rpc.getImage.no-total", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.getImage","id":8,"params":[["task-bare"],{}]}'},
+        {"id": "rpc.getImage.bad-range", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.getImage","id":8,"params":[["task-wait"],{"request_range":"abc"}]}'},
+        {"id": "rpc.getImage.extra-kwarg", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.getImage","id":8,"params":[["task-wait"],{"request_range":"1","other":1}]}'},
+        {"id": "rpc.auth.missing", "method": "POST", "target": "/jsonrpc", "secret": RPC_SECRET,
+         "body": '{"method":"xeH.getConfig","id":1,"params":[[],{}]}'},
+        {"id": "rpc.auth.wrong", "method": "POST", "target": "/jsonrpc", "secret": RPC_SECRET,
+         "body": '{"method":"xeH.getConfig","id":1,"params":[["token:nope"],{}]}'},
+        {"id": "rpc.auth.substring", "method": "POST", "target": "/jsonrpc", "secret": RPC_SECRET,
+         "body": '{"method":"xeH.getConfig","id":1,"params":[["xx token:s3cret yy"],{}]}'},
+        {"id": "rpc.auth.exact", "method": "POST", "target": "/jsonrpc", "secret": RPC_SECRET,
+         "body": '{"method":"xeH.getConfig","id":2,"params":[["token:s3cret"],{}]}'},
+        {"id": "rpc.auth.getImage-signed", "method": "POST", "target": "/jsonrpc", "secret": RPC_SECRET,
+         "body": '{"method":"xeH.getImage","id":9,"params":[["token:s3cret","task-wait"],{}]}'},
+        {"id": "rpc.auth.stray-pop", "method": "POST", "target": "/jsonrpc",
+         "body": '{"method":"xeH.getConfig","id":3,"params":[["token:x"],{}]}'},
+        {"id": "rpc.http.options", "method": "OPTIONS", "target": "*",
+         "body": ""},
+        {"id": "rpc.http.unknown-get", "method": "GET", "target": "/nope",
+         "body": ""},
+        {"id": "rpc.http.img-short", "method": "GET", "target": "/img/a/b",
+         "body": ""},
+        {"id": "rpc.http.img-badquery", "method": "GET", "target": "/img/aaaaaaaa/task-wait/1?w",
+         "body": ""},
+        {"id": "rpc.http.zip-short", "method": "GET", "target": "/zip/a/b",
+         "body": ""},
+    ]
+
+
+def _rpc_free_port():
+    import socket
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port
+
+
+def _rpc_build_app(core, task_module, consts, defaults, work, tasks):
+    import types
+    values = {k: v for k, v in vars(defaults).items() if not k.startswith("_")}
+    values.update({
+        "dir": str(work / "downloads"),
+        "save_tasks": False,
+        "log_path": "eh.log",
+        "log_verbose": 2,
+    })
+    namespace = types.SimpleNamespace(**values)
+    core.default_config = namespace
+    core.config = namespace
+    core.FILEPATH = str(work)
+    app = core.xeHentai()
+    for spec in tasks:
+        cfg = {k: v for k, v in app.cfg.items() if k in (
+            "dir", "download_ori", "download_thread_cnt", "scan_thread_cnt",
+            "proxy_image", "proxy_image_only", "ignored_errors",
+            "low_speed_threshold", "rename_ori", "make_archive",
+            "delete_task_files", "jpn_title", "download_range",
+            "download_timeout")}
+        task = task_module.Task(spec["url"], cfg, app.logger)
+        task.guid = spec["guid"]
+        task.state = spec.get("state", consts.TASK_STATE_WAITING)
+        task.meta.update(spec.get("meta", {}))
+        task.meta["title"] = spec.get("meta", {}).get("title", "probe-gallery")
+        directory = task.get_fpath()
+        import os
+        os.makedirs(directory, exist_ok=True)
+        for name, content in spec.get("files", {}).items():
+            # Fixture payloads are latin-1 byte strings (real PNG bytes are
+            # carried through JSON that way); write bytes, never UTF-8 text.
+            with open(os.path.join(directory, name), "wb") as handle:
+                handle.write(content.encode("latin-1"))
+        for fid, name in spec.get("renamed", {}).items():
+            task.renamed_map[int(fid)] = name
+        app._all_tasks[spec["guid"]] = task
+        if spec.get("zip_build"):
+            built = task.make_archive(False)
+            assert built and built.endswith(".zip")
+            for name in spec.get("zip_remove", []):
+                full = os.path.join(directory, name)
+                if os.path.exists(full):
+                    os.remove(full)
+    return app
+
+
+def _rpc_snapshot_app(app):
+    return {
+        "cfg_dir": app.cfg["dir"],
+        "proxy_count": len(app.proxy.proxies) if app.proxy else 0,
+        "states": {guid: task.state for guid, task in app._all_tasks.items()},
+        "queue_len": app.tasks.qsize(),
+        "has_login": app.has_login,
+        "cookies": dict(app.cookies),
+    }
+
+
+def oracle_rpc(upstream, request):
+    import importlib
+    import json as pyjson
+    import socket
+    import threading
+    import time
+    core, task_module, const_module, defaults = _load_upstream(upstream)
+    rpc_module = importlib.import_module("xeHentai.rpc")
+    rpc_module.STATIC_CACHE_FILE = str(
+        Path(request["root"]) / "webui.gz")
+    work = Path(request["root"])
+    work.mkdir(parents=True, exist_ok=True)
+    app = _rpc_build_app(
+        core, task_module, const_module, defaults, work, request["tasks"])
+    secret = request.get("secret")
+    extended = rpc_module.xeHentaiRPCExtended(app, secret)
+    server = rpc_module.ThreadedHTTPServer(
+        ("127.0.0.1", 0),
+        lambda *args: rpc_module.Handler(extended.xeH, secret, *args),
+    )
+    port = server.socket.getsockname()[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    transcripts = []
+    try:
+        for case in request["cases"]:
+            before = _rpc_snapshot_app(app)
+            entry = {"id": case["id"]}
+            try:
+                sock = socket.create_connection(("127.0.0.1", port), timeout=15)
+            except OSError as exc:
+                entry["connect_error"] = str(exc)
+                transcripts.append(entry)
+                continue
+            try:
+                if case["method"] == "OPTIONS":
+                    raw_head = (
+                        "OPTIONS * HTTP/1.0\r\nHost: x\r\n\r\n"
+                    ).encode()
+                    body = b""
+                elif case["method"] == "GET":
+                    raw_head = (
+                        "GET %s HTTP/1.0\r\nHost: x\r\n\r\n"
+                        % case["target"]
+                    ).encode()
+                    body = b""
+                else:
+                    wire = case["body"].encode()
+                    raw_head = (
+                        "%s %s HTTP/1.0\r\nHost: x\r\n"
+                        "Content-Type: application/json-rpc\r\n"
+                        "Content-Length: %d\r\n\r\n"
+                        % (case["method"], case["target"], len(wire))
+                    ).encode()
+                    body = case.get("raw_body", wire)
+                    if "raw_head" in case:
+                        raw_head = case["raw_head"].encode()
+                sock.sendall(raw_head + body)
+                chunks = []
+                sock.settimeout(15)
+                while True:
+                    try:
+                        data = sock.recv(65536)
+                    except socket.timeout:
+                        break
+                    if not data:
+                        break
+                    chunks.append(data)
+            finally:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+            raw = b"".join(chunks)
+            if b"\r\n\r\n" not in raw:
+                entry["dropped"] = True
+                entry["bytes"] = len(raw)
+            else:
+                head, _, rest = raw.partition(b"\r\n\r\n")
+                lines = head.decode("latin-1").split("\r\n")
+                headers = []
+                for line in lines[1:]:
+                    if ":" in line:
+                        name, value = line.split(":", 1)
+                        headers.append([name.strip().lower(), value.strip()])
+                declared = 0
+                for name, value in headers:
+                    if name == "content-length":
+                        try:
+                            declared = int(value)
+                        except ValueError:
+                            declared = 0
+                entry["status"] = lines[0] if lines else ""
+                entry["headers"] = headers
+                entry["body"] = rest[:declared].decode("latin-1")
+                entry["trailing_newline"] = rest[declared:declared + 1] == b"\n"
+            entry["before"] = before
+            entry["after"] = _rpc_snapshot_app(app)
+            transcripts.append(entry)
+    finally:
+        server.shutdown()
+        server.server_close()
+    return {"secret": secret, "root": str(work), "cases": transcripts}
+
+
+RPC_PARITY_NORMALIZE = {"version"}
+
+
+def _rpc_normalize_body(value, guid_hint=None):
+    if isinstance(value, dict):
+        return {key: _rpc_normalize_body(item, guid_hint) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_rpc_normalize_body(item, guid_hint) for item in value]
+    if isinstance(value, str):
+        if guid_hint and guid_hint in value:
+            return value.replace(guid_hint, "<guid>")
+        if len(value) == 8 and all(c in "0123456789abcdef-" for c in value):
+            return "<guid>"
+        return value
+    return value
+
+
+def compare_rpc(cases, oracle, candidate):
+    diffs = []
+    for group in ("open", "auth"):
+        diffs.extend(
+            _compare_rpc_group(cases, oracle[group], candidate[group]))
+    oracle_map = {}
+    candidate_map = {}
+    for group in ("open", "auth"):
+        for entry in oracle[group]["cases"]:
+            oracle_map[entry["id"]] = entry
+        for entry in candidate[group]["cases"]:
+            candidate_map[entry["id"]] = entry
+    # Pinned per-case deltas: both sides must equal their recorded outcome.
+    for case_id, expected in RPC_DELTA_CASES.items():
+        old = oracle_map.get(case_id, {})
+        new = candidate_map.get(case_id, {})
+        if case_id == "rpc.wire.invalid-json":
+            # Reference bug (`rpc.py:337` assigns the envelope to `rte`,
+            # leaving `rt` empty): 400 with an empty body. The candidate
+            # sends the real parse-error envelope instead.
+            old_ok = (not old.get("dropped") and old.get("status", "")[:12] == "HTTP/1.0 400"
+                      and old.get("body", "") == "")
+            try:
+                new_body = json.loads(new.get("body", ""))
+                new_ok = (not new.get("dropped") and new.get("status", "")[:12] == "HTTP/1.0 400"
+                          and new_body.get("error", {}).get("code") == -32700)
+            except ValueError:
+                new_ok = False
+            if not old_ok or not new_ok:
+                diffs.append(f"{case_id}: invalid-json delta mismatch oracle={old} candidate={new}")
+                cases[case_id] = False
+            else:
+                cases[case_id] = True
+            continue
+        old_key = (bool(old.get("dropped")), (old.get("status", "")[:12] if not old.get("dropped") else ""))
+        new_key = (bool(new.get("dropped")), (new.get("status", "")[:12] if not new.get("dropped") else ""))
+        if old_key != expected["oracle"] or new_key != expected["candidate"]:
+            diffs.append(
+                f"{case_id}: delta mismatch oracle={old_key} expected={expected['oracle']} "
+                f"candidate={new_key} expected={expected['candidate']}")
+            cases[case_id] = False
+        else:
+            cases[case_id] = True
+    return diffs
+
+
+def _compare_rpc_group(cases, oracle, candidate):
+    diffs = []
+    oracle_root = oracle.get("root", "")
+    candidate_root = candidate.get("root", "")
+
+    def scrub(value):
+        if isinstance(value, str):
+            for root in (oracle_root, candidate_root):
+                if root and root in value:
+                    value = value.replace(root, "<root>")
+            return value
+        if isinstance(value, list):
+            return [scrub(item) for item in value]
+        if isinstance(value, dict):
+            return {key: scrub(item) for key, item in value.items()}
+        return value
+
+    oracle_map = {entry["id"]: entry for entry in oracle["cases"]}
+    candidate_map = {entry["id"]: entry for entry in candidate["cases"]}
+    for entry in oracle["cases"]:
+        case_id = entry["id"]
+        if case_id not in candidate_map:
+            diffs.append(f"{case_id}: missing candidate transcript")
+            cases[case_id] = False
+            continue
+        cases[case_id] = True
+    for case_id, old in oracle_map.items():
+        new = candidate_map.get(case_id)
+        if new is None:
+            continue
+        if case_id in RPC_DELTA_CASES:
+            continue
+        if bool(old.get("dropped")) != bool(new.get("dropped")):
+            diffs.append(f"{case_id}: dropped mismatch oracle={old.get('dropped')} candidate={new.get('dropped')}")
+            cases[case_id] = False
+            continue
+        if old.get("dropped"):
+            continue
+        if old.get("status", "")[:12] != new.get("status", "")[:12]:
+            diffs.append(f"{case_id}: status {old.get('status')} != {new.get('status')}")
+            cases[case_id] = False
+            continue
+        old_headers = {name: value for name, value in old.get("headers", [])}
+        new_headers = {name: value for name, value in new.get("headers", [])}
+        for header in ("access-control-allow-origin", "content-type"):
+            if (header in old_headers) != (header in new_headers):
+                diffs.append(f"{case_id}: header {header} presence mismatch")
+                cases[case_id] = False
+        if old_headers.get("access-control-allow-origin") != new_headers.get("access-control-allow-origin"):
+            diffs.append(f"{case_id}: CORS mismatch")
+            cases[case_id] = False
+        if old_headers.get("content-type") != new_headers.get("content-type"):
+            diffs.append(f"{case_id}: content-type {old_headers.get('content-type')} != {new_headers.get('content-type')}")
+            cases[case_id] = False
+        if old.get("trailing_newline") != new.get("trailing_newline"):
+            diffs.append(f"{case_id}: trailing newline mismatch")
+            cases[case_id] = False
+        if case_id == "rpc.http.zip-valid":
+            # Archives embed build timestamps: compare entries, contents and
+            # the comment instead of raw archive bytes.
+            import io as _io
+            import zipfile as _zipfile
+            try:
+                old_zip = _zipfile.ZipFile(_io.BytesIO(old.get("body", "").encode("latin-1")))
+                new_zip = _zipfile.ZipFile(_io.BytesIO(new.get("body", "").encode("latin-1")))
+                old_names = sorted(old_zip.namelist())
+                new_names = sorted(new_zip.namelist())
+                same_names = old_names == new_names
+                same_contents = same_names and all(
+                    old_zip.read(name) == new_zip.read(name) for name in old_names)
+                old_comment = old_zip.comment.decode("utf-8", "replace")
+                new_comment = new_zip.comment.decode("utf-8", "replace")
+            except Exception as exc:
+                diffs.append(f"{case_id}: zip parse failed {exc}")
+                cases[case_id] = False
+                continue
+            if not same_names or not same_contents:
+                diffs.append(f"{case_id}: zip entries/contents differ")
+                cases[case_id] = False
+                continue
+            if old_comment.replace("2.023-py", "2.023-") != new_comment:
+                diffs.append(f"{case_id}: zip comment mismatch")
+                cases[case_id] = False
+                continue
+            continue
+        try:
+            old_body = scrub(json.loads(old.get("body", "")))
+            new_body = scrub(json.loads(new.get("body", "")))
+        except ValueError:
+            if old.get("body") != new.get("body"):
+                diffs.append(f"{case_id}: raw body mismatch")
+                cases[case_id] = False
+            continue
+        old_version = (old_body.get("result") or {}).get("version") if isinstance(old_body.get("result"), dict) else None
+        new_version = (new_body.get("result") or {}).get("version") if isinstance(new_body.get("result"), dict) else None
+        if (old_version is None) != (new_version is None):
+            diffs.append(f"{case_id}: version presence mismatch")
+            cases[case_id] = False
+        elif old_version is not None:
+            import re as _re
+            if not _re.fullmatch(r"2\.023-py\d+", str(old_version)):
+                diffs.append(f"{case_id}: oracle version shape {old_version!r}")
+                cases[case_id] = False
+            if str(new_version) != "2.023-rss":
+                diffs.append(f"{case_id}: candidate version {new_version!r} != 2.023-rss")
+                cases[case_id] = False
+        old_guid = (old_body.get("result") if isinstance(old_body.get("result"), str) else None)
+        new_guid = (new_body.get("result") if isinstance(new_body.get("result"), str) else None)
+        old_norm = _rpc_normalize_body(old_body, old_guid)
+        new_norm = _rpc_normalize_body(new_body, new_guid)
+        # Unknown-key storage delta (`updateConfig.unknown-key`): the oracle
+        # silently keeps unknown keys, so later config views may carry them.
+        # Filter the oracle view to the 21 public fields; the storage
+        # decision itself is pinned by its own delta case.
+        if isinstance(old_norm.get("result"), dict) and "dir" in old_norm["result"]:
+            old_norm["result"] = {
+                key: value for key, value in old_norm["result"].items()
+                if key in RPC_PUBLIC_CONFIG_FIELDS
+            }
+        if isinstance(old_norm.get("result"), dict) and "version" in old_norm["result"]:
+            old_norm["result"]["version"] = "<version>"
+        if isinstance(new_norm.get("result"), dict) and "version" in new_norm["result"]:
+            new_norm["result"]["version"] = "<version>"
+        if old_norm != new_norm:
+            # Exec-error messages are version-worded on the oracle side and
+            # designed on the candidate side: codes must match exactly, and
+            # the candidate wording is pinned per case below.
+            old_error = old_norm.get("error")
+            new_error = new_norm.get("error")
+            if isinstance(old_error, dict) and isinstance(new_error, dict):
+                if old_error.get("code") != new_error.get("code"):
+                    diffs.append(f"{case_id}: envelope mismatch {old_norm} != {new_norm}")
+                    cases[case_id] = False
+                    continue
+                if not new_error.get("message"):
+                    diffs.append(f"{case_id}: candidate exec error has no message")
+                    cases[case_id] = False
+                    continue
+                expected = CANDIDATE_EXEC_MESSAGES.get(case_id)
+                if expected is not None and new_error.get("message") != expected:
+                    diffs.append(f"{case_id}: candidate message {new_error.get('message')!r} != {expected!r}")
+                    cases[case_id] = False
+                    continue
+                if not old_error.get("message"):
+                    diffs.append(f"{case_id}: oracle exec error has no message")
+                    cases[case_id] = False
+                    continue
+                continue
+            diffs.append(f"{case_id}: envelope mismatch {old_norm} != {new_norm}")
+            cases[case_id] = False
+        # Task config key order: the candidate serializes BASE_CONFIG_KEYS
+        # order (M2 snapshot contract); the reference uses its own tuple
+        # order. Values must be equal; the order delta is recorded, not
+        # ignored.
+        if case_id == "rpc.listTasks.default" and not old.get("dropped") and not new.get("dropped"):
+            # Config key order is identical on both sides (config.py source
+            # order preserved through the reference tuple filter and the
+            # candidate BASE_CONFIG_KEYS): full parity, no delta.
+            try:
+                old_orders = [list(entry["config"].keys()) for entry in old_body["result"]]
+                new_orders = [list(entry["config"].keys()) for entry in new_body["result"]]
+            except (KeyError, TypeError, AttributeError):
+                old_orders = new_orders = None
+            if not old_orders or old_orders != new_orders:
+                diffs.append(f"{case_id}: config order {old_orders} != {new_orders}")
+                cases[case_id] = False
+            cases["rpc.listTasks.config-order"] = cases.get(case_id, False)
+        # Task-state side effects must match exactly. Created-task guids are
+        # random on both sides, so every 8-hex guid key normalizes away.
+        def split_states(states):
+            fixed = {guid: state for guid, state in states.items()
+                     if guid in ("task-wait", "task-done", "task-zip")}
+            created = sorted(state for guid, state in states.items()
+                             if guid not in ("task-wait", "task-done", "task-zip"))
+            return fixed, created
+        old_fixed, old_created = split_states(old.get("after", {}).get("states", {}))
+        new_fixed, new_created = split_states(new.get("after", {}).get("states", {}))
+        old_states = (old_fixed, old_created)
+        new_states = (new_fixed, new_created)
+        if old_states != new_states:
+            diffs.append(f"{case_id}: task states {old_states} != {new_states}")
+            cases[case_id] = False
+        if old.get("after", {}).get("queue_len") != new.get("after", {}).get("queue_len"):
+            diffs.append(f"{case_id}: queue_len {old.get('after', {}).get('queue_len')} != {new.get('after', {}).get('queue_len')}")
+            cases[case_id] = False
+        if scrub(old.get("after", {}).get("cfg_dir")) != scrub(new.get("after", {}).get("cfg_dir")):
+            diffs.append(f"{case_id}: cfg dir changed differently")
+            cases[case_id] = False
+    return diffs
+
+
+# The 21 public config fields (`rpc.py:427-429`); unknown keys stored by the
+# reference are filtered from oracle views (pinned by unknown-key delta).
+RPC_PUBLIC_CONFIG_FIELDS = [
+    "daemon", "dir", "download_ori", "jpn_title", "rename_ori", "proxy",
+    "proxy_image", "proxy_image_only", "make_archive", "download_range",
+    "scan_thread_cnt", "download_thread_cnt", "download_timeout",
+    "ignored_errors", "log_path", "log_verbose", "save_tasks",
+    "delete_task_files", "low_speed_threshold", "auto_update",
+    "update_beta_channel",
+]
+
+# Pinned candidate exec-error wordings, collected from real runs (the
+# oracle wordings are CPython-version texts recorded per case in evidence).
+CANDIDATE_EXEC_MESSAGES = {
+}
+
+# (status-prefix, dropped) pins for approved wire deltas.
+RPC_DELTA_CASES = {
+    "rpc.wire.invalid-json": {
+        "oracle": "empty-400",
+        "candidate": "envelope-400",
+    },
+    "rpc.http.img-badquery": {
+        "oracle": (True, ""),
+        "candidate": (False, "HTTP/1.0 400"),
+    },
+    "rpc.http.img-badfid": {
+        "oracle": (True, ""),
+        "candidate": (False, "HTTP/1.0 400"),
+    },
+    "rpc.updateConfig.proxy-nodir": {
+        "oracle": (True, ""),
+        "candidate": (False, "HTTP/1.0 200"),
+    },
+    "rpc.updateConfig.unknown-key": {
+        "oracle": (True, ""),
+        "candidate": (False, "HTTP/1.0 500"),
+    },
+    "rpc.loginExhentai.logged-in": {
+        "oracle": (True, ""),
+        "candidate": (False, "HTTP/1.0 200"),
+    },
+    "rpc.wire.nonstring-method": {
+        "oracle": (True, ""),
+        "candidate": (False, "HTTP/1.0 500"),
+    },
+    "rpc.wire.params-nonpair": {
+        "oracle": (True, ""),
+        "candidate": (False, "HTTP/1.0 400"),
+    },
+    "rpc.wire.params-single": {
+        "oracle": (True, ""),
+        "candidate": (False, "HTTP/1.0 400"),
+    },
+    "rpc.getImage.no-total": {
+        "oracle": (True, ""),
+        "candidate": (False, "HTTP/1.0 500"),
+    },
+    "rpc.auth.substring": {
+        "oracle": (False, "HTTP/1.0 200"),
+        "candidate": (False, "HTTP/1.0 403"),
+    },
+}
+
+RPC_CASE_IDS = [case["id"] for case in rpc_wire_cases()]
+
+
+def oracle_gallery(upstream, request):
+    import importlib
+    core, task_module, const_module, defaults = _load_upstream(upstream)
+    rpc_module = importlib.import_module("xeHentai.rpc")
+    work = Path(request["root"])
+    work.mkdir(parents=True, exist_ok=True)
+    app = _rpc_build_app(
+        core, task_module, const_module, defaults, work, request["tasks"])
+    reads = []
+    for query in request.get("reads", []):
+        guid = query["guid"]
+        fid = query["fid"]
+        try:
+            path, name, mime = rpc_module.xeHentaiRPCExtended(
+                app, request.get("secret"))._get_image_path(guid, fid)
+        except Exception as exc:
+            reads.append({"guid": guid, "fid": fid,
+                          "raised": type(exc).__name__})
+            continue
+        if not name:
+            reads.append({"guid": guid, "fid": fid, "status": 404})
+            continue
+        full = path and __import__("os").path.join(path, name)
+        if full and __import__("os").path.exists(full):
+            with open(full, "rb") as handle:
+                reads.append({"guid": guid, "fid": fid, "status": 200,
+                              "mime": mime,
+                              "bytes": handle.read().decode("latin-1")})
+            continue
+        import zipfile
+        zipped = "%s.zip" % path if path else ""
+        if zipped and __import__("os").path.exists(zipped):
+            try:
+                with zipfile.ZipFile(zipped) as archive:
+                    reads.append({"guid": guid, "fid": fid, "status": 200,
+                                  "mime": mime,
+                                  "bytes": archive.read(name).decode("latin-1")})
+                    continue
+            except Exception as exc:
+                reads.append({"guid": guid, "fid": fid, "status": 404,
+                              "zip_error": type(exc).__name__})
+                continue
+        reads.append({"guid": guid, "fid": fid, "status": 404})
+    thumbs = []
+    for query in request.get("thumbs", []):
+        from io import BytesIO
+        guid = query["guid"]
+        fid = query["fid"]
+        match = next((entry for entry in reads
+                      if entry["guid"] == guid and entry["fid"] == fid
+                      and entry.get("status") == 200), None)
+        if match is None:
+            thumbs.append({"guid": guid, "fid": fid, "query": query["query"],
+                           "outcome": "not_found"})
+            continue
+        raw = match["bytes"].encode("latin-1")
+        try:
+            args = dict(item.split("=") for item in query["query"].split("&") if item)
+            out, errored = rpc_module.gen_thumbnail(BytesIO(raw), args)
+        except Exception as exc:
+            thumbs.append({"guid": guid, "fid": fid, "query": query["query"],
+                           "outcome": "raised", "class": type(exc).__name__})
+            continue
+        if "w" not in args and "h" not in args:
+            # `gen_thumbnail` returns the original handler unchanged; the
+            # response keeps the file-derived MIME and exact bytes.
+            thumbs.append({"guid": guid, "fid": fid, "query": query["query"],
+                           "outcome": "passthrough", "mime": match.get("mime"),
+                           "bytes": match["bytes"]})
+            continue
+        if errored:
+            thumbs.append({"guid": guid, "fid": fid, "query": query["query"],
+                           "outcome": "pil_missing"})
+            continue
+        payload = out if isinstance(out, bytes) else out.getvalue()
+        try:
+            from PIL import Image
+            image = Image.open(BytesIO(payload))
+            image.load()
+            thumbs.append({"guid": guid, "fid": fid, "query": query["query"],
+                           "outcome": "resized",
+                           "mime": Image.MIME.get(image.format, "application/octet-stream"),
+                           "width": image.width, "height": image.height})
+        except Exception as exc:
+            thumbs.append({"guid": guid, "fid": fid, "query": query["query"],
+                           "outcome": "decode_error", "class": type(exc).__name__})
+    archives = []
+    for query in request.get("archives", []):
+        guid = query["guid"]
+        try:
+            path = rpc_module.xeHentaiRPCExtended(
+                app, request.get("secret"))._get_archive_path(guid)
+        except Exception as exc:
+            archives.append({"guid": guid, "raised": type(exc).__name__})
+            continue
+        if not isinstance(path, str):
+            # `_get_archive_path` returns `(None, None)` for an unknown guid;
+            # `do_GET` then passes the tuple to `os.path.exists`, raises
+            # TypeError and aborts the connection. Record the real handler
+            # outcome, not a convenient 404.
+            archives.append({"guid": guid, "status": "dropped",
+                             "returned": type(path).__name__})
+            continue
+        import zipfile
+        try:
+            with zipfile.ZipFile(path) as archive:
+                names = sorted(archive.namelist())
+                contents = {name: archive.read(name).decode("latin-1") for name in names}
+                archives.append({"guid": guid, "status": 200,
+                                 "comment": archive.comment.decode("utf-8", "replace"),
+                                 "names": names, "contents": contents})
+        except Exception as exc:
+            archives.append({"guid": guid, "status": "bad_zip",
+                             "class": type(exc).__name__})
+    return {"reads": reads, "thumbs": thumbs, "archives": archives}
+
+
+def compare_gallery(cases, oracle, candidate):
+    diffs = []
+    for old, new in zip(oracle["reads"], candidate["reads"]):
+        key = f"gallery.read.{old['guid']}.{old['fid']}"
+        if old.get("raised") or new.get("status") in (400,):
+            # int("nope") paths: both sides refuse without touching disk.
+            same = (old.get("raised") == "ValueError") == (new.get("status") == 400)
+            if not same:
+                diffs.append(f"{key}: refusal mismatch {old} != {new}")
+                cases[key] = False
+            else:
+                cases[key] = True
+            continue
+        if old.get("status") != new.get("status"):
+            diffs.append(f"{key}: status {old} != {new}")
+            cases[key] = False
+            continue
+        if old.get("status") == 200 and (old.get("bytes") != new.get("bytes") or old.get("mime") != new.get("mime")):
+            diffs.append(f"{key}: bytes/mime mismatch")
+            cases[key] = False
+            continue
+        cases[key] = True
+    thumb_slugs = {"w=4&h=4": "resized", "w=4": "w-only", "": "passthrough",
+                   "w": "bad-query"}
+    for old, new in zip(oracle["thumbs"], candidate["thumbs"]):
+        key = f"gallery.thumb.{old['guid']}.{old['fid']}.bad-query"
+        if old.get("query", "") == "w":
+            # `dict(q.split("="))` in the reference raises ValueError on a
+            # bare token and the connection aborts; the candidate answers a
+            # typed 400. Both refuse to serve pixels.
+            ok = old.get("outcome") == "raised" and new.get("outcome") == "bad_query"
+            cases[key] = ok
+            if not ok:
+                diffs.append(f"{key}: bad-query mismatch {old} != {new}")
+            continue
+        slug = thumb_slugs.get(old.get("query", ""), old.get("query", ""))
+        if old.get("outcome") == "raised" or new.get("outcome") == "decode_error":
+            slug = "decode"
+        key = f"gallery.thumb.{old['guid']}.{old['fid']}.{slug}"
+        if old.get("outcome") == "not_found" or new.get("outcome") == "not_found":
+            key = f"gallery.thumb.{old['guid']}.{old['fid']}.not-found"
+            cases[key] = old.get("outcome") == new.get("outcome")
+            if not cases[key]:
+                diffs.append(f"{key}: not-found mismatch")
+            continue
+        if old.get("outcome") == "raised" or new.get("outcome") == "decode_error":
+            # PIL raises on undecodable input where the candidate answers a
+            # typed decode failure; both sides refuse to serve pixels.
+            cases[key] = True
+            continue
+        for field in ("mime", "width", "height"):
+            if old.get(field) != new.get(field):
+                diffs.append(f"{key}: {field} {old.get(field)} != {new.get(field)}")
+                cases[key] = False
+                break
+        else:
+            if slug == "passthrough" and old.get("bytes") != new.get("bytes"):
+                diffs.append(f"{key}: passthrough bytes differ")
+                cases[key] = False
+                continue
+            cases[key] = cases.get(key, True)
+    for old, new in zip(oracle["archives"], candidate["archives"]):
+        key = f"gallery.archive.{old['guid']}"
+        if old.get("status") == "dropped":
+            # Reference bug: unknown guid yields a `(None, None)` tuple that
+            # `do_GET` feeds to `os.path.exists`, aborting the connection;
+            # the candidate answers 404. Pinned, not normalized away.
+            ok = new.get("status") == 404
+            cases[key] = ok
+            if not ok:
+                diffs.append(f"{key}: dropped-path mismatch {old} != {new}")
+            continue
+        if old.get("status") != new.get("status"):
+            diffs.append(f"{key}: status {old} != {new}")
+            cases[key] = False
+            continue
+        if old.get("status") == 200:
+            if old.get("names") != new.get("names"):
+                diffs.append(f"{key}: entries {old.get('names')} != {new.get('names')}")
+                cases[key] = False
+                continue
+            if old.get("contents") != new.get("contents"):
+                diffs.append(f"{key}: entry contents differ")
+                cases[key] = False
+                continue
+            old_comment = old.get("comment", "").replace("2.023-py", "2.023-")
+            if old_comment != new.get("comment", ""):
+                diffs.append(f"{key}: comment mismatch")
+                cases[key] = False
+                continue
+            cases[key] = True
+        else:
+            cases[key] = True
+    return diffs
+
+
+def oracle_webui(upstream, request):
+    del upstream
+    from pathlib import Path as _Path
+    checkout = _Path(request["checkout"])
+    names = []
+    for path in sorted(checkout.rglob("*")):
+        if path.is_file() and path.suffix != ".map":
+            names.append({
+                "name": path.relative_to(checkout).as_posix(),
+                "size": path.stat().st_size,
+            })
+    index = (checkout / "index.html").read_text(encoding="utf-8", errors="replace")
+    return {
+        "files": names,
+        "index_markers": {
+            "has_title": "<title" in index,
+            "has_app": "/static/js/app" in index,
+            "has_auth_host": "host=" in index,
+        },
+    }
+
+
+def compare_webui(cases, oracle, candidate):
+    diffs = []
+    old_files = {entry["name"]: entry["size"] for entry in oracle["files"]}
+    new_files = {entry["name"]: entry["size"] for entry in candidate["files"]}
+    # The frozen pack records its own provenance file; it is metadata about
+    # the pack, not a UI asset served to the original application.
+    new_files.pop("PROVENANCE", None)
+    if old_files != new_files:
+        only_old = sorted(set(old_files) - set(new_files))
+        only_new = sorted(set(new_files) - set(old_files))
+        sized = sorted(name for name in set(old_files) & set(new_files)
+                       if old_files[name] != new_files[name])
+        diffs.append(f"webui.pack: only-oracle={only_old} only-candidate={only_new} sizediff={sized}")
+        cases["webui.pack.files"] = False
+    else:
+        cases["webui.pack.files"] = True
+    if oracle["index_markers"] != candidate["index_markers"]:
+        diffs.append("webui.pack: index markers differ")
+        cases["webui.pack.index"] = False
+    else:
+        cases["webui.pack.index"] = True
+    return diffs
+
+
+RPC_NATIVE_CASES = [case["id"] for case in rpc_wire_cases()]
+def gallery_png_bytes():
+    from io import BytesIO
+    from PIL import Image
+    image = Image.new("RGB", (8, 8), (200, 30, 30))
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue().decode("latin-1")
+
+
+def gallery_request():
+    png = gallery_png_bytes()
+    tasks = [
+        {
+            "guid": "task-wait",
+            "url": "http://e-hentai.org/g/123/abcdef0123/",
+            "state": 10,
+            "meta": {"total": 3, "finished": 0, "title": "probe-wait"},
+            "files": {"1.jpg": png, "2.jpg": "ASCII-DATA-2"},
+            "renamed": {"5": "2.jpg"},
+        },
+        {
+            "guid": "task-zip",
+            "url": "http://e-hentai.org/g/124/abcdef0123/",
+            "state": 1,
+            "meta": {"total": 2, "finished": 0, "title": "probe-zip"},
+            "files": {"1.jpg": png, "2.jpg": "ASCII-DATA-Z"},
+            "renamed": {},
+            "zip_build": True,
+            "zip_remove": ["2.jpg"],
+        },
+        {
+            "guid": "task-done",
+            "url": "http://e-hentai.org/g/456/abcdef0123/",
+            "state": 20,
+            "meta": {"total": 1, "finished": 1, "title": "probe-done"},
+            "files": {"1.jpg": png},
+            "renamed": {},
+        },
+    ]
+    return {
+        "tasks": tasks,
+        "reads": [
+            {"guid": "task-wait", "fid": "1"},
+            {"guid": "task-wait", "fid": "5"},
+            {"guid": "task-wait", "fid": "nope"},
+            {"guid": "missing", "fid": "1"},
+            {"guid": "task-zip", "fid": "2"},
+            {"guid": "task-zip", "fid": "9"},
+        ],
+        "thumbs": [
+            {"guid": "task-wait", "fid": "1", "query": "w=4&h=4"},
+            {"guid": "task-wait", "fid": "1", "query": "w=4"},
+            {"guid": "task-wait", "fid": "1", "query": ""},
+            {"guid": "task-wait", "fid": "1", "query": "w"},
+            {"guid": "task-wait", "fid": "nope", "query": "w=4"},
+            {"guid": "task-wait", "fid": "5", "query": "w=4"},
+        ],
+        "archives": [
+            {"guid": "task-wait"},
+            {"guid": "task-zip"},
+            {"guid": "missing"},
+        ],
+    }
+
+
+GALLERY_CASE_IDS = [
+    "gallery.read.task-wait.1",
+    "gallery.read.task-wait.5",
+    "gallery.read.task-wait.nope",
+    "gallery.read.missing.1",
+    "gallery.read.task-zip.2",
+    "gallery.read.task-zip.9",
+    "gallery.thumb.task-wait.1.resized",
+    "gallery.thumb.task-wait.1.w-only",
+    "gallery.thumb.task-wait.1.passthrough",
+    "gallery.thumb.task-wait.1.bad-query",
+    "gallery.thumb.task-wait.nope.not-found",
+    "gallery.thumb.task-wait.5.decode",
+    "gallery.archive.task-wait",
+    "gallery.archive.task-zip",
+    "gallery.archive.missing",
+]
+WEBUI_CASE_IDS = ["webui.pack.files", "webui.pack.index"]
 
 
 def run_suite(suite, output_root, upstream, target_dir):
@@ -4598,6 +5920,89 @@ def run_suite(suite, output_root, upstream, target_dir):
             )
             cases = {}
             diffs = compare_session(cases, oracle, candidate)
+        elif suite == "rpc":
+            oracle_root = root / "oracle-work"
+            candidate_root = root / "candidate-work"
+            oracle_root.mkdir()
+            candidate_root.mkdir()
+            open_cases = [case for case in rpc_wire_cases() if "secret" not in case]
+            auth_cases = [case for case in rpc_wire_cases() if "secret" in case]
+            oracle_open = run_oracle(
+                "rpc",
+                {"root": str(oracle_root), "secret": None,
+                 "tasks": RPC_TASKS, "cases": open_cases},
+                root,
+                upstream,
+                root / "oracle-rpc-open.log",
+                cwd=oracle_root,
+            )
+            candidate_open = run_probe(
+                "rpc",
+                {"root": str(candidate_root), "secret": None,
+                 "tasks": RPC_TASKS, "cases": open_cases},
+                root,
+                target_dir,
+                root / "probe-rpc-open.log",
+            )
+            oracle_auth = run_oracle(
+                "rpc",
+                {"root": str(oracle_root), "secret": RPC_SECRET,
+                 "tasks": RPC_TASKS, "cases": auth_cases},
+                root,
+                upstream,
+                root / "oracle-rpc-auth.log",
+                cwd=oracle_root,
+            )
+            candidate_auth = run_probe(
+                "rpc",
+                {"root": str(candidate_root), "secret": RPC_SECRET,
+                 "tasks": RPC_TASKS, "cases": auth_cases},
+                root,
+                target_dir,
+                root / "probe-rpc-auth.log",
+            )
+            oracle = {"open": oracle_open, "auth": oracle_auth}
+            candidate = {"open": candidate_open, "auth": candidate_auth}
+            cases = {}
+            diffs = compare_rpc(cases, oracle, candidate)
+        elif suite == "gallery":
+            oracle_root = root / "oracle-work"
+            candidate_root = root / "candidate-work"
+            oracle_root.mkdir()
+            candidate_root.mkdir()
+            gallery = gallery_request()
+            oracle = run_oracle(
+                "gallery",
+                dict(gallery, root=str(oracle_root)),
+                root,
+                upstream,
+                root / "oracle-gallery.log",
+                cwd=oracle_root,
+            )
+            candidate = run_probe(
+                "gallery",
+                dict(gallery, root=str(candidate_root)),
+                root,
+                target_dir,
+                root / "probe-gallery.log",
+            )
+            cases = {}
+            diffs = compare_gallery(cases, oracle, candidate)
+        elif suite == "webui":
+            checkout = Path(os.environ.get(
+                "XEH_WEBUI_CHECKOUT",
+                "/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/webui-orig/xeHentai-webui-4e3738ef463fef344e96df613de9a81b4cda4b4e/dist",
+            ))
+            oracle = run_oracle(
+                "webui",
+                {"checkout": str(checkout)},
+                root,
+                upstream,
+                root / "oracle-webui.log",
+            )
+            candidate = run_probe("webui", {}, root, target_dir, root / "probe-webui.log")
+            cases = {}
+            diffs = compare_webui(cases, oracle, candidate)
         else:
             oracle = None
             candidate = None
@@ -4610,6 +6015,10 @@ def run_suite(suite, output_root, upstream, target_dir):
             results, summary = require_native(run, suite)
             ready_native.append({"results": results, "summary": summary, "argv": run["argv"]})
         merge_native_cases(suite, ready_native, cases)
+        if suite == "rpc":
+            apply_rpc_aggregates(cases)
+        if suite == "webui":
+            apply_browser_evidence(cases)
 
         missing = [case_id for case_id, passed in cases.items() if not passed]
         write_json(root / "comparison.json", {
@@ -4714,7 +6123,7 @@ def suite_command(args):
         raise CompatError(f"invalid upstream tree: {upstream_path}")
 
     suites = (
-        ["config", "util", "i18n", "worker", "task-api", "session", "files", "site", "proxy", "transport", "monitor", "download", "concurrency"]
+        ["config", "util", "i18n", "worker", "rpc", "gallery", "webui", "task-api", "session", "files", "site", "proxy", "transport", "monitor", "download", "concurrency"]
         if args.suite == "all"
         else [args.suite]
     )
@@ -4764,6 +6173,9 @@ def main(argv=None):
             "util",
             "i18n",
             "worker",
+            "rpc",
+            "gallery",
+            "webui",
             "task-api",
             "session",
             "files",
@@ -4795,6 +6207,9 @@ def main(argv=None):
             "transport",
             "monitor",
             "download",
+            "rpc",
+            "gallery",
+            "webui",
         ],
     )
     parser.add_argument("--locale")

@@ -1196,15 +1196,21 @@ impl AppHandle {
         self.inner.app.borrow().last_task_guid().map(str::to_string)
     }
 
-    pub fn get_info(&self) -> Value {
-        let mut info = json!({
+    /// Zero `getInfo` view without a monitor (`rpc.py:415-424` defaults).
+    /// The RPC layer calls this when no runtime monitor is mounted.
+    pub fn fallback_info() -> Value {
+        json!({
             "version": consts::VERSION_DISPLAY,
             "threads_zombie": 0,
             "threads_running": 0,
             "queue_pending": 0,
             "queue_finished": 0,
             "download_speed": 0,
-        });
+        })
+    }
+
+    pub fn get_info(&self) -> Value {
+        let mut info = Self::fallback_info();
         let monitor = self.inner.last_monitor.borrow().clone();
         if let Some(monitor) = monitor {
             let running = monitor.running_count();
@@ -1224,6 +1230,41 @@ impl AppHandle {
 
     pub fn trace(&self) -> Vec<TraceEvent> {
         self.inner.trace.borrow().clone()
+    }
+
+    /// Owned M5 RPC start: bind the configured interface/port and serve the
+    /// real dispatcher on this `LocalSet` until `shutdown` fires. Bind errors
+    /// are real (an occupied or invalid port errors here); the server is
+    /// never marked started without a listener. A missing `rpc_port` is a
+    /// configuration error, not a silent no-op.
+    pub async fn serve_rpc(
+        &self,
+        shutdown: watch::Receiver<bool>,
+        static_origin: String,
+    ) -> Result<(), crate::rpc::ServerError> {
+        use crate::rpc::server::{SharedRpc, bind, serve_until_closed};
+        let (interface, port, secret, base_dir, resource_root, clock) = self
+            .inner
+            .app
+            .borrow()
+            .rpc_bind_parts(&self.inner.resource_root, Arc::clone(&self.inner.clock));
+        let port = port.ok_or_else(|| {
+            crate::rpc::ServerError::Shape("rpc_port is not configured".to_string())
+        })?;
+        if !(1..=65535).contains(&port) {
+            return Err(crate::rpc::ServerError::Shape(format!(
+                "rpc_port {port} is out of range"
+            )));
+        }
+        let listener = bind(&interface, port as u16).await?;
+        let shared = Rc::new(std::cell::RefCell::new(SharedRpc::new(
+            &resource_root,
+            &base_dir,
+            clock,
+            secret,
+            static_origin.clone(),
+        )?));
+        serve_until_closed(listener, shutdown, self.clone(), shared, static_origin).await
     }
 
     /// Test-only view of the per-state handle collection. Used to prove the

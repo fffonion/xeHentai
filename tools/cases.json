@@ -1541,7 +1541,7 @@
       "assertions": [
         "success, error, missing param, token and HTTP behaviour compared"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1553,7 +1553,7 @@
       "assertions": [
         "success, error, missing param, token and HTTP behaviour compared"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1565,7 +1565,7 @@
       "assertions": [
         "success, error, missing param, token and HTTP behaviour compared"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1577,7 +1577,7 @@
       "assertions": [
         "success, error, missing param, token and HTTP behaviour compared"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1589,7 +1589,7 @@
       "assertions": [
         "success, error, missing param, token and HTTP behaviour compared"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1601,7 +1601,7 @@
       "assertions": [
         "success, error, missing param, token and HTTP behaviour compared"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1613,7 +1613,7 @@
       "assertions": [
         "success, error, missing param, token and HTTP behaviour compared"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1625,7 +1625,7 @@
       "assertions": [
         "success, error, missing param, token and HTTP behaviour compared"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1637,7 +1637,7 @@
       "assertions": [
         "success, error, missing param, token and HTTP behaviour compared"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1649,7 +1649,7 @@
       "assertions": [
         "success, error, missing param, token and HTTP behaviour compared"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1661,7 +1661,7 @@
       "assertions": [
         "success, error, missing param, token and HTTP behaviour compared"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1673,7 +1673,7 @@
       "assertions": [
         "success, error, missing param, token and HTTP behaviour compared"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1685,7 +1685,7 @@
       "assertions": [
         "success, error, missing param, token and HTTP behaviour compared"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -2590,7 +2590,7 @@
       "assertions": [
         "real browser flow and HTTP trace"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -2602,7 +2602,7 @@
       "assertions": [
         "real browser flow and HTTP trace"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -2614,7 +2614,7 @@
       "assertions": [
         "real browser flow and HTTP trace"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -3357,6 +3357,1339 @@
       "assertions": [
         "scan_thread_cnt/download_thread_cnt snapshots independently bound real overlap."
       ],
+      "delta": null
+    },
+    {
+      "id": "rpc.getConfig.ok",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.getConfig.ok matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.getConfig.id-zero",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.getConfig.id-zero matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.getConfig.id-false",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.getConfig.id-false matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.getConfig.extra-arg",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.getConfig.extra-arg matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.getInfo.ok",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.getInfo.ok matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.getInfo.extra-kwarg",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.getInfo.extra-kwarg matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.listTasks.default",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.listTasks.default matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.listTasks.positional",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.listTasks.positional matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.listTasks.keyword",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.listTasks.keyword matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.listTasks.negation",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.listTasks.negation matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.listTasks.invalid",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.listTasks.invalid matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.listTasks.nonstring",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.listTasks.nonstring matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": "both sides answer 500 exec error: the reference TypeErrors in the open-server stray-token pop ('token:' in non-string), the candidate rejects non-string levels; messages differ"
+    },
+    {
+      "id": "rpc.listTasks.null",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.listTasks.null matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": "both sides answer 500 exec error: the reference TypeErrors in the open-server stray-token pop ('token:' in non-string), the candidate rejects non-string levels; messages differ"
+    },
+    {
+      "id": "rpc.listTasks.duplicate",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.listTasks.duplicate matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.listTasks.extra-kwarg",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.listTasks.extra-kwarg matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.addTask.ok",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.addTask.ok matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.addTask.missing",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.addTask.missing matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.addTask.extra",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.addTask.extra matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.addTask.bad-url",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.addTask.bad-url matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.addTask.exh-no-login",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.addTask.exh-no-login matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.pauseTask.unknown",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.pauseTask.unknown matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.pauseTask.missing",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.pauseTask.missing matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.delTask.running",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.delTask.running matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.delTask.unknown",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.delTask.unknown matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.updateConfig.noop",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.updateConfig.noop matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.updateConfig.proxy-dir",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.updateConfig.proxy-dir matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.updateConfig.proxy-nodir",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.updateConfig.proxy-nodir matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": "reference raises KeyError on cfg_dict['dir'] after in-memory cfg+pool side effects and drops the connection; candidate applies the update and answers 200 getConfig view"
+    },
+    {
+      "id": "rpc.updateConfig.unknown-key",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.updateConfig.unknown-key matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": "reference dict.update silently stores unknown keys; candidate rejects with 500 exec error (typed config)"
+    },
+    {
+      "id": "rpc.saveSession.ok",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.saveSession.ok matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.loadSession.ok",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.loadSession.ok matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.setCookie.login",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.setCookie.login matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.addTask.exh-logged-in",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.addTask.exh-logged-in matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.loginExhentai.logged-in",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.loginExhentai.logged-in matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": "reference returns None and drops the connection (NoneType subscript); candidate answers 200 true"
+    },
+    {
+      "id": "rpc.method.unknown",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.method.unknown matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.method.private",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.method.private matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.method.other-prefix",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.method.other-prefix matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.wire.missing-id",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.wire.missing-id matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.wire.missing-method",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.wire.missing-method matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.wire.null-method",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.wire.null-method matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.wire.nonstring-method",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.wire.nonstring-method matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": "reference drops the connection (re.findall TypeError outside catch); candidate answers 500 exec error"
+    },
+    {
+      "id": "rpc.wire.invalid-json",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.wire.invalid-json matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.wire.params-nonpair",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.wire.params-nonpair matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": "reference drops the connection (KeyError/IndexError outside catch); candidate answers 400 invalid request"
+    },
+    {
+      "id": "rpc.wire.params-single",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.wire.params-single matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": "as params-nonpair"
+    },
+    {
+      "id": "rpc.getImage.unknown",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.getImage.unknown matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.getImage.no-total",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.getImage.no-total matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": "reference raises KeyError on meta['total'] and drops the connection; candidate answers 500 exec error"
+    },
+    {
+      "id": "rpc.getImage.bad-range",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.getImage.bad-range matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.getImage.extra-kwarg",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.getImage.extra-kwarg matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.auth.missing",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.auth.missing matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.auth.wrong",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.auth.wrong matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.auth.substring",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.auth.substring matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": "SECURITY: reference substring regex accepts a token buried in surrounding text; candidate requires exact literal token:<secret> equality"
+    },
+    {
+      "id": "rpc.auth.exact",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.auth.exact matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.auth.stray-pop",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.auth.stray-pop matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.http.options",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.http.options matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.http.unknown-get",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.http.unknown-get matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.http.img-short",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.http.img-short matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.http.zip-short",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.http.zip-short matches the reference transcript"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.method.lookup",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.method.lookup passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.arity",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.arity passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.updateConfig.filter",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.updateConfig.filter passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.listTasks.level",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.listTasks.level passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.listTasks.config-order",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.listTasks.config-order passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.getImage.range",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.getImage.range passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.projection.config",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.projection.config passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.projection.task",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.projection.task passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.wire.id",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.wire.id passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.wire.parse",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.wire.parse passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.thumb.query",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.thumb.query passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.wire.framing",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.wire.framing passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.rss.mutant",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.rss.mutant passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.server.owned-start",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.server.owned-start passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.server.drain",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.server.drain passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.task.lifecycle",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.task.lifecycle passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.session.roundtrip",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.session.roundtrip passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.updateConfig.proxy",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.updateConfig.proxy passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.getImage.errors",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.getImage.errors passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.http.options",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.http.options passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.http.unknown-get",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.http.unknown-get passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.sign.pending",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.sign.pending passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.method.unknown",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.method.unknown passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.method.private",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.method.private passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.auth.missing",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.auth.missing passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.auth.exact",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "rpc.auth.exact passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "gallery.mime",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "gallery.mime passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "gallery.traversal",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "gallery.traversal passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "gallery.pixel-bound",
+      "source": "xeHentai/rpc.py unit contract",
+      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "gallery.pixel-bound passes the focused native test"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "gallery.read.task-wait.1",
+      "source": "xeHentai/rpc.py _get_image_path/_get_archive_path/gen_thumbnail",
+      "target": "src/rpc/server.rs gallery reads/thumbnails/archives",
+      "suite": "gallery",
+      "inputs": [],
+      "assertions": [
+        "gallery.read.task-wait.1 matches the oracle structurally"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "gallery.read.task-wait.5",
+      "source": "xeHentai/rpc.py _get_image_path/_get_archive_path/gen_thumbnail",
+      "target": "src/rpc/server.rs gallery reads/thumbnails/archives",
+      "suite": "gallery",
+      "inputs": [],
+      "assertions": [
+        "gallery.read.task-wait.5 matches the oracle structurally"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "gallery.read.task-wait.nope",
+      "source": "xeHentai/rpc.py _get_image_path/_get_archive_path/gen_thumbnail",
+      "target": "src/rpc/server.rs gallery reads/thumbnails/archives",
+      "suite": "gallery",
+      "inputs": [],
+      "assertions": [
+        "gallery.read.task-wait.nope matches the oracle structurally"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "gallery.read.missing.1",
+      "source": "xeHentai/rpc.py _get_image_path/_get_archive_path/gen_thumbnail",
+      "target": "src/rpc/server.rs gallery reads/thumbnails/archives",
+      "suite": "gallery",
+      "inputs": [],
+      "assertions": [
+        "gallery.read.missing.1 matches the oracle structurally"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "gallery.read.task-zip.2",
+      "source": "xeHentai/rpc.py _get_image_path/_get_archive_path/gen_thumbnail",
+      "target": "src/rpc/server.rs gallery reads/thumbnails/archives",
+      "suite": "gallery",
+      "inputs": [],
+      "assertions": [
+        "gallery.read.task-zip.2 matches the oracle structurally"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "gallery.read.task-zip.9",
+      "source": "xeHentai/rpc.py _get_image_path/_get_archive_path/gen_thumbnail",
+      "target": "src/rpc/server.rs gallery reads/thumbnails/archives",
+      "suite": "gallery",
+      "inputs": [],
+      "assertions": [
+        "gallery.read.task-zip.9 matches the oracle structurally"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "gallery.thumb.task-wait.1.resized",
+      "source": "xeHentai/rpc.py _get_image_path/_get_archive_path/gen_thumbnail",
+      "target": "src/rpc/server.rs gallery reads/thumbnails/archives",
+      "suite": "gallery",
+      "inputs": [],
+      "assertions": [
+        "gallery.thumb.task-wait.1.resized matches the oracle structurally"
+      ],
+      "status": "implemented",
+      "delta": "PIL and the native image crate emit different encoded bytes; equivalence is dimensions+format+MIME, never byte equality"
+    },
+    {
+      "id": "gallery.thumb.task-wait.1.w-only",
+      "source": "xeHentai/rpc.py _get_image_path/_get_archive_path/gen_thumbnail",
+      "target": "src/rpc/server.rs gallery reads/thumbnails/archives",
+      "suite": "gallery",
+      "inputs": [],
+      "assertions": [
+        "gallery.thumb.task-wait.1.w-only matches the oracle structurally"
+      ],
+      "status": "implemented",
+      "delta": "PIL and the native image crate emit different encoded bytes; equivalence is dimensions+format+MIME, never byte equality"
+    },
+    {
+      "id": "gallery.thumb.task-wait.1.passthrough",
+      "source": "xeHentai/rpc.py _get_image_path/_get_archive_path/gen_thumbnail",
+      "target": "src/rpc/server.rs gallery reads/thumbnails/archives",
+      "suite": "gallery",
+      "inputs": [],
+      "assertions": [
+        "gallery.thumb.task-wait.1.passthrough matches the oracle structurally"
+      ],
+      "status": "implemented",
+      "delta": "PIL and the native image crate emit different encoded bytes; equivalence is dimensions+format+MIME, never byte equality"
+    },
+    {
+      "id": "gallery.thumb.task-wait.1.bad-query",
+      "source": "xeHentai/rpc.py _get_image_path/_get_archive_path/gen_thumbnail",
+      "target": "src/rpc/server.rs gallery reads/thumbnails/archives",
+      "suite": "gallery",
+      "inputs": [],
+      "assertions": [
+        "gallery.thumb.task-wait.1.bad-query matches the oracle structurally"
+      ],
+      "status": "implemented",
+      "delta": "PIL and the native image crate emit different encoded bytes; equivalence is dimensions+format+MIME, never byte equality"
+    },
+    {
+      "id": "gallery.thumb.task-wait.nope.not-found",
+      "source": "xeHentai/rpc.py _get_image_path/_get_archive_path/gen_thumbnail",
+      "target": "src/rpc/server.rs gallery reads/thumbnails/archives",
+      "suite": "gallery",
+      "inputs": [],
+      "assertions": [
+        "gallery.thumb.task-wait.nope.not-found matches the oracle structurally"
+      ],
+      "status": "implemented",
+      "delta": "PIL and the native image crate emit different encoded bytes; equivalence is dimensions+format+MIME, never byte equality"
+    },
+    {
+      "id": "gallery.thumb.task-wait.5.decode",
+      "source": "xeHentai/rpc.py _get_image_path/_get_archive_path/gen_thumbnail",
+      "target": "src/rpc/server.rs gallery reads/thumbnails/archives",
+      "suite": "gallery",
+      "inputs": [],
+      "assertions": [
+        "gallery.thumb.task-wait.5.decode matches the oracle structurally"
+      ],
+      "status": "implemented",
+      "delta": "PIL and the native image crate emit different encoded bytes; equivalence is dimensions+format+MIME, never byte equality"
+    },
+    {
+      "id": "gallery.archive.task-wait",
+      "source": "xeHentai/rpc.py _get_image_path/_get_archive_path/gen_thumbnail",
+      "target": "src/rpc/server.rs gallery reads/thumbnails/archives",
+      "suite": "gallery",
+      "inputs": [],
+      "assertions": [
+        "gallery.archive.task-wait matches the oracle structurally"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "gallery.archive.task-zip",
+      "source": "xeHentai/rpc.py _get_image_path/_get_archive_path/gen_thumbnail",
+      "target": "src/rpc/server.rs gallery reads/thumbnails/archives",
+      "suite": "gallery",
+      "inputs": [],
+      "assertions": [
+        "gallery.archive.task-zip matches the oracle structurally"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "gallery.archive.missing",
+      "source": "xeHentai/rpc.py _get_image_path/_get_archive_path/gen_thumbnail",
+      "target": "src/rpc/server.rs gallery reads/thumbnails/archives",
+      "suite": "gallery",
+      "inputs": [],
+      "assertions": [
+        "gallery.archive.missing matches the oracle structurally"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "webui.pack.files",
+      "source": "fffonion/xeHentai-webui@4e3738e built index.html/static",
+      "target": "ui/ frozen pack + src/rpc/server.rs static fallback",
+      "suite": "webui",
+      "inputs": [],
+      "assertions": [
+        "webui.pack.files serves the frozen pack offline"
+      ],
+      "status": "implemented",
+      "delta": "reference serves invalid-request JSON when the origin is unreachable; candidate serves the frozen offline pack instead"
+    },
+    {
+      "id": "webui.pack.index",
+      "source": "fffonion/xeHentai-webui@4e3738e built index.html/static",
+      "target": "ui/ frozen pack + src/rpc/server.rs static fallback",
+      "suite": "webui",
+      "inputs": [],
+      "assertions": [
+        "webui.pack.index serves the frozen pack offline"
+      ],
+      "status": "implemented",
+      "delta": "reference serves invalid-request JSON when the origin is unreachable; candidate serves the frozen offline pack instead"
+    },
+    {
+      "id": "rpc.getImage.signed",
+      "source": "xeHentai/rpc.py:488-510 getImage signed URL list",
+      "target": "src/rpc/mod.rs execute get_image + hash_link",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "getImage with metadata returns signed /img URLs; execution needs product-signing authorization"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.img.signed",
+      "source": "xeHentai/rpc.py:199-231 do_GET /img/ signature check",
+      "target": "src/rpc/server.rs serve_image + hash_link",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "valid-signature /img serves file bytes; execution needs product-signing authorization"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.zip.signed",
+      "source": "xeHentai/rpc.py:232-251 do_GET /zip/ signature check",
+      "target": "src/rpc/server.rs serve_archive + hash_link",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "valid-signature /zip serves archive bytes; execution needs product-signing authorization"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.http.img-valid",
+      "source": "xeHentai/rpc.py:199-231 do_GET /img/ valid signature",
+      "target": "src/rpc/server.rs serve_image + hash_link",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "valid signature serves exact file bytes"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.http.img-tampered",
+      "source": "xeHentai/rpc.py:206-210 signature mismatch",
+      "target": "src/rpc/server.rs serve_image + hash_link",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "tampered signature answers 403 without disk access"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.http.img-unknown-guid",
+      "source": "xeHentai/rpc.py:211-217 unknown guid",
+      "target": "src/rpc/server.rs serve_image",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "valid signature but unknown guid answers 404"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.http.img-badfid",
+      "source": "xeHentai/rpc.py:464 int(fid) ValueError",
+      "target": "src/rpc/server.rs serve_image",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "non-integer fid drops the reference connection; candidate answers 400 BadRequest",
+        "recorded delta, not an ignore"
+      ],
+      "status": "implemented",
+      "delta": "reference raises ValueError on int(fid) outside the ValueError/TypeError catch and drops the connection; candidate answers 400"
+    },
+    {
+      "id": "rpc.http.zip-valid",
+      "source": "xeHentai/rpc.py:232-251 do_GET /zip/ valid signature",
+      "target": "src/rpc/server.rs serve_archive + hash_link",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "valid signature serves on-demand archive; entries/contents/comment compared"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.http.zip-tampered",
+      "source": "xeHentai/rpc.py:240-244 signature mismatch",
+      "target": "src/rpc/server.rs serve_archive + hash_link",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "tampered signature answers 403"
+      ],
+      "status": "implemented",
       "delta": null
     }
   ],

@@ -651,6 +651,31 @@ impl App {
         &self.authorized_dir
     }
 
+    /// Parts the owned M5 server start binds from: interface, optional port,
+    /// optional secret, cache directory, resource root and clock. Stored
+    /// values only; binding (and its real errors) happens in the runtime.
+    pub(crate) fn rpc_bind_parts(
+        &self,
+        resource_root: &Path,
+        clock: Arc<dyn crate::worker::HttpClock>,
+    ) -> (
+        String,
+        Option<i64>,
+        Option<String>,
+        PathBuf,
+        PathBuf,
+        Arc<dyn crate::worker::HttpClock>,
+    ) {
+        (
+            self.cfg.rpc_interface.clone(),
+            self.cfg.rpc_port,
+            self.cfg.rpc_secret.clone(),
+            self.base_dir.clone(),
+            resource_root.to_path_buf(),
+            clock,
+        )
+    }
+
     /// Grant a download root that an explicit user entry point selected
     /// (global config or task arguments). Never called with session values.
     fn trust_dir(&mut self, dir: &Path) {
@@ -718,17 +743,14 @@ impl App {
         (consts::ERR_NO_ERROR, None)
     }
 
-    /// Internal configuration update used by task snapshot tests. It is not
-    /// the public RPC `updateConfig` (that handler arrives with the RPC
-    /// milestone), and it refuses proxy/RPC side effects instead of faking
-    /// them.
+    /// Internal configuration update. Unlike the M2 placeholder, `rpc_port`
+    /// is accepted and stored here: the M5 owned server start binds the
+    /// listener through the runtime (`rpc::server::serve_until_closed`), so
+    /// bind errors are real and the server is never marked started without
+    /// a listener. RPC `updateConfig` itself still filters `rpc_*` keys.
     pub fn update_config(&mut self, patch: JsonMap<String, Value>) -> Result<(), AppError> {
-        if let Some(value) = patch.get("rpc_port")
-            && !value.is_null()
-            && crate::task::value_truthy(value)
-        {
-            return Err(AppError::Unavailable("RPC server"));
-        }
+        // `rpc_port` is stored like any other key; binding happens in the
+        // owned server start, not in this synchronous patch.
         let mut new_ignored: Option<Vec<i64>> = None;
         for (key, value) in &patch {
             match key.as_str() {
@@ -1122,6 +1144,16 @@ impl App {
             ori,
             has_stream,
         }
+    }
+
+    /// RPC-visible response projection for the login flow. Same view the
+    /// workers use, without moving worker ownership into the RPC module.
+    pub(crate) fn page_view_for_rpc(
+        response: &FetchedResponse,
+        ori: bool,
+        has_stream: bool,
+    ) -> PageResponse {
+        Self::page_view(response, ori, has_stream)
     }
 
     /// Synthetic login against the real login endpoint. The RSS filter parses

@@ -1,0 +1,644 @@
+// RPC handler decisions from the fixed Python reference (`xeHentai/rpc.py`).
+//
+// Every business decision lives here: method lookup (the `xeH.` prefix and
+// camelCase to snake_case mapping of `rpc.py:343-349`), the 13-method
+// allowlist and private-name refusal (`rpc.py:350-353`), the updateConfig
+// key filter and proxy no-op rule (`rpc.py:431-435`), the listTasks level
+// selector (`rpc.py:437-450`), the getImage range quirk (`rpc.py:488-501`),
+// per-method arity rules, and the public task/config field projections
+// (`rpc.py:427-428`, `rpc.py:446-450`). Native Rust supplies the wire bytes,
+// the exact-literal token check, the App mutations and the serialization of
+// the values this module selects; it never decides a method, a default, a
+// filter or a projection itself.
+//
+// Ownership note: the script borrow checker rejects slicing a local and
+// then moving that same local. String predicates therefore run through tiny
+// helpers on explicit copies (`has_prefix("" + name, ...)`), slices apply to
+// parameters or helper-locals only, and every selected value is moved exactly
+// once. The verbose nesting below follows the proven `rss/filters/match.rss`
+// statement shapes.
+
+// --- small character helpers -------------------------------------------
+// The reference only folds an ASCII lower-to-upper boundary (`([a-z])([A-Z])`).
+// These explicit arms keep exactly that behavior without a regex engine.
+
+fn is_lower(text: string) -> bool {
+    match text {
+        "a" => true,
+        "b" => true,
+        "c" => true,
+        "d" => true,
+        "e" => true,
+        "f" => true,
+        "g" => true,
+        "h" => true,
+        "i" => true,
+        "j" => true,
+        "k" => true,
+        "l" => true,
+        "m" => true,
+        "n" => true,
+        "o" => true,
+        "p" => true,
+        "q" => true,
+        "r" => true,
+        "s" => true,
+        "t" => true,
+        "u" => true,
+        "v" => true,
+        "w" => true,
+        "x" => true,
+        "y" => true,
+        "z" => true,
+        _ => false,
+    }
+}
+
+fn is_upper(text: string) -> bool {
+    match text {
+        "A" => true,
+        "B" => true,
+        "C" => true,
+        "D" => true,
+        "E" => true,
+        "F" => true,
+        "G" => true,
+        "H" => true,
+        "I" => true,
+        "J" => true,
+        "K" => true,
+        "L" => true,
+        "M" => true,
+        "N" => true,
+        "O" => true,
+        "P" => true,
+        "Q" => true,
+        "R" => true,
+        "S" => true,
+        "T" => true,
+        "U" => true,
+        "V" => true,
+        "W" => true,
+        "X" => true,
+        "Y" => true,
+        "Z" => true,
+        _ => false,
+    }
+}
+
+fn lower_of(text: string) -> string {
+    match text {
+        "A" => "a",
+        "B" => "b",
+        "C" => "c",
+        "D" => "d",
+        "E" => "e",
+        "F" => "f",
+        "G" => "g",
+        "H" => "h",
+        "I" => "i",
+        "J" => "j",
+        "K" => "k",
+        "L" => "l",
+        "M" => "m",
+        "N" => "n",
+        "O" => "o",
+        "P" => "p",
+        "Q" => "q",
+        "R" => "r",
+        "S" => "s",
+        "T" => "t",
+        "U" => "u",
+        "V" => "v",
+        "W" => "w",
+        "X" => "x",
+        "Y" => "y",
+        "Z" => "z",
+        _ => text,
+    }
+}
+
+fn upper_of(text: string) -> string {
+    match text {
+        "a" => "A",
+        "b" => "B",
+        "c" => "C",
+        "d" => "D",
+        "e" => "E",
+        "f" => "F",
+        "g" => "G",
+        "h" => "H",
+        "i" => "I",
+        "j" => "J",
+        "k" => "K",
+        "l" => "L",
+        "m" => "M",
+        "n" => "N",
+        "o" => "O",
+        "p" => "P",
+        "q" => "Q",
+        "r" => "R",
+        "s" => "S",
+        "t" => "T",
+        "u" => "U",
+        "v" => "V",
+        "w" => "W",
+        "x" => "X",
+        "y" => "Y",
+        "z" => "Z",
+        _ => text,
+    }
+}
+
+fn has_prefix(text: string, prefix: string) -> bool {
+    let mut out = false;
+    if text.length >= prefix.length {
+        if text[0:prefix.length] == prefix {
+            out = true;
+        }
+    }
+    out
+}
+
+fn starts_with_underscore(text: string) -> bool {
+    let mut out = false;
+    if text.length > 0 {
+        if text[0:1] == "_" {
+            out = true;
+        }
+    }
+    out
+}
+
+fn to_snake(name: string) -> string {
+    let mut out = "";
+    let mut index = 0;
+    while index < name.length {
+        let ch = name[index:(index + 1)];
+        if is_upper("" + ch) {
+            if index > 0 {
+                if is_lower(name[(index - 1):index]) {
+                    out = out + "_" + lower_of(ch);
+                } else {
+                    out = out + lower_of(ch);
+                }
+            } else {
+                out = out + lower_of(ch);
+            }
+        } else {
+            out = out + ch;
+        }
+        index = index + 1;
+    }
+    out
+}
+
+fn to_upper_text(text: string) -> string {
+    let mut out = "";
+    let mut index = 0;
+    while index < text.length {
+        out = out + upper_of(text[index:(index + 1)]);
+        index = index + 1;
+    }
+    out
+}
+
+fn strip_bang(text: string) -> string {
+    let mut start = 0;
+    if has_prefix("" + text, "!") {
+        start = 1;
+    }
+    let out = text[start:text.length];
+    out
+}
+
+// --- method lookup ------------------------------------------------------
+
+struct MethodSelect {
+    outcome: string,
+    method: string,
+}
+
+pub fn rpc_method_select(raw: string) -> MethodSelect {
+    // Mirrors `re.findall("xeH\\.(.+)", method)`: no `xeH.` marker or an
+    // empty remainder is not a method at all.
+    let mut outcome = "not_found";
+    let mut method = "";
+    let mut cmd = "";
+    let mut marked = false;
+    if raw.length > 4 {
+        cmd = raw[4:raw.length];
+        if has_prefix("" + raw, "xeH.") {
+            marked = true;
+        }
+    }
+    if marked {
+        let snake = to_snake(cmd);
+        if starts_with_underscore("" + snake) {
+            // `rpc.py:350` refuses private/dunder attributes as unknown.
+            outcome = "private";
+            method = snake;
+        } else {
+            if snake == "update_config" || snake == "add_task" || snake == "del_task" || snake == "pause_task" || snake == "resume_task" || snake == "save_session" || snake == "load_session" || snake == "login_exhentai" || snake == "set_cookie" || snake == "get_info" || snake == "get_config" || snake == "list_tasks" || snake == "get_image" {
+                outcome = "ok";
+                method = snake;
+            } else {
+                outcome = "not_found";
+                method = snake;
+            }
+        }
+    }
+    { outcome: outcome, method: method }
+}
+
+// --- per-method arity ----------------------------------------------------
+
+struct Arity {
+    outcome: string,
+}
+
+// `add_task(url, **task_cfg)`: exactly one positional argument; kwargs pass
+// through natively so task extras keep their order and values.
+pub fn rpc_add_task_arity(argc: int, kw_names: [string]) -> Arity {
+    let mut outcome = "ok";
+    if argc < 1 {
+        outcome = "missing";
+    } else {
+        if argc > 1 {
+            outcome = "extra";
+        } else {
+            let mut index = 0;
+            while index < kw_names.length {
+                // `url` given both positionally and by keyword: the reference
+                // raises `TypeError: got multiple values for argument 'url'`.
+                if kw_names[index] == "url" {
+                    outcome = "duplicate";
+                }
+                index = index + 1;
+            }
+        }
+    }
+    { outcome: outcome }
+}
+
+// `del_task` / `pause_task` / `resume_task` / `set_cookie` take exactly one
+// positional guid/cookie argument.
+pub fn rpc_guid_arity(argc: int, kw_count: int) -> Arity {
+    let mut outcome = "ok";
+    if argc < 1 {
+        outcome = "missing";
+    } else {
+        if argc > 1 {
+            outcome = "extra";
+        } else {
+            if kw_count > 0 {
+                outcome = "extra";
+            }
+        }
+    }
+    { outcome: outcome }
+}
+
+// `save_session` / `get_info` / `get_config` take no arguments at all.
+pub fn rpc_noarg_arity(argc: int, kw_count: int) -> Arity {
+    let mut outcome = "ok";
+    if argc > 0 {
+        outcome = "extra";
+    } else {
+        if kw_count > 0 {
+            outcome = "extra";
+        }
+    }
+    { outcome: outcome }
+}
+
+// `login_exhentai(name, pwd)`: exactly two positional arguments.
+pub fn rpc_login_arity(argc: int, kw_count: int) -> Arity {
+    let mut outcome = "ok";
+    if argc < 2 {
+        outcome = "missing";
+    } else {
+        if argc > 2 {
+            outcome = "extra";
+        } else {
+            if kw_count > 0 {
+                outcome = "extra";
+            }
+        }
+    }
+    { outcome: outcome }
+}
+
+// `load_session()` takes no arguments; its success value is decided natively
+// from the session result.
+pub fn rpc_load_arity(argc: int, kw_count: int) -> Arity {
+    let mut outcome = "ok";
+    if argc > 0 {
+        outcome = "extra";
+    } else {
+        if kw_count > 0 {
+            outcome = "extra";
+        }
+    }
+    { outcome: outcome }
+}
+
+// --- updateConfig filter --------------------------------------------------
+
+struct UpdateFilter {
+    kept: [string],
+    invoke: bool,
+}
+
+pub fn rpc_update_config_filter(names: [string]) -> UpdateFilter {
+    // `rpc.py:432`: drop every `rpc_*` key and `urls`. The remainder decides.
+    // `rpc.py:433-435`: without `proxy` the call is a plain getConfig read.
+    let mut kept: [string] = [];
+    let mut invoke = false;
+    let mut index = 0;
+    while index < names.length {
+        let name = names[index];
+        let mut drop = false;
+        if has_prefix("" + name, "rpc_") {
+            drop = true;
+        } else {
+            if name == "urls" {
+                drop = true;
+            }
+        }
+        if drop {
+        } else {
+            if name == "proxy" {
+                invoke = true;
+            }
+            kept[kept.length] = name;
+        }
+        index = index + 1;
+    }
+    { kept: kept, invoke: invoke }
+}
+
+// --- listTasks level selector ----------------------------------------------
+
+struct LevelSelect {
+    outcome: string,
+    canonical: string,
+}
+
+pub fn rpc_level_select(has_pos: bool, has_kw: bool, level: string) -> LevelSelect {
+    let mut outcome = "ok";
+    let mut canonical = "";
+    if has_pos {
+        if has_kw {
+            // `list_tasks() got multiple values for argument 'level'`.
+            outcome = "duplicate";
+        }
+    }
+    if outcome == "ok" {
+        let mut name = "download";
+        if has_pos {
+            name = level;
+        } else {
+            if has_kw {
+                name = level;
+            }
+        }
+        let mut reverse = false;
+        if has_prefix("" + name, "!") {
+            reverse = true;
+        }
+        let bare = strip_bang("" + name);
+        let upper = to_upper_text(bare);
+        if upper == "PAUSED" {
+            canonical = "paused";
+        } else {
+            if upper == "WAITING" {
+                canonical = "waiting";
+            } else {
+                if upper == "GET_META" {
+                    canonical = "get_meta";
+                } else {
+                    if upper == "SCAN_PAGE" {
+                        canonical = "scan_page";
+                    } else {
+                        if upper == "SCAN_IMG" {
+                            canonical = "scan_img";
+                        } else {
+                            if upper == "SCAN_ARCHIVE" {
+                                canonical = "scan_archive";
+                            } else {
+                                if upper == "DOWNLOAD" {
+                                    canonical = "download";
+                                } else {
+                                    if upper == "MAKE_ARCHIVE" {
+                                        canonical = "make_archive";
+                                    } else {
+                                        if upper == "FINISHED" {
+                                            canonical = "finished";
+                                        } else {
+                                            if upper == "FAILED" {
+                                                canonical = "failed";
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if canonical == "" {
+            outcome = "undef";
+        } else {
+            if reverse {
+                canonical = "!" + canonical;
+            }
+        }
+    }
+    { outcome: outcome, canonical: canonical }
+}
+
+// --- getImage range ---------------------------------------------------------
+
+struct RangeSelect {
+    outcome: string,
+    start: int,
+    end: int,
+}
+
+fn digit_value(text: string) -> int {
+    match text {
+        "0" => 0,
+        "1" => 1,
+        "2" => 2,
+        "3" => 3,
+        "4" => 4,
+        "5" => 5,
+        "6" => 6,
+        "7" => 7,
+        "8" => 8,
+        "9" => 9,
+        _ => -1,
+    }
+}
+
+fn is_int_range(text: string, endpos: int) -> bool {
+    let mut ok = false;
+    if endpos > 0 {
+        let mut bad = false;
+        let mut index = 0;
+        while index < endpos {
+            if digit_value(text[index:(index + 1)]) < 0 {
+                bad = true;
+            }
+            index = index + 1;
+        }
+        if bad {
+        } else {
+            ok = true;
+        }
+    }
+    ok
+}
+
+fn parse_range_int(text: string, endpos: int) -> int {
+    let mut value = 0;
+    let mut index = 0;
+    while index < endpos {
+        value = value * 10 + digit_value(text[index:(index + 1)]);
+        index = index + 1;
+    }
+    value
+}
+
+pub fn rpc_image_range(has_range: bool, text: string) -> RangeSelect {
+    // `rpc.py:494-501`: a falsy range lists the whole gallery; any truthy
+    // range (even `"3,10"`) yields exactly one image addressed by its first
+    // item. Only the first item is ever read.
+    let mut outcome = "default";
+    let mut start = 1;
+    let mut end = 0;
+    if has_range {
+        let mut comma = -1;
+        let mut index = 0;
+        while index < text.length {
+            if text[index:(index + 1)] == "," {
+                if comma < 0 {
+                    comma = index;
+                }
+            }
+            index = index + 1;
+        }
+        let mut endpos = text.length;
+        if comma >= 0 {
+            endpos = comma;
+        }
+        if is_int_range("" + text, endpos) {
+            outcome = "single";
+            start = parse_range_int(text, endpos);
+            end = start + 1;
+        } else {
+            outcome = "bad";
+            start = 0;
+        }
+    }
+    { outcome: outcome, start: start, end: end }
+}
+
+// --- public field projections -----------------------------------------------
+
+// `rpc.py:428` (`get_config`) and `rpc.py:432` (`update_config`) hide every
+// `rpc_*` key and `urls`. `rpc.py:446-450` (`list_tasks`) hides the reload,
+// duplicate and rename maps, the logger and both queues. These functions own
+// the keep/drop lists; native code only copies the values of kept fields.
+
+pub fn rpc_config_keep(names: [string]) -> [string] {
+    let mut kept: [string] = [];
+    let mut index = 0;
+    while index < names.length {
+        let name = names[index];
+        let mut drop = false;
+        if has_prefix("" + name, "rpc_") {
+            drop = true;
+        } else {
+            if name == "urls" {
+                drop = true;
+            }
+        }
+        if drop {
+        } else {
+            kept[kept.length] = name;
+        }
+        index = index + 1;
+    }
+    kept
+}
+
+pub fn rpc_task_keep(names: [string]) -> [string] {
+    let mut kept: [string] = [];
+    let mut index = 0;
+    while index < names.length {
+        let name = names[index];
+        let mut drop = false;
+        if name == "reload_map" || name == "duplicate_map" || name == "renamed_map" || name == "logger" || name == "img_q" || name == "page_q" {
+            drop = true;
+        }
+        if drop {
+        } else {
+            kept[kept.length] = name;
+        }
+        index = index + 1;
+    }
+    kept
+}
+
+// Ordered reference field lists so the wire keeps the reference order and so
+// a projection mutant is observable field by field.
+pub fn rpc_config_fields() -> [string] {
+    let mut out: [string] = [];
+    out[out.length] = "daemon";
+    out[out.length] = "dir";
+    out[out.length] = "download_ori";
+    out[out.length] = "jpn_title";
+    out[out.length] = "rename_ori";
+    out[out.length] = "proxy";
+    out[out.length] = "proxy_image";
+    out[out.length] = "proxy_image_only";
+    out[out.length] = "rpc_interface";
+    out[out.length] = "rpc_port";
+    out[out.length] = "rpc_secret";
+    out[out.length] = "rpc_open_browser";
+    out[out.length] = "make_archive";
+    out[out.length] = "download_range";
+    out[out.length] = "scan_thread_cnt";
+    out[out.length] = "download_thread_cnt";
+    out[out.length] = "download_timeout";
+    out[out.length] = "ignored_errors";
+    out[out.length] = "log_path";
+    out[out.length] = "log_verbose";
+    out[out.length] = "save_tasks";
+    out[out.length] = "delete_task_files";
+    out[out.length] = "low_speed_threshold";
+    out[out.length] = "auto_update";
+    out[out.length] = "update_beta_channel";
+    out
+}
+
+pub fn rpc_task_fields() -> [string] {
+    let mut out: [string] = [];
+    out[out.length] = "url";
+    out[out.length] = "gid";
+    out[out.length] = "sethash";
+    out[out.length] = "failcode";
+    out[out.length] = "state";
+    out[out.length] = "guid";
+    out[out.length] = "config";
+    out[out.length] = "meta";
+    out[out.length] = "reload_map";
+    out[out.length] = "duplicate_map";
+    out[out.length] = "renamed_map";
+    out[out.length] = "img_q";
+    out[out.length] = "page_q";
+    out
+}

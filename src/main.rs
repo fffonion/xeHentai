@@ -13,6 +13,7 @@ mod core;
 mod filters;
 mod i18n;
 mod proxy;
+mod rpc;
 mod task;
 mod util;
 mod worker;
@@ -86,6 +87,12 @@ pub fn run(root: &Path) -> i32 {
             return 1;
         }
     };
+    // M5 minimal startup hook: with `rpc_port` configured, serve the real
+    // RPC gallery alongside the task loop. Full CLI/signal/daemon lifecycle
+    // remains M6; this hook blocks until the process is stopped.
+    if app.cfg.rpc_port.is_some() {
+        return rpc::run_with_rpc(app, root);
+    }
     eprintln!(
         "xeHentai: this build implements the configuration, task, session and file foundation; downloading is not implemented"
     );
