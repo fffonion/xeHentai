@@ -889,15 +889,12 @@ async fn run_archive(
     let path = match prepared {
         PreparedArchive::Existing(path) => path,
         PreparedArchive::Staged(stage) => {
-            // Publish only while the exact captured run still owns the task
-            // at FINISHED (the reader's minimum state). Validation, state
-            // and the bounded namespace step share one borrow.
-            match handle.commit_archive_exact(
-                guid,
-                token,
-                PreparedArchive::Staged(stage),
-                consts::TASK_STATE_FINISHED,
-            ) {
+            // Publish only while the exact captured run still owns the task.
+            // The frozen reader (`rpc.py:477-486`) has no task-state gate, so
+            // the commit takes no minimum state: progress inside the same
+            // valid owner/run is not a new permission grant. Validation and
+            // the bounded namespace step share one borrow.
+            match handle.commit_archive_exact(guid, token, PreparedArchive::Staged(stage), None) {
                 Ok(ArchiveCommit::Committed(committed)) => committed.path,
                 Ok(ArchiveCommit::Stale(prepared)) => {
                     if crate::task::discard_prepared(prepared).is_err() {
@@ -2241,9 +2238,6 @@ mod tests {
         // A valid /zip signature streams the built archive bytes.
         let mut app = test_app();
         let zip_guid = task_with_image(&mut app, "1.jpg", &png_bytes(8, 8));
-        // The reader publishes only at the FINISHED fence; this fixture is a
-        // completed gallery served on demand.
-        app.task_mut(&zip_guid).expect("task").state = consts::TASK_STATE_FINISHED;
         let zip_path = format!("/zip/{}/{zip_guid}/gallery.zip", hash_link(None, &zip_guid));
         let (status, mime, bytes) = serve_media_bytes(app, None, &zip_path);
         assert_eq!(status, 200);
@@ -4121,9 +4115,6 @@ mod tests {
         let mut app = test_app();
         let big = pattern_bytes(4 * 1024 * 1024);
         let guid = task_with_image(&mut app, "big.jpg", &big);
-        // The reader publishes only at the FINISHED fence; this fixture is a
-        // completed gallery served on demand.
-        app.task_mut(&guid).expect("task").state = consts::TASK_STATE_FINISHED;
         let target = format!("/zip/{}/{guid}/gallery.zip", hash_link(None, &guid));
         let (status, mime, bytes) = serve_media_bytes(app, None, &target);
         assert_eq!(status, 200);
@@ -5615,6 +5606,326 @@ mod tests {
         let gallery = app.task(&guid).expect("task").get_fpath().expect("fpath");
         app.task_mut(&guid).expect("task").state = consts::TASK_STATE_FINISHED;
         (guid, gallery)
+    }
+
+    // --- M5 R3-A state compatibility: the frozen reader has no task-state gate ---
+
+    const STATE_COMPAT_FRESH_ENTRY: &[u8] = b"FRESH-ENTRY-BYTES";
+    const STATE_COMPAT_EXISTING_ENTRY: &[u8] = b"EXISTING-ENTRY-BYTES";
+    const STATE_COMPAT_EXISTING_COMMENT: &str = "existing-fixture-comment";
+
+    /// A pre-existing sibling archive with its own entry and comment, so the
+    /// Existing branch is proven to serve the real on-disk container.
+    fn preexisting_archive_fixture(path: &std::path::Path) {
+        let file = std::fs::File::create(path).expect("existing zip");
+        let mut writer = zip::ZipWriter::new(file);
+        writer.set_comment(STATE_COMPAT_EXISTING_COMMENT);
+        writer
+            .start_file("existing.jpg", zip::write::SimpleFileOptions::default())
+            .expect("entry");
+        {
+            use std::io::Write;
+            writer
+                .write_all(STATE_COMPAT_EXISTING_ENTRY)
+                .expect("bytes");
+        }
+        writer.finish().expect("finish");
+    }
+
+    /// One real `/zip/` wire observation over a frozen task record.
+    struct ArchiveStateRoute {
+        title: String,
+        status: u16,
+        mime: Option<String>,
+        body: Vec<u8>,
+        archive_before: bool,
+        archive_after: bool,
+        state_before: i64,
+        state_after: i64,
+        meta_unchanged: bool,
+        native_pending: usize,
+        private_leftovers: Vec<String>,
+    }
+
+    /// Drive the public archive route through `serve_one` (real request and
+    /// response bytes over a duplex socket), with the task frozen at `state`
+    /// and either no archive or a pre-existing one. The task record and its
+    /// meta are sampled before and after the read.
+    fn observe_archive_state_route(state: i64, label: &str, existing: bool) -> ArchiveStateRoute {
+        let mut app = test_app();
+        let kind = if existing { "existing" } else { "fresh" };
+        let title = format!("gallery-state-{label}-{kind}");
+        let guid = task_with_image_named(&mut app, &title, "1.jpg", STATE_COMPAT_FRESH_ENTRY);
+        app.task_mut(&guid).expect("task").state = state;
+        let gallery = app.task(&guid).expect("task").get_fpath().expect("fpath");
+        let zip = gallery.with_extension("zip");
+        if existing {
+            preexisting_archive_fixture(&zip);
+        }
+        let archive_before = zip.exists();
+        let (state_before, meta_before) = app
+            .task(&guid)
+            .map(|task| (task.state, Value::Object(task.meta.clone())))
+            .expect("task");
+        let target = format!("/zip/{}/{guid}/gallery.zip", hash_link(None, &guid));
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
+        let handle = runtime.handle();
+        let cache_dir = tempfile::tempdir().expect("cache").keep();
+        let shared = Rc::new(RefCell::new(
+            SharedRpc::new(
+                manifest,
+                &cache_dir,
+                Arc::new(crate::worker::RealClock),
+                None,
+                "http://127.0.0.1:9".to_string(),
+            )
+            .expect("shared"),
+        ));
+        let raw = block_on(async {
+            let (mut client, mut server) = tokio::io::duplex(256 * 1024);
+            let request = format!("GET {target} HTTP/1.0\r\nHost: x\r\n\r\n");
+            let (served, read) = tokio::join!(
+                serve_one(
+                    &mut server,
+                    handle.clone(),
+                    shared,
+                    "http://127.0.0.1:9".to_string(),
+                ),
+                async {
+                    use tokio::io::AsyncWriteExt;
+                    client.write_all(request.as_bytes()).await.expect("head");
+                    let mut out = Vec::new();
+                    {
+                        use tokio::io::AsyncReadExt;
+                        client.read_to_end(&mut out).await.expect("read");
+                    }
+                    out
+                }
+            );
+            served.expect("serve");
+            read
+        });
+        let (status_line, headers, body) = split_response(&raw);
+        let status = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .expect("status code");
+        let mime = headers
+            .iter()
+            .find(|(name, _)| name == "content-type")
+            .map(|(_, value)| value.clone());
+        let (state_after, meta_after) = handle.borrow_app(|app| {
+            app.task(&guid)
+                .map(|task| (task.state, Value::Object(task.meta.clone())))
+                .expect("task")
+        });
+        let native_pending = handle.native_pending();
+        let private_leftovers = private_stage_entries(gallery.parent().expect("parent"));
+        ArchiveStateRoute {
+            title,
+            status,
+            mime,
+            body,
+            archive_before,
+            archive_after: zip.exists(),
+            state_before,
+            state_after,
+            meta_unchanged: meta_before == meta_after,
+            native_pending,
+            private_leftovers,
+        }
+    }
+
+    /// Frozen reference evidence: `rpc.py:477-486` `_get_archive_path` gates
+    /// only on the guid being present, and `task.py:399-415` `make_archive`
+    /// has no task-state gate either. This regression covers the five
+    /// representative states against both the staged (no archive) and the
+    /// Existing branch, over the real public `/zip/` wire route. On c71 the
+    /// newly staged cases answer 404 because the reader demanded FINISHED.
+    #[test]
+    fn r3a_rpc_archive_reader_serves_valid_gallery_in_any_task_state() {
+        let states = [
+            (consts::TASK_STATE_WAITING, "waiting"),
+            (consts::TASK_STATE_PAUSED, "paused"),
+            (consts::TASK_STATE_DOWNLOAD, "downloading"),
+            (consts::TASK_STATE_FAILED, "failed"),
+            (consts::TASK_STATE_FINISHED, "finished"),
+        ];
+        let mut cases = 0;
+        for (state, label) in states {
+            for existing in [false, true] {
+                cases += 1;
+                let route = observe_archive_state_route(state, label, existing);
+                let case = format!("{label}-{}", if existing { "existing" } else { "fresh" });
+                assert_eq!(
+                    route.status, 200,
+                    "{case}: the frozen reader has no task-state gate (c71 refused a staged ZIP)"
+                );
+                assert_eq!(
+                    route.mime.as_deref(),
+                    Some("application/zip"),
+                    "{case}: archive route must answer a ZIP"
+                );
+                let mut reader =
+                    zip::ZipArchive::new(std::io::Cursor::new(&route.body)).expect("served zip");
+                let names: Vec<String> = (0..reader.len())
+                    .map(|index| reader.by_index(index).expect("entry").name().to_string())
+                    .collect();
+                let comment = String::from_utf8_lossy(reader.comment()).into_owned();
+                let (expected_name, expected_entry, expected_comment) = if existing {
+                    (
+                        "existing.jpg",
+                        STATE_COMPAT_EXISTING_ENTRY,
+                        STATE_COMPAT_EXISTING_COMMENT.to_string(),
+                    )
+                } else {
+                    (
+                        "1.jpg",
+                        STATE_COMPAT_FRESH_ENTRY,
+                        format!(
+                            "xeHentai Archiver v{}\nTitle:{}\nOriginal URL:http://e-hentai.org/g/123/abcdef0123/",
+                            consts::VERSION,
+                            route.title
+                        ),
+                    )
+                };
+                assert_eq!(names, vec![expected_name.to_string()], "{case}: entries");
+                let mut content = Vec::new();
+                {
+                    use std::io::Read;
+                    reader
+                        .by_name(expected_name)
+                        .expect("entry by name")
+                        .read_to_end(&mut content)
+                        .expect("entry bytes");
+                }
+                let contents_ok = content == expected_entry;
+                assert!(contents_ok, "{case}: entry bytes");
+                assert_eq!(comment, expected_comment, "{case}: archive comment");
+                assert_eq!(route.archive_before, existing, "{case}: fixture state");
+                assert!(
+                    route.archive_after,
+                    "{case}: archive present after the read"
+                );
+                assert_eq!(route.state_before, state, "{case}: frozen state");
+                assert_eq!(
+                    route.state_after, route.state_before,
+                    "{case}: the reader must not change task state"
+                );
+                assert!(
+                    route.meta_unchanged,
+                    "{case}: the reader must not change task meta"
+                );
+                assert_eq!(route.native_pending, 0, "{case}: joined native jobs");
+                assert!(
+                    route.private_leftovers.is_empty(),
+                    "{case}: private leftovers {:?}",
+                    route.private_leftovers
+                );
+                let mut record = JsonMap::new();
+                record.insert("case".to_string(), Value::String(case));
+                record.insert("state".to_string(), Value::from(state));
+                record.insert("status".to_string(), Value::from(route.status));
+                record.insert("entries".to_string(), Value::from(names));
+                record.insert("contents_ok".to_string(), Value::Bool(contents_ok));
+                record.insert("comment".to_string(), Value::String(comment));
+                record.insert(
+                    "archive_present_before".to_string(),
+                    Value::Bool(route.archive_before),
+                );
+                record.insert(
+                    "archive_present_after".to_string(),
+                    Value::Bool(route.archive_after),
+                );
+                record.insert("state_before".to_string(), Value::from(route.state_before));
+                record.insert("state_after".to_string(), Value::from(route.state_after));
+                record.insert(
+                    "meta_unchanged".to_string(),
+                    Value::Bool(route.meta_unchanged),
+                );
+                println!("R3A_STATE_COMPAT native {}", Value::Object(record));
+            }
+        }
+        assert_eq!(cases, 10, "five states x absent/existing archive paths");
+    }
+
+    /// The reader must not pin the task at its captured state: progress inside
+    /// the same owner/run is not a new permission grant, matching the frozen
+    /// reader's identity-only lookup. Replacement of the run itself is still
+    /// refused by the existing stale-run case.
+    #[test]
+    fn r3a_rpc_archive_reader_allows_state_progress_within_the_same_run() {
+        use crate::task::arm_archive_gate;
+        let mut app = test_app();
+        let guid = task_with_image_named(
+            &mut app,
+            "gallery-r3a-progress",
+            "1.jpg",
+            STATE_COMPAT_FRESH_ENTRY,
+        );
+        let gallery = app.task(&guid).expect("task").get_fpath().expect("fpath");
+        let zip = gallery.with_extension("zip");
+        let signature = hash_link(None, &guid);
+        let gate = arm_archive_gate(&gallery.to_string_lossy());
+        let release = gate.release.clone();
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
+        let handle = runtime.handle();
+        let permits = Arc::new(tokio::sync::Semaphore::new(super::super::MAX_HEAVY_WORKERS));
+        let local = tokio::task::LocalSet::new();
+        block_on(local.run_until(async {
+            let _release = ReleaseOnDrop(release);
+            let request_guid = guid.clone();
+            let request_signature = signature.clone();
+            let request_handle = handle.clone();
+            let request_permits = Arc::clone(&permits);
+            let request = tokio::task::spawn_local(async move {
+                run_archive(
+                    request_handle,
+                    request_permits,
+                    None,
+                    &request_guid,
+                    &request_signature,
+                )
+                .await
+            });
+            wait_archive_started(&gate.started).await;
+            // Same task object and run, advanced state while the writer is
+            // still building: this is progress, not a replacement run.
+            let before_token = handle
+                .borrow_app(|app| app.task_token(&guid))
+                .expect("token");
+            handle.borrow_app_mut(|app| {
+                app.task_mut(&guid).expect("task").state = consts::TASK_STATE_DOWNLOAD;
+            });
+            let after_token = handle
+                .borrow_app(|app| app.task_token(&guid))
+                .expect("token");
+            assert_eq!(before_token, after_token, "the run token must not change");
+            gate.release.send(()).expect("release writer");
+            let response = tokio::time::timeout(std::time::Duration::from_secs(10), request)
+                .await
+                .expect("progress request retires")
+                .expect("request task joins");
+            assert_eq!(
+                response.status, 200,
+                "state progress within the same run must not refuse publication"
+            );
+            assert!(zip.exists(), "the archive is published");
+            assert_eq!(
+                handle.task_state(&guid),
+                Some(consts::TASK_STATE_DOWNLOAD),
+                "the reader must not rewrite the task state"
+            );
+            assert_eq!(handle.native_pending(), 0);
+            assert_eq!(permits.available_permits(), 2);
+            assert!(
+                private_stage_entries(gallery.parent().expect("parent")).is_empty(),
+                "no private stage remains"
+            );
+        }));
     }
 
     /// Both native archive jobs (private preparation, final confined open)

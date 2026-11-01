@@ -364,23 +364,25 @@ impl RuntimeInner {
     /// Publish a prepared container for the exact run that was admitted.
     /// Identity validation and the bounded namespace effects share one
     /// borrow, so an invalidated run can never publish in between. The
-    /// minimum state is parameterized: the M4 worker publishes at
-    /// MAKE_ARCHIVE, the RPC reader at FINISHED.
+    /// minimum state is optional: the M4 worker publishes at MAKE_ARCHIVE,
+    /// while the frozen RPC reader (`rpc.py:477-486`) consults only the
+    /// captured task identity and its progress within that run does not
+    /// invalidate publication.
     fn commit_archive(
         &self,
         guid: &str,
         token: (u64, u64),
         prepared: PreparedArchive,
-        min_state: i64,
+        min_state: Option<i64>,
     ) -> Result<ArchiveCommit, TaskError> {
         // An immutable RefCell borrow still excludes every mutation for the
         // duration of the bounded rename/removal, so a validated run cannot
         // be replaced between validation and publication.
         let app = self.app.borrow();
         let current = app.exit_state() < consts::XEH_STATE_FULL_EXIT
-            && app
-                .task(guid)
-                .is_some_and(|task| task.token() == token && task.state >= min_state);
+            && app.task(guid).is_some_and(|task| {
+                task.token() == token && min_state.is_none_or(|min| task.state >= min)
+            });
         if !current {
             return Ok(ArchiveCommit::Stale(prepared));
         }
@@ -1364,15 +1366,17 @@ impl AppHandle {
         Some(handle)
     }
 
-    /// Publish an RPC-prepared archive only for the exact captured run and
-    /// minimum state (FINISHED for the reader). One borrow covers identity,
-    /// state and the bounded namespace effects.
+    /// Publish an RPC-prepared archive only for the exact captured run. The
+    /// reader has no minimum task state (`rpc.py:477-486`), so `None` gates
+    /// on identity alone; the M4 worker keeps `Some(MAKE_ARCHIVE)`. One
+    /// borrow covers identity, the optional state floor and the bounded
+    /// namespace effects.
     pub(crate) fn commit_archive_exact(
         &self,
         guid: &str,
         token: (u64, u64),
         prepared: crate::task::PreparedArchive,
-        min_state: i64,
+        min_state: Option<i64>,
     ) -> Result<ArchiveCommit, crate::task::TaskError> {
         self.inner.commit_archive(guid, token, prepared, min_state)
     }
@@ -2493,7 +2497,12 @@ async fn archive_worker(
             return;
         }
     };
-    match inner.commit_archive(&guid, token, prepared, consts::TASK_STATE_MAKE_ARCHIVE) {
+    match inner.commit_archive(
+        &guid,
+        token,
+        prepared,
+        Some(consts::TASK_STATE_MAKE_ARCHIVE),
+    ) {
         Ok(ArchiveCommit::Committed(committed)) => {
             // Test-only barrier between publication and detached-tree
             // cleanup; unarmed runs pass straight through.
