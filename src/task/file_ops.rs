@@ -19,6 +19,66 @@ use super::{FidKey, RenameError, Task, TaskError};
 
 static STAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Lifetime-bound registry of exclusively owned detached containers.
+///
+/// Each entry is the canonicalized container path from reservation until
+/// explicit retirement (`remove_detached` success or `restore` success).
+/// While an entry is present, no new public gallery, writable cfg.dir,
+/// title or canonical alias may resolve to that container or any of its
+/// descendants: admission is rejected before any directory/stage/file
+/// write. After retirement the exact ordinary name is usable again, so
+/// there is no blanket prefix ban.
+static ACTIVE_DETACHED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+fn detached_key(container: &Path) -> PathBuf {
+    boundary_path(container).unwrap_or_else(|_| normalize(container))
+}
+
+/// Record a freshly reserved owned container. Called once the gallery has
+/// been moved into the container; only this path addresses the payload.
+pub(crate) fn track_detached_container(container: &Path) {
+    let key = detached_key(container);
+    let mut active = ACTIVE_DETACHED
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if !active.iter().any(|entry| entry == &key) {
+        active.push(key);
+    }
+}
+
+/// Forget a retired container. Called only when the owned payload is gone
+/// (successful tree removal or successful restore that removed the empty
+/// container). A failed cleanup keeps the entry so the payload stays
+/// protected.
+pub(crate) fn untrack_detached_container(container: &Path) {
+    let key = detached_key(container);
+    let lexical = normalize(container);
+    let mut active = ACTIVE_DETACHED
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    active.retain(|entry| entry != &key && entry != &lexical);
+}
+
+/// Reject a candidate public path that would enter an owned container.
+/// The check is component-wise on canonicalized paths, so `..`, symlink
+/// and `legalpath` aliases are judged by their real target. Safe to call
+/// before any write.
+pub(crate) fn ensure_not_inside_detached(candidate: &Path) -> Result<(), TaskError> {
+    let canon = boundary_path(candidate).unwrap_or_else(|_| normalize(candidate));
+    let active = ACTIVE_DETACHED
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for owner in active.iter() {
+        if path_within(owner, &canon) {
+            return Err(TaskError::UnsafePath {
+                path: candidate.to_path_buf(),
+                reason: "detached gallery container is still owned",
+            });
+        }
+    }
+    Ok(())
+}
+
 /// The task-owned download directory and the two short locks the reference
 /// keeps on `Task` (`_f_lock` for the filesystem and `_cnt_lock` for the
 /// finished counter). They are never held across a stream.
@@ -72,6 +132,10 @@ impl TaskFiles {
     pub(super) fn task_dir(&self, component: &str) -> Result<PathBuf, TaskError> {
         check_component(component)?;
         let path = self.root.join(component);
+        // Lifetime-bound owned namespace: while a detached container owns
+        // this namespace, no new public gallery may resolve here. Rejected
+        // before any directory/stage/file write and before symlink checks.
+        ensure_not_inside_detached(&path)?;
         match fs::symlink_metadata(&path) {
             Ok(metadata) => {
                 if metadata.file_type().is_symlink() {
@@ -97,7 +161,14 @@ impl TaskFiles {
     /// symlink targets.
     pub(super) fn child_file(&self, dir: &Path, name: &str) -> Result<PathBuf, TaskError> {
         check_component(name)?;
+        // The gallery directory itself must not be an owned container: this
+        // covers cfg.dir descendants that bypass `task_dir` and keeps every
+        // direct file write inside the same lifetime-bound boundary.
+        ensure_not_inside_detached(dir)?;
         let path = dir.join(name);
+        // The file itself must not land inside an owned container either:
+        // a new gallery named exactly like a container resolves here.
+        ensure_not_inside_detached(&path)?;
         if path.parent() != Some(dir) {
             return Err(TaskError::UnsafePath {
                 path,

@@ -513,6 +513,9 @@ impl Task {
         base: &Path,
     ) -> Result<Self, TaskError> {
         let root = file_ops::resolve_dir(base, &config.dir);
+        // A writable cfg.dir may not point into an owned detached container:
+        // reject the task before any gallery/file admission.
+        file_ops::ensure_not_inside_detached(&root)?;
         let mut task = Self {
             url: url.to_string(),
             gid: None,

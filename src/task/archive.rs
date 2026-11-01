@@ -91,6 +91,7 @@ impl DetachedGallery {
         match fs::rename(&self.child, &self.public) {
             Ok(()) => {
                 let _ = fs::remove_dir(&self.container);
+                file_ops::untrack_detached_container(&self.container);
                 Ok(())
             }
             Err(source) => Err(TaskError::RollbackFailed {
@@ -146,8 +147,14 @@ pub fn make_archive_snapshot(
 /// Remove the exclusively owned detached container. Only a container
 /// produced by the reservation below is ever addressed here: the blocking
 /// pool walks exactly this private subtree, never a rebound public name.
+/// Retirement unregisters the lifetime-bound namespace so the exact
+/// ordinary name is usable again; a failed cleanup keeps the registration.
 pub fn remove_detached(detached: &DetachedGallery) -> Result<(), TaskError> {
-    file_ops::remove_tree(&detached.container)
+    let result = file_ops::remove_tree(&detached.container);
+    if result.is_ok() {
+        file_ops::untrack_detached_container(&detached.container);
+    }
+    result
 }
 
 /// Build `<gallery>.zip` from `snapshot.fpath` in a private staging file.
@@ -406,11 +413,16 @@ pub(crate) fn detach_gallery(gallery: &Path) -> Result<Option<DetachedGallery>, 
     let container = reserve_detach_container(parent)?;
     let child = container.join("gallery");
     match fs::rename(gallery, &child) {
-        Ok(()) => Ok(Some(DetachedGallery {
-            container,
-            child,
-            public: gallery.to_path_buf(),
-        })),
+        Ok(()) => {
+            // The namespace is now owned: no new public gallery, writable
+            // cfg.dir, title or alias may resolve here until retirement.
+            file_ops::track_detached_container(&container);
+            Ok(Some(DetachedGallery {
+                container,
+                child,
+                public: gallery.to_path_buf(),
+            }))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let _ = fs::remove_dir(&container);
             Ok(None)

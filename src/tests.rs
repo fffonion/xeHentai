@@ -10809,10 +10809,10 @@ mod m4 {
     }
 
     /// A new task admitted while a detached payload is owned cannot rebind
-    /// it: the payload lives in an exclusively owned container whose child
-    /// is unreachable through single-component public gallery admission, and
-    /// colliding with the container name fails safely without writing into
-    /// it.
+    /// it: while the container is owned, any public gallery, writable
+    /// cfg.dir, title or canonical alias resolving to the container or its
+    /// descendants is rejected before any directory/stage/file write. After
+    /// retirement the exact legal name admits normally.
     #[test]
     fn active_detached_payload_cannot_be_rebound_by_task_admission() {
         let root = tempfile::tempdir().expect("root");
@@ -10827,9 +10827,7 @@ mod m4 {
         assert!(committed.detached.is_some(), "gallery detached");
         assert!(!gallery.exists(), "the public gallery path is moved aside");
         // The owned payload lives in exactly one freshly reserved exclusive
-        // container; the child holding the images sits at depth two, which no
-        // single-component public gallery title can address through the
-        // existing task_dir boundary.
+        // container; the child holding the images sits at depth two.
         let mut owned = Vec::new();
         for entry in std::fs::read_dir(&downloads).unwrap().flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -10840,8 +10838,6 @@ mod m4 {
         assert_eq!(owned.len(), 1, "exactly one exclusively owned container");
         let container = owned.pop().unwrap();
         let child = container.join("gallery");
-        // Depth two below the download root: no single-component public
-        // gallery title can address it through the task_dir boundary.
         assert!(child.strip_prefix(&downloads).unwrap().components().count() >= 2);
         assert_eq!(std::fs::read(child.join("1.jpg")).unwrap(), b"victim-bytes");
         let container_title = container
@@ -10850,6 +10846,10 @@ mod m4 {
             .to_string_lossy()
             .into_owned();
         let probe = "http://127.0.0.1:9/img/0123456789abcdef0123456789abcdef01234567-10-20-0-jpg/keystamp=x";
+        // While the container is owned, a rival gallery resolving to the
+        // container root must be rejected before ANY write. A genuinely
+        // committed rival file would otherwise be deleted by the
+        // whole-container cleanup.
         let mut rival = prepared_task(root.path(), "guid0002", &container_title, 1, |_| {});
         rival.reload_map.insert(
             "0123456789".into(),
@@ -10858,27 +10858,148 @@ mod m4 {
                 "one.jpg".into(),
             ),
         );
-        // A colliding title resolves to the container root at depth one,
-        // never to the owned child: ordinary admission cannot address it.
-        assert_eq!(rival.get_fpath().unwrap(), container);
-        match rival.begin_staged_save(probe, probe) {
-            Ok(SaveStart::Staged(staged)) => {
-                assert_eq!(staged.stage.parent(), Some(container.as_path()));
-                crate::task::Task::abort_staged_save(staged);
+        match rival.get_fpath() {
+            Err(crate::task::TaskError::UnsafePath { reason, .. }) => {
+                assert!(
+                    reason.contains("still owned"),
+                    "unexpected rejection reason: {reason}"
+                );
             }
-            Ok(SaveStart::AlreadyDone(_)) => panic!("fresh rival must stage"),
+            Ok(path) => {
+                assert_eq!(
+                    path, container,
+                    "colliding title resolves to container root"
+                );
+                match rival.begin_staged_save(probe, probe) {
+                    Err(crate::task::TaskError::UnsafePath { reason, .. }) => {
+                        assert!(
+                            reason.contains("still owned"),
+                            "unexpected rejection reason: {reason}"
+                        );
+                    }
+                    Ok(_) => panic!(
+                        "rival admission at the owned container root must be rejected \
+                         before any write; a committed file would be deleted by \
+                         whole-container cleanup"
+                    ),
+                    Err(error) => panic!("unexpected rival stage error: {error}"),
+                }
+            }
             Err(error) => panic!("unexpected admission error: {error}"),
         }
+        // No rival write may have entered the owned container.
         assert_eq!(
             std::fs::read(child.join("1.jpg")).unwrap(),
             b"victim-bytes",
             "the owned payload was modified through admission"
         );
+        let mut names: Vec<String> = std::fs::read_dir(&container)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["gallery".to_string()],
+            "rival admission wrote into the owned container: {names:?}"
+        );
+        // A writable cfg.dir pointing directly at the owned container (hence
+        // at the owned child `gallery`) is the same namespace admission and
+        // must also be rejected before any write.
+        {
+            let mut cfg = m4_config(root.path(), 1, 1);
+            cfg.dir = container.to_string_lossy().into_owned();
+            let task_config = TaskConfig::from_app(&cfg, &serde_json::Map::new()).unwrap();
+            match Task::new(
+                "http://e-hentai.org/g/123/abcdef0123/",
+                task_config,
+                "guid-cfg".into(),
+                root.path(),
+            ) {
+                Err(crate::task::TaskError::UnsafePath { reason, .. }) => {
+                    assert!(
+                        reason.contains("still owned"),
+                        "unexpected cfg.dir rejection reason: {reason}"
+                    );
+                }
+                Ok(other) => panic!(
+                    "Task with cfg.dir inside the owned container must be rejected, got {}",
+                    other.files().root().display()
+                ),
+                Err(error) => panic!("unexpected cfg.dir error: {error}"),
+            }
+        }
+        // A canonical alias that collapses to the same container name via
+        // legalpath must be rejected identically.
+        {
+            let alias = format!("{}/{}", &container_title[..1], &container_title[1..]);
+            assert_eq!(
+                crate::util::legalpath(&alias),
+                container_title,
+                "alias must collapse to the container name"
+            );
+            let mut alias_rival = prepared_task(root.path(), "guid-alias", &alias, 1, |_| {});
+            alias_rival.reload_map.insert(
+                "0123456789".into(),
+                (
+                    "http://e-hentai.org/s/0123456789/123456-1".into(),
+                    "one.jpg".into(),
+                ),
+            );
+            match alias_rival.get_fpath() {
+                Err(crate::task::TaskError::UnsafePath { .. }) => {}
+                Ok(path) => {
+                    assert_eq!(path, container);
+                    match alias_rival.begin_staged_save(probe, probe) {
+                        Err(crate::task::TaskError::UnsafePath { .. }) => {}
+                        Ok(_) => panic!("canonical alias admission must be rejected"),
+                        Err(error) => panic!("unexpected alias stage error: {error}"),
+                    }
+                }
+                Err(error) => panic!("unexpected alias admission error: {error}"),
+            }
+        }
+        // Explicit retirement: the old cleanup consumes only the owned payload.
         if let Some(detached) = committed.detached {
             remove_detached(&detached).unwrap();
         }
-        // Ordinary titles still admit normally after the fix.
-        let mut plain = prepared_task(root.path(), "guid0003", "ordinary", 1, |_| {});
+        assert!(
+            leftover_private_entries(&downloads).is_empty(),
+            "owned container must be gone after retirement"
+        );
+        // After retirement the exact legal name admits normally with a real
+        // committed file, proving there is no blanket prefix ban.
+        {
+            let mut plain = prepared_task(root.path(), "guid0003", &container_title, 1, |_| {});
+            plain.reload_map.insert(
+                "0123456789".into(),
+                (
+                    "http://e-hentai.org/s/0123456789/123456-1".into(),
+                    "one.jpg".into(),
+                ),
+            );
+            let fpath = plain
+                .get_fpath()
+                .expect("exact legal name must admit after retirement");
+            assert_eq!(fpath, downloads.join(&container_title));
+            match plain.begin_staged_save(probe, probe) {
+                Ok(SaveStart::Staged(staged)) => {
+                    std::fs::write(&staged.stage, b"post-bytes").unwrap();
+                    let dest = plain.commit_staged_save(staged).unwrap();
+                    assert_eq!(std::fs::read(&dest).unwrap(), b"post-bytes");
+                }
+                Ok(SaveStart::AlreadyDone(_)) => panic!("fresh post-retirement task must stage"),
+                Err(error) => panic!("post-retirement admission must succeed, got {error}"),
+            }
+            std::fs::remove_dir_all(&fpath).unwrap();
+            assert!(
+                leftover_private_entries(&downloads).is_empty(),
+                "post-retirement gallery cleaned"
+            );
+        }
+        // Ordinary titles still admit normally.
+        let mut plain = prepared_task(root.path(), "guid0004", "ordinary", 1, |_| {});
         plain.reload_map.insert(
             "0123456789".into(),
             (
