@@ -27,8 +27,8 @@ use tokio::sync::watch;
 
 use super::{
     FrozenPack, GalleryFail, Response, RpcDispatcher, RpcRequest, ServerError, StaticCache,
-    check_auth, execute, hash_link, jsonrpc_envelope, parse_jsonrpc, parse_thumb_query,
-    read_archive, read_gallery_file, thumbnail,
+    hash_link, jsonrpc_envelope, parse_jsonrpc, parse_thumb_query, read_archive, read_gallery_file,
+    thumbnail,
 };
 use crate::r#const as consts;
 use crate::core::App;
@@ -41,6 +41,22 @@ pub use super::{
 
 /// Production login endpoint from `core.py:454`, reused by the RPC login.
 pub const LOGIN_URL: &str = "https://forums.e-hentai.org/index.php?act=Login&CODE=01";
+
+/// Login POST target. Production always uses [`LOGIN_URL`]; tests may point
+/// one controlled local-login fixture at a loopback origin through
+/// `XEH_TEST_LOGIN_URL` so the real RPC path, the real App login and real
+/// HTTP bytes are exercised without any public network. The variable is only
+/// honored in test builds and only names the origin — never credentials, and
+/// business logic is never patched.
+fn login_endpoint() -> String {
+    #[cfg(test)]
+    if let Ok(url) = std::env::var("XEH_TEST_LOGIN_URL") {
+        if !url.is_empty() {
+            return url;
+        }
+    }
+    LOGIN_URL.to_string()
+}
 
 /// Synchronous per-request dispatch used by connection tasks and tests.
 /// Gallery/archive/thumbnail/static-cache-hit bytes are produced here under
@@ -328,41 +344,40 @@ fn dispatch_post(
             });
         }
     };
-    // Authorization (`rpc.py:355-370`): exact literal `token:<secret>`.
-    let first_raw = req.args.first().and_then(|value| value.as_str());
-    if !check_auth(secret, first_raw) {
-        let envelope = jsonrpc_envelope(&req.id, consts::ERR_RPC_UNAUTHORIZED, None, None);
-        return RequestAction::Ready(Response {
-            status: 403,
-            reason: reason_of(403),
-            mime: Some("application/json-rpc".to_string()),
-            body: serde_json::to_vec(&envelope).unwrap_or_default(),
-        });
+    // One normalized, singly-authenticated path: the RSS selector maps every
+    // accepted wire spelling (camelCase and snake_case) to one canonical
+    // method, the optional first token is authenticated and consumed once,
+    // and login/drain/ordinary calls all run prepared. Lookup runs before
+    // auth, like the reference (`rpc.py:343-370`).
+    let prepared = match super::prepare_call(rpc, &req, secret) {
+        Ok(prepared) => prepared,
+        Err(outcome) => {
+            let envelope = jsonrpc_envelope(&req.id, outcome.code, outcome.result, outcome.message);
+            return RequestAction::Ready(Response {
+                status: outcome.status,
+                reason: reason_of(outcome.status),
+                mime: Some("application/json-rpc".to_string()),
+                body: serde_json::to_vec(&envelope).unwrap_or_default(),
+            });
+        }
+    };
+    // The server secret still reaches `execute_prepared` so getImage signs
+    // URLs with it; the token itself was already consumed above.
+    if prepared.method == "login_exhentai" {
+        return dispatch_login(rpc, &req, &prepared);
     }
-    let mut req = req;
-    // Login and runtime-drain paths take the token positionally before their
-    // own arity checks; ordinary methods leave it in place because the
-    // dispatcher performs the same exact-literal check and consumes it. The
-    // server secret must reach `execute` so getImage signs URLs with it.
-    let pop_first = secret.is_some()
-        || req
-            .args
-            .first()
-            .and_then(|value| value.as_str())
-            .is_some_and(|text| text.contains("token:"));
-    let special = req.method_raw == "xeH.loginExhentai"
-        || (runtime.is_some()
-            && (req.method_raw == "xeH.pauseTask" || req.method_raw == "xeH.delTask"));
-    if special && pop_first {
-        req.args.remove(0);
+    if runtime.is_some() && (prepared.method == "pause_task" || prepared.method == "del_task") {
+        return dispatch_drain(rpc, &req, &prepared);
     }
-    if req.method_raw == "xeH.loginExhentai" {
-        return dispatch_login(rpc, &req, secret);
-    }
-    if runtime.is_some() && (req.method_raw == "xeH.pauseTask" || req.method_raw == "xeH.delTask") {
-        return dispatch_drain(rpc, &req);
-    }
-    let outcome = execute(app, rpc, &req, secret, Some(get_info()));
+    let outcome = super::execute_prepared(
+        app,
+        rpc,
+        &prepared.method,
+        &prepared.args,
+        &req.kwargs,
+        secret,
+        Some(get_info()),
+    );
     let envelope = jsonrpc_envelope(&req.id, outcome.code, outcome.result, outcome.message);
     RequestAction::Ready(Response {
         status: outcome.status,
@@ -374,8 +389,14 @@ fn dispatch_post(
 
 /// Runtime-mounted pause/delete: check arity and guid types synchronously,
 /// then let the connection owner drain worker retirement before mutating.
-fn dispatch_drain(rpc: &mut RpcDispatcher, req: &RpcRequest) -> RequestAction {
-    let arity = match rpc.guid_arity(req.args.len() as i64, req.kwargs.len() as i64) {
+/// The canonical RSS method selects the drain; the raw wire spelling is only
+/// kept for the reference-shaped error text.
+fn dispatch_drain(
+    rpc: &mut RpcDispatcher,
+    req: &RpcRequest,
+    prepared: &super::PreparedCall,
+) -> RequestAction {
+    let arity = match rpc.guid_arity(prepared.args.len() as i64, req.kwargs.len() as i64) {
         Ok(arity) => arity,
         Err(error) => return ready_exec_error(&req.id, error.to_string()),
     };
@@ -385,13 +406,13 @@ fn dispatch_drain(rpc: &mut RpcDispatcher, req: &RpcRequest) -> RequestAction {
             format!("{}() has invalid arguments", req.method_raw),
         );
     }
-    let Some(guid) = req.args.first().and_then(|value| value.as_str()) else {
+    let Some(guid) = prepared.args.first().and_then(|value| value.as_str()) else {
         return ready_exec_error(
             &req.id,
             format!("{}() argument 'guid' must be a string", req.method_raw),
         );
     };
-    if req.method_raw == "xeH.pauseTask" {
+    if prepared.method == "pause_task" {
         RequestAction::DrainPause {
             id: req.id.clone(),
             guid: guid.to_string(),
@@ -417,28 +438,11 @@ fn ready_exec_error(id: &Value, message: String) -> RequestAction {
 fn dispatch_login(
     rpc: &mut RpcDispatcher,
     req: &RpcRequest,
-    secret: Option<&str>,
+    prepared: &super::PreparedCall,
 ) -> RequestAction {
-    let first = req.args.first().and_then(|value| value.as_str());
-    if !check_auth(secret, first) {
-        let envelope = jsonrpc_envelope(&req.id, consts::ERR_RPC_UNAUTHORIZED, None, None);
-        return RequestAction::Ready(Response {
-            status: 403,
-            reason: reason_of(403),
-            mime: Some("application/json-rpc".to_string()),
-            body: serde_json::to_vec(&envelope).unwrap_or_default(),
-        });
-    }
-    let mut args = req.args.clone();
-    let pop_first = secret.is_some()
-        || args
-            .first()
-            .and_then(|value| value.as_str())
-            .is_some_and(|text| text.contains("token:"));
-    if pop_first {
-        args.remove(0);
-    }
-    let arity = match rpc.login_arity(args.len() as i64, req.kwargs.len() as i64) {
+    // The token was already authenticated and consumed by `prepare_call`;
+    // these are the real credentials, never a second USERNAME check.
+    let arity = match rpc.login_arity(prepared.args.len() as i64, req.kwargs.len() as i64) {
         Ok(arity) => arity,
         Err(error) => {
             let envelope = jsonrpc_envelope(
@@ -469,13 +473,24 @@ fn dispatch_login(
             body: serde_json::to_vec(&envelope).unwrap_or_default(),
         });
     }
-    let user = args.first().and_then(|value| value.as_str()).unwrap_or("");
-    let pwd = args.get(1).and_then(|value| value.as_str()).unwrap_or("");
+    let user = prepared
+        .args
+        .first()
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let pwd = prepared
+        .args
+        .get(1)
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
     // Non-string credentials: the reference passes them to `requests`, which
     // raises `TypeError` outside the RPC catch and drops the connection; the
     // candidate answers 500 instead of inventing form encoding.
-    if args.first().is_some_and(|value| !value.is_string())
-        || args.get(1).is_some_and(|value| !value.is_string())
+    if prepared
+        .args
+        .first()
+        .is_some_and(|value| !value.is_string())
+        || prepared.args.get(1).is_some_and(|value| !value.is_string())
     {
         let envelope = jsonrpc_envelope(
             &req.id,
@@ -877,7 +892,9 @@ async fn run_login(
                 ("bt".to_string(), "pone".to_string()),
                 ("PassWord".to_string(), pwd.clone()),
             ];
-            let fetched = session.request("POST", LOGIN_URL, Some(data), false).await;
+            let fetched = session
+                .request("POST", &login_endpoint(), Some(data), false)
+                .await;
             // Restore the session before touching App state again.
             let applied = handle.borrow_app_mut(|app| {
                 app.restore_http_session(session);
@@ -1971,6 +1988,380 @@ mod tests {
         assert_eq!(envelope.get("result"), Some(&Value::String(String::new())));
     }
 
+    // --- B1+B4: one normalized, singly-authenticated request path -----------
+
+    fn dispatch_sync(
+        app: &mut App,
+        rpc: &mut RpcDispatcher,
+        body: &[u8],
+        secret: Option<&str>,
+        runtime: Option<&crate::core::runtime::AppHandle>,
+    ) -> RequestAction {
+        let cache_dir = tempfile::tempdir().expect("cache").keep();
+        let mut cache = crate::rpc::StaticCache::load(
+            &cache_dir.join(crate::rpc::STATIC_CACHE_NAME),
+            Arc::new(crate::worker::RealClock),
+        );
+        let info = Value::Null;
+        dispatch_request(
+            app,
+            rpc,
+            &mut cache,
+            &|| info.clone(),
+            "POST /jsonrpc",
+            body,
+            secret,
+            runtime,
+        )
+    }
+
+    fn ready_envelope(action: RequestAction) -> (u16, Value) {
+        let RequestAction::Ready(response) = action else {
+            panic!("expected a ready response, got {action:?}");
+        };
+        let envelope: Value = serde_json::from_slice(&response.body).expect("envelope");
+        (response.status, envelope)
+    }
+
+    #[test]
+    fn secret_login_authenticates_once_and_prepares_credentials() {
+        let mut app = test_app();
+        let mut rpc = dispatcher();
+        // RED on 21fc8f7: the second USERNAME check in dispatch_login pops
+        // the secret first, then rejects the real username with 403.
+        let body =
+            br#"{"method":"xeH.loginExhentai","id":7,"params":[["token:s3cret","u","p"],{}]}"#;
+        match dispatch_sync(&mut app, &mut rpc, body, Some("s3cret"), None) {
+            RequestAction::Login { id, user, pwd } => {
+                assert_eq!(id, Value::from(7));
+                assert_eq!(user, "u");
+                assert_eq!(pwd, "p");
+            }
+            other => panic!("secret login must prepare a login action, got {other:?}"),
+        }
+        // Ordinary usernames (never tokens) still reach the login path.
+        let body = br#"{"method":"xeH.loginExhentai","id":8,"params":[["token:s3cret","alice","wonderland"],{}]}"#;
+        match dispatch_sync(&mut app, &mut rpc, body, Some("s3cret"), None) {
+            RequestAction::Login { user, pwd, .. } => {
+                assert_eq!(user, "alice");
+                assert_eq!(pwd, "wonderland");
+            }
+            other => panic!("ordinary login must prepare a login action, got {other:?}"),
+        }
+        // Open server keeps the stray-token pop without authentication.
+        let body = br#"{"method":"xeH.loginExhentai","id":9,"params":[["token:xyz","u","p"],{}]}"#;
+        match dispatch_sync(&mut app, &mut rpc, body, None, None) {
+            RequestAction::Login { user, pwd, .. } => {
+                assert_eq!(user, "u");
+                assert_eq!(pwd, "p");
+            }
+            other => panic!("open-server login must pop the stray token, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn login_arity_and_type_errors_survive_single_auth() {
+        let mut app = test_app();
+        let mut rpc = dispatcher();
+        // Wrong or missing token with a configured secret: 403, unchanged.
+        for body in [
+            &br#"{"method":"xeH.loginExhentai","id":1,"params":[["bogus","u","p"],{}]}"#[..],
+            br#"{"method":"xeH.loginExhentai","id":2,"params":[[],{}]}"#,
+        ] {
+            let (status, envelope) = ready_envelope(dispatch_sync(
+                &mut app,
+                &mut rpc,
+                body,
+                Some("s3cret"),
+                None,
+            ));
+            assert_eq!(status, 403, "{envelope}");
+        }
+        // Non-string credentials: 500 type error, never a second 403.
+        let body = br#"{"method":"xeH.loginExhentai","id":3,"params":[["token:s3cret",5,"p"],{}]}"#;
+        let (status, envelope) = ready_envelope(dispatch_sync(
+            &mut app,
+            &mut rpc,
+            body,
+            Some("s3cret"),
+            None,
+        ));
+        assert_eq!(status, 500, "{envelope}");
+        // Keyword arguments: the reference TypeError surfaces as 500.
+        let body = br#"{"method":"xeH.loginExhentai","id":4,"params":[["token:s3cret","u","p"],{"name":"u"}]}"#;
+        let (status, envelope) = ready_envelope(dispatch_sync(
+            &mut app,
+            &mut rpc,
+            body,
+            Some("s3cret"),
+            None,
+        ));
+        assert_eq!(status, 500, "{envelope}");
+        // Missing password: 500 missing-argument error.
+        let body = br#"{"method":"xeH.loginExhentai","id":5,"params":[["token:s3cret","u"],{}]}"#;
+        let (status, envelope) = ready_envelope(dispatch_sync(
+            &mut app,
+            &mut rpc,
+            body,
+            Some("s3cret"),
+            None,
+        ));
+        assert_eq!(status, 500, "{envelope}");
+    }
+
+    #[test]
+    fn snake_pause_and_delete_take_the_runtime_drain_path() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let runtime = crate::core::Runtime::new(test_app(), manifest.to_path_buf());
+        let handle = runtime.handle();
+        let mut rpc = dispatcher();
+        // RED on 21fc8f7: only raw camelCase names drain; the snake_case
+        // forms the RSS selector also accepts fall into sync App mutation.
+        for method in ["xeH.pause_task", "xeH.pauseTask"] {
+            let body = format!(r#"{{"method":"{method}","id":3,"params":[["nope"],{{}}]}}"#);
+            let action = handle.borrow_app_mut(|app| {
+                dispatch_sync(app, &mut rpc, body.as_bytes(), None, Some(&handle))
+            });
+            assert!(
+                matches!(action, RequestAction::DrainPause { .. }),
+                "{method} must drain, got {action:?}"
+            );
+        }
+        for method in ["xeH.del_task", "xeH.delTask"] {
+            let body = format!(r#"{{"method":"{method}","id":3,"params":[["nope"],{{}}]}}"#);
+            let action = handle.borrow_app_mut(|app| {
+                dispatch_sync(app, &mut rpc, body.as_bytes(), None, Some(&handle))
+            });
+            assert!(
+                matches!(action, RequestAction::DrainDelete { .. }),
+                "{method} must drain, got {action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn snake_pause_and_delete_drain_over_wire() {
+        let mut app = test_app();
+        let mut rpc = dispatcher();
+        let (status, envelope) =
+            add_task_with_url(&mut app, &mut rpc, "http://e-hentai.org/g/123/abcdef0123/");
+        assert_eq!(status, 200);
+        let guid = envelope
+            .get("result")
+            .and_then(Value::as_str)
+            .expect("guid")
+            .to_string();
+        // Snake pause drains through the same M4 retirement path as camel.
+        let body = format!(r#"{{"method":"xeH.pause_task","id":10,"params":[["{guid}"],{{}}]}}"#);
+        let raw = roundtrip_handle(&post_bytes("/jsonrpc", body.as_bytes()), None, app);
+        let (status, _, body) = split_response(&raw);
+        assert!(status.contains("200"), "{status}");
+        let envelope: Value = serde_json::from_slice(&body).expect("envelope");
+        assert_eq!(envelope.get("result"), Some(&Value::String(String::new())));
+    }
+
+    #[test]
+    fn snake_delete_running_is_refused_over_wire() {
+        // A running task refuses deletion with the real code, in both
+        // spellings; nothing is pretended drained.
+        for method in ["xeH.del_task", "xeH.delTask"] {
+            let mut running = test_app();
+            let mut rpc = dispatcher();
+            let (_, envelope) = add_task_with_url(
+                &mut running,
+                &mut rpc,
+                "http://e-hentai.org/g/123/abcdef0123/",
+            );
+            let guid = envelope
+                .get("result")
+                .and_then(Value::as_str)
+                .expect("guid")
+                .to_string();
+            running.task_mut(&guid).expect("task").state = consts::TASK_STATE_DOWNLOAD;
+            let body = format!(r#"{{"method":"{method}","id":11,"params":[["{guid}"],{{}}]}}"#);
+            let raw = roundtrip_handle(&post_bytes("/jsonrpc", body.as_bytes()), None, running);
+            let (status, _, body) = split_response(&raw);
+            assert!(status.contains("200"), "{status}");
+            let envelope: Value = serde_json::from_slice(&body).expect("envelope");
+            assert_eq!(
+                envelope
+                    .get("error")
+                    .and_then(|error| error.get("code"))
+                    .and_then(Value::as_i64),
+                Some(consts::ERR_DELETE_RUNNING_TASK),
+                "{method}"
+            );
+        }
+    }
+
+    struct LoginFixture {
+        _server: std::thread::JoinHandle<()>,
+        url: String,
+        requests: std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>,
+    }
+
+    /// Loopback login origin on a plain OS thread (it must outlive the
+    /// one-shot test runtimes): captures the real HTTP request bytes the
+    /// native session sends and answers with a synthetic logged-in cookie
+    /// pair. Only external I/O origin is faked; no handler, filter or App
+    /// business logic is patched. Credential values stay in memory and are
+    /// never written to retained logs.
+    fn loopback_login() -> LoginFixture {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback");
+        let port = listener.local_addr().expect("addr").port();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = std::sync::Arc::clone(&requests);
+        let server = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else {
+                    return;
+                };
+                let seen = std::sync::Arc::clone(&seen);
+                std::thread::spawn(move || {
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_secs(15)))
+                        .ok();
+                    let mut head = Vec::new();
+                    let mut byte = [0u8; 1];
+                    loop {
+                        match stream.read(&mut byte) {
+                            Ok(1) => {
+                                head.extend_from_slice(&byte);
+                                if head.len() > 65536 {
+                                    return;
+                                }
+                                if head.ends_with(b"\r\n\r\n") {
+                                    break;
+                                }
+                            }
+                            _ => return,
+                        }
+                    }
+                    let text = String::from_utf8_lossy(&head).into_owned();
+                    let mut lines = text.split("\r\n");
+                    let request_line = lines.next().unwrap_or("").to_string();
+                    let mut length = 0usize;
+                    for line in lines {
+                        if let Some(value) =
+                            line.to_ascii_lowercase().strip_prefix("content-length:")
+                        {
+                            length = value.trim().parse().unwrap_or(0);
+                        }
+                    }
+                    let mut body = vec![0u8; length.min(1 << 20)];
+                    let mut read = 0usize;
+                    while read < body.len() {
+                        match stream.read(&mut body[read..]) {
+                            Ok(0) => break,
+                            Ok(n) => read += n,
+                            Err(_) => break,
+                        }
+                    }
+                    body.truncate(read);
+                    seen.lock().expect("capture").push((request_line, body));
+                    let reply = b"HTTP/1.1 200 OK\r\nSet-Cookie: ipb_member_id=4242; path=/\r\nSet-Cookie: ipb_pass_hash=deadbeef00; path=/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(reply);
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                });
+            }
+        });
+        LoginFixture {
+            _server: server,
+            url: format!("http://127.0.0.1:{port}/index.php?act=Login&CODE=01"),
+            requests,
+        }
+    }
+
+    #[test]
+    fn secret_login_runs_real_loopback_login_and_keeps_session() {
+        let fixture = loopback_login();
+        // Synthetic fixture credentials only; redacted from retained logs.
+        let user = "fixture-user";
+        let pwd = "fixture-pass-9";
+        unsafe {
+            std::env::set_var("XEH_TEST_LOGIN_URL", &fixture.url);
+        }
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let runtime = crate::core::Runtime::new(test_app(), manifest.to_path_buf());
+        let handle = runtime.handle();
+        let login = |id: i64| {
+            let body = format!(
+                r#"{{"method":"xeH.loginExhentai","id":{id},"params":[["token:s3cret","{user}","{pwd}"],{{}}]}}"#
+            );
+            block_on(async {
+                let (mut client, mut server) = tokio::io::duplex(256 * 1024);
+                {
+                    use tokio::io::AsyncWriteExt;
+                    client
+                        .write_all(&post_bytes("/jsonrpc", body.as_bytes()))
+                        .await
+                        .expect("write");
+                }
+                let cache_dir = tempfile::tempdir().expect("cache").keep();
+                let shared = Rc::new(RefCell::new(
+                    SharedRpc::new(
+                        manifest,
+                        &cache_dir,
+                        Arc::new(crate::worker::RealClock),
+                        Some("s3cret".to_string()),
+                        "http://127.0.0.1:9".to_string(),
+                    )
+                    .expect("shared"),
+                ));
+                serve_one(
+                    &mut server,
+                    handle.clone(),
+                    shared,
+                    "http://127.0.0.1:9".to_string(),
+                )
+                .await
+                .expect("serve");
+                drop(server);
+                let mut out = Vec::new();
+                {
+                    use tokio::io::AsyncReadExt;
+                    client.read_to_end(&mut out).await.expect("read");
+                }
+                out
+            })
+        };
+        // First login: real RPC POST with the secret, real App login against
+        // the loopback origin, real HTTP bytes and Set-Cookie capture.
+        let raw = login(7);
+        let (status, _, body) = split_response(&raw);
+        assert!(status.contains("200"), "{status}");
+        let envelope: Value = serde_json::from_slice(&body).expect("envelope");
+        assert_eq!(envelope.get("result"), Some(&Value::Bool(true)));
+        let captured = fixture.requests.lock().expect("capture");
+        assert_eq!(captured.len(), 1, "one real HTTP login POST");
+        assert!(captured[0].0.starts_with("POST "), "{}", captured[0].0);
+        let sent = String::from_utf8_lossy(&captured[0].1).into_owned();
+        for field in ["UserName=", "PassWord=", "returntype=8", "CookieDate=1"] {
+            assert!(sent.contains(field), "login form must carry {field}");
+        }
+        drop(captured);
+        // Same App now carries the session: login flag, Cookie header and no
+        // second network hit on the follow-up request.
+        assert!(handle.borrow_app(|app| app.has_login()));
+        let cookie = handle.borrow_app(|app| app.cookie_header().unwrap_or_default().to_string());
+        assert!(cookie.contains("ipb_member_id=4242"), "{cookie}");
+        assert!(cookie.contains("ipb_pass_hash=deadbeef00"), "{cookie}");
+        let raw = login(8);
+        let (status, _, body) = split_response(&raw);
+        assert!(status.contains("200"), "{status}");
+        let envelope: Value = serde_json::from_slice(&body).expect("envelope");
+        assert_eq!(envelope.get("result"), Some(&Value::Bool(true)));
+        assert_eq!(
+            fixture.requests.lock().expect("capture").len(),
+            1,
+            "logged-in login must not hit the network again"
+        );
+        unsafe {
+            std::env::remove_var("XEH_TEST_LOGIN_URL");
+        }
+    }
+
     // --- native thumbnails on synthetic images ------------------------------
 
     fn png_bytes(width: u32, height: u32) -> Vec<u8> {
@@ -2537,6 +2928,34 @@ mod tests {
                 .and_then(Value::as_array)
                 .map(Vec::len),
             Some(0)
+        );
+    }
+
+    #[test]
+    fn rss_mutant_changes_drain_routing() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let runtime = crate::core::Runtime::new(test_app(), manifest.to_path_buf());
+        let handle = runtime.handle();
+        let source = std::fs::read_to_string(manifest.join(super::super::RPC_RSS))
+            .expect("handlers.rss must exist");
+        // Mutant: drop pause_task from the RSS allowlist. The same wire
+        // spelling no longer drains — it 404s — proving the RSS selector
+        // (not a Rust alias list) owns the pause/delete route.
+        let mutant = source.replace("|| snake == \"pause_task\" ||", "||");
+        assert_ne!(mutant, source);
+        let mut rpc_mutant = RpcDispatcher::from_source(&mutant).expect("mutant compiles");
+        let body = br#"{"method":"xeH.pauseTask","id":3,"params":[["nope"],{}]}"#;
+        let action = handle
+            .borrow_app_mut(|app| dispatch_sync(app, &mut rpc_mutant, body, None, Some(&handle)));
+        let (status, envelope) = ready_envelope(action);
+        assert_eq!(status, 404, "{envelope}");
+        // Control: the login route is untouched by this mutant.
+        let body = br#"{"method":"xeH.loginExhentai","id":7,"params":[["u","p"],{}]}"#;
+        let action = handle
+            .borrow_app_mut(|app| dispatch_sync(app, &mut rpc_mutant, body, None, Some(&handle)));
+        assert!(
+            matches!(action, RequestAction::Login { .. }),
+            "login route must survive the pause mutant, got {action:?}"
         );
     }
 }

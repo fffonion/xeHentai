@@ -724,20 +724,57 @@ pub fn execute(
     secret: Option<&str>,
     info: Option<Value>,
 ) -> ExecOutcome {
+    let prepared = match prepare_call(rpc, req, secret) {
+        Ok(prepared) => prepared,
+        Err(outcome) => return outcome,
+    };
+    execute_prepared(
+        app,
+        rpc,
+        &prepared.method,
+        &prepared.args,
+        &req.kwargs,
+        secret,
+        info,
+    )
+}
+
+/// One authenticated, token-consumed call: the canonical RSS method plus the
+/// positional arguments after the single token pop. Both [`execute`] and the
+/// server dispatch prepare exactly this, once; downstream code never
+/// re-authenticates or re-pops.
+#[derive(Debug)]
+pub(crate) struct PreparedCall {
+    pub method: String,
+    pub args: Vec<Value>,
+}
+
+/// Normalize through the RSS selector, authenticate the optional first token
+/// and consume it, exactly once. Lookup runs before auth (like
+/// `rpc.py:343-370`), then a single pop (`rpc.py:373-375`): the whole secret
+/// token when a secret is configured, else a stray `token:`-looking first
+/// argument on an open server.
+pub(crate) fn prepare_call(
+    rpc: &mut RpcDispatcher,
+    req: &RpcRequest,
+    secret: Option<&str>,
+) -> Result<PreparedCall, ExecOutcome> {
     use crate::r#const as consts;
     let selected = match rpc.method_select(&req.method_raw) {
         Ok(selected) => selected,
-        Err(error) => return ExecOutcome::exec_error(error.to_string()),
+        Err(error) => return Err(ExecOutcome::exec_error(error.to_string())),
     };
     if selected.outcome != "ok" {
-        return ExecOutcome::http(404, consts::ERR_RPC_METHOD_NOT_FOUND, None);
+        return Err(ExecOutcome::http(
+            404,
+            consts::ERR_RPC_METHOD_NOT_FOUND,
+            None,
+        ));
     }
-    let method = selected.method;
-
     // Authorization (`rpc.py:355-370`): exact literal `token:<secret>`.
     let first_raw = req.args.first().and_then(wire_string);
     if !check_auth(secret, first_raw.as_deref()) {
-        return ExecOutcome::http(403, consts::ERR_RPC_UNAUTHORIZED, None);
+        return Err(ExecOutcome::http(403, consts::ERR_RPC_UNAUTHORIZED, None));
     }
     let mut args = req.args.clone();
     if secret.is_some() {
@@ -751,12 +788,30 @@ pub fn execute(
         // Preserve the open-server stray-token pop (`rpc.py:373-375`).
         args.remove(0);
     }
+    Ok(PreparedCall {
+        method: selected.method,
+        args,
+    })
+}
 
+/// Run a prepared call: no method lookup, no authentication, no token pop.
+/// `secret` here only signs getImage URLs; the token was already consumed.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn execute_prepared(
+    app: &mut crate::core::App,
+    rpc: &mut RpcDispatcher,
+    method: &str,
+    args: &[Value],
+    kwargs: &JsonMap<String, Value>,
+    secret: Option<&str>,
+    info: Option<Value>,
+) -> ExecOutcome {
+    use crate::r#const as consts;
     let argc = args.len() as i64;
-    let kw_count = req.kwargs.len() as i64;
-    match method.as_str() {
+    let kw_count = kwargs.len() as i64;
+    match method {
         "add_task" => {
-            let kw_names: Vec<String> = req.kwargs.keys().cloned().collect();
+            let kw_names: Vec<String> = kwargs.keys().cloned().collect();
             let arity = match rpc.add_task_arity(argc, &kw_names) {
                 Ok(arity) => arity,
                 Err(error) => return ExecOutcome::exec_error(error.to_string()),
@@ -772,7 +827,7 @@ pub fn execute(
                     "add_task() argument 'url' must be a string".to_string(),
                 );
             };
-            match app.add_task(&url, req.kwargs.clone()) {
+            match app.add_task(&url, kwargs.clone()) {
                 Ok((code, guid)) => {
                     if code != 0 {
                         ExecOutcome::method_error(code, None)
@@ -784,7 +839,7 @@ pub fn execute(
             }
         }
         "update_config" => {
-            let names: Vec<String> = req.kwargs.keys().cloned().collect();
+            let names: Vec<String> = kwargs.keys().cloned().collect();
             let filter = match rpc.update_config_filter(&names) {
                 Ok(filter) => filter,
                 Err(error) => return ExecOutcome::exec_error(error.to_string()),
@@ -794,7 +849,7 @@ pub fn execute(
             }
             let mut patch = JsonMap::new();
             for name in &filter.kept {
-                if let Some(value) = req.kwargs.get(name) {
+                if let Some(value) = kwargs.get(name) {
                     patch.insert(name.clone(), value.clone());
                 }
             }
@@ -954,8 +1009,8 @@ pub fn execute(
         }
         "list_tasks" => {
             let has_pos = !args.is_empty();
-            let has_kw = req.kwargs.contains_key("level");
-            if has_kw && req.kwargs.len() > 1 {
+            let has_kw = kwargs.contains_key("level");
+            if has_kw && kwargs.len() > 1 {
                 return ExecOutcome::exec_error(
                     "list_tasks() got an unexpected keyword argument".to_string(),
                 );
@@ -963,7 +1018,7 @@ pub fn execute(
             let level_value = if has_pos {
                 args.first().cloned()
             } else if has_kw {
-                req.kwargs.get("level").cloned()
+                kwargs.get("level").cloned()
             } else {
                 None
             };
@@ -1013,12 +1068,12 @@ pub fn execute(
                     "get_image() takes at most 2 arguments".to_string(),
                 );
             }
-            if req.kwargs.keys().any(|name| name != "request_range") {
+            if kwargs.keys().any(|name| name != "request_range") {
                 return ExecOutcome::exec_error(
                     "get_image() got an unexpected keyword argument".to_string(),
                 );
             }
-            if argc == 2 && req.kwargs.contains_key("request_range") {
+            if argc == 2 && kwargs.contains_key("request_range") {
                 return ExecOutcome::exec_error(
                     "get_image() got multiple values for argument 'request_range'".to_string(),
                 );
@@ -1034,10 +1089,7 @@ pub fn execute(
             let range_value = if argc == 2 {
                 args.get(1).cloned().unwrap_or(Value::Null)
             } else {
-                req.kwargs
-                    .get("request_range")
-                    .cloned()
-                    .unwrap_or(Value::Null)
+                kwargs.get("request_range").cloned().unwrap_or(Value::Null)
             };
             let truthy = range_is_truthy(&range_value);
             let text = python_range_text(&range_value);
