@@ -2263,10 +2263,10 @@
       ],
       "status": "delta",
       "delta": {
-        "reference": "make_archive returns while still holding _f_lock when the zip already exists; a failed zip can leave a partial archive",
-        "candidate": "releases the task file lock on the early return and publishes the archive from a same-directory stage by rename; failures leave the original images intact",
-        "client_impact": "same archive bytes and early-return result; the lock stays usable and no partial archive is visible",
-        "regression": "archive_uses_store_sorted_entries_and_the_reference_comment; archive_failure_keeps_images_and_releases_the_lock"
+        "reference": "make_archive returns while still holding _f_lock when the zip already exists; a failed zip can leave a partial archive, and the writer publishes/removes the gallery without any run identity check",
+        "candidate": "releases the task file lock on the early return; the blocking step builds only a private container and the runtime commits the ZIP rename and the detached-gallery removal under the captured task owner/run, so a stale or invalidated attempt cannot publish or delete a reused gallery; failures leave the original images intact",
+        "client_impact": "same archive bytes and early-return result; the lock stays usable, no partial archive is visible, and a replacement run's gallery is never removed by an older writer",
+        "regression": "archive_uses_store_sorted_entries_and_the_reference_comment; archive_failure_keeps_images_and_releases_the_lock; stale_archive_success_cannot_publish_or_remove_a_new_gallery; stale_archive_prepare_error_cannot_fail_a_new_owner; stale_archive_join_error_cannot_fail_a_new_owner; archive_waiting_worker_cannot_follow_a_same_guid_replacement_run; previous_archive_is_joined_before_the_next_archive_admission; shutdown_waits_for_a_pending_archive_writer_before_retirement"
       }
     },
     {
@@ -3298,12 +3298,16 @@
     {
       "id": "m4.archive.after-finish",
       "status": "implemented",
-      "source": "M4 contract (worker.py/core.py/task.py)",
-      "target": "src/core/runtime.rs + src/tests.rs",
+      "source": "M4 contract (worker.py/core.py/task.py); M4 R1 archive lifecycle",
+      "target": "src/core/runtime.rs + src/task/archive.rs + src/tests.rs",
       "suite": "download",
       "inputs": [],
       "assertions": [
-        "Archive starts only after downloads/rename, writes STORE zip and removes the gallery directory."
+        "Archive starts only after downloads/rename, writes STORE zip and removes the gallery directory.",
+        "Admission, MAKE_ARCHIVE/FINISHED/FAILED state, ZIP publication and gallery removal are fenced by the captured task owner/run at wakeup, admission, after the blocking await and at every success/failure/file effect.",
+        "A same-guid resume (add_task on a finished task) and pause/delete/recreate leave the replacement task state, failcode, meta and queues unchanged; a stale ZIP/gallery effect is refused and the old private stage is removed.",
+        "The previous archive JoinHandle is taken and awaited at the DOWNLOAD boundary after the new download workers start; at most one archive writer runs and finished state-19 handles are reaped.",
+        "Shutdown while the real blocking ZIP writer is pending waits for the thread completion acknowledgement and publishes no late ZIP/state effect."
       ],
       "delta": null
     },

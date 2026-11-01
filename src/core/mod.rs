@@ -1023,11 +1023,23 @@ impl App {
     /// live run and can be mutated. Paused, failed, finished, deleted and
     /// same-guid-new-task states all reject the late callback.
     pub fn task_is_current(&self, guid: &str, token: (u64, u64)) -> bool {
+        self.task_run_matches(guid, token)
+            && self
+                .all_tasks
+                .get(guid)
+                .is_some_and(|task| is_runnable_state(task.state))
+    }
+
+    /// Identity-only half of [`Self::task_is_current`]: the same task object
+    /// and run marker, without the worker-state window. Archive admission and
+    /// its state/publication effects happen at MAKE_ARCHIVE/FINISHED, which
+    /// the worker-only runnable predicate deliberately rejects.
+    pub fn task_run_matches(&self, guid: &str, token: (u64, u64)) -> bool {
         self.exit < consts::XEH_STATE_FULL_EXIT
             && self
                 .all_tasks
                 .get(guid)
-                .is_some_and(|task| task.token() == token && is_runnable_state(task.state))
+                .is_some_and(|task| task.token() == token)
     }
 
     pub fn task_state(&self, guid: &str) -> Option<i64> {

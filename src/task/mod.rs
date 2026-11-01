@@ -10,8 +10,15 @@
 mod archive;
 pub(crate) mod file_ops;
 
-pub use archive::ArchiveSnapshot;
-pub(crate) use archive::make_archive_snapshot;
+#[cfg(test)]
+pub(crate) use archive::{
+    ArchiveFault, archive_waiting_gate, archive_writer_log, archive_writer_stats,
+    arm_archive_fault, arm_archive_gate, arm_archive_waiting, reset_archive_writer_stats,
+};
+pub use archive::{ArchiveSnapshot, CommittedArchive, PreparedArchive};
+pub(crate) use archive::{
+    commit_prepared, discard_prepared, prepare_archive_snapshot, remove_detached,
+};
 
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};

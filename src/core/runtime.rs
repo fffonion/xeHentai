@@ -24,7 +24,10 @@ use super::{
 };
 use crate::r#const as consts;
 use crate::filters::{Filters, ImageOutcome, MetadataOutcome, PageOutcome, PageResponse};
-use crate::task::{ArchiveSnapshot, make_archive_snapshot};
+use crate::task::{
+    ArchiveSnapshot, CommittedArchive, PreparedArchive, commit_prepared, discard_prepared,
+    prepare_archive_snapshot, remove_detached,
+};
 use crate::task::{SaveStart, StagedSave, Task, TaskError};
 use crate::util;
 use crate::util::logger::{DEBUG, ERROR, INFO, VERBOSE, WARNING};
@@ -61,6 +64,20 @@ impl Slot {
     }
 }
 
+/// Result of the synchronous archive admission boundary.
+enum ArchiveAdmission {
+    Admitted(ArchiveSnapshot),
+    Stale,
+    Failed(TaskError),
+}
+
+/// Result of the synchronous publication boundary. `Stale` hands the
+/// unpublished container back so its owner can remove the private stage.
+enum ArchiveCommit {
+    Committed(CommittedArchive),
+    Stale(PreparedArchive),
+}
+
 pub(crate) struct RuntimeInner {
     pub app: std::cell::RefCell<App>,
     resource_root: PathBuf,
@@ -92,6 +109,13 @@ impl RuntimeInner {
 
     fn is_current(&self, guid: &str, token: (u64, u64)) -> bool {
         self.app.borrow().task_is_current(guid, token)
+    }
+
+    /// Identity-only ownership check for effects that legitimately happen at
+    /// FINISHED (archive admission), where the worker-runnable window no
+    /// longer applies.
+    fn owns_run(&self, guid: &str, token: (u64, u64)) -> bool {
+        self.app.borrow().task_run_matches(guid, token)
     }
 
     fn finished(&self, guid: &str) -> i64 {
@@ -199,6 +223,94 @@ impl RuntimeInner {
         if (0..20).contains(&state) {
             self.threads.borrow_mut()[state as usize].push(slot);
         }
+    }
+
+    /// Capture the archive inputs and enter MAKE_ARCHIVE only while `guid`
+    /// still holds the exact task object/run that was admitted. One borrow
+    /// covers the identity check, the snapshot and the state change, so no
+    /// await can interleave a resume/reuse between them. FINISHED (20) is a
+    /// valid archive admission even though it is outside the worker-runnable
+    /// window.
+    fn begin_archive(&self, guid: &str, token: (u64, u64)) -> ArchiveAdmission {
+        let mut app = self.app.borrow_mut();
+        if app.exit_state() >= consts::XEH_STATE_FULL_EXIT {
+            return ArchiveAdmission::Stale;
+        }
+        let Some(task) = app.task_mut(guid) else {
+            return ArchiveAdmission::Stale;
+        };
+        if task.token() != token || task.state < consts::TASK_STATE_FINISHED {
+            return ArchiveAdmission::Stale;
+        }
+        match task.archive_snapshot() {
+            Ok(snapshot) => {
+                task.state = consts::TASK_STATE_MAKE_ARCHIVE;
+                ArchiveAdmission::Admitted(snapshot)
+            }
+            Err(error) => {
+                task.state = consts::TASK_STATE_FAILED;
+                ArchiveAdmission::Failed(error)
+            }
+        }
+    }
+
+    /// Publish a prepared container for the exact run that was admitted.
+    /// Identity validation and the bounded namespace effects share one
+    /// borrow, so an invalidated run can never publish in between.
+    fn commit_archive(
+        &self,
+        guid: &str,
+        token: (u64, u64),
+        prepared: PreparedArchive,
+    ) -> Result<ArchiveCommit, TaskError> {
+        // An immutable RefCell borrow still excludes every mutation for the
+        // duration of the bounded rename/removal, so a validated run cannot
+        // be replaced between validation and publication.
+        let app = self.app.borrow();
+        let current = app.exit_state() < consts::XEH_STATE_FULL_EXIT
+            && app.task(guid).is_some_and(|task| {
+                task.token() == token && task.state >= consts::TASK_STATE_MAKE_ARCHIVE
+            });
+        if !current {
+            return Ok(ArchiveCommit::Stale(prepared));
+        }
+        match commit_prepared(prepared) {
+            Ok(committed) => Ok(ArchiveCommit::Committed(committed)),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Complete the archive only while this run still owns the task.
+    fn finish_archive(&self, guid: &str, token: (u64, u64)) -> bool {
+        let mut app = self.app.borrow_mut();
+        if app.exit_state() >= consts::XEH_STATE_FULL_EXIT {
+            return false;
+        }
+        let Some(task) = app.task_mut(guid) else {
+            return false;
+        };
+        if task.token() != token || task.state < consts::TASK_STATE_MAKE_ARCHIVE {
+            return false;
+        }
+        task.state = consts::TASK_STATE_FINISHED;
+        true
+    }
+
+    /// Publish a failure only while this run still owns the task; an old
+    /// writer's error must never fail a replacement run.
+    fn fail_archive(&self, guid: &str, token: (u64, u64)) -> bool {
+        let mut app = self.app.borrow_mut();
+        if app.exit_state() >= consts::XEH_STATE_FULL_EXIT {
+            return false;
+        }
+        let Some(task) = app.task_mut(guid) else {
+            return false;
+        };
+        if task.token() != token || task.state < consts::TASK_STATE_MAKE_ARCHIVE {
+            return false;
+        }
+        task.state = consts::TASK_STATE_FAILED;
+        true
     }
 
     fn cancel_channel(&self, guid: &str) -> watch::Receiver<bool> {
@@ -643,11 +755,37 @@ impl Runtime {
                         inner.set_state(guid, consts::TASK_STATE_FAILED);
                         break;
                     }
-                    if run.make_archive
-                        && let Err(error) = self.spawn_archive_worker(guid, token)
-                    {
-                        inner.log(ERROR, &format!("task #{guid} error: {error}"));
-                        inner.set_state(guid, consts::TASK_STATE_FAILED);
+                    if run.make_archive {
+                        // The reference starts the new download workers
+                        // first, then joins the previous archiver, and only
+                        // afterwards admits the next one. The await happens
+                        // outside every App/Task borrow.
+                        let previous = inner.take_slots(consts::TASK_STATE_MAKE_ARCHIVE);
+                        if !previous.is_empty() {
+                            let message = format!(
+                                "wait {} threads in state {}",
+                                previous.len(),
+                                consts::TASK_STATE_MAKE_ARCHIVE
+                            );
+                            inner.log(VERBOSE, &message);
+                            for slot in previous {
+                                slot.join().await;
+                            }
+                            // A blocked admission can outlive the run it was
+                            // waiting for; revalidate the exact task/run (the
+                            // download may legitimately have reached FINISHED
+                            // while the previous archive was still running).
+                            if *cancel.borrow()
+                                || inner.exit() >= consts::XEH_STATE_FULL_EXIT
+                                || !inner.owns_run(guid, token)
+                            {
+                                break;
+                            }
+                        }
+                        if let Err(error) = self.spawn_archive_worker(guid, token) {
+                            inner.log(ERROR, &format!("task #{guid} error: {error}"));
+                            inner.set_state(guid, consts::TASK_STATE_FAILED);
+                        }
                     }
                     break;
                 }
@@ -1004,6 +1142,16 @@ impl AppHandle {
 
     pub fn trace(&self) -> Vec<TraceEvent> {
         self.inner.trace.borrow().clone()
+    }
+
+    /// Test-only view of the per-state handle collection. Used to prove the
+    /// archive slot is joined/reaped rather than accumulated.
+    #[cfg(test)]
+    pub fn slot_count(&self, state: i64) -> usize {
+        if !(0..20).contains(&state) {
+            return 0;
+        }
+        self.inner.threads.borrow()[state as usize].len()
     }
 
     /// Test-only handle to the production download port for stale-result
@@ -2083,7 +2231,18 @@ async fn archive_worker(
     token: (u64, u64),
 ) {
     loop {
-        let state = inner.state(&guid).unwrap_or(consts::TASK_STATE_FAILED);
+        let state = {
+            let app = inner.app.borrow();
+            if !app.task_run_matches(&guid, token) {
+                // A resumed/deleted/recreated run owns the guid now: this
+                // worker must stop waiting for a completion that is not ours.
+                return;
+            }
+            match app.task(&guid) {
+                Some(task) => task.state,
+                None => return,
+            }
+        };
         if state >= consts::TASK_STATE_FINISHED {
             break;
         }
@@ -2100,50 +2259,27 @@ async fn archive_worker(
             _ = inner.clock.sleep(1.0) => {}
         }
     }
-    let snapshot: Option<ArchiveSnapshot> = {
-        inner
+    // Narrow test seam: hold the worker after it observed FINISHED but before
+    // it re-validates the exact run at admission.
+    #[cfg(test)]
+    {
+        let marker = inner
             .app
             .borrow()
             .task(&guid)
-            .and_then(|task| task.archive_snapshot().ok())
-    };
-    let Some(snapshot) = snapshot else {
-        return;
-    };
-    let message = localized("TASK_START_MAKE_ARCHIVE", &[&guid]);
-    inner.log(INFO, &message);
-    inner.set_state(&guid, consts::TASK_STATE_MAKE_ARCHIVE);
-    let started = std::time::Instant::now();
-    // The blocking writer takes the same task file lock inside its thread.
-    // It is never aborted or detached: shutdown waits for this JoinHandle, so
-    // cancellation cannot pretend the archive ended early or publish late.
-    let handle = tokio::task::spawn_blocking(move || make_archive_snapshot(&snapshot, true));
-    match handle.await {
-        Ok(Ok(path)) => {
-            if inner
-                .app
-                .borrow()
-                .task(&guid)
-                .is_some_and(|task| task.token() == token)
-            {
-                inner.set_state(&guid, consts::TASK_STATE_FINISHED);
-                let message = localized(
-                    "TASK_MAKE_ARCHIVE_FINISHED",
-                    &[
-                        &guid,
-                        &path.display().to_string(),
-                        &started.elapsed().as_secs_f64().to_string(),
-                    ],
-                );
-                inner.log(INFO, &message);
-                inner.record(
-                    "archive.done",
-                    json!({"task": guid, "path": path.display().to_string()}),
-                );
-            }
+            .and_then(|task| task.get_fpath().ok())
+            .map(|path| path.to_string_lossy().into_owned());
+        if let Some(marker) = marker {
+            crate::task::archive_waiting_gate(&marker).await;
         }
-        Ok(Err(error)) => {
-            inner.set_state(&guid, consts::TASK_STATE_FAILED);
+    }
+    let snapshot = match inner.begin_archive(&guid, token) {
+        ArchiveAdmission::Admitted(snapshot) => snapshot,
+        ArchiveAdmission::Stale => {
+            inner.record("archive.stale", json!({"task": guid, "stage": "admission"}));
+            return;
+        }
+        ArchiveAdmission::Failed(error) => {
             let message = format!(
                 "task #{guid} error: {}",
                 localized("ERR_CANNOT_MAKE_ARCHIVE", &[])
@@ -2153,14 +2289,93 @@ async fn archive_worker(
                 "archive.failed",
                 json!({"task": guid, "error": error.to_string()}),
             );
+            return;
+        }
+    };
+    let message = localized("TASK_START_MAKE_ARCHIVE", &[&guid]);
+    inner.log(INFO, &message);
+    let started = std::time::Instant::now();
+    // The blocking writer only builds a private container. It is never
+    // aborted or detached: shutdown waits for this JoinHandle, so
+    // cancellation cannot pretend the archive ended early.
+    let handle = tokio::task::spawn_blocking(move || prepare_archive_snapshot(&snapshot, true));
+    let prepared = match handle.await {
+        Ok(Ok(prepared)) => prepared,
+        Ok(Err(error)) => {
+            archive_failed(&inner, &guid, token, &error.to_string());
+            return;
         }
         Err(error) => {
-            inner.set_state(&guid, consts::TASK_STATE_FAILED);
-            inner.log(ERROR, &format!("task #{guid} archive join error: {error}"));
+            archive_failed(&inner, &guid, token, &format!("join error: {error}"));
+            return;
+        }
+    };
+    match inner.commit_archive(&guid, token, prepared) {
+        Ok(ArchiveCommit::Committed(committed)) => {
+            if let Some(detached) = committed.detached {
+                // Heavy tree cleanup owns only the detached private path and
+                // is awaited, so shutdown/pause join its real completion.
+                let removal = tokio::task::spawn_blocking(move || remove_detached(&detached)).await;
+                match removal {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        archive_failed(&inner, &guid, token, &error.to_string());
+                        return;
+                    }
+                    Err(error) => {
+                        archive_failed(&inner, &guid, token, &format!("join error: {error}"));
+                        return;
+                    }
+                }
+            }
+            if inner.finish_archive(&guid, token) {
+                let message = localized(
+                    "TASK_MAKE_ARCHIVE_FINISHED",
+                    &[
+                        &guid,
+                        &committed.path.display().to_string(),
+                        &started.elapsed().as_secs_f64().to_string(),
+                    ],
+                );
+                inner.log(INFO, &message);
+                inner.record(
+                    "archive.done",
+                    json!({"task": guid, "path": committed.path.display().to_string()}),
+                );
+            } else {
+                inner.record(
+                    "archive.stale",
+                    json!({"task": guid, "stage": "completion"}),
+                );
+            }
+        }
+        Ok(ArchiveCommit::Stale(prepared)) => {
+            // The run was invalidated after the private container was built:
+            // only its owner may remove that stage, and nothing public is
+            // touched.
+            discard_prepared(prepared);
             inner.record(
-                "archive.failed",
-                json!({"task": guid, "error": error.to_string()}),
+                "archive.stale",
+                json!({"task": guid, "stage": "publication"}),
             );
         }
+        Err(error) => {
+            archive_failed(&inner, &guid, token, &error.to_string());
+        }
     }
+}
+
+/// Fence one archive failure publication by the captured owner/run. A stale
+/// writer error (or join error) never mutates the replacement run.
+fn archive_failed(inner: &RuntimeInner, guid: &str, token: (u64, u64), error: &str) {
+    if !inner.fail_archive(guid, token) {
+        inner.record("archive.stale", json!({"task": guid, "stage": "failure"}));
+        return;
+    }
+    let message = format!(
+        "task #{guid} error: {}",
+        localized("ERR_CANNOT_MAKE_ARCHIVE", &[])
+    );
+    inner.log(ERROR, &format!("{message}: {error}"));
+    inner.record("archive.failed", json!({"task": guid, "error": error}));
 }

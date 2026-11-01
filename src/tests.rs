@@ -7629,7 +7629,11 @@ mod m4 {
         App, AppHandle, CommitOutcome, DownloadPort, Runtime, TraceEvent, WorkerRef,
     };
     use crate::proxy::FixedResolver;
-    use crate::task::{SaveStart, StagedSave, Task, TaskConfig};
+    use crate::task::{
+        ArchiveFault, SaveStart, StagedSave, Task, TaskConfig, archive_writer_log,
+        archive_writer_stats, arm_archive_fault, arm_archive_gate, arm_archive_waiting,
+        reset_archive_writer_stats,
+    };
     use crate::worker::{SessionConfig, SpeedChecker, StepClock, TestClock, TickClock};
 
     const MANIFEST: &str = env!("CARGO_MANIFEST_DIR");
@@ -9630,6 +9634,585 @@ mod m4 {
                 );
                 monitor3.request_exit();
                 let _ = join3.await;
+            })
+            .await;
+    }
+
+    // --- M4 R1: archive run identity and previous-archive retirement -------
+
+    fn m4_task_named(
+        app: &mut App,
+        root: &Path,
+        guid: &str,
+        url: &str,
+        kwargs: serde_json::Value,
+    ) -> String {
+        let config = TaskConfig::from_app(&app.cfg, kwargs.as_object().unwrap()).unwrap();
+        let task = Task::new(url, config, guid.into(), root).unwrap();
+        app.insert_task_for_test(task)
+    }
+
+    /// Put a real task directly at DOWNLOAD with a real gallery directory.
+    fn ready_archive_task(
+        app: &mut App,
+        guid: &str,
+        title: &str,
+        gallery: &Path,
+        total: i64,
+        finished: i64,
+    ) {
+        std::fs::create_dir_all(gallery).unwrap();
+        let task = app.task_mut(guid).unwrap();
+        task.state = consts::TASK_STATE_DOWNLOAD;
+        task.meta.insert("title".into(), serde_json::json!(title));
+        task.meta.insert("total".into(), serde_json::json!(total));
+        task.meta
+            .insert("finished".into(), serde_json::json!(finished));
+        task.meta
+            .insert("thumbnail_cnt".into(), serde_json::json!(20));
+        task.img_q = Some(VecDeque::new());
+        task.page_q = Some(VecDeque::new());
+    }
+
+    fn leftover_private_entries(dir: &Path) -> Vec<String> {
+        let mut names = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with(".xehentai-archive-") || name.starts_with(".xehentai-remove-") {
+                    names.push(name);
+                }
+            }
+        }
+        names
+    }
+
+    async fn wait_until(mut predicate: impl FnMut() -> bool, what: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !predicate() {
+            if std::time::Instant::now() > deadline {
+                panic!("timed out waiting for {what}");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Bounded observation window after a gated writer is released: stop as
+    /// soon as the worker records an archive effect, changes the task state or
+    /// creates the ZIP. It never proves success by elapsed time; the
+    /// assertions decide.
+    async fn wait_for_archive_effect(handle: &AppHandle, guid: &str, state: i64, zip: &Path) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            let recorded = handle
+                .trace()
+                .iter()
+                .any(|event| event.kind.starts_with("archive."));
+            if handle.task_state(guid) != Some(state) || zip.exists() || recorded {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// The archive worker observed FINISHED and is held at the wakeup seam.
+    /// A same-guid `add_task` then advances the run; the old worker may not
+    /// follow the replacement into admission, state 19, ZIP or gallery
+    /// removal.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn archive_waiting_worker_cannot_follow_a_same_guid_replacement_run() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = m4_config(root.path(), 1, 1);
+        config.make_archive = true;
+        let mut app = m4_app(root.path(), config);
+        let url = "http://e-hentai.org/g/123/abcdef0123/";
+        let guid = m4_task(
+            &mut app,
+            root.path(),
+            url,
+            serde_json::json!({"scan_thread_cnt": 1, "download_thread_cnt": 1, "make_archive": true}),
+        );
+        let gallery = root.path().join("downloads").join("archived");
+        ready_archive_task(&mut app, &guid, "archived", &gallery, 1, 1);
+        std::fs::write(gallery.join("1.jpg"), b"old-run-bytes").unwrap();
+        let zip = root.path().join("downloads").join("archived.zip");
+        let waiting = arm_archive_waiting(&gallery.to_string_lossy());
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let runtime = Runtime::new(app, Path::new(MANIFEST).to_path_buf());
+                let (run, handle) = runtime.spawn();
+                let deadline = std::time::Instant::now() + Duration::from_secs(20);
+                while waiting.started.try_recv().is_err() {
+                    if std::time::Instant::now() > deadline {
+                        panic!(
+                            "archive worker never reached the wakeup seam: {:?}",
+                            handle.trace()
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                assert_eq!(handle.task_state(&guid), Some(consts::TASK_STATE_FINISHED));
+                // Real App mutation: a finished task's same-guid add_task
+                // resets it to WAITING and advances the run marker.
+                let (code, returned) =
+                    handle.borrow_app_mut(|app| app.add_task(url, serde_json::Map::new()).unwrap());
+                assert_eq!(code, consts::ERR_NO_ERROR);
+                assert_eq!(returned.as_deref(), Some(guid.as_str()));
+                assert_eq!(handle.task_state(&guid), Some(consts::TASK_STATE_WAITING));
+                // The replacement run reaches FINISHED before the old worker
+                // wakes: the state window alone cannot tell them apart, only
+                // the captured owner/run can.
+                handle.borrow_app_mut(|app| {
+                    app.task_mut(&guid).unwrap().state = consts::TASK_STATE_FINISHED;
+                });
+                assert_eq!(handle.task_state(&guid), Some(consts::TASK_STATE_FINISHED));
+                let _ = waiting.release.send(());
+                wait_for_archive_effect(&handle, &guid, consts::TASK_STATE_FINISHED, &zip).await;
+                let report = handle.shutdown().await;
+                assert!(report.joined >= 1, "{report:?}");
+                run.await.unwrap();
+                assert_eq!(
+                    handle.task_state(&guid),
+                    Some(consts::TASK_STATE_FINISHED),
+                    "an old wakeup must not admit the replacement run"
+                );
+                assert_eq!(
+                    handle.borrow_app(|app| app.task(&guid).unwrap().failcode),
+                    0
+                );
+                assert!(!zip.exists(), "no old ZIP may be published");
+                assert_eq!(
+                    std::fs::read(gallery.join("1.jpg")).unwrap(),
+                    b"old-run-bytes"
+                );
+                assert!(leftover_private_entries(&root.path().join("downloads")).is_empty());
+                assert_eq!(handle.slot_count(consts::TASK_STATE_MAKE_ARCHIVE), 0);
+            })
+            .await;
+    }
+
+    /// One stale-writer scenario: pause -> delete -> recreate the same guid,
+    /// then release the blocking writer. `fault` selects the success path or
+    /// one of the two failure branches (preparation error / join error).
+    async fn stale_writer_case(fault: Option<ArchiveFault>) {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = m4_config(root.path(), 1, 1);
+        config.make_archive = true;
+        let mut app = m4_app(root.path(), config);
+        let url = "http://e-hentai.org/g/123/abcdef0123/";
+        let guid = m4_task(
+            &mut app,
+            root.path(),
+            url,
+            serde_json::json!({"scan_thread_cnt": 1, "download_thread_cnt": 1, "make_archive": true}),
+        );
+        let gallery = root.path().join("downloads").join("archived");
+        ready_archive_task(&mut app, &guid, "archived", &gallery, 1, 1);
+        std::fs::write(gallery.join("1.jpg"), b"old-run-bytes").unwrap();
+        let zip = root.path().join("downloads").join("archived.zip");
+        let downloads = root.path().join("downloads");
+        let marker = gallery.to_string_lossy().into_owned();
+        reset_archive_writer_stats(&downloads);
+        let gate = arm_archive_gate(&marker);
+        if let Some(fault) = fault {
+            arm_archive_fault(&marker, fault);
+        }
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let runtime = Runtime::new(app, Path::new(MANIFEST).to_path_buf());
+                let (run, handle) = runtime.spawn();
+                let deadline = std::time::Instant::now() + Duration::from_secs(20);
+                while gate.started.try_recv().is_err() {
+                    if std::time::Instant::now() > deadline {
+                        panic!("blocking writer never started: {:?}", handle.trace());
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                assert_eq!(
+                    handle.task_state(&guid),
+                    Some(consts::TASK_STATE_MAKE_ARCHIVE)
+                );
+                handle.borrow_app_mut(|app| {
+                    assert_eq!(app.pause_task(&guid).unwrap().0, consts::ERR_NO_ERROR);
+                    assert_eq!(app.del_task(&guid).unwrap().0, consts::ERR_NO_ERROR);
+                    let (code, returned) = app.add_task(url, serde_json::Map::new()).unwrap();
+                    assert_eq!(code, consts::ERR_NO_ERROR);
+                    assert_eq!(returned.as_deref(), Some(guid.as_str()));
+                    assert_eq!(app.task_state(&guid), Some(consts::TASK_STATE_WAITING));
+                    // The replacement run owns the same public gallery name.
+                    // Drive it to a real FINISHED while the old writer is
+                    // still blocked; it must not start an archive itself.
+                    let task = app.task_mut(&guid).unwrap();
+                    task.config.make_archive = false;
+                    task.state = consts::TASK_STATE_DOWNLOAD;
+                    task.meta
+                        .insert("title".into(), serde_json::json!("archived"));
+                    task.meta.insert("total".into(), serde_json::json!(1));
+                    task.meta.insert("finished".into(), serde_json::json!(1));
+                    task.meta
+                        .insert("thumbnail_cnt".into(), serde_json::json!(20));
+                    task.img_q = Some(VecDeque::new());
+                    task.page_q = Some(VecDeque::new());
+                });
+                std::fs::create_dir_all(&gallery).unwrap();
+                std::fs::write(gallery.join("1.jpg"), b"new-run-bytes").unwrap();
+                std::fs::write(gallery.join("new-only.txt"), b"only-new-run").unwrap();
+                wait_until(
+                    || handle.task_state(&guid) == Some(consts::TASK_STATE_FINISHED),
+                    "replacement run completion",
+                )
+                .await;
+                let _ = gate.release.send(());
+                wait_for_archive_effect(&handle, &guid, consts::TASK_STATE_FINISHED, &zip).await;
+                let _ = handle.shutdown().await;
+                run.await.unwrap();
+                assert_eq!(
+                    handle.task_state(&guid),
+                    Some(consts::TASK_STATE_FINISHED),
+                    "a stale writer must not change the replacement task state"
+                );
+                let (failcode, meta_len, queues) = handle.borrow_app(|app| {
+                    let task = app.task(&guid).unwrap();
+                    (
+                        task.failcode,
+                        task.meta.len(),
+                        (task.img_q.is_none(), task.page_q.is_none()),
+                    )
+                });
+                assert_eq!(failcode, 0);
+                assert_eq!(meta_len, 4, "the replacement metadata is untouched");
+                assert_eq!(queues, (true, true));
+                assert!(!zip.exists(), "a stale archive must not publish a ZIP");
+                assert_eq!(
+                    std::fs::read(gallery.join("1.jpg")).unwrap(),
+                    b"new-run-bytes",
+                    "a stale archive must not remove the replacement gallery"
+                );
+                assert_eq!(
+                    std::fs::read(gallery.join("new-only.txt")).unwrap(),
+                    b"only-new-run"
+                );
+                assert!(
+                    leftover_private_entries(&root.path().join("downloads")).is_empty(),
+                    "the discarded private stage must be removed"
+                );
+                let (active, peak) = archive_writer_stats(&downloads);
+                assert_eq!(active, 0);
+                assert!(peak <= 1);
+                assert_eq!(handle.slot_count(consts::TASK_STATE_MAKE_ARCHIVE), 0);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_archive_success_cannot_publish_or_remove_a_new_gallery() {
+        stale_writer_case(None).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_archive_prepare_error_cannot_fail_a_new_owner() {
+        stale_writer_case(Some(ArchiveFault::Prepare)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_archive_join_error_cannot_fail_a_new_owner() {
+        stale_writer_case(Some(ArchiveFault::Panic)).await;
+    }
+
+    /// Three real archive tasks with distinct galleries. The first writer is
+    /// held; the second task's downloads must already be running, but its
+    /// archive may not start until the first worker is actually joined. The
+    /// third task cannot pass that stage boundary either.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn previous_archive_is_joined_before_the_next_archive_admission() {
+        let hash_a = "0123456789abcdef0123456789abcdef01234567";
+        let hash_b = "89abcdef0123456789abcdef0123456789abcdef";
+        let hash_c = "fedcba9876543210fedcba9876543210fedcba98";
+        let image_a = image_body(3, 640);
+        let image_b = image_body(4, 700);
+        let image_c = image_body(5, 760);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&requests);
+        let server_bodies = [
+            (hash_a.to_string(), image_a.clone()),
+            (hash_b.to_string(), image_b.clone()),
+            (hash_c.to_string(), image_c.clone()),
+        ];
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let seen = Arc::clone(&seen);
+                let bodies = server_bodies.clone();
+                tokio::spawn(async move {
+                    let head = read_head(&mut socket).await;
+                    let path = path_of(&head);
+                    seen.lock().unwrap().push(path.clone());
+                    let body = bodies
+                        .iter()
+                        .find(|(hash, _)| path.contains(hash))
+                        .map(|(_, body)| body.clone())
+                        .unwrap_or_default();
+                    respond(&mut socket, "200 OK", "image/jpeg", &body).await;
+                });
+            }
+        });
+
+        let root = tempfile::tempdir().unwrap();
+        let mut config = m4_config(root.path(), 1, 1);
+        config.make_archive = true;
+        let mut app = m4_app_guids(root.path(), config, &["aaaa0001", "bbbb0002", "cccc0003"]);
+        let url = "http://e-hentai.org/g/123/abcdef0123/";
+        let mut guids = Vec::new();
+        for (guid, title) in [("aaaa0001", "aa"), ("bbbb0002", "bb"), ("cccc0003", "cc")] {
+            guids.push(m4_task_named(
+                &mut app,
+                root.path(),
+                guid,
+                url,
+                serde_json::json!({
+                    "scan_thread_cnt": 1,
+                    "download_thread_cnt": 1,
+                    "make_archive": true,
+                }),
+            ));
+            let gallery = root.path().join("downloads").join(title);
+            ready_archive_task(&mut app, guid, title, &gallery, 1, 0);
+        }
+        let setups = [
+            (guids[0].as_str(), "aa", hash_a, "0123456789", &image_a),
+            (guids[1].as_str(), "bb", hash_b, "89abcdef01", &image_b),
+            (guids[2].as_str(), "cc", hash_c, "fedcba9876", &image_c),
+        ];
+        for (guid, _title, hash40, hash10, body) in setups {
+            let task = app.task_mut(guid).unwrap();
+            let image_url = format!(
+                "http://127.0.0.1:{port}/img/{hash40}-{}-200-0-jpg/keystamp=x",
+                body.len()
+            );
+            task.img_q = Some(VecDeque::from([image_url]));
+            task.reload_map.insert(
+                hash10.into(),
+                (
+                    format!("http://e-hentai.org/s/{hash10}/123456-1"),
+                    "one.jpg".into(),
+                ),
+            );
+        }
+        m4_session(
+            &mut app,
+            Arc::new(crate::worker::RealClock),
+            Arc::new(FixedResolver::new(
+                format!("127.0.0.1:{port}").parse::<SocketAddr>().unwrap(),
+            )),
+        );
+        let gallery_a = root.path().join("downloads").join("aa");
+        let marker_a = gallery_a.to_string_lossy().into_owned();
+        let downloads = root.path().join("downloads");
+        let zip_b = downloads.join("bb.zip");
+        reset_archive_writer_stats(&downloads);
+        let gate = arm_archive_gate(&marker_a);
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let runtime = Runtime::new(app, Path::new(MANIFEST).to_path_buf());
+                let (run, handle) = runtime.spawn();
+                let deadline = std::time::Instant::now() + Duration::from_secs(20);
+                while gate.started.try_recv().is_err() {
+                    if std::time::Instant::now() > deadline {
+                        panic!("first archive writer never started: {:?}", handle.trace());
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                assert_eq!(
+                    handle.task_state(&guids[0]),
+                    Some(consts::TASK_STATE_MAKE_ARCHIVE)
+                );
+                wait_until(
+                    {
+                        let requests = Arc::clone(&requests);
+                        move || {
+                            requests
+                                .lock()
+                                .unwrap()
+                                .iter()
+                                .any(|path| path.contains(hash_b))
+                        }
+                    },
+                    "second task's image download",
+                )
+                .await;
+                wait_until(
+                    || handle.task_state(&guids[1]) == Some(consts::TASK_STATE_FINISHED),
+                    "second task's download completion",
+                )
+                .await;
+                // Give the old implementation its synchronous chance to admit
+                // the second archive while the first writer is still held.
+                let chance = std::time::Instant::now() + Duration::from_secs(2);
+                while std::time::Instant::now() < chance
+                    && handle.slot_count(consts::TASK_STATE_MAKE_ARCHIVE) <= 1
+                    && !zip_b.exists()
+                    && archive_writer_log(&downloads).len() == 1
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                assert!(
+                    handle.slot_count(consts::TASK_STATE_MAKE_ARCHIVE) <= 1,
+                    "no second archive handle may accumulate in state 19"
+                );
+                assert!(
+                    !zip_b.exists(),
+                    "second archive started before the first was joined"
+                );
+                assert_eq!(
+                    archive_writer_log(&downloads),
+                    vec![marker_a.clone()],
+                    "no second archive writer may start before the first is joined"
+                );
+                assert_ne!(
+                    handle.task_state(&guids[1]),
+                    Some(consts::TASK_STATE_MAKE_ARCHIVE)
+                );
+                assert_eq!(
+                    requests
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|path| path.contains(hash_c))
+                        .count(),
+                    0,
+                    "the third task must not pass the archive stage boundary"
+                );
+                let _ = gate.release.send(());
+                let archive_names = ["aa", "bb", "cc"];
+                wait_until(
+                    || {
+                        archive_names.iter().all(|title| {
+                            root.path()
+                                .join("downloads")
+                                .join(format!("{title}.zip"))
+                                .exists()
+                        }) && guids.iter().all(|guid| {
+                            handle.task_state(guid) == Some(consts::TASK_STATE_FINISHED)
+                        })
+                    },
+                    "all three archives",
+                )
+                .await;
+                let (active, peak) = archive_writer_stats(&downloads);
+                assert_eq!(active, 0);
+                assert_eq!(peak, 1, "archive writers must never overlap");
+                let expected: Vec<String> = ["aa", "bb", "cc"]
+                    .iter()
+                    .map(|title| {
+                        root.path()
+                            .join("downloads")
+                            .join(title)
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                    .collect();
+                assert_eq!(archive_writer_log(&downloads), expected);
+                for (title, body) in [("aa", &image_a), ("bb", &image_b), ("cc", &image_c)] {
+                    let gallery = root.path().join("downloads").join(title);
+                    let zip = root.path().join("downloads").join(format!("{title}.zip"));
+                    assert!(!gallery.exists(), "{title} gallery removed after archive");
+                    let mut archive =
+                        zip::ZipArchive::new(std::fs::File::open(&zip).unwrap()).unwrap();
+                    assert_eq!(archive.len(), 1);
+                    let mut entry = archive.by_index(0).unwrap();
+                    let mut bytes = Vec::new();
+                    std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
+                    assert_eq!(&bytes, body, "{title} zip bytes");
+                }
+                assert!(leftover_private_entries(&root.path().join("downloads")).is_empty());
+                let _ = handle.shutdown().await;
+                let _ = run.await;
+                assert_eq!(handle.slot_count(consts::TASK_STATE_MAKE_ARCHIVE), 0);
+            })
+            .await;
+        server.abort();
+    }
+
+    /// Shutdown while the real ZIP writer is still blocked must wait for the
+    /// thread's completion acknowledgement and must not publish a late ZIP or
+    /// state change afterwards.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_waits_for_a_pending_archive_writer_before_retirement() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = m4_config(root.path(), 1, 1);
+        config.make_archive = true;
+        let mut app = m4_app(root.path(), config);
+        let url = "http://e-hentai.org/g/123/abcdef0123/";
+        let guid = m4_task(
+            &mut app,
+            root.path(),
+            url,
+            serde_json::json!({"scan_thread_cnt": 1, "download_thread_cnt": 1, "make_archive": true}),
+        );
+        let gallery = root.path().join("downloads").join("pending");
+        ready_archive_task(&mut app, &guid, "pending", &gallery, 1, 1);
+        std::fs::write(gallery.join("1.jpg"), b"pending-bytes").unwrap();
+        let zip = root.path().join("downloads").join("pending.zip");
+        let downloads = root.path().join("downloads");
+        let marker = gallery.to_string_lossy().into_owned();
+        reset_archive_writer_stats(&downloads);
+        let gate = arm_archive_gate(&marker);
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let runtime = Runtime::new(app, Path::new(MANIFEST).to_path_buf());
+                let (run, handle) = runtime.spawn();
+                let deadline = std::time::Instant::now() + Duration::from_secs(20);
+                while gate.started.try_recv().is_err() {
+                    if std::time::Instant::now() > deadline {
+                        panic!("blocking writer never started: {:?}", handle.trace());
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                assert_eq!(
+                    handle.task_state(&guid),
+                    Some(consts::TASK_STATE_MAKE_ARCHIVE)
+                );
+                let mut shutdown = Box::pin(handle.shutdown());
+                let early = tokio::time::timeout(Duration::from_millis(200), &mut shutdown).await;
+                assert!(
+                    early.is_err(),
+                    "shutdown reported retirement while the ZIP writer was still pending"
+                );
+                assert_eq!(
+                    handle.task_state(&guid),
+                    Some(consts::TASK_STATE_MAKE_ARCHIVE)
+                );
+                assert!(gallery.join("1.jpg").exists());
+                assert!(!zip.exists());
+                let _ = gate.release.send(());
+                let report = shutdown.await;
+                assert!(report.joined >= 1, "{report:?}");
+                let _ = run.await;
+                assert_eq!(
+                    archive_writer_stats(&downloads).0,
+                    0,
+                    "the blocking writer really retired before shutdown returned"
+                );
+                assert_eq!(
+                    handle.task_state(&guid),
+                    Some(consts::TASK_STATE_MAKE_ARCHIVE),
+                    "shutdown must not claim a finished archive"
+                );
+                assert!(!zip.exists(), "no late ZIP after shutdown");
+                assert_eq!(
+                    std::fs::read(gallery.join("1.jpg")).unwrap(),
+                    b"pending-bytes"
+                );
+                assert!(leftover_private_entries(&root.path().join("downloads")).is_empty());
+                assert_eq!(handle.slot_count(consts::TASK_STATE_MAKE_ARCHIVE), 0);
             })
             .await;
     }
