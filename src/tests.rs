@@ -3931,6 +3931,7 @@ fn m2_task_error_name(error: &crate::task::TaskError) -> &'static str {
         TaskError::UnsafePath { .. } => "UnsafePathDelta",
         TaskError::Io { .. } => "OSError",
         TaskError::PublishFailed { .. } => "NameError",
+        TaskError::RollbackFailed { .. } => "OSError",
         TaskError::Zip(_) => "BadZipFile",
         TaskError::SimulatedSizeExceeded => "RuntimeError",
     }
@@ -7629,11 +7630,14 @@ mod m4 {
         App, AppHandle, CommitOutcome, DownloadPort, Runtime, TraceEvent, WorkerRef,
     };
     use crate::proxy::FixedResolver;
+    use crate::task::detach_gallery;
     use crate::task::{
         ArchiveFault, SaveStart, StagedSave, Task, TaskConfig, archive_writer_log,
-        archive_writer_stats, arm_archive_fault, arm_archive_gate, arm_archive_waiting,
-        reset_archive_writer_stats,
+        archive_writer_stats, arm_archive_cleanup_gate, arm_archive_fault, arm_archive_gate,
+        arm_archive_waiting, arm_detach_candidate, commit_prepared, prepare_archive_snapshot,
+        remove_detached, reset_archive_writer_stats,
     };
+    use crate::tests::prepared_task;
     use crate::worker::{SessionConfig, SpeedChecker, StepClock, TestClock, TickClock};
 
     const MANIFEST: &str = env!("CARGO_MANIFEST_DIR");
@@ -9679,7 +9683,10 @@ mod m4 {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
-                if name.starts_with(".xehentai-archive-") || name.starts_with(".xehentai-remove-") {
+                if name.starts_with(".xehentai-archive-")
+                    || name.starts_with(".xehentai-remove-")
+                    || name.starts_with(".xehentai-detached-")
+                {
                     names.push(name);
                 }
             }
@@ -10215,5 +10222,745 @@ mod m4 {
                 assert_eq!(handle.slot_count(consts::TASK_STATE_MAKE_ARCHIVE), 0);
             })
             .await;
+    }
+
+    // --- M4 R2 D1: public drains must see joins owned by another task loop --
+    //
+    // Task B's DOWNLOAD iteration takes task A's archive handle into its own
+    // `do_task` local (`take_slots(19)` at runtime.rs:763) and blocks joining
+    // it while B's downloads run. A public drain that only takes the
+    // currently shared slots cannot report retired while that join is still
+    // active. These fixtures pin that window deterministically: B reaching
+    // FINISHED proves B's downloads ran, and the held writer gate proves A is
+    // still being joined, so B's `do_task` must already hold A's handle.
+
+    /// Public `shutdown` must stay pending while the archive join is owned by
+    /// another task loop, then retire only after the real writer completion.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn public_shutdown_sees_an_archive_join_held_by_another_task_loop() {
+        let hash_b = "89abcdef0123456789abcdef0123456789abcdef";
+        let image_b = image_body(4, 700);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let body = image_b.clone();
+                let hash = hash_b.to_string();
+                tokio::spawn(async move {
+                    let head = read_head(&mut socket).await;
+                    let path = path_of(&head);
+                    let content = if path.contains(&hash) {
+                        body
+                    } else {
+                        Vec::new()
+                    };
+                    respond(&mut socket, "200 OK", "image/jpeg", &content).await;
+                });
+            }
+        });
+
+        let root = tempfile::tempdir().unwrap();
+        let mut config = m4_config(root.path(), 1, 1);
+        config.make_archive = true;
+        let mut app = m4_app_guids(root.path(), config, &["aaaa0001", "bbbb0002"]);
+        let url = "http://e-hentai.org/g/123/abcdef0123/";
+        let guid_a = m4_task_named(
+            &mut app,
+            root.path(),
+            "aaaa0001",
+            url,
+            serde_json::json!({
+                "scan_thread_cnt": 1, "download_thread_cnt": 1, "make_archive": true,
+            }),
+        );
+        let guid_b = m4_task_named(
+            &mut app,
+            root.path(),
+            "bbbb0002",
+            url,
+            serde_json::json!({
+                "scan_thread_cnt": 1, "download_thread_cnt": 1, "make_archive": true,
+            }),
+        );
+        let gallery_a = root.path().join("downloads").join("aa");
+        ready_archive_task(&mut app, &guid_a, "aa", &gallery_a, 1, 1);
+        std::fs::write(gallery_a.join("1.jpg"), b"a-bytes").unwrap();
+        let gallery_b = root.path().join("downloads").join("bb");
+        ready_archive_task(&mut app, &guid_b, "bb", &gallery_b, 1, 0);
+        {
+            let task = app.task_mut(&guid_b).unwrap();
+            let image_url = format!(
+                "http://127.0.0.1:{port}/img/{hash_b}-{}-200-0-jpg/keystamp=x",
+                700
+            );
+            task.img_q = Some(VecDeque::from([image_url]));
+            task.reload_map.insert(
+                "89abcdef01".into(),
+                (
+                    "http://e-hentai.org/s/89abcdef01/123456-1".into(),
+                    "one.jpg".into(),
+                ),
+            );
+        }
+        m4_session(
+            &mut app,
+            Arc::new(crate::worker::RealClock),
+            Arc::new(FixedResolver::new(
+                format!("127.0.0.1:{port}").parse::<SocketAddr>().unwrap(),
+            )),
+        );
+        let downloads = root.path().join("downloads");
+        let marker_a = gallery_a.to_string_lossy().into_owned();
+        reset_archive_writer_stats(&downloads);
+        let gate = arm_archive_gate(&marker_a);
+        let zip_a = downloads.join("aa.zip");
+        let zip_b = downloads.join("bb.zip");
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let runtime = Runtime::new(app, Path::new(MANIFEST).to_path_buf());
+                let (run, handle) = runtime.spawn();
+                let deadline = std::time::Instant::now() + Duration::from_secs(20);
+                while gate.started.try_recv().is_err() {
+                    if std::time::Instant::now() > deadline {
+                        panic!("A writer never started: {:?}", handle.trace());
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                assert_eq!(
+                    handle.task_state(&guid_a),
+                    Some(consts::TASK_STATE_MAKE_ARCHIVE)
+                );
+                // B's downloads ran to completion while A is still held: B's
+                // `do_task` must already hold A's archive handle locally.
+                wait_state(&handle, &guid_b, consts::TASK_STATE_FINISHED).await;
+                let mut shutdown = Box::pin(handle.shutdown());
+                let early = tokio::time::timeout(Duration::from_millis(200), &mut shutdown).await;
+                assert!(
+                    early.is_err(),
+                    "public shutdown retired while the archive join was still \
+                     owned by another task loop"
+                );
+                assert!(!zip_a.exists(), "no ZIP while the writer is held");
+                let _ = gate.release.send(());
+                let report = tokio::time::timeout(Duration::from_secs(20), shutdown)
+                    .await
+                    .expect("shutdown must retire after the real writer completion");
+                assert!(report.joined >= 1, "{report:?}");
+                assert_eq!(report.blocking_pending, 0);
+                let _ = tokio::time::timeout(Duration::from_secs(20), run)
+                    .await
+                    .expect("runtime must stop after shutdown");
+                assert!(!zip_a.exists(), "no late ZIP after shutdown");
+                assert!(!zip_b.exists(), "B never reached archive admission");
+                assert_eq!(
+                    std::fs::read(gallery_a.join("1.jpg")).unwrap(),
+                    b"a-bytes",
+                    "the held gallery is untouched"
+                );
+                assert!(gallery_b.join("1.jpg").exists());
+                assert!(leftover_private_entries(&root.path().join("downloads")).is_empty());
+                assert_eq!(
+                    archive_writer_stats(&root.path().join("downloads")).0,
+                    0,
+                    "the blocking writer really retired before shutdown returned"
+                );
+                assert_eq!(handle.slot_count(consts::TASK_STATE_MAKE_ARCHIVE), 0);
+            })
+            .await;
+        server.abort();
+    }
+
+    /// Public `pause_task_and_wait` on the held task must stay pending until
+    /// the owned archive join actually retires, not report quiescent early.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn public_pause_waits_for_an_archive_join_held_by_another_task_loop() {
+        let hash_b = "89abcdef0123456789abcdef0123456789abcdef";
+        let image_b = image_body(4, 700);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let body = image_b.clone();
+                let hash = hash_b.to_string();
+                tokio::spawn(async move {
+                    let head = read_head(&mut socket).await;
+                    let path = path_of(&head);
+                    let content = if path.contains(&hash) {
+                        body
+                    } else {
+                        Vec::new()
+                    };
+                    respond(&mut socket, "200 OK", "image/jpeg", &content).await;
+                });
+            }
+        });
+
+        let root = tempfile::tempdir().unwrap();
+        let mut config = m4_config(root.path(), 1, 1);
+        config.make_archive = true;
+        let mut app = m4_app_guids(root.path(), config, &["aaaa0001", "bbbb0002"]);
+        let url = "http://e-hentai.org/g/123/abcdef0123/";
+        let guid_a = m4_task_named(
+            &mut app,
+            root.path(),
+            "aaaa0001",
+            url,
+            serde_json::json!({
+                "scan_thread_cnt": 1, "download_thread_cnt": 1, "make_archive": true,
+            }),
+        );
+        let guid_b = m4_task_named(
+            &mut app,
+            root.path(),
+            "bbbb0002",
+            url,
+            serde_json::json!({
+                "scan_thread_cnt": 1, "download_thread_cnt": 1, "make_archive": true,
+            }),
+        );
+        let gallery_a = root.path().join("downloads").join("aa");
+        ready_archive_task(&mut app, &guid_a, "aa", &gallery_a, 1, 1);
+        std::fs::write(gallery_a.join("1.jpg"), b"a-bytes").unwrap();
+        let gallery_b = root.path().join("downloads").join("bb");
+        ready_archive_task(&mut app, &guid_b, "bb", &gallery_b, 1, 0);
+        {
+            let task = app.task_mut(&guid_b).unwrap();
+            let image_url = format!(
+                "http://127.0.0.1:{port}/img/{hash_b}-{}-200-0-jpg/keystamp=x",
+                700
+            );
+            task.img_q = Some(VecDeque::from([image_url]));
+            task.reload_map.insert(
+                "89abcdef01".into(),
+                (
+                    "http://e-hentai.org/s/89abcdef01/123456-1".into(),
+                    "one.jpg".into(),
+                ),
+            );
+        }
+        m4_session(
+            &mut app,
+            Arc::new(crate::worker::RealClock),
+            Arc::new(FixedResolver::new(
+                format!("127.0.0.1:{port}").parse::<SocketAddr>().unwrap(),
+            )),
+        );
+        let downloads = root.path().join("downloads");
+        let marker_a = gallery_a.to_string_lossy().into_owned();
+        reset_archive_writer_stats(&downloads);
+        let gate = arm_archive_gate(&marker_a);
+        let zip_a = downloads.join("aa.zip");
+        let zip_b = downloads.join("bb.zip");
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let runtime = Runtime::new(app, Path::new(MANIFEST).to_path_buf());
+                let (run, handle) = runtime.spawn();
+                let deadline = std::time::Instant::now() + Duration::from_secs(20);
+                while gate.started.try_recv().is_err() {
+                    if std::time::Instant::now() > deadline {
+                        panic!("A writer never started: {:?}", handle.trace());
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                wait_state(&handle, &guid_b, consts::TASK_STATE_FINISHED).await;
+                let mut pause = Box::pin(handle.pause_task_and_wait(&guid_a));
+                let early = tokio::time::timeout(Duration::from_millis(200), &mut pause).await;
+                assert!(
+                    early.is_err(),
+                    "pause reported quiescent while the owned archive join was \
+                     still held by another task loop"
+                );
+                let _ = gate.release.send(());
+                let report = tokio::time::timeout(Duration::from_secs(20), pause)
+                    .await
+                    .expect("pause must retire after the real writer completion")
+                    .unwrap();
+                assert!(report.joined >= 1, "{report:?}");
+                assert_eq!(report.blocking_pending, 0);
+                assert_eq!(handle.task_state(&guid_a), Some(consts::TASK_STATE_PAUSED));
+                assert!(
+                    !zip_a.exists(),
+                    "a stale writer after pause must not publish"
+                );
+                assert_eq!(std::fs::read(gallery_a.join("1.jpg")).unwrap(), b"a-bytes");
+                // B was never paused: its loop still owns the shared
+                // completion and must archive normally once A retires.
+                wait_state(&handle, &guid_b, consts::TASK_STATE_FINISHED).await;
+                wait_until(|| zip_b.exists(), "B archive after A retirement").await;
+                let _ = handle.shutdown().await;
+                let _ = tokio::time::timeout(Duration::from_secs(20), run)
+                    .await
+                    .expect("runtime must stop after shutdown");
+                assert!(leftover_private_entries(&root.path().join("downloads")).is_empty());
+                assert_eq!(handle.slot_count(consts::TASK_STATE_MAKE_ARCHIVE), 0);
+            })
+            .await;
+        server.abort();
+    }
+
+    /// Two overlapping public drains plus a dropped waiter: cancelling one
+    /// waiter must neither detach the owned join nor release the other drain.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dropped_drain_waiter_never_detaches_the_owned_archive_join() {
+        let hash_b = "89abcdef0123456789abcdef0123456789abcdef";
+        let image_b = image_body(4, 700);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let body = image_b.clone();
+                let hash = hash_b.to_string();
+                tokio::spawn(async move {
+                    let head = read_head(&mut socket).await;
+                    let path = path_of(&head);
+                    let content = if path.contains(&hash) {
+                        body
+                    } else {
+                        Vec::new()
+                    };
+                    respond(&mut socket, "200 OK", "image/jpeg", &content).await;
+                });
+            }
+        });
+
+        let root = tempfile::tempdir().unwrap();
+        let mut config = m4_config(root.path(), 1, 1);
+        config.make_archive = true;
+        let mut app = m4_app_guids(root.path(), config, &["aaaa0001", "bbbb0002"]);
+        let url = "http://e-hentai.org/g/123/abcdef0123/";
+        let guid_a = m4_task_named(
+            &mut app,
+            root.path(),
+            "aaaa0001",
+            url,
+            serde_json::json!({
+                "scan_thread_cnt": 1, "download_thread_cnt": 1, "make_archive": true,
+            }),
+        );
+        let guid_b = m4_task_named(
+            &mut app,
+            root.path(),
+            "bbbb0002",
+            url,
+            serde_json::json!({
+                "scan_thread_cnt": 1, "download_thread_cnt": 1, "make_archive": true,
+            }),
+        );
+        let gallery_a = root.path().join("downloads").join("aa");
+        ready_archive_task(&mut app, &guid_a, "aa", &gallery_a, 1, 1);
+        std::fs::write(gallery_a.join("1.jpg"), b"a-bytes").unwrap();
+        let gallery_b = root.path().join("downloads").join("bb");
+        ready_archive_task(&mut app, &guid_b, "bb", &gallery_b, 1, 0);
+        {
+            let task = app.task_mut(&guid_b).unwrap();
+            let image_url = format!(
+                "http://127.0.0.1:{port}/img/{hash_b}-{}-200-0-jpg/keystamp=x",
+                700
+            );
+            task.img_q = Some(VecDeque::from([image_url]));
+            task.reload_map.insert(
+                "89abcdef01".into(),
+                (
+                    "http://e-hentai.org/s/89abcdef01/123456-1".into(),
+                    "one.jpg".into(),
+                ),
+            );
+        }
+        m4_session(
+            &mut app,
+            Arc::new(crate::worker::RealClock),
+            Arc::new(FixedResolver::new(
+                format!("127.0.0.1:{port}").parse::<SocketAddr>().unwrap(),
+            )),
+        );
+        let downloads = root.path().join("downloads");
+        let marker_a = gallery_a.to_string_lossy().into_owned();
+        reset_archive_writer_stats(&downloads);
+        let gate = arm_archive_gate(&marker_a);
+        let zip_a = downloads.join("aa.zip");
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let runtime = Runtime::new(app, Path::new(MANIFEST).to_path_buf());
+                let (run, handle) = runtime.spawn();
+                let deadline = std::time::Instant::now() + Duration::from_secs(20);
+                while gate.started.try_recv().is_err() {
+                    if std::time::Instant::now() > deadline {
+                        panic!("A writer never started: {:?}", handle.trace());
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                wait_state(&handle, &guid_b, consts::TASK_STATE_FINISHED).await;
+                let mut waiter = Box::pin(handle.pause_task_and_wait(&guid_a));
+                let mut shutdown = Box::pin(handle.shutdown());
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(200), &mut waiter)
+                        .await
+                        .is_err(),
+                    "first waiter must observe the owned completion"
+                );
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(200), &mut shutdown)
+                        .await
+                        .is_err(),
+                    "second waiter must observe the same owned completion"
+                );
+                drop(waiter);
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(200), &mut shutdown)
+                        .await
+                        .is_err(),
+                    "dropping one waiter must not detach the owned join or \
+                     release the other drain"
+                );
+                let _ = gate.release.send(());
+                let report = tokio::time::timeout(Duration::from_secs(20), shutdown)
+                    .await
+                    .expect("surviving drain must retire after the real completion");
+                assert!(report.joined >= 1, "{report:?}");
+                let _ = tokio::time::timeout(Duration::from_secs(20), run)
+                    .await
+                    .expect("runtime must stop after shutdown");
+                assert!(!zip_a.exists(), "no late ZIP after shutdown");
+                assert_eq!(std::fs::read(gallery_a.join("1.jpg")).unwrap(), b"a-bytes");
+                assert_eq!(
+                    archive_writer_log(&root.path().join("downloads")),
+                    vec![marker_a],
+                    "the writer ran exactly once: no double join"
+                );
+                assert!(leftover_private_entries(&root.path().join("downloads")).is_empty());
+                assert_eq!(handle.slot_count(consts::TASK_STATE_MAKE_ARCHIVE), 0);
+            })
+            .await;
+        server.abort();
+    }
+
+    // --- M4 R2 N1: exclusively owned detached namespaces -------------------
+    //
+    // `detach_gallery` (task/archive.rs) builds its private name with a
+    // counter and a plain rename. A legal gallery whose title already equals
+    // the generated name renames onto itself (success no-op), and an
+    // existing empty gallery at the generated name is replaced by POSIX
+    // rename. The detached path then still names the public gallery, so the
+    // post-publication cleanup can remove a new owner's files.
+
+    /// A gallery whose legal title is exactly an old generated detach
+    /// candidate: after commit/detach but before cleanup, pause, delete and
+    /// recreate the same guid with a sentinel; the released cleanup must not
+    /// touch the new gallery.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn detached_collision_cannot_rebind_or_remove_a_new_public_gallery() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = m4_config(root.path(), 1, 1);
+        config.make_archive = true;
+        let mut app = m4_app(root.path(), config);
+        let url = "http://e-hentai.org/g/123/abcdef0123/";
+        let guid = m4_task(
+            &mut app,
+            root.path(),
+            url,
+            serde_json::json!({"scan_thread_cnt": 1, "download_thread_cnt": 1, "make_archive": true}),
+        );
+        // A legal single-component title in the exact shape the old counter
+        // scheme generates; the armed candidate forces that proposal.
+        let title = format!(".xehentai-remove-{}-7", std::process::id());
+        let gallery = root.path().join("downloads").join(&title);
+        ready_archive_task(&mut app, &guid, &title, &gallery, 1, 1);
+        std::fs::write(gallery.join("1.jpg"), b"old-bytes").unwrap();
+        let zip = root.path().join("downloads").join(format!("{title}.zip"));
+        arm_detach_candidate(&root.path().join("downloads"), &title);
+        let cleanup = arm_archive_cleanup_gate(&zip.to_string_lossy());
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let runtime = Runtime::new(app, Path::new(MANIFEST).to_path_buf());
+                let (run, handle) = runtime.spawn();
+                let deadline = std::time::Instant::now() + Duration::from_secs(20);
+                while cleanup.started.try_recv().is_err() {
+                    if std::time::Instant::now() > deadline {
+                        panic!("archive never published: {:?}", handle.trace());
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                // The already-published ZIP is consistent before anything else.
+                {
+                    let mut archive =
+                        zip::ZipArchive::new(std::fs::File::open(&zip).unwrap()).unwrap();
+                    assert_eq!(archive.len(), 1);
+                    let mut entry = archive.by_index(0).unwrap();
+                    assert_eq!(entry.name(), "1.jpg");
+                    let mut bytes = Vec::new();
+                    std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
+                    assert_eq!(bytes, b"old-bytes");
+                }
+                // Real pause/delete/add_task boundary while cleanup is held.
+                handle.borrow_app_mut(|app| {
+                    assert_eq!(app.pause_task(&guid).unwrap().0, consts::ERR_NO_ERROR);
+                    assert_eq!(app.del_task(&guid).unwrap().0, consts::ERR_NO_ERROR);
+                    let (code, returned) = app.add_task(url, serde_json::Map::new()).unwrap();
+                    assert_eq!(code, consts::ERR_NO_ERROR);
+                    assert_eq!(returned.as_deref(), Some(guid.as_str()));
+                    // The replacement run owns the same public gallery name
+                    // but never archives; it must finish on its own.
+                    let task = app.task_mut(&guid).unwrap();
+                    task.config.make_archive = false;
+                    task.state = consts::TASK_STATE_DOWNLOAD;
+                    task.meta.insert("title".into(), serde_json::json!(title));
+                    task.meta.insert("total".into(), serde_json::json!(1));
+                    task.meta.insert("finished".into(), serde_json::json!(1));
+                    task.meta
+                        .insert("thumbnail_cnt".into(), serde_json::json!(20));
+                    task.img_q = Some(VecDeque::new());
+                    task.page_q = Some(VecDeque::new());
+                });
+                std::fs::create_dir_all(&gallery).unwrap();
+                std::fs::write(gallery.join("1.jpg"), b"new-bytes").unwrap();
+                std::fs::write(gallery.join("new-only.txt"), b"only-new-run").unwrap();
+                let _ = cleanup.release.send(());
+                wait_state(&handle, &guid, consts::TASK_STATE_FINISHED).await;
+                let _ = handle.shutdown().await;
+                run.await.unwrap();
+                assert_eq!(
+                    std::fs::read(gallery.join("1.jpg")).unwrap(),
+                    b"new-bytes",
+                    "cleanup removed the new owner's gallery through the rebound name"
+                );
+                assert_eq!(
+                    std::fs::read(gallery.join("new-only.txt")).unwrap(),
+                    b"only-new-run"
+                );
+                assert_eq!(handle.task_state(&guid), Some(consts::TASK_STATE_FINISHED));
+                // The already-published ZIP stays consistent.
+                {
+                    let archive = zip::ZipArchive::new(std::fs::File::open(&zip).unwrap()).unwrap();
+                    assert_eq!(archive.len(), 1);
+                }
+                // The recreated public gallery and its already-published ZIP
+                // keep their (old-pattern) names by design; everything else
+                // private must be gone.
+                let mut leftovers = leftover_private_entries(&root.path().join("downloads"));
+                let zip_name = format!("{title}.zip");
+                leftovers.retain(|name| name != &title && name != &zip_name);
+                assert!(leftovers.is_empty(), "{leftovers:?}");
+                assert_eq!(handle.slot_count(consts::TASK_STATE_MAKE_ARCHIVE), 0);
+            })
+            .await;
+    }
+
+    /// An existing other empty gallery at the proposed detach target must
+    /// survive: rename may not replace it, and the archive still completes.
+    #[test]
+    fn detached_reservation_never_replaces_an_existing_empty_gallery() {
+        let root = tempfile::tempdir().expect("root");
+        let task = prepared_task(root.path(), "guid0001", "victim", 1, |_| {});
+        let gallery = task.get_fpath().unwrap();
+        std::fs::create_dir_all(&gallery).unwrap();
+        std::fs::write(gallery.join("1.jpg"), b"victim-bytes").unwrap();
+        let downloads = root.path().join("downloads");
+        // Another ordinary empty gallery sits exactly where detach proposes
+        // to move the victim. It stays empty: a sentinel inside would hide a
+        // POSIX empty-directory replacement.
+        let other = downloads.join(format!(".xehentai-detached-{}-9", std::process::id()));
+        std::fs::create_dir_all(&other).unwrap();
+        arm_detach_candidate(&downloads, &other.file_name().unwrap().to_string_lossy());
+        let snapshot = task.archive_snapshot().unwrap();
+        let zip = snapshot.arc.clone();
+        let committed =
+            commit_prepared(prepare_archive_snapshot(&snapshot, true).unwrap()).unwrap();
+        assert!(zip.exists(), "the archive is published");
+        assert_eq!(
+            std::fs::read_dir(&other).unwrap().count(),
+            0,
+            "the existing empty gallery was replaced by the detach rename"
+        );
+        assert!(other.is_dir());
+        if let Some(detached) = committed.detached {
+            remove_detached(&detached).unwrap();
+        }
+        assert_eq!(
+            std::fs::read_dir(&other).unwrap().count(),
+            0,
+            "cleanup touched the unrelated gallery"
+        );
+        let other_name = other.file_name().unwrap().to_string_lossy().into_owned();
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&zip).unwrap()).unwrap();
+        assert_eq!(archive.len(), 1);
+        let mut entry = archive.by_index(0).unwrap();
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
+        assert_eq!(bytes, b"victim-bytes");
+        // The pre-existing ordinary gallery keeps its name by design; every
+        // other private entry must be gone, so a leaked container would fail
+        // here.
+        let mut leftovers = leftover_private_entries(&downloads);
+        leftovers.retain(|name| name != &other_name);
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    /// A new task admitted while a detached payload is owned cannot rebind
+    /// it: the payload lives in an exclusively owned container whose child
+    /// is unreachable through single-component public gallery admission, and
+    /// colliding with the container name fails safely without writing into
+    /// it.
+    #[test]
+    fn active_detached_payload_cannot_be_rebound_by_task_admission() {
+        let root = tempfile::tempdir().expect("root");
+        let task = prepared_task(root.path(), "guid0001", "victim", 1, |_| {});
+        let gallery = task.get_fpath().unwrap();
+        std::fs::create_dir_all(&gallery).unwrap();
+        std::fs::write(gallery.join("1.jpg"), b"victim-bytes").unwrap();
+        let downloads = root.path().join("downloads");
+        let snapshot = task.archive_snapshot().unwrap();
+        let committed =
+            commit_prepared(prepare_archive_snapshot(&snapshot, true).unwrap()).unwrap();
+        assert!(committed.detached.is_some(), "gallery detached");
+        assert!(!gallery.exists(), "the public gallery path is moved aside");
+        // The owned payload lives in exactly one freshly reserved exclusive
+        // container; the child holding the images sits at depth two, which no
+        // single-component public gallery title can address through the
+        // existing task_dir boundary.
+        let mut owned = Vec::new();
+        for entry in std::fs::read_dir(&downloads).unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(".xehentai-detached-") {
+                owned.push(downloads.join(name));
+            }
+        }
+        assert_eq!(owned.len(), 1, "exactly one exclusively owned container");
+        let container = owned.pop().unwrap();
+        let child = container.join("gallery");
+        // Depth two below the download root: no single-component public
+        // gallery title can address it through the task_dir boundary.
+        assert!(child.strip_prefix(&downloads).unwrap().components().count() >= 2);
+        assert_eq!(std::fs::read(child.join("1.jpg")).unwrap(), b"victim-bytes");
+        let container_title = container
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let probe = "http://127.0.0.1:9/img/0123456789abcdef0123456789abcdef01234567-10-20-0-jpg/keystamp=x";
+        let mut rival = prepared_task(root.path(), "guid0002", &container_title, 1, |_| {});
+        rival.reload_map.insert(
+            "0123456789".into(),
+            (
+                "http://e-hentai.org/s/0123456789/123456-1".into(),
+                "one.jpg".into(),
+            ),
+        );
+        // A colliding title resolves to the container root at depth one,
+        // never to the owned child: ordinary admission cannot address it.
+        assert_eq!(rival.get_fpath().unwrap(), container);
+        match rival.begin_staged_save(probe, probe) {
+            Ok(SaveStart::Staged(staged)) => {
+                assert_eq!(staged.stage.parent(), Some(container.as_path()));
+                crate::task::Task::abort_staged_save(staged);
+            }
+            Ok(SaveStart::AlreadyDone(_)) => panic!("fresh rival must stage"),
+            Err(error) => panic!("unexpected admission error: {error}"),
+        }
+        assert_eq!(
+            std::fs::read(child.join("1.jpg")).unwrap(),
+            b"victim-bytes",
+            "the owned payload was modified through admission"
+        );
+        if let Some(detached) = committed.detached {
+            remove_detached(&detached).unwrap();
+        }
+        // Ordinary titles still admit normally after the fix.
+        let mut plain = prepared_task(root.path(), "guid0003", "ordinary", 1, |_| {});
+        plain.reload_map.insert(
+            "0123456789".into(),
+            (
+                "http://e-hentai.org/s/0123456789/123456-1".into(),
+                "one.jpg".into(),
+            ),
+        );
+        let fpath = plain.get_fpath().unwrap();
+        std::fs::create_dir_all(&fpath).unwrap();
+        match plain.begin_staged_save(probe, probe) {
+            Ok(SaveStart::Staged(staged)) => crate::task::Task::abort_staged_save(staged),
+            Ok(SaveStart::AlreadyDone(_)) => panic!("fresh task must stage"),
+            Err(error) => panic!("unexpected admission error: {error}"),
+        }
+    }
+
+    /// Publication failure restores the original gallery: images are intact,
+    /// only the attempt's staging file is removed, and nothing detached is
+    /// left behind.
+    #[test]
+    fn publish_failure_restores_the_original_gallery() {
+        let root = tempfile::tempdir().expect("root");
+        let task = prepared_task(root.path(), "guid0001", "victim", 1, |_| {});
+        let gallery = task.get_fpath().unwrap();
+        std::fs::create_dir_all(&gallery).unwrap();
+        std::fs::write(gallery.join("1.jpg"), b"victim-bytes").unwrap();
+        let snapshot = task.archive_snapshot().unwrap();
+        let prepared = prepare_archive_snapshot(&snapshot, true).unwrap();
+        // Force the bounded publish rename to fail with a real directory at
+        // the archive path, after the container was built.
+        std::fs::create_dir_all(&snapshot.arc).unwrap();
+        let error = match commit_prepared(prepared) {
+            Ok(_) => panic!("publish must fail"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, crate::task::TaskError::PublishFailed { .. }),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            std::fs::read(gallery.join("1.jpg")).unwrap(),
+            b"victim-bytes",
+            "the gallery was not restored after publish failure"
+        );
+        assert!(!snapshot.arc.is_file());
+        std::fs::remove_dir_all(&snapshot.arc).unwrap();
+        assert!(leftover_private_entries(&root.path().join("downloads")).is_empty());
+    }
+
+    /// Rollback failure retains the recoverable images at the owned path and
+    /// reports that location: when the public path cannot take the gallery
+    /// back, the owned container is kept, never dropped with its only copy.
+    #[test]
+    fn rollback_failure_retains_images_at_the_owned_path() {
+        let root = tempfile::tempdir().expect("root");
+        let task = prepared_task(root.path(), "guid0001", "victim", 1, |_| {});
+        let gallery = task.get_fpath().unwrap();
+        std::fs::create_dir_all(&gallery).unwrap();
+        std::fs::write(gallery.join("1.jpg"), b"victim-bytes").unwrap();
+        let detached = detach_gallery(&gallery)
+            .expect("detach")
+            .expect("gallery detached");
+        // The public path is rebound before the restore: a real file there
+        // makes the rename-back fail deterministically.
+        std::fs::write(&gallery, b"squatter").unwrap();
+        let error = match detached.restore() {
+            Ok(()) => panic!("restore must fail"),
+            Err(error) => error,
+        };
+        let owned = match &error {
+            crate::task::TaskError::RollbackFailed { owned, .. } => owned.clone(),
+            _ => panic!("unexpected error: {error}"),
+        };
+        assert_eq!(
+            std::fs::read(owned.join("1.jpg")).unwrap(),
+            b"victim-bytes",
+            "the only image copy was dropped with the rollback"
+        );
+        assert!(
+            format!("{error}").contains(&owned.to_string_lossy().into_owned()),
+            "the error must report the actual retained location: {error}"
+        );
+        assert_eq!(std::fs::read(&gallery).unwrap(), b"squatter");
     }
 }

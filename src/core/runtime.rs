@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 
 use super::{
@@ -53,14 +53,57 @@ pub struct TraceEvent {
 
 pub(crate) struct Slot {
     pub guid: String,
-    pub handle: Option<JoinHandle<()>>,
+    pub shared: Rc<SharedSlot>,
 }
 
-impl Slot {
-    async fn join(mut self) {
-        if let Some(handle) = self.handle.take() {
+/// Shared ownership record for one spawned logical worker. The `JoinHandle`
+/// stays in this record until one owner joins its actual retirement; every
+/// other waiter observes the same completion instead of taking the handle
+/// away. Moving a waiter (task-loop local, public pause/shutdown/delete
+/// drain) can therefore never hide work from the other drains, and dropping
+/// a waiter only drops its own observation without detaching the task.
+pub(crate) struct SharedSlot {
+    handle: std::cell::RefCell<Option<JoinHandle<()>>>,
+    done: std::cell::Cell<bool>,
+    notify: Notify,
+}
+
+impl SharedSlot {
+    /// Block until the owned worker actually retired. A cancelled waiter
+    /// simply drops its observation; the handle stays owned by this record.
+    async fn wait(&self) {
+        loop {
+            let notified = self.notify.notified();
+            if self.done.get() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Join the owned handle exactly once. Only retired entries are reaped,
+    /// so the await resolves immediately and never strands the record.
+    async fn join_owned(&self) {
+        let handle = self.handle.borrow_mut().take();
+        if let Some(handle) = handle {
             let _ = handle.await;
         }
+    }
+
+    fn complete(&self) {
+        self.done.set(true);
+        self.notify.notify_waiters();
+    }
+}
+
+/// Completes the shared record when the wrapped worker future returns,
+/// including through a panic unwind: the completion is a synchronous record
+/// update, never a second task, registry or reaper.
+struct CompleteOnExit(Rc<SharedSlot>);
+
+impl Drop for CompleteOnExit {
+    fn drop(&mut self) {
+        self.0.complete();
     }
 }
 
@@ -195,34 +238,98 @@ impl RuntimeInner {
         let _ = self.app.borrow_mut().save_session();
     }
 
-    fn take_slots(&self, state: i64) -> Vec<Slot> {
+    /// Observe the owned completions for one state without detaching them.
+    /// Every waiter (task loop or public drain) sees the same records.
+    fn snapshot_slots(&self, state: i64) -> Vec<Rc<SharedSlot>> {
         if !(0..20).contains(&state) {
             return Vec::new();
         }
-        let mut threads = self.threads.borrow_mut();
-        std::mem::take(&mut threads[state as usize])
+        self.threads.borrow()[state as usize]
+            .iter()
+            .map(|slot| Rc::clone(&slot.shared))
+            .collect()
     }
 
-    fn take_guid_slots(&self, guid: &str) -> Vec<Slot> {
+    /// Observe every owned completion of one task without detaching them.
+    fn snapshot_guid_slots(&self, guid: &str) -> Vec<Rc<SharedSlot>> {
         let mut out = Vec::new();
-        let mut threads = self.threads.borrow_mut();
-        for slots in threads.iter_mut() {
-            let mut index = 0;
-            while index < slots.len() {
-                if slots[index].guid == guid {
-                    out.push(slots.remove(index));
-                } else {
-                    index += 1;
+        for slots in self.threads.borrow().iter() {
+            for slot in slots {
+                if slot.guid == guid {
+                    out.push(Rc::clone(&slot.shared));
                 }
             }
         }
         out
     }
 
-    fn push_slot(&self, state: i64, slot: Slot) {
-        if (0..20).contains(&state) {
-            self.threads.borrow_mut()[state as usize].push(slot);
+    /// Observe every owned completion without detaching any of them.
+    fn snapshot_all_slots(&self) -> Vec<Rc<SharedSlot>> {
+        let mut out = Vec::new();
+        for slots in self.threads.borrow().iter() {
+            for slot in slots {
+                out.push(Rc::clone(&slot.shared));
+            }
         }
+        out
+    }
+
+    /// Await owned completions, then reap the retired entries. Reaping joins
+    /// only handles whose completion already fired, so the joins resolve
+    /// immediately; waiters never take a handle, so a dropped waiter keeps
+    /// the record visible and joined exactly once here.
+    async fn wait_and_reap(&self, shared: Vec<Rc<SharedSlot>>) -> usize {
+        let count = shared.len();
+        for entry in &shared {
+            entry.wait().await;
+        }
+        let retired = {
+            let mut threads = self.threads.borrow_mut();
+            let mut retired = Vec::new();
+            for slots in threads.iter_mut() {
+                let mut index = 0;
+                while index < slots.len() {
+                    if slots[index].shared.done.get() {
+                        retired.push(slots.remove(index).shared);
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+            retired
+        };
+        for entry in retired {
+            entry.join_owned().await;
+        }
+        count
+    }
+
+    /// Spawn one logical worker and keep its shared ownership record until
+    /// its actual retirement is joined. The wrapper completes the record
+    /// when the worker future returns (or unwinds); waiters only ever
+    /// observe the completion, so no waiter can hide or detach the task.
+    fn push_tracked(
+        &self,
+        state: i64,
+        guid: String,
+        future: impl std::future::Future<Output = ()> + 'static,
+    ) {
+        if !(0..20).contains(&state) {
+            tokio::task::spawn_local(future);
+            return;
+        }
+        let shared = Rc::new(SharedSlot {
+            handle: std::cell::RefCell::new(None),
+            done: std::cell::Cell::new(false),
+            notify: Notify::new(),
+        });
+        let guard = CompleteOnExit(Rc::clone(&shared));
+        let handle = tokio::task::spawn_local(async move {
+            let _guard = guard;
+            future.await;
+        });
+        shared.handle.borrow_mut().replace(handle);
+        self.threads.borrow_mut()[state as usize].push(Slot { guid, shared });
     }
 
     /// Capture the archive inputs and enter MAKE_ARCHIVE only while `guid`
@@ -436,17 +543,9 @@ impl Runtime {
             inner.app.borrow_mut().set_exit(consts::XEH_STATE_SOFT_EXIT);
         }
         inner.save_session();
-        let slots = {
-            let mut threads = inner.threads.borrow_mut();
-            let mut all = Vec::new();
-            for slots in threads.iter_mut() {
-                all.append(slots);
-            }
-            all
-        };
-        for slot in slots {
-            slot.join().await;
-        }
+        // Shared observations: retirement is joined through the same records
+        // every drain uses, so entries disappear only after actual completion.
+        inner.wait_and_reap(inner.snapshot_all_slots()).await;
         inner.stage.wait_zero().await;
         inner.save_session();
         inner.app.borrow_mut().set_exit(consts::XEH_STATE_CLEAN);
@@ -489,13 +588,14 @@ impl Runtime {
             if !is_runnable_state(state) {
                 break;
             }
-            let waiting = inner.take_slots(state);
+            let waiting = inner.snapshot_slots(state);
             if !waiting.is_empty() {
                 let message = format!("wait {} threads in state {state}", waiting.len());
                 inner.log(VERBOSE, &message);
-                for slot in waiting {
-                    slot.join().await;
-                }
+                // Observe the shared completions without detaching them: a
+                // public drain waits on the same records while this loop
+                // holds its own observation.
+                inner.wait_and_reap(waiting).await;
                 continue;
             }
             if state >= consts::TASK_STATE_SCAN_IMG && !monitor_started {
@@ -760,7 +860,7 @@ impl Runtime {
                         // first, then joins the previous archiver, and only
                         // afterwards admits the next one. The await happens
                         // outside every App/Task borrow.
-                        let previous = inner.take_slots(consts::TASK_STATE_MAKE_ARCHIVE);
+                        let previous = inner.snapshot_slots(consts::TASK_STATE_MAKE_ARCHIVE);
                         if !previous.is_empty() {
                             let message = format!(
                                 "wait {} threads in state {}",
@@ -768,9 +868,10 @@ impl Runtime {
                                 consts::TASK_STATE_MAKE_ARCHIVE
                             );
                             inner.log(VERBOSE, &message);
-                            for slot in previous {
-                                slot.join().await;
-                            }
+                            // Shared observation, not a take: public
+                            // pause/shutdown drains await the same archive
+                            // completion while this loop holds its own.
+                            inner.wait_and_reap(previous).await;
                             // A blocked admission can outlive the run it was
                             // waiting for; revalidate the exact task/run (the
                             // download may legitimately have reached FINISHED
@@ -812,13 +913,10 @@ impl Runtime {
         ));
         monitor.set_vote_ns(names);
         let cancel = self.inner.cancel_channel(guid);
-        let handle = tokio::task::spawn_local(Rc::clone(&monitor).run(cancel));
-        self.inner.push_slot(
+        self.inner.push_tracked(
             consts::TASK_STATE_SCAN_IMG,
-            Slot {
-                guid: guid.to_string(),
-                handle: Some(handle),
-            },
+            guid.to_string(),
+            Rc::clone(&monitor).run(cancel),
         );
         self.inner
             .monitors
@@ -879,26 +977,20 @@ impl Runtime {
             let worker_guid = guid.to_string();
             let slot_guid = worker_guid.clone();
             let monitor = Rc::clone(monitor);
-            let handle = tokio::task::spawn_local(async move {
-                scan_worker(
-                    inner,
-                    worker_guid,
-                    name,
-                    cancel,
-                    monitor,
-                    session,
-                    filters,
-                    reference,
-                )
-                .await
-            });
-            self.inner.push_slot(
-                consts::TASK_STATE_SCAN_IMG,
-                Slot {
-                    guid: slot_guid,
-                    handle: Some(handle),
-                },
-            );
+            self.inner
+                .push_tracked(consts::TASK_STATE_SCAN_IMG, slot_guid, async move {
+                    scan_worker(
+                        inner,
+                        worker_guid,
+                        name,
+                        cancel,
+                        monitor,
+                        session,
+                        filters,
+                        reference,
+                    )
+                    .await
+                });
         }
         Ok(())
     }
@@ -942,28 +1034,22 @@ impl Runtime {
             let worker_guid = guid.to_string();
             let slot_guid = worker_guid.clone();
             let monitor = Rc::clone(monitor);
-            let handle = tokio::task::spawn_local(async move {
-                download_worker(
-                    inner,
-                    worker_guid,
-                    name,
-                    cancel,
-                    monitor,
-                    session,
-                    filters,
-                    speed,
-                    threshold,
-                    reference,
-                )
-                .await
-            });
-            self.inner.push_slot(
-                consts::TASK_STATE_DOWNLOAD,
-                Slot {
-                    guid: slot_guid,
-                    handle: Some(handle),
-                },
-            );
+            self.inner
+                .push_tracked(consts::TASK_STATE_DOWNLOAD, slot_guid, async move {
+                    download_worker(
+                        inner,
+                        worker_guid,
+                        name,
+                        cancel,
+                        monitor,
+                        session,
+                        filters,
+                        speed,
+                        threshold,
+                        reference,
+                    )
+                    .await
+                });
         }
         Ok(())
     }
@@ -973,16 +1059,10 @@ impl Runtime {
         let inner = Rc::clone(&self.inner);
         let worker_guid = guid.to_string();
         let slot_guid = worker_guid.clone();
-        let handle = tokio::task::spawn_local(async move {
-            archive_worker(inner, worker_guid, cancel, token).await
-        });
-        self.inner.push_slot(
-            consts::TASK_STATE_MAKE_ARCHIVE,
-            Slot {
-                guid: slot_guid,
-                handle: Some(handle),
-            },
-        );
+        self.inner
+            .push_tracked(consts::TASK_STATE_MAKE_ARCHIVE, slot_guid, async move {
+                archive_worker(inner, worker_guid, cancel, token).await
+            });
         Ok(())
     }
 }
@@ -1034,10 +1114,12 @@ impl AppHandle {
             });
         }
         let mut joined = 0usize;
-        for slot in self.inner.take_guid_slots(guid) {
-            slot.join().await;
-            joined += 1;
-        }
+        // Shared observations: the task loop may hold the same completions
+        // in its own local while this drain waits on them.
+        joined += self
+            .inner
+            .wait_and_reap(self.inner.snapshot_guid_slots(guid))
+            .await;
         self.inner.stage.wait_zero().await;
         Ok(DrainReport {
             joined,
@@ -1067,9 +1149,9 @@ impl AppHandle {
         }
         self.inner.signal_cancel(guid);
         self.inner.monitor_exit(guid);
-        for slot in self.inner.take_guid_slots(guid) {
-            slot.join().await;
-        }
+        self.inner
+            .wait_and_reap(self.inner.snapshot_guid_slots(guid))
+            .await;
         self.inner.stage.wait_zero().await;
         let result = self.inner.app.borrow_mut().del_task(guid)?;
         if result.0 == consts::ERR_NO_ERROR {
@@ -1179,18 +1261,11 @@ impl AppHandle {
         for monitor in self.inner.monitors.borrow().values() {
             monitor.request_exit();
         }
-        let slots = {
-            let mut threads = self.inner.threads.borrow_mut();
-            let mut all = Vec::new();
-            for slots in threads.iter_mut() {
-                all.append(slots);
-            }
-            all
-        };
-        let joined = slots.len();
-        for slot in slots {
-            slot.join().await;
-        }
+        let waiting = self.inner.snapshot_all_slots();
+        // Shared observations: a task loop may hold the same completions in
+        // its own local while shutdown waits on them. Nothing is detached,
+        // so this future stays pending until every owned worker retires.
+        let joined = self.inner.wait_and_reap(waiting).await;
         self.inner.stage.wait_zero().await;
         self.inner.save_session();
         self.inner.save_session();
@@ -2312,6 +2387,13 @@ async fn archive_worker(
     };
     match inner.commit_archive(&guid, token, prepared) {
         Ok(ArchiveCommit::Committed(committed)) => {
+            // Test-only barrier between publication and detached-tree
+            // cleanup; unarmed runs pass straight through.
+            #[cfg(test)]
+            {
+                let marker = committed.path.to_string_lossy().into_owned();
+                crate::task::archive_cleanup_gate(&marker).await;
+            }
             if let Some(detached) = committed.detached {
                 // Heavy tree cleanup owns only the detached private path and
                 // is awaited, so shutdown/pause join its real completion.

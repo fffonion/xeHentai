@@ -9,11 +9,12 @@
 //!    staging file owned by this attempt. It never touches the public archive
 //!    path and never removes the gallery, so it is safe to run on the blocking
 //!    pool even after the run it was admitted for has been invalidated.
-//! 2. [`commit_prepared`] performs the bounded namespace effects (detach the
-//!    gallery to a private name, one rename over the archive path) and is
+//! 2. [`commit_prepared`] performs the bounded namespace effects (move the
+//!    gallery into a freshly reserved exclusively owned container, one
+//!    rename over the archive path) and is
 //!    only called by the runtime while it still owns the exact task run. The
 //!    detached gallery is then removed from the blocking pool; cleanup can
-//!    only ever touch that private path, never a reused public gallery.
+//!    only ever touch that owned container, never a reused public gallery.
 //!
 //! The writer itself is a free function over an immutable [`ArchiveSnapshot`]
 //! so the runtime can run it on Tokio's blocking pool without holding a
@@ -61,9 +62,44 @@ pub enum PreparedArchive {
 /// Result of the run-authorized publication step.
 pub struct CommittedArchive {
     pub path: PathBuf,
-    /// The gallery directory, already detached to this private name. The
-    /// caller removes it on the blocking pool; nothing else may touch it.
-    pub detached: Option<PathBuf>,
+    /// The gallery directory, moved into an exclusively reserved private
+    /// container. The caller removes it on the blocking pool; only this
+    /// owned value addresses that container.
+    pub detached: Option<DetachedGallery>,
+}
+
+/// An exclusively owned detached namespace: a freshly reserved private
+/// container in the same filesystem plus the fixed child path holding the
+/// moved gallery. The container is allocated with an atomic exclusive
+/// `create_dir`, so it can never coincide with a public gallery, an
+/// existing file or another reservation; the fixed child sits one level
+/// below the download root, unreachable through ordinary single-component
+/// public gallery admission. Only this value (created by reservation)
+/// addresses the container through cleanup or rollback.
+pub struct DetachedGallery {
+    container: PathBuf,
+    child: PathBuf,
+    public: PathBuf,
+}
+
+impl DetachedGallery {
+    /// Move the owned payload back to its public gallery path. Success
+    /// removes the now-empty container; failure retains the recoverable
+    /// images at the owned child and reports that location instead of
+    /// claiming the public path survived.
+    pub(crate) fn restore(self) -> Result<(), TaskError> {
+        match fs::rename(&self.child, &self.public) {
+            Ok(()) => {
+                let _ = fs::remove_dir(&self.container);
+                Ok(())
+            }
+            Err(source) => Err(TaskError::RollbackFailed {
+                owned: self.child.clone(),
+                target: self.public.clone(),
+                message: source.to_string(),
+            }),
+        }
+    }
 }
 
 impl Task {
@@ -107,11 +143,11 @@ pub fn make_archive_snapshot(
     Ok(committed.path)
 }
 
-/// Remove a private staging file or a detached gallery tree. The runtime calls
-/// the latter on the blocking pool so a large tree is never walked under a
-/// `Task`/`App` borrow.
-pub fn remove_detached(path: &Path) -> Result<(), TaskError> {
-    file_ops::remove_tree(path)
+/// Remove the exclusively owned detached container. Only a container
+/// produced by the reservation below is ever addressed here: the blocking
+/// pool walks exactly this private subtree, never a rebound public name.
+pub fn remove_detached(detached: &DetachedGallery) -> Result<(), TaskError> {
+    file_ops::remove_tree(&detached.container)
 }
 
 /// Build `<gallery>.zip` from `snapshot.fpath` in a private staging file.
@@ -263,12 +299,24 @@ pub fn commit_prepared(prepared: PreparedArchive) -> Result<CommittedArchive, Ta
         }),
         Err(error) => {
             // The bound run keeps its images: put the detached gallery back
-            // and remove only this attempt's staging file.
-            if let Some(trash) = &detached {
-                let _ = fs::rename(trash, &stage.gallery);
+            // and remove only this attempt's staging file. If the restore
+            // itself fails, the images stay retained at the owned path and
+            // the error reports that location; nothing is dropped.
+            if let Some(owned) = detached {
+                match owned.restore() {
+                    Ok(()) => {
+                        let _ = fs::remove_file(&stage.stage);
+                        Err(error)
+                    }
+                    Err(restore) => {
+                        let _ = fs::remove_file(&stage.stage);
+                        Err(restore)
+                    }
+                }
+            } else {
+                let _ = fs::remove_file(&stage.stage);
+                Err(error)
             }
-            let _ = fs::remove_file(&stage.stage);
-            Err(error)
         }
     }
 }
@@ -281,15 +329,62 @@ pub fn discard_prepared(prepared: PreparedArchive) {
     }
 }
 
-/// Move the gallery directory to a private name in the same parent. Renaming
-/// is the only removal step allowed under the task borrow; walking the tree
-/// happens later on the blocking pool and only ever sees this detached path.
-fn detach_gallery(gallery: &Path) -> Result<Option<PathBuf>, TaskError> {
+/// Atomically reserve a fresh private container in the same filesystem as
+/// the gallery. The exclusive `create_dir` is the allocation: an existing
+/// gallery, file, symlink or previously reserved container at the candidate
+/// fails reservation and retries with the next name, never overwrites and
+/// never accepts a self-rename. A test-armed candidate goes through the
+/// same exclusive step, so collisions reproduce exactly.
+fn reserve_detach_container(parent: &Path) -> Result<PathBuf, TaskError> {
+    #[cfg(test)]
+    if let Some(name) = take_detach_candidate(parent) {
+        let candidate = parent.join(name);
+        if fs::create_dir(&candidate).is_ok() {
+            return Ok(candidate);
+        }
+    }
+    for _ in 0..1024 {
+        let counter = DETACH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let candidate = parent.join(format!(
+            ".xehentai-detached-{}-{counter}",
+            std::process::id()
+        ));
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(source) => {
+                return Err(TaskError::Io {
+                    path: candidate,
+                    source,
+                });
+            }
+        }
+    }
+    Err(TaskError::Io {
+        path: parent.to_path_buf(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "no free detached container name",
+        ),
+    })
+}
+
+/// Move the gallery directory into a freshly reserved owned container as its
+/// fixed child. Renaming is the only removal step allowed under the task
+/// borrow; walking the tree happens later on the blocking pool and only ever
+/// sees this owned container, never a public gallery path.
+pub(crate) fn detach_gallery(gallery: &Path) -> Result<Option<DetachedGallery>, TaskError> {
     match fs::symlink_metadata(gallery) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             return Err(TaskError::UnsafePath {
                 path: gallery.to_path_buf(),
                 reason: "refusing to delete a symlinked directory",
+            });
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(TaskError::UnsafePath {
+                path: gallery.to_path_buf(),
+                reason: "refusing to detach a non-directory gallery",
             });
         }
         Ok(_) => {}
@@ -305,31 +400,57 @@ fn detach_gallery(gallery: &Path) -> Result<Option<PathBuf>, TaskError> {
         path: gallery.to_path_buf(),
         reason: "gallery directory has no parent",
     })?;
-    for _ in 0..1024 {
-        let counter = TRASH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let trash = parent.join(format!(".xehentai-remove-{}-{counter}", std::process::id()));
-        match fs::rename(gallery, &trash) {
-            Ok(()) => return Ok(Some(trash)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(source) => {
-                return Err(TaskError::Io {
-                    path: gallery.to_path_buf(),
-                    source,
-                });
-            }
+    // Reservation and the move are one bounded synchronous section: the
+    // container is exclusively ours, so no public gallery can interleave
+    // between the two steps on this thread.
+    let container = reserve_detach_container(parent)?;
+    let child = container.join("gallery");
+    match fs::rename(gallery, &child) {
+        Ok(()) => Ok(Some(DetachedGallery {
+            container,
+            child,
+            public: gallery.to_path_buf(),
+        })),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let _ = fs::remove_dir(&container);
+            Ok(None)
+        }
+        Err(source) => {
+            let _ = fs::remove_dir(&container);
+            Err(TaskError::Io {
+                path: gallery.to_path_buf(),
+                source,
+            })
         }
     }
-    Err(TaskError::Io {
-        path: gallery.to_path_buf(),
-        source: std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "no free detached gallery name",
-        ),
-    })
 }
 
-static TRASH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DETACH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Test-only deterministic detach candidates, scoped by the gallery parent
+/// directory so parallel tests in different roots never interact. Each armed
+/// name is consumed once by the next detach in its scope and still goes
+/// through the production rename/reservation step.
+#[cfg(test)]
+static DETACH_SEAMS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) fn arm_detach_candidate(scope: &Path, name: &str) {
+    DETACH_SEAMS
+        .lock()
+        .unwrap()
+        .push((scope.to_string_lossy().into_owned(), name.to_string()));
+}
+
+#[cfg(test)]
+fn take_detach_candidate(parent: &Path) -> Option<String> {
+    let key = parent.to_string_lossy().into_owned();
+    let mut seams = DETACH_SEAMS.lock().unwrap();
+    seams
+        .iter()
+        .position(|(scope, _)| *scope == key)
+        .map(|index| seams.remove(index).1)
+}
 
 struct StageCleanup {
     path: PathBuf,
@@ -393,6 +514,11 @@ type WaitingSeam = (
 static ARCHIVE_SEAMS: Mutex<Vec<ArchiveSeam>> = Mutex::new(Vec::new());
 #[cfg(test)]
 static WAITING_SEAMS: Mutex<Vec<WaitingSeam>> = Mutex::new(Vec::new());
+/// Barrier between publication and detached-tree cleanup, keyed by the
+/// committed ZIP path. The worker signals `started` after the ZIP is
+/// published and waits for `release` before removing the detached payload.
+#[cfg(test)]
+static CLEANUP_SEAMS: Mutex<Vec<WaitingSeam>> = Mutex::new(Vec::new());
 #[cfg(test)]
 static WRITER_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
 #[cfg(test)]
@@ -466,6 +592,35 @@ pub(crate) fn arm_archive_waiting(marker: &str) -> ArchiveWaitingGate {
     ArchiveWaitingGate {
         started: started_rx,
         release: release_tx,
+    }
+}
+
+/// Arm the post-publication, pre-cleanup barrier for one committed ZIP path.
+#[cfg(test)]
+pub(crate) fn arm_archive_cleanup_gate(zip_marker: &str) -> ArchiveWaitingGate {
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let mut seams = CLEANUP_SEAMS.lock().unwrap();
+    seams.retain(|(armed, _, _)| armed != zip_marker);
+    seams.push((zip_marker.to_string(), started_tx, release_rx));
+    ArchiveWaitingGate {
+        started: started_rx,
+        release: release_tx,
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn archive_cleanup_gate(zip_marker: &str) {
+    let channels = {
+        let mut seams = CLEANUP_SEAMS.lock().unwrap();
+        seams
+            .iter()
+            .position(|(armed, _, _)| armed == zip_marker)
+            .map(|index| seams.remove(index))
+    };
+    if let Some((_, started, release)) = channels {
+        let _ = started.send(());
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(20), release).await;
     }
 }
 

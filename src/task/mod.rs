@@ -12,8 +12,9 @@ pub(crate) mod file_ops;
 
 #[cfg(test)]
 pub(crate) use archive::{
-    ArchiveFault, archive_waiting_gate, archive_writer_log, archive_writer_stats,
-    arm_archive_fault, arm_archive_gate, arm_archive_waiting, reset_archive_writer_stats,
+    ArchiveFault, archive_cleanup_gate, archive_waiting_gate, archive_writer_log,
+    archive_writer_stats, arm_archive_cleanup_gate, arm_archive_fault, arm_archive_gate,
+    arm_archive_waiting, arm_detach_candidate, detach_gallery, reset_archive_writer_stats,
 };
 pub use archive::{ArchiveSnapshot, CommittedArchive, PreparedArchive};
 pub(crate) use archive::{
@@ -412,6 +413,14 @@ pub enum TaskError {
         to: PathBuf,
         message: String,
     },
+    /// The post-publish restore of a detached gallery failed: the images
+    /// stay retained at `owned` and the error reports that location instead
+    /// of claiming the public `target` survived.
+    RollbackFailed {
+        owned: PathBuf,
+        target: PathBuf,
+        message: String,
+    },
     Zip(String),
 }
 
@@ -446,6 +455,17 @@ impl std::fmt::Display for TaskError {
                 "cannot publish {} to {}: {message}",
                 from.display(),
                 to.display()
+            ),
+            Self::RollbackFailed {
+                owned,
+                target,
+                message,
+            } => write!(
+                f,
+                "cannot restore {} from owned {}: {message}; images retained at {}",
+                target.display(),
+                owned.display(),
+                owned.display()
             ),
             Self::Zip(message) => write!(f, "zip error: {message}"),
         }
