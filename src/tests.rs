@@ -11301,7 +11301,107 @@ fn compat_rpc(inputs: &serde_json::Value) -> serde_json::Value {
         .build()
         .expect("probe runtime");
     fn snapshot(handle: &crate::core::runtime::AppHandle) -> serde_json::Value {
-        handle.borrow_app(|app| {
+        handle.borrow_app(thin_snapshot)
+    }
+    /// Full isolated-update snapshot: the real public-config view plus pool
+    /// members, task queue, cookies/login, cfg dir and the directory tree.
+    /// Used only for the independent proxy-nodir repairs, never for the
+    /// shared sequential transcript.
+    fn snapshot_full(
+        handle: &crate::core::runtime::AppHandle,
+        shared: &std::rc::Rc<std::cell::RefCell<SharedRpc>>,
+        root: &std::path::Path,
+    ) -> serde_json::Value {
+        handle.borrow_app_mut(|app| {
+            let mut thin = thin_snapshot(app);
+            let cfg_view = {
+                let mut shared_ref = shared.borrow_mut();
+                let req = crate::rpc::RpcRequest {
+                    method_raw: "xeH.getConfig".to_string(),
+                    id: serde_json::Value::Null,
+                    args: Vec::new(),
+                    kwargs: serde_json::Map::new(),
+                };
+                // The real public view, not a second mapping.
+                match crate::rpc::execute(app, &mut shared_ref.rpc, &req, None, None) {
+                    outcome if outcome.code == 0 => {
+                        outcome.result.unwrap_or(serde_json::Value::Null)
+                    }
+                    outcome => serde_json::json!({"error": outcome.code}),
+                }
+            };
+            let proxy_members: Vec<String> = app
+                .proxy_pool()
+                .map(|pool| pool.lock().expect("pool").proxies.keys().cloned().collect())
+                .unwrap_or_default();
+            let mut dirs = Vec::new();
+            let mut stack = vec![root.to_path_buf()];
+            while let Some(dir) = stack.pop() {
+                let entries =
+                    std::fs::read_dir(&dir).unwrap_or_else(|_| panic!("list {}", dir.display()));
+                let mut names: Vec<std::path::PathBuf> = entries
+                    .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                    .collect();
+                names.sort();
+                for path in names {
+                    let rel = path
+                        .strip_prefix(root)
+                        .expect("rel")
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    // Harness isolation dirs (oracle subprocess cwd); the
+                    // candidate probe never creates them.
+                    if !rel.contains('/') && ["home", "cache", "tmp"].contains(&rel.as_str()) {
+                        continue;
+                    }
+                    if path.is_dir() && !path.is_symlink() {
+                        dirs.push(format!("{rel}/"));
+                        stack.push(path);
+                    } else if path.is_symlink() {
+                        let target = std::fs::read_link(&path)
+                            .map(|target| target.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        dirs.push(format!("{rel} -> {target}"));
+                    } else {
+                        let name = path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("");
+                        if ["h.json", "eh.log", "webui.gz", "webui-cache.json"].contains(&name) {
+                            continue;
+                        }
+                        dirs.push(rel);
+                    }
+                }
+            }
+            dirs.sort();
+            let mut cookie_pairs: Vec<serde_json::Value> = thin
+                .get("cookies")
+                .and_then(|cookies| cookies.as_array())
+                .cloned()
+                .unwrap_or_default();
+            cookie_pairs.sort_by_key(|left| left.to_string());
+            let object = thin.as_object_mut().expect("snapshot object");
+            object.insert(
+                "cookies".to_string(),
+                serde_json::Value::Array(cookie_pairs),
+            );
+            object.insert("cfg".to_string(), cfg_view);
+            object.insert(
+                "proxy_members".to_string(),
+                serde_json::Value::Array(
+                    proxy_members
+                        .into_iter()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                ),
+            );
+            object.insert("dirs".to_string(), serde_json::json!(dirs));
+            thin
+        })
+    }
+    fn thin_snapshot(app: &crate::core::App) -> serde_json::Value {
+        {
             let mut states = serde_json::Map::new();
             for guid in app.all_task_guids() {
                 if let Some(task) = app.task(&guid) {
@@ -11316,8 +11416,11 @@ fn compat_rpc(inputs: &serde_json::Value) -> serde_json::Value {
                 "has_login": app.has_login(),
                 "cookies": app.cookies().to_vec(),
             })
-        })
+        }
     }
+    let full = inputs["snapshot"]
+        .as_str()
+        .is_some_and(|mode| mode == "full");
     let mut transcripts = Vec::new();
     for case in inputs["cases"].as_array().cloned().unwrap_or_default() {
         let id = case["id"].as_str().unwrap_or("?").to_string();
@@ -11340,7 +11443,11 @@ fn compat_rpc(inputs: &serde_json::Value) -> serde_json::Value {
                 use tokio::io::AsyncWriteExt;
                 client.write_all(head.as_bytes()).await.expect("write");
             }
-            let before = snapshot(&handle);
+            let before = if full {
+                snapshot_full(&handle, &shared, &root)
+            } else {
+                snapshot(&handle)
+            };
             let result = serve_one(
                 &mut server,
                 handle.clone(),
@@ -11348,7 +11455,11 @@ fn compat_rpc(inputs: &serde_json::Value) -> serde_json::Value {
                 "http://127.0.0.1:9".to_string(),
             )
             .await;
-            let after = snapshot(&handle);
+            let after = if full {
+                snapshot_full(&handle, &shared, &root)
+            } else {
+                snapshot(&handle)
+            };
             drop(server);
             let mut raw = Vec::new();
             {

@@ -3684,6 +3684,42 @@
       "delta": "reference raises KeyError on cfg_dict['dir'] after in-memory cfg+pool side effects and drops the connection; candidate applies the update and answers 200 getConfig view"
     },
     {
+      "id": "rpc.updateConfig.proxy-nodir-isolated",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + tools/compat.py isolated leg",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "fresh app + distinct proxy + download_thread_cnt change: oracle KeyError-disconnect with applied cfg/pool, candidate exact 200 post-update getConfig + converged full state"
+      ],
+      "status": "implemented",
+      "delta": "reference raises KeyError on cfg_dict['dir'] after in-memory cfg+pool side effects and drops the connection; candidate applies the update and answers 200 getConfig view"
+    },
+    {
+      "id": "rpc.updateConfig.proxy-empty-isolated",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + tools/compat.py isolated leg",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "fresh app, empty proxy list + config change: cfg change applies on both sides, absent pool stays absent"
+      ],
+      "status": "implemented",
+      "delta": "reference raises KeyError on cfg_dict['dir'] after in-memory cfg side effects and drops the connection; candidate applies the update and answers 200 getConfig view"
+    },
+    {
+      "id": "rpc.updateConfig.proxy-existing-isolated",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "target": "src/rpc/{mod,server}.rs + tools/compat.py isolated leg",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "seeded pool gains the distinct member on both sides with insertion order; other change applies on top"
+      ],
+      "status": "implemented",
+      "delta": "reference raises KeyError on cfg_dict['dir'] after in-memory cfg+pool side effects and drops the connection; candidate applies the update and answers 200 getConfig view"
+    },
+    {
       "id": "rpc.updateConfig.unknown-key",
       "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
       "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
@@ -4688,6 +4724,66 @@
       "inputs": [],
       "assertions": [
         "tampered signature answers 403"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "gallery.stream.large-file",
+      "source": "xeHentai native media path (owned snapshot + streaming)",
+      "target": "src/rpc/{mod,server}.rs",
+      "suite": "gallery",
+      "inputs": [],
+      "assertions": [
+        "70 MiB gallery file streams in 64 KiB chunks with exact length/pattern/first-last; on-demand archive streams entries+comment+STORE; wire framing keeps Content-Length + trailing newline"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "gallery.stream.spool-cleanup",
+      "source": "xeHentai native media path (owned snapshot + streaming)",
+      "target": "src/rpc/{mod,server}.rs",
+      "suite": "gallery",
+      "inputs": [],
+      "assertions": [
+        "ZIP-fallback passthrough spools to a task-owned file, streams it, unlinks it on every exit path"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.media.permit-queue",
+      "source": "xeHentai native media path (owned snapshot + streaming)",
+      "target": "src/rpc/{mod,server}.rs",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "heavy decode/build waits on the shared 2-permit semaphore end to end, then serves"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.server.conn-cap",
+      "source": "xeHentai native media path (owned snapshot + streaming)",
+      "target": "src/rpc/{mod,server}.rs",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "accept loop defers past 64 live connections, reaps finished records, shutdown drains"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "rpc.media.disconnect-drain",
+      "source": "xeHentai native media path (owned snapshot + streaming)",
+      "target": "src/rpc/{mod,server}.rs",
+      "suite": "rpc",
+      "inputs": [],
+      "assertions": [
+        "mid-stream disconnect cannot strand owned work; next request serves, shutdown drains"
       ],
       "status": "implemented",
       "delta": null

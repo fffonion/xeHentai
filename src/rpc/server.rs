@@ -16,18 +16,19 @@
 #![allow(dead_code)]
 
 use std::cell::RefCell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use serde_json::Value;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 use super::{
-    FrozenPack, GalleryFail, Response, RpcDispatcher, RpcRequest, ServerError, StaticCache,
-    hash_link, jsonrpc_envelope, parse_jsonrpc, parse_thumb_query, read_archive, read_gallery_file,
+    FileStream, FrozenPack, GalleryFail, GallerySnap, MAX_THUMB_ENCODED, OpenOutcome, Response,
+    ResponseBody, RpcDispatcher, RpcRequest, ServerError, StaticCache, hash_link, jsonrpc_envelope,
+    parse_jsonrpc, parse_thumb_query, probe_gallery_file, read_zip_fallback, snapshot_gallery_file,
     thumbnail,
 };
 use crate::r#const as consts;
@@ -50,10 +51,10 @@ pub const LOGIN_URL: &str = "https://forums.e-hentai.org/index.php?act=Login&COD
 /// business logic is never patched.
 fn login_endpoint() -> String {
     #[cfg(test)]
-    if let Ok(url) = std::env::var("XEH_TEST_LOGIN_URL") {
-        if !url.is_empty() {
-            return url;
-        }
+    if let Ok(url) = std::env::var("XEH_TEST_LOGIN_URL")
+        && !url.is_empty()
+    {
+        return url;
     }
     LOGIN_URL.to_string()
 }
@@ -82,19 +83,21 @@ pub fn dispatch_request(
     let target = parts.next().unwrap_or("/");
     match method {
         "OPTIONS" => RequestAction::Ready(options_response()),
-        "GET" => dispatch_get(app, cache, target, secret),
+        "GET" => dispatch_get(cache, target, secret),
         "POST" => dispatch_post(app, rpc, get_info, target, body, secret, runtime),
         _ => RequestAction::Ready(Response {
             status: 501,
             reason: reason_of(501),
             mime: None,
-            body: Vec::new(),
+            body: ResponseBody::Inline(Vec::new()),
         }),
     }
 }
 
-/// What a synchronous dispatch decided: either a complete response or an
-/// async follow-up that the connection owner performs without any borrow.
+/// What a synchronous dispatch decided: either a complete response, an
+/// async follow-up that the connection owner performs without any borrow, or
+/// an owned media request whose snapshot is taken under a short borrow and
+/// whose bytes stream with no borrow held.
 #[derive(Debug)]
 pub enum RequestAction {
     Ready(Response),
@@ -117,6 +120,32 @@ pub enum RequestAction {
         id: Value,
         guid: String,
     },
+    /// Owned media: the snapshot moves out under a short borrow; opening,
+    /// validation, decode/build and streaming all run borrow-free.
+    Media(MediaRequest),
+}
+
+/// One validated media route: the parsed path pieces plus the secret the
+/// signature is checked against. No file is opened here.
+#[derive(Debug)]
+pub struct MediaRequest {
+    pub kind: MediaKind,
+    pub secret: Option<String>,
+}
+
+/// The two media routes, with their parsed path pieces.
+#[derive(Debug)]
+pub enum MediaKind {
+    Image {
+        guid: String,
+        fid: String,
+        query: String,
+        presented: String,
+    },
+    Archive {
+        guid: String,
+        presented: String,
+    },
 }
 
 fn path_matches(target: &str) -> bool {
@@ -135,12 +164,7 @@ fn path_matches(target: &str) -> bool {
     false
 }
 
-fn dispatch_get(
-    app: &App,
-    cache: &mut StaticCache,
-    target: &str,
-    secret: Option<&str>,
-) -> RequestAction {
+fn dispatch_get(cache: &mut StaticCache, target: &str, secret: Option<&str>) -> RequestAction {
     if !path_matches(target) {
         return RequestAction::Ready(cors_404());
     }
@@ -149,10 +173,82 @@ fn dispatch_get(
         None => (target, ""),
     };
     if path.starts_with("/img/") {
-        return RequestAction::Ready(serve_image(app, path, query, secret));
+        // `rpc.py:199-231`: segments from the URL path; extra filename
+        // ignored. Short paths answer 400 with the default text/html MIME
+        // in place. Query strictness (`rpc.py:200`) runs before the
+        // signature check, exactly like the reference precedence; both run
+        // before anything is opened. Dispatch returns the validated route;
+        // the owner streams it borrow-free.
+        let segments: Vec<&str> = path.split('/').collect();
+        if segments.len() < 5 {
+            return RequestAction::Ready(Response {
+                status: 400,
+                reason: reason_of(400),
+                mime: Some("text/html".to_string()),
+                body: ResponseBody::Inline(Vec::new()),
+            });
+        }
+        if parse_thumb_query(query).is_err() {
+            return RequestAction::Ready(Response {
+                status: 400,
+                reason: reason_of(400),
+                mime: Some("text/html".to_string()),
+                body: ResponseBody::Inline(Vec::new()),
+            });
+        }
+        let guid = segments[3];
+        let fid = segments[4];
+        let presented = segments[2];
+        // Signature check (`rpc.py:206-210`): mismatches answer 403 with the
+        // default MIME and never touch disk.
+        if presented != hash_link(secret, &format!("{guid}/{fid}")).as_str() {
+            return RequestAction::Ready(Response {
+                status: 403,
+                reason: reason_of(403),
+                mime: Some("text/html".to_string()),
+                body: ResponseBody::Inline(Vec::new()),
+            });
+        }
+        return RequestAction::Media(MediaRequest {
+            kind: MediaKind::Image {
+                guid: guid.to_string(),
+                fid: fid.to_string(),
+                query: query.to_string(),
+                presented: presented.to_string(),
+            },
+            secret: secret.map(str::to_string),
+        });
     }
     if path.starts_with("/zip/") {
-        return RequestAction::Ready(serve_archive(app, path, secret));
+        let segments: Vec<&str> = path.split('/').collect();
+        if segments.len() < 5 {
+            return RequestAction::Ready(Response {
+                status: 400,
+                reason: reason_of(400),
+                mime: Some("text/html".to_string()),
+                body: ResponseBody::Inline(Vec::new()),
+            });
+        }
+        let guid = segments[3];
+        let presented = segments[2];
+        // Signature check (`rpc.py:240-244`): mismatches answer 403. An
+        // empty guid can never present a valid signature, so it 403s here
+        // exactly like the reference instead of reaching the archive lookup.
+        if presented != hash_link(secret, guid).as_str() {
+            return RequestAction::Ready(Response {
+                status: 403,
+                reason: reason_of(403),
+                mime: Some("text/html".to_string()),
+                body: ResponseBody::Inline(Vec::new()),
+            });
+        }
+        return RequestAction::Media(MediaRequest {
+            kind: MediaKind::Archive {
+                guid: guid.to_string(),
+                presented: presented.to_string(),
+            },
+            secret: secret.map(str::to_string),
+        });
     }
     if target == "/ui/" || path.starts_with("/static/") {
         return static_action(cache, target);
@@ -164,137 +260,416 @@ fn dispatch_get(
         status: 200,
         reason: reason_of(200),
         mime: Some("text/html".to_string()),
-        body: serde_json::to_vec(&body).unwrap_or_default(),
+        body: ResponseBody::Inline(serde_json::to_vec(&body).unwrap_or_default()),
     })
 }
 
-fn serve_image(app: &App, path: &str, query: &str, secret: Option<&str>) -> Response {
-    // `rpc.py:199-231`: segments from the URL path; extra filename ignored.
-    // Short paths answer 400 with the default text/html MIME in place.
-    let segments: Vec<&str> = path.split('/').collect();
-    if segments.len() < 5 {
-        return Response {
-            status: 400,
-            reason: reason_of(400),
-            mime: Some("text/html".to_string()),
-            body: Vec::new(),
-        };
+static SPOOL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn spool_path(root: &Path) -> PathBuf {
+    let id = SPOOL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    root.join(format!(".xehentai-spool-{}-{id}", std::process::id()))
+}
+
+fn text_html(status: u16) -> Response {
+    Response {
+        status,
+        reason: reason_of(status),
+        mime: Some("text/html".to_string()),
+        body: ResponseBody::Inline(Vec::new()),
     }
-    // Signature check (`rpc.py:206-210`): the URL signature must equal the
-    // real product signature; mismatches log a warning and answer 403.
-    let guid = segments[3];
-    let fid = segments[4];
-    let presented = segments[2];
+}
+
+fn gallery_fail(fail: GalleryFail) -> Response {
+    // `rpc.py:211` unpacks `(None, None, None)` for an unknown guid
+    // and `send_header("Content-Type", None)` coerces to the literal
+    // string "None": byte-exact preservation of the observable wire.
+    let mime = match fail {
+        GalleryFail::NotFound => Some("None".to_string()),
+        GalleryFail::BadRequest => Some("text/html".to_string()),
+        GalleryFail::Server(_) => None,
+    };
+    Response {
+        status: fail.status(),
+        reason: reason_of(fail.status()),
+        mime,
+        body: ResponseBody::Inline(Vec::new()),
+    }
+}
+
+fn task_fail(error: crate::task::TaskError) -> GalleryFail {
+    match &error {
+        crate::task::TaskError::UnsafePath { .. } => GalleryFail::NotFound,
+        _ => GalleryFail::Server(error.to_string()),
+    }
+}
+
+/// Owned media entry point: snapshot under a short borrow, then open,
+/// validate, decode/build and stream with no borrow held.
+pub async fn run_media(
+    handle: crate::core::runtime::AppHandle,
+    permits: Arc<tokio::sync::Semaphore>,
+    request: MediaRequest,
+) -> Response {
+    match request.kind {
+        MediaKind::Image {
+            guid,
+            fid,
+            query,
+            presented,
+        } => {
+            run_image(
+                handle,
+                permits,
+                request.secret.as_deref(),
+                &guid,
+                &fid,
+                &query,
+                &presented,
+            )
+            .await
+        }
+        MediaKind::Archive { guid, presented } => {
+            run_archive(
+                handle,
+                permits,
+                request.secret.as_deref(),
+                &guid,
+                &presented,
+            )
+            .await
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_image(
+    handle: crate::core::runtime::AppHandle,
+    permits: Arc<tokio::sync::Semaphore>,
+    secret: Option<&str>,
+    guid: &str,
+    fid: &str,
+    query: &str,
+    presented: &str,
+) -> Response {
     // Query strictness (`rpc.py:200`) runs before the signature check, so
     // malformed queries answer 400 exactly like the reference precedence.
     let (width, height) = match parse_thumb_query(query) {
         Ok(sizes) => sizes,
-        Err(_) => {
-            return Response {
-                status: 400,
-                reason: reason_of(400),
-                mime: Some("text/html".to_string()),
-                body: Vec::new(),
-            };
-        }
+        Err(_) => return text_html(400),
     };
+    // Signature check (`rpc.py:206-210`): the URL signature must equal the
+    // real product signature; mismatches answer 403 with the default MIME.
     let expected = hash_link(secret, &format!("{guid}/{fid}"));
     if presented != expected.as_str() {
-        // The reference falls through to the shared tail with the default
-        // text/html MIME on a hash mismatch.
+        return text_html(403);
+    }
+    // Snapshot under a SHORT borrow; released before any disk read.
+    let snap = handle.borrow_app(|app| snapshot_gallery_file(app, guid, fid));
+    let snap = match snap {
+        Ok(snap) => snap,
+        Err(fail) => return gallery_fail(fail),
+    };
+    match probe_gallery_file(&snap) {
+        Err(_) => gallery_fail(GalleryFail::NotFound),
+        Ok(OpenOutcome::Denied) => gallery_fail(GalleryFail::NotFound),
+        Ok(OpenOutcome::Missing) => {
+            // Reference ZIP fallback, validated before any headers exist.
+            match read_zip_fallback(&snap) {
+                Err(fail) => gallery_fail(fail),
+                Ok((bytes, mime)) => {
+                    finish_entry_bytes(permits, &snap, bytes, mime, width, height).await
+                }
+            }
+        }
+        Ok(OpenOutcome::File(opened)) => {
+            if width.is_none() && height.is_none() {
+                // Passthrough streams the owned file; no Vec at all.
+                return Response {
+                    status: 200,
+                    reason: reason_of(200),
+                    mime: Some(opened.mime),
+                    body: ResponseBody::Stream(FileStream {
+                        file: Some(opened.file),
+                        len: opened.len,
+                        cleanup: None,
+                    }),
+                };
+            }
+            // Bounded read, then decode behind the heavy permit.
+            let bytes = {
+                use std::io::Read;
+                let mut limited = opened.file.take(MAX_THUMB_ENCODED as u64 + 1);
+                let mut bytes = Vec::new();
+                match limited.read_to_end(&mut bytes) {
+                    Ok(_) => bytes,
+                    Err(_) => return gallery_fail(GalleryFail::NotFound),
+                }
+            };
+            if bytes.len() > MAX_THUMB_ENCODED {
+                return Response {
+                    status: 500,
+                    reason: reason_of(500),
+                    mime: None,
+                    body: ResponseBody::Inline(Vec::new()),
+                };
+            }
+            decode_thumb(&permits, bytes, opened.mime, width, height).await
+        }
+    }
+}
+
+/// Finish validated ZIP-entry bytes: thumbnails decode from memory behind
+/// the heavy permit; passthrough spools to a task-owned file and streams.
+async fn finish_entry_bytes(
+    permits: Arc<tokio::sync::Semaphore>,
+    snap: &GallerySnap,
+    bytes: Vec<u8>,
+    mime: String,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> Response {
+    if width.is_none() && height.is_none() {
+        let path = spool_path(&snap.root);
+        if std::fs::write(&path, &bytes).is_err() {
+            return gallery_fail(GalleryFail::Server("spool".to_string()));
+        }
+        let (file, len) = match std::fs::File::open(&path) {
+            Ok(file) => match file.metadata() {
+                Ok(metadata) if metadata.is_file() => (file, metadata.len()),
+                _ => return gallery_fail(GalleryFail::NotFound),
+            },
+            Err(_) => return gallery_fail(GalleryFail::NotFound),
+        };
         return Response {
-            status: 403,
-            reason: reason_of(403),
-            mime: Some("text/html".to_string()),
-            body: Vec::new(),
+            status: 200,
+            reason: reason_of(200),
+            mime: Some(mime),
+            body: ResponseBody::Stream(FileStream {
+                file: Some(file),
+                len,
+                cleanup: Some(path),
+            }),
         };
     }
-    let (bytes, mime) = match read_gallery_file(app, guid, fid) {
-        Err(fail) => {
-            // `rpc.py:211` unpacks `(None, None, None)` for an unknown guid
-            // and `send_header("Content-Type", None)` coerces to the literal
-            // string "None": byte-exact preservation of the observable wire.
-            let mime = match fail {
-                GalleryFail::NotFound => Some("None".to_string()),
-                GalleryFail::BadRequest => Some("text/html".to_string()),
-                GalleryFail::Server(_) => None,
-            };
-            return Response {
-                status: fail.status(),
-                reason: reason_of(fail.status()),
-                mime,
-                body: Vec::new(),
-            };
-        }
-        Ok(found) => found,
-    };
-    let (body, out_mime) = match thumbnail(&bytes, width, height) {
-        Ok((resized, mime)) => (resized, mime),
-        Err(ThumbError::Passthrough) => (bytes, mime),
-        Err(ThumbError::BadRequest(_)) => {
-            return Response {
-                status: 400,
-                reason: reason_of(400),
-                mime: None,
-                body: Vec::new(),
-            };
-        }
-        Err(ThumbError::Decode(_)) => {
+    decode_thumb(&permits, bytes, mime, width, height).await
+}
+
+/// Decode behind the shared heavy permit on the blocking pool. Only owned
+/// bytes move in; no App borrow, no VM, no file descriptor is held across
+/// the decode.
+async fn decode_thumb(
+    permits: &Arc<tokio::sync::Semaphore>,
+    bytes: Vec<u8>,
+    mime: String,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> Response {
+    let permit = match Arc::clone(permits).acquire_owned().await {
+        Ok(permit) => permit,
+        Err(_) => {
             return Response {
                 status: 500,
                 reason: reason_of(500),
                 mime: None,
-                body: Vec::new(),
+                body: ResponseBody::Inline(Vec::new()),
             };
         }
+    };
+    let decoded =
+        tokio::task::spawn_blocking(move || (thumbnail(&bytes, width, height), bytes)).await;
+    drop(permit);
+    match decoded {
+        Err(_) => Response {
+            status: 500,
+            reason: reason_of(500),
+            mime: None,
+            body: ResponseBody::Inline(Vec::new()),
+        },
+        Ok((Ok((resized, mime)), _)) => Response {
+            status: 200,
+            reason: reason_of(200),
+            mime: Some(mime),
+            body: ResponseBody::Inline(resized),
+        },
+        Ok((Err(ThumbError::Passthrough), bytes)) => Response {
+            status: 200,
+            reason: reason_of(200),
+            mime: Some(mime),
+            body: ResponseBody::Inline(bytes),
+        },
+        Ok((Err(ThumbError::BadRequest(_)), _)) => Response {
+            status: 400,
+            reason: reason_of(400),
+            mime: None,
+            body: ResponseBody::Inline(Vec::new()),
+        },
+        Ok((Err(ThumbError::Decode(_)), _)) => Response {
+            status: 500,
+            reason: reason_of(500),
+            mime: None,
+            body: ResponseBody::Inline(Vec::new()),
+        },
+    }
+}
+
+async fn run_archive(
+    handle: crate::core::runtime::AppHandle,
+    permits: Arc<tokio::sync::Semaphore>,
+    secret: Option<&str>,
+    guid: &str,
+    presented: &str,
+) -> Response {
+    // Signature check (`rpc.py:240-244`): mismatches answer 403. An empty
+    // guid can never present a valid signature, so it 403s here exactly like
+    // the reference instead of reaching the archive lookup.
+    let expected = hash_link(secret, guid);
+    if presented != expected.as_str() {
+        return text_html(403);
+    }
+    // Snapshot under a SHORT borrow; the writer never touches task state.
+    let snapshot = handle.borrow_app(|app| {
+        app.task(guid)
+            .ok_or(GalleryFail::NotFound)
+            .and_then(|task| task.archive_snapshot().map_err(task_fail))
+    });
+    let snapshot = match snapshot {
+        Ok(snapshot) => snapshot,
+        Err(fail) => {
+            return Response {
+                status: fail.status(),
+                reason: reason_of(fail.status()),
+                mime: None,
+                body: ResponseBody::Inline(Vec::new()),
+            };
+        }
+    };
+    // Heavy build on the blocking pool behind the heavy permit. The task
+    // file lock is taken inside that thread, like the M4 worker path.
+    let permit = match Arc::clone(&permits).acquire_owned().await {
+        Ok(permit) => permit,
+        Err(_) => {
+            return Response {
+                status: 500,
+                reason: reason_of(500),
+                mime: None,
+                body: ResponseBody::Inline(Vec::new()),
+            };
+        }
+    };
+    let prepared = tokio::task::spawn_blocking(move || {
+        crate::task::prepare_archive_snapshot(&snapshot, false)
+    })
+    .await;
+    drop(permit);
+    let prepared = match prepared {
+        Err(_) => {
+            return Response {
+                status: 500,
+                reason: reason_of(500),
+                mime: None,
+                body: ResponseBody::Inline(Vec::new()),
+            };
+        }
+        Ok(Err(error)) => {
+            let fail = task_fail(error);
+            return Response {
+                status: fail.status(),
+                reason: reason_of(fail.status()),
+                mime: None,
+                body: ResponseBody::Inline(Vec::new()),
+            };
+        }
+        Ok(Ok(prepared)) => prepared,
+    };
+    use crate::task::PreparedArchive;
+    let path = match prepared {
+        PreparedArchive::Existing(path) => path,
+        PreparedArchive::Staged(stage) => {
+            // Re-validate the exact task before publishing, then commit the
+            // bounded namespace step on the owner thread.
+            let live = handle.borrow_app(|app| app.task(guid).is_some());
+            if !live {
+                crate::task::discard_prepared(PreparedArchive::Staged(stage));
+                return Response {
+                    status: 404,
+                    reason: reason_of(404),
+                    mime: None,
+                    body: ResponseBody::Inline(Vec::new()),
+                };
+            }
+            match crate::task::commit_prepared(PreparedArchive::Staged(stage)) {
+                Err(error) => {
+                    let fail = task_fail(error);
+                    return Response {
+                        status: fail.status(),
+                        reason: reason_of(fail.status()),
+                        mime: None,
+                        body: ResponseBody::Inline(Vec::new()),
+                    };
+                }
+                Ok(committed) => committed.path,
+            }
+        }
+    };
+    // The committed sibling needs the exact owned authority, never an
+    // arbitrary link target swapped in after the build.
+    let (file, len) = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Response {
+                status: 404,
+                reason: reason_of(404),
+                mime: None,
+                body: ResponseBody::Inline(Vec::new()),
+            };
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            return Response {
+                status: 404,
+                reason: reason_of(404),
+                mime: None,
+                body: ResponseBody::Inline(Vec::new()),
+            };
+        }
+        Err(_) => {
+            return Response {
+                status: 404,
+                reason: reason_of(404),
+                mime: None,
+                body: ResponseBody::Inline(Vec::new()),
+            };
+        }
+        Ok(_) => match std::fs::File::open(&path) {
+            Ok(file) => match file.metadata() {
+                Ok(metadata) if metadata.is_file() => (file, metadata.len()),
+                _ => {
+                    return Response {
+                        status: 404,
+                        reason: reason_of(404),
+                        mime: None,
+                        body: ResponseBody::Inline(Vec::new()),
+                    };
+                }
+            },
+            Err(_) => {
+                return Response {
+                    status: 404,
+                    reason: reason_of(404),
+                    mime: None,
+                    body: ResponseBody::Inline(Vec::new()),
+                };
+            }
+        },
     };
     Response {
         status: 200,
         reason: reason_of(200),
-        mime: Some(out_mime),
-        body,
-    }
-}
-
-fn serve_archive(app: &App, path: &str, secret: Option<&str>) -> Response {
-    let segments: Vec<&str> = path.split('/').collect();
-    if segments.len() < 5 {
-        return Response {
-            status: 400,
-            reason: reason_of(400),
-            mime: Some("text/html".to_string()),
-            body: Vec::new(),
-        };
-    }
-    // Signature check (`rpc.py:240-244`): the URL signature must equal the
-    // real product signature; mismatches log a warning and answer 403.
-    // An empty guid can never present a valid signature, so it 403s here
-    // exactly like the reference instead of reaching the archive lookup.
-    let guid = segments[3];
-    let presented = segments[2];
-    let expected = hash_link(secret, guid);
-    if presented != expected.as_str() {
-        // Same shared-tail default as the image path: text/html.
-        return Response {
-            status: 403,
-            reason: reason_of(403),
-            mime: Some("text/html".to_string()),
-            body: Vec::new(),
-        };
-    }
-    match read_archive(app, guid) {
-        Err(fail) => Response {
-            status: fail.status(),
-            reason: reason_of(fail.status()),
-            mime: None,
-            body: Vec::new(),
-        },
-        Ok(bytes) => Response {
-            status: 200,
-            reason: reason_of(200),
-            mime: Some("application/zip".to_string()),
-            body: bytes,
-        },
+        mime: Some("application/zip".to_string()),
+        body: ResponseBody::Stream(FileStream {
+            file: Some(file),
+            len,
+            cleanup: None,
+        }),
     }
 }
 
@@ -307,7 +682,7 @@ fn static_action(cache: &mut StaticCache, target: &str) -> RequestAction {
             status: 200,
             reason: reason_of(200),
             mime: Some(entry.mime),
-            body: entry.body,
+            body: ResponseBody::Inline(entry.body),
         });
     }
     // A stale entry triggers a synchronous-equivalent origin revalidation:
@@ -340,7 +715,7 @@ fn dispatch_post(
                 status,
                 reason: reason_of(status),
                 mime: Some("application/json-rpc".to_string()),
-                body: serde_json::to_vec(&envelope).unwrap_or_default(),
+                body: ResponseBody::Inline(serde_json::to_vec(&envelope).unwrap_or_default()),
             });
         }
     };
@@ -357,7 +732,7 @@ fn dispatch_post(
                 status: outcome.status,
                 reason: reason_of(outcome.status),
                 mime: Some("application/json-rpc".to_string()),
-                body: serde_json::to_vec(&envelope).unwrap_or_default(),
+                body: ResponseBody::Inline(serde_json::to_vec(&envelope).unwrap_or_default()),
             });
         }
     };
@@ -383,7 +758,7 @@ fn dispatch_post(
         status: outcome.status,
         reason: reason_of(outcome.status),
         mime: Some("application/json-rpc".to_string()),
-        body: serde_json::to_vec(&envelope).unwrap_or_default(),
+        body: ResponseBody::Inline(serde_json::to_vec(&envelope).unwrap_or_default()),
     })
 }
 
@@ -431,7 +806,7 @@ fn ready_exec_error(id: &Value, message: String) -> RequestAction {
         status: 500,
         reason: reason_of(500),
         mime: Some("application/json-rpc".to_string()),
-        body: serde_json::to_vec(&envelope).unwrap_or_default(),
+        body: ResponseBody::Inline(serde_json::to_vec(&envelope).unwrap_or_default()),
     })
 }
 
@@ -455,7 +830,7 @@ fn dispatch_login(
                 status: 500,
                 reason: reason_of(500),
                 mime: Some("application/json-rpc".to_string()),
-                body: serde_json::to_vec(&envelope).unwrap_or_default(),
+                body: ResponseBody::Inline(serde_json::to_vec(&envelope).unwrap_or_default()),
             });
         }
     };
@@ -470,7 +845,7 @@ fn dispatch_login(
             status: 500,
             reason: reason_of(500),
             mime: Some("application/json-rpc".to_string()),
-            body: serde_json::to_vec(&envelope).unwrap_or_default(),
+            body: ResponseBody::Inline(serde_json::to_vec(&envelope).unwrap_or_default()),
         });
     }
     let user = prepared
@@ -502,7 +877,7 @@ fn dispatch_login(
             status: 500,
             reason: reason_of(500),
             mime: Some("application/json-rpc".to_string()),
-            body: serde_json::to_vec(&envelope).unwrap_or_default(),
+            body: ResponseBody::Inline(serde_json::to_vec(&envelope).unwrap_or_default()),
         });
     }
     RequestAction::Login {
@@ -514,7 +889,8 @@ fn dispatch_login(
 
 /// Per-connection owned dispatch: one dispatcher VM, one login VM and the
 /// shared static cache handle. Everything here is `!Send` by construction
-/// (VM ownership) and runs on the single `LocalSet` thread.
+/// (VM ownership) and runs on the single `LocalSet` thread. The heavy-media
+/// permit semaphore is `Send` and shared server-wide through this handle.
 pub struct SharedRpc {
     pub rpc: RpcDispatcher,
     pub cache: StaticCache,
@@ -523,6 +899,7 @@ pub struct SharedRpc {
     pub secret: Option<String>,
     pub static_origin: String,
     pub clock: Arc<dyn HttpClock>,
+    pub media_permits: Arc<tokio::sync::Semaphore>,
 }
 
 impl SharedRpc {
@@ -546,6 +923,7 @@ impl SharedRpc {
             secret,
             static_origin,
             clock,
+            media_permits: Arc::new(tokio::sync::Semaphore::new(super::MAX_HEAVY_WORKERS)),
         })
     }
 
@@ -571,20 +949,27 @@ impl SharedRpc {
     }
 }
 
-/// Read one HTTP request head plus optional body from the stream.
+/// Read one HTTP request head plus optional body from the stream. Every
+/// read carries a per-operation idle bound: a client that goes quiet for
+/// longer than [`super::READ_IDLE_SECS`] is dropped instead of holding a
+/// connection slot forever. Continuous transfers never hit the bound.
 pub async fn read_request<S>(
     stream: &mut S,
 ) -> Result<(String, Vec<(String, String)>, Vec<u8>), u16>
 where
     S: AsyncRead + Unpin,
 {
+    let idle = std::time::Duration::from_secs(super::READ_IDLE_SECS);
     let mut head = Vec::new();
     let mut buf = [0u8; 4096];
     loop {
         if head.len() > MAX_HEAD_BYTES {
             return Err(413);
         }
-        let n = stream.read(&mut buf).await.map_err(|_| 400u16)?;
+        let n = tokio::time::timeout(idle, stream.read(&mut buf))
+            .await
+            .map_err(|_| 400u16)?
+            .map_err(|_| 400u16)?;
         if n == 0 {
             return Err(400);
         }
@@ -624,7 +1009,10 @@ where
             return Err(413);
         }
         while body.len() < length {
-            let n = stream.read(&mut buf).await.map_err(|_| 400u16)?;
+            let n = tokio::time::timeout(idle, stream.read(&mut buf))
+                .await
+                .map_err(|_| 400u16)?
+                .map_err(|_| 400u16)?;
             if n == 0 {
                 return Err(400);
             }
@@ -676,7 +1064,7 @@ where
                             status: 200,
                             reason: reason_of(200),
                             mime: Some(entry.mime),
-                            body: entry.body,
+                            body: ResponseBody::Inline(entry.body),
                         },
                         None => {
                             // 304 with no local entry left: pack, else the
@@ -687,7 +1075,7 @@ where
                                     status: 200,
                                     reason: reason_of(200),
                                     mime: Some(mime.to_string()),
-                                    body: bytes.to_vec(),
+                                    body: ResponseBody::Inline(bytes.to_vec()),
                                 },
                                 None => {
                                     let body = jsonrpc_envelope(
@@ -700,7 +1088,9 @@ where
                                         status: 200,
                                         reason: reason_of(200),
                                         mime: Some("text/html".to_string()),
-                                        body: serde_json::to_vec(&body).unwrap_or_default(),
+                                        body: ResponseBody::Inline(
+                                            serde_json::to_vec(&body).unwrap_or_default(),
+                                        ),
                                     }
                                 }
                             }
@@ -725,7 +1115,7 @@ where
                         status: 200,
                         reason: reason_of(200),
                         mime: Some(mime),
-                        body,
+                        body: ResponseBody::Inline(body),
                     }
                 }
                 Err(_) => {
@@ -738,14 +1128,14 @@ where
                             status: 200,
                             reason: reason_of(200),
                             mime: Some(entry.mime),
-                            body: entry.body,
+                            body: ResponseBody::Inline(entry.body),
                         },
                         None => match shared_ref.pack.as_ref().and_then(|pack| pack.get(&name)) {
                             Some((bytes, mime)) => Response {
                                 status: 200,
                                 reason: reason_of(200),
                                 mime: Some(mime.to_string()),
-                                body: bytes.to_vec(),
+                                body: ResponseBody::Inline(bytes.to_vec()),
                             },
                             None => {
                                 let body = jsonrpc_envelope(
@@ -758,7 +1148,9 @@ where
                                     status: 200,
                                     reason: reason_of(200),
                                     mime: Some("text/html".to_string()),
-                                    body: serde_json::to_vec(&body).unwrap_or_default(),
+                                    body: ResponseBody::Inline(
+                                        serde_json::to_vec(&body).unwrap_or_default(),
+                                    ),
                                 }
                             }
                         },
@@ -813,10 +1205,14 @@ where
                 },
             }
         }
+        RequestAction::Media(media) => {
+            // The snapshot moves out under a short borrow; opening,
+            // validation, decode/build and streaming all run borrow-free.
+            let permits = Arc::clone(&shared.borrow().media_permits);
+            run_media(handle.clone(), permits, media).await
+        }
     };
-    let bytes = response.bytes(true);
-    stream.write_all(&bytes).await?;
-    stream.shutdown().await?;
+    write_response(stream, response, true).await?;
     Ok(())
 }
 
@@ -828,7 +1224,7 @@ fn method_error_envelope(id: Value, code: i64) -> Response {
         status: 200,
         reason: reason_of(200),
         mime: Some("application/json-rpc".to_string()),
-        body: serde_json::to_vec(&envelope).unwrap_or_default(),
+        body: ResponseBody::Inline(serde_json::to_vec(&envelope).unwrap_or_default()),
     }
 }
 
@@ -851,7 +1247,7 @@ fn drain_envelope(
         status,
         reason: reason_of(status),
         mime: Some("application/json-rpc".to_string()),
-        body: serde_json::to_vec(&envelope).unwrap_or_default(),
+        body: ResponseBody::Inline(serde_json::to_vec(&envelope).unwrap_or_default()),
     }
 }
 
@@ -966,8 +1362,67 @@ async fn run_login(
         status: 200,
         reason: reason_of(200),
         mime: Some("application/json-rpc".to_string()),
-        body: serde_json::to_vec(&outcome.envelope).unwrap_or_default(),
+        body: ResponseBody::Inline(serde_json::to_vec(&outcome.envelope).unwrap_or_default()),
     }
+}
+
+/// Write one response with the exact reference framing: headers carrying the
+/// real `Content-Length`, the body, then `\\n` outside the length. Inline
+/// bodies go out in one bounded write; streams move in [`IO_CHUNK`] pieces
+/// with backpressure, so a slow client holds one buffer and one file handle.
+/// Every write carries a per-operation stall bound; legit large files stream
+/// continuously and never hit it.
+async fn write_response<S>(
+    stream: &mut S,
+    response: Response,
+    cors: bool,
+) -> Result<(), ServerError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+    let idle = std::time::Duration::from_secs(super::WRITE_IDLE_SECS);
+    let head = response.head_bytes(cors);
+    tokio::time::timeout(idle, stream.write_all(&head))
+        .await
+        .map_err(|_| ServerError::Io("response head write stalled".to_string()))?
+        .map_err(ServerError::from)?;
+    match response.body {
+        ResponseBody::Inline(bytes) => {
+            tokio::time::timeout(idle, stream.write_all(&bytes))
+                .await
+                .map_err(|_| ServerError::Io("response body write stalled".to_string()))?
+                .map_err(ServerError::from)?;
+        }
+        ResponseBody::Stream(mut stream_body) => {
+            let Some(std_file) = stream_body.file.take() else {
+                return Err(ServerError::Io("media stream has no file".to_string()));
+            };
+            let mut file = tokio::fs::File::from_std(std_file);
+            let mut remaining = stream_body.len;
+            let mut chunk = vec![0u8; super::IO_CHUNK];
+            use tokio::io::AsyncReadExt;
+            while remaining > 0 {
+                let want = (remaining as usize).min(chunk.len());
+                file.read_exact(&mut chunk[..want])
+                    .await
+                    .map_err(|_| ServerError::Io("media stream ended early".to_string()))?;
+                tokio::time::timeout(idle, stream.write_all(&chunk[..want]))
+                    .await
+                    .map_err(|_| ServerError::Io("media stream write stalled".to_string()))?
+                    .map_err(ServerError::from)?;
+                remaining -= want as u64;
+            }
+            // The spool cleanup (if any) drops here with the stream body.
+        }
+    }
+    // `rpc.py:319/396`: the newline sits outside Content-Length.
+    tokio::time::timeout(idle, stream.write_all(b"\n"))
+        .await
+        .map_err(|_| ServerError::Io("response tail write stalled".to_string()))?
+        .map_err(ServerError::from)?;
+    stream.shutdown().await?;
+    Ok(())
 }
 
 /// Bind an owned listener. Bind errors are real: the server is never marked
@@ -980,6 +1435,12 @@ pub async fn bind(interface: &str, port: u16) -> Result<TcpListener, std::io::Er
 /// and every connection task it owns before returning. All connection tasks
 /// run `spawn_local` on this thread, so the `!Send` App/dispatcher borrows
 /// never cross threads.
+///
+/// Connection accounting is explicit and bounded: at most
+/// [`super::MAX_ACTIVE_CONN`] live connections; past that the loop defers
+/// (the listener backlog holds newcomers) until a slot frees. Finished
+/// connection records are reaped as they complete, so sequential requests
+/// never grow the owner set.
 pub async fn serve_until_closed(
     listener: TcpListener,
     mut shutdown: watch::Receiver<bool>,
@@ -989,20 +1450,61 @@ pub async fn serve_until_closed(
 ) -> Result<(), ServerError> {
     use tokio::task::JoinSet;
     let mut owned = JoinSet::new();
+    let mut active: usize = 0;
     loop {
-        tokio::select! {
-            incoming = listener.accept() => {
-                let (mut stream, _) = incoming?;
-                let handle = handle.clone();
-                let shared = Rc::clone(&shared);
-                let static_origin = static_origin.clone();
-                owned.spawn_local(async move {
-                    let _ = serve_one(&mut stream, handle, shared, static_origin).await;
-                });
+        if active == 0 {
+            tokio::select! {
+                incoming = listener.accept() => {
+                    let (mut stream, _) = incoming?;
+                    let handle = handle.clone();
+                    let shared = Rc::clone(&shared);
+                    let static_origin = static_origin.clone();
+                    owned.spawn_local(async move {
+                        let _ = serve_one(&mut stream, handle, shared, static_origin).await;
+                    });
+                    active += 1;
+                }
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() {
+                        break;
+                    }
+                }
             }
-            _ = shutdown.changed() => {
-                if *shutdown.borrow() {
-                    break;
+        } else if active >= super::MAX_ACTIVE_CONN {
+            // Deferred: no new accept until a connection record is reaped.
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() {
+                        break;
+                    }
+                }
+                finished = owned.join_next() => {
+                    if finished.is_some() {
+                        active = active.saturating_sub(1);
+                    }
+                }
+            }
+        } else {
+            tokio::select! {
+                incoming = listener.accept() => {
+                    let (mut stream, _) = incoming?;
+                    let handle = handle.clone();
+                    let shared = Rc::clone(&shared);
+                    let static_origin = static_origin.clone();
+                    owned.spawn_local(async move {
+                        let _ = serve_one(&mut stream, handle, shared, static_origin).await;
+                    });
+                    active += 1;
+                }
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() {
+                        break;
+                    }
+                }
+                finished = owned.join_next() => {
+                    if finished.is_some() {
+                        active = active.saturating_sub(1);
+                    }
                 }
             }
         }
@@ -1014,7 +1516,7 @@ pub async fn serve_until_closed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rpc::{check_pixels, refuse_unsafe_name};
+    use crate::rpc::{check_pixels, read_archive, read_gallery_file, refuse_unsafe_name};
     use serde_json::Map as JsonMap;
 
     pub(crate) fn test_app() -> App {
@@ -1210,28 +1712,9 @@ mod tests {
         // The embedded signature is the real product signature.
         let sign = first.split('/').nth(2).expect("sign");
         assert_eq!(sign, hash_link(None, &format!("{guid}/1")));
-        // Serving the signed URL returns the exact file bytes.
-        let image = dispatch_get(
-            &app,
-            &mut StaticCache::load(
-                Path::new("/nonexistent-webui-cache.json"),
-                Arc::new(crate::worker::RealClock),
-            ),
-            first,
-            None,
-        );
-        match image {
-            RequestAction::Ready(response) => {
-                assert_eq!(response.status, 200);
-                assert_eq!(response.mime.as_deref(), Some("image/jpeg"));
-                assert_eq!(response.body, png);
-            }
-            other => panic!("expected ready image, got {other:?}"),
-        }
         // A tampered signature is refused without touching disk.
         let tampered = first.replacen(sign, "00000000", 1);
         let refused = dispatch_get(
-            &app,
             &mut StaticCache::load(
                 Path::new("/nonexistent-webui-cache.json"),
                 Arc::new(crate::worker::RealClock),
@@ -1243,6 +1726,11 @@ mod tests {
             RequestAction::Ready(response) => assert_eq!(response.status, 403),
             other => panic!("expected ready refusal, got {other:?}"),
         }
+        // Serving the signed URL returns the exact file bytes.
+        let (status, mime, bytes) = serve_media_bytes(app, None, first);
+        assert_eq!(status, 200);
+        assert_eq!(mime.as_deref(), Some("image/jpeg"));
+        assert_eq!(bytes, png);
     }
 
     #[test]
@@ -1269,25 +1757,8 @@ mod tests {
         assert_eq!(sign, hash_link(Some("s3cret"), &format!("{guid}/1")));
         assert_ne!(sign, hash_link(None, &format!("{guid}/1")));
         let cache_path = tempfile::tempdir().expect("cache").keep();
-        let served = dispatch_get(
-            &app,
-            &mut StaticCache::load(
-                &cache_path.join("webui-cache.json"),
-                Arc::new(crate::worker::RealClock),
-            ),
-            first,
-            Some("s3cret"),
-        );
-        match served {
-            RequestAction::Ready(response) => {
-                assert_eq!(response.status, 200);
-                assert_eq!(response.body, png);
-            }
-            other => panic!("expected a signed image, got {other:?}"),
-        }
         // The same URL is not valid on a server without that secret.
         let unsigned = dispatch_get(
-            &app,
             &mut StaticCache::load(
                 &cache_path.join("webui-cache.json"),
                 Arc::new(crate::worker::RealClock),
@@ -1299,6 +1770,9 @@ mod tests {
             RequestAction::Ready(response) => assert_eq!(response.status, 403),
             other => panic!("expected a refusal, got {other:?}"),
         }
+        let (status, _, bytes) = serve_media_bytes(app, Some("s3cret".to_string()), first);
+        assert_eq!(status, 200);
+        assert_eq!(bytes, png);
     }
 
     #[test]
@@ -1310,19 +1784,11 @@ mod tests {
                 other => panic!("expected a ready gallery response, got {other:?}"),
             }
         }
-        fn ready(action: RequestAction) -> Response {
-            match action {
-                RequestAction::Ready(response) => response,
-                other => panic!("expected a ready gallery response, got {other:?}"),
-            }
-        }
         let mut app = test_app();
         let png = png_bytes(8, 8);
         let guid = task_with_image(&mut app, "1.jpg", &png);
-        let cache_dir = tempfile::tempdir().expect("cache").keep();
         // Mismatched and empty signatures answer 403 without touching disk.
         let image = dispatch_get(
-            &app,
             &mut StaticCache::load(
                 Path::new("/nonexistent-webui-cache.json"),
                 Arc::new(crate::worker::RealClock),
@@ -1332,7 +1798,6 @@ mod tests {
         );
         assert_eq!(status_of(image), 403);
         let archive = dispatch_get(
-            &app,
             &mut StaticCache::load(
                 Path::new("/nonexistent-webui-cache.json"),
                 Arc::new(crate::worker::RealClock),
@@ -1349,32 +1814,19 @@ mod tests {
         assert_ne!(hash_link(Some("s"), "guid1/1"), hash_link(None, "guid1/1"));
         // A valid /img signature serves the exact file bytes.
         let image_path = format!("/img/{}/{guid}/1", hash_link(None, &format!("{guid}/1")));
-        let served = ready(dispatch_get(
-            &app,
-            &mut StaticCache::load(
-                &cache_dir.join("webui-cache.json"),
-                Arc::new(crate::worker::RealClock),
-            ),
-            &image_path,
-            None,
-        ));
-        assert_eq!(served.status, 200);
-        assert_eq!(served.mime.as_deref(), Some("image/jpeg"));
-        assert_eq!(served.body, png);
-        // A valid /zip signature serves the built archive bytes.
-        let zip_path = format!("/zip/{}/{guid}/gallery.zip", hash_link(None, &guid));
-        let archived = ready(dispatch_get(
-            &app,
-            &mut StaticCache::load(
-                &cache_dir.join("webui-cache.json"),
-                Arc::new(crate::worker::RealClock),
-            ),
-            &zip_path,
-            None,
-        ));
-        assert_eq!(archived.status, 200);
-        assert_eq!(archived.mime.as_deref(), Some("application/zip"));
-        assert!(archived.body.starts_with(b"PK"));
+        // A valid /img signature serves the exact file bytes.
+        let (status, mime, bytes) = serve_media_bytes(app, None, &image_path);
+        assert_eq!(status, 200);
+        assert_eq!(mime.as_deref(), Some("image/jpeg"));
+        assert_eq!(bytes, png);
+        // A valid /zip signature streams the built archive bytes.
+        let mut app = test_app();
+        let zip_guid = task_with_image(&mut app, "1.jpg", &png_bytes(8, 8));
+        let zip_path = format!("/zip/{}/{zip_guid}/gallery.zip", hash_link(None, &zip_guid));
+        let (status, mime, bytes) = serve_media_bytes(app, None, &zip_path);
+        assert_eq!(status, 200);
+        assert_eq!(mime.as_deref(), Some("application/zip"));
+        assert!(bytes.starts_with(b"PK"));
     }
 
     // --- task lifecycle through the real dispatcher -------------------------
@@ -1522,6 +1974,115 @@ mod tests {
             JsonMap::new(),
         );
         assert_eq!(status, 200);
+    }
+
+    #[test]
+    fn update_config_proxy_nodir_isolated_applies_and_returns_config() {
+        // Fresh app, distinct proxy plus another config change, no earlier
+        // proxy case: the narrow missing-dir repair applies the requested
+        // effects, keeps the current dir and answers 200 with the real
+        // post-update getConfig view.
+        let mut app = test_app();
+        let mut rpc = dispatcher();
+        let before_dir = app.cfg.dir.clone();
+        let before_tree = task_tree(app.base_dir());
+        let mut kwargs = JsonMap::new();
+        kwargs.insert(
+            "proxy".to_string(),
+            Value::Array(vec![Value::String("socks5://127.0.0.1:1081".to_string())]),
+        );
+        kwargs.insert("download_thread_cnt".to_string(), Value::from(9));
+        let (status, envelope) = call(&mut app, &mut rpc, "xeH.updateConfig", vec![], kwargs);
+        assert_eq!(status, 200);
+        let result = envelope.get("result").expect("result");
+        assert_eq!(
+            result.get("proxy"),
+            Some(&Value::Array(vec![Value::String(
+                "socks5://127.0.0.1:1081".to_string()
+            )]))
+        );
+        assert_eq!(result.get("download_thread_cnt"), Some(&Value::from(9)));
+        // Same effects land in the App: pool learns the distinct member,
+        // the other change sticks, the directory is untouched.
+        assert_eq!(app.proxy_count(), 1);
+        let members: Vec<String> = app
+            .proxy_pool()
+            .expect("pool")
+            .lock()
+            .expect("pool")
+            .proxies
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(members, vec!["socks5://127.0.0.1:1081".to_string()]);
+        assert_eq!(app.cfg.dir, before_dir);
+        assert_eq!(app.cfg.download_thread_cnt, 9);
+        assert_eq!(task_tree(app.base_dir()), before_tree);
+    }
+
+    #[test]
+    fn update_config_proxy_empty_isolated_keeps_pool_semantics() {
+        // Empty proxy with the dir omitted: the cfg change still applies,
+        // the absent pool stays absent, and the view answers 200.
+        let mut app = test_app();
+        let mut rpc = dispatcher();
+        let mut kwargs = JsonMap::new();
+        kwargs.insert("proxy".to_string(), Value::Array(vec![]));
+        kwargs.insert("download_thread_cnt".to_string(), Value::from(9));
+        let (status, envelope) = call(&mut app, &mut rpc, "xeH.updateConfig", vec![], kwargs);
+        assert_eq!(status, 200);
+        assert_eq!(
+            envelope
+                .get("result")
+                .and_then(|result| result.get("proxy")),
+            Some(&Value::Array(vec![]))
+        );
+        assert_eq!(app.proxy_count(), 0);
+        assert!(app.proxy_pool().is_none());
+        assert_eq!(app.cfg.download_thread_cnt, 9);
+    }
+
+    #[test]
+    fn update_config_proxy_existing_pool_is_additive() {
+        // A pre-seeded pool gains the distinct member; both survive with
+        // insertion order and the other change applies on top.
+        let mut app = test_app();
+        let mut rpc = dispatcher();
+        let mut seed = JsonMap::new();
+        seed.insert(
+            "proxy".to_string(),
+            Value::Array(vec![Value::String("socks5://127.0.0.1:1079".to_string())]),
+        );
+        seed.insert("dir".to_string(), Value::String(app.cfg.dir.clone()));
+        let (status, _) = call(&mut app, &mut rpc, "xeH.updateConfig", vec![], seed);
+        assert_eq!(status, 200);
+        assert_eq!(app.proxy_count(), 1);
+        let mut kwargs = JsonMap::new();
+        kwargs.insert(
+            "proxy".to_string(),
+            Value::Array(vec![Value::String("socks5://127.0.0.1:1081".to_string())]),
+        );
+        kwargs.insert("download_thread_cnt".to_string(), Value::from(9));
+        let (status, _) = call(&mut app, &mut rpc, "xeH.updateConfig", vec![], kwargs);
+        assert_eq!(status, 200);
+        assert_eq!(app.proxy_count(), 2);
+        let members: Vec<String> = app
+            .proxy_pool()
+            .expect("pool")
+            .lock()
+            .expect("pool")
+            .proxies
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(
+            members,
+            vec![
+                "socks5://127.0.0.1:1079".to_string(),
+                "socks5://127.0.0.1:1081".to_string()
+            ]
+        );
+        assert_eq!(app.cfg.download_thread_cnt, 9);
     }
 
     #[test]
@@ -1990,6 +2551,42 @@ mod tests {
 
     // --- B1+B4: one normalized, singly-authenticated request path -----------
 
+    fn task_tree(root: &std::path::Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let mut names: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+                .expect("list")
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .collect();
+            names.sort();
+            for path in names {
+                let rel = path
+                    .strip_prefix(root)
+                    .expect("rel")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if path.is_dir() && !path.is_symlink() {
+                    out.push(format!("{rel}/"));
+                    stack.push(path);
+                } else {
+                    // Volatile operational files (log/session/cache) are
+                    // routine set_logfile output, not directory creation.
+                    let name = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("");
+                    if ["h.json", "eh.log", "webui.gz", "webui-cache.json"].contains(&name) {
+                        continue;
+                    }
+                    out.push(rel);
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
     fn dispatch_sync(
         app: &mut App,
         rpc: &mut RpcDispatcher,
@@ -2019,8 +2616,67 @@ mod tests {
         let RequestAction::Ready(response) = action else {
             panic!("expected a ready response, got {action:?}");
         };
-        let envelope: Value = serde_json::from_slice(&response.body).expect("envelope");
+        let envelope: Value =
+            serde_json::from_slice(&response_body_bytes(&response)).expect("envelope");
         (response.status, envelope)
+    }
+
+    fn response_body_bytes(response: &Response) -> Vec<u8> {
+        match &response.body {
+            ResponseBody::Inline(bytes) => bytes.clone(),
+            ResponseBody::Stream(_) => panic!("expected inline test response"),
+        }
+    }
+
+    /// Drive a GET target through dispatch plus the owned media path and
+    /// collect the exact wire bytes the client would receive.
+    fn serve_media_bytes(
+        app: App,
+        secret: Option<String>,
+        target: &str,
+    ) -> (u16, Option<String>, Vec<u8>) {
+        block_on(async {
+            let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
+            let handle = runtime.handle();
+            let cache_dir = tempfile::tempdir().expect("cache").keep();
+            let shared = Rc::new(RefCell::new(
+                SharedRpc::new(
+                    manifest,
+                    &cache_dir,
+                    Arc::new(crate::worker::RealClock),
+                    secret.clone(),
+                    "http://127.0.0.1:9".to_string(),
+                )
+                .expect("shared"),
+            ));
+            let mut cache = StaticCache::load(
+                &cache_dir.join(crate::rpc::STATIC_CACHE_NAME),
+                Arc::new(crate::worker::RealClock),
+            );
+            let action = dispatch_get(&mut cache, target, secret.as_deref());
+            let response = match action {
+                RequestAction::Media(media) => {
+                    let permits = Arc::clone(&shared.borrow().media_permits);
+                    run_media(handle, permits, media).await
+                }
+                RequestAction::Ready(response) => response,
+                other => panic!("unexpected media action: {other:?}"),
+            };
+            let status = response.status;
+            let mime = response.mime.clone();
+            let bytes = match response.body {
+                ResponseBody::Inline(bytes) => bytes,
+                ResponseBody::Stream(mut stream) => {
+                    use std::io::Read;
+                    let mut file = stream.file.take().expect("stream file");
+                    let mut out = Vec::new();
+                    file.read_to_end(&mut out).expect("stream read");
+                    out
+                }
+            };
+            (status, mime, bytes)
+        })
     }
 
     #[test]
@@ -2194,10 +2850,12 @@ mod tests {
         }
     }
 
+    type LoginCaptures = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
+
     struct LoginFixture {
         _server: std::thread::JoinHandle<()>,
         url: String,
-        requests: std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>,
+        requests: LoginCaptures,
     }
 
     /// Loopback login origin on a plain OS thread (it must outlive the
@@ -2599,23 +3257,830 @@ mod tests {
                 .map(|dir| dir.count())
                 .unwrap_or(0)
         }
-        let app = test_app();
         let cache_dir = tempfile::tempdir().expect("cache").keep();
         let cache_path = cache_dir.join("webui-cache.json");
         let before = open_fds();
         for index in 0..64 {
             let mut cache = StaticCache::load(&cache_path, Arc::new(crate::worker::RealClock));
-            let _ = dispatch_get(
-                &app,
-                &mut cache,
-                &format!("/img/00000000/guid{index}/1"),
-                None,
-            );
+            let _ = dispatch_get(&mut cache, &format!("/img/00000000/guid{index}/1"), None);
             let mut cache = StaticCache::load(&cache_path, Arc::new(crate::worker::RealClock));
-            let _ = dispatch_get(&app, &mut cache, "/zip/00000000/none/gallery.zip", None);
+            let _ = dispatch_get(&mut cache, "/zip/00000000/none/gallery.zip", None);
         }
         let after = open_fds();
         assert!(after <= before + 4, "descriptor leak: {before} -> {after}");
+    }
+
+    // --- B3 RED: owned IO, confined targets, bounded buffering ----------------
+    // These fail on the unfixed media path (whole-file Vec under the App
+    // borrow, unconfined symlink targets, unbounded decode/cache/zip reads)
+    // and pass once snapshots stream with enforced budgets.
+
+    fn make_fifo(path: &std::path::Path) {
+        let status = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .expect("mkfifo");
+        assert!(status.success(), "mkfifo failed");
+    }
+
+    /// Minimal BMP header claiming huge dimensions with no pixel data:
+    /// header-only bytes that must fail the pixel gate before any full
+    /// decode allocation.
+    fn bmp_claiming_dims(width: i32, height: i32) -> Vec<u8> {
+        let mut out = vec![b'B', b'M'];
+        out.extend_from_slice(&54u32.to_le_bytes());
+        out.extend_from_slice(&[0, 0, 0, 0]);
+        out.extend_from_slice(&54u32.to_le_bytes());
+        out.extend_from_slice(&40u32.to_le_bytes());
+        out.extend_from_slice(&width.to_le_bytes());
+        out.extend_from_slice(&height.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&24u16.to_le_bytes());
+        out.extend_from_slice(&[0u8; 24]);
+        out
+    }
+
+    #[test]
+    fn gallery_symlink_escape_and_reserved_are_denied() {
+        let mut app = test_app();
+        let png = png_bytes(8, 8);
+        let guid = task_with_image(&mut app, "1.jpg", &png);
+        let dir = app.task(&guid).expect("task").get_fpath().expect("fpath");
+        // Symlink pointing outside the owned gallery root.
+        let outside = tempfile::tempdir().expect("outside").keep();
+        std::fs::write(outside.join("evil.jpg"), &png).expect("evil");
+        std::fs::remove_file(dir.join("1.jpg")).expect("remove");
+        std::os::unix::fs::symlink(outside.join("evil.jpg"), dir.join("1.jpg")).expect("link");
+        // RED: served through the link. Must be denied before any read.
+        assert!(
+            read_gallery_file(&app, &guid, "1").is_err(),
+            "symlink outside the gallery was admitted"
+        );
+        // Symlink pointing at reserved App persistence.
+        let reserved = app.base_dir().join("eh.log");
+        std::fs::write(&reserved, b"log bytes").expect("log");
+        std::fs::remove_file(dir.join("1.jpg")).expect("remove link");
+        std::os::unix::fs::symlink(&reserved, dir.join("1.jpg")).expect("link");
+        assert!(
+            read_gallery_file(&app, &guid, "1").is_err(),
+            "reserved symlink target was admitted"
+        );
+    }
+
+    #[test]
+    fn gallery_sibling_archive_symlink_is_denied() {
+        let mut app = test_app();
+        let png = png_bytes(8, 8);
+        let guid = task_with_image(&mut app, "2.jpg", &png);
+        let dir = app.task(&guid).expect("task").get_fpath().expect("fpath");
+        let outside = tempfile::tempdir().expect("outside").keep();
+        let evil_zip = outside.join("evil.zip");
+        {
+            let file = std::fs::File::create(&evil_zip).expect("zip");
+            let mut archive = zip::ZipWriter::new(file);
+            archive
+                .start_file("2.jpg", zip::write::SimpleFileOptions::default())
+                .expect("entry");
+            {
+                use std::io::Write;
+                archive.write_all(&png).expect("bytes");
+            }
+            archive.finish().expect("finish");
+        }
+        std::fs::remove_file(dir.join("2.jpg")).expect("remove");
+        let sibling = std::path::PathBuf::from(format!("{}.zip", dir.display()));
+        std::os::unix::fs::symlink(&evil_zip, &sibling).expect("link");
+        // RED: read through the archive symlink. Sibling archives need the
+        // exact owned authority, never an arbitrary link target.
+        assert!(
+            read_gallery_file(&app, &guid, "2").is_err(),
+            "sibling archive symlink was admitted"
+        );
+    }
+
+    #[test]
+    fn gallery_dispatch_releases_before_reads() {
+        let mut app = test_app();
+        let png = png_bytes(8, 8);
+        let guid = task_with_image(&mut app, "1.jpg", &png);
+        let dir = app.task(&guid).expect("task").get_fpath().expect("fpath");
+        std::fs::remove_file(dir.join("1.jpg")).expect("remove");
+        make_fifo(&dir.join("1.jpg"));
+        // A FIFO with no writer blocks any read forever. Dispatch must come
+        // back without reading; RED blocks here and the timeout below fires.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let sign = hash_link(None, &format!("{guid}/1"));
+        let target = format!("/img/{sign}/{guid}/1");
+        std::thread::spawn(move || {
+            let cache_dir = tempfile::tempdir().expect("cache").keep();
+            let mut cache = StaticCache::load(
+                &cache_dir.join(crate::rpc::STATIC_CACHE_NAME),
+                Arc::new(crate::worker::RealClock),
+            );
+            let action = dispatch_get(&mut cache, &target, None);
+            let _ = tx.send(action);
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("dispatch blocked on a media read");
+    }
+
+    #[test]
+    fn gallery_thumbnail_input_budgets_fire_before_decode() {
+        // Huge claimed dimensions, header-only bytes: the pixel gate must
+        // fire before any full decode allocation.
+        let evil = bmp_claiming_dims(20_000, 20_000);
+        let error = thumbnail(&evil, Some(20), Some(20)).expect_err("must refuse");
+        let ThumbError::Decode(message) = error else {
+            panic!("wrong failure shape: {error:?}");
+        };
+        assert!(
+            message.contains("pixel bound"),
+            "dimension gate must fire first, got: {message}"
+        );
+        // 65 MiB of encoded bytes: the dedicated encoded-input budget must
+        // fire before parsing.
+        let mut big = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        big.resize(65 * 1024 * 1024, 0);
+        let error = thumbnail(&big, Some(20), Some(20)).expect_err("must refuse");
+        let ThumbError::Decode(message) = error else {
+            panic!("wrong failure shape: {error:?}");
+        };
+        assert!(
+            message.contains("encoded"),
+            "encoded-input gate must fire first, got: {message}"
+        );
+    }
+
+    #[test]
+    fn static_cache_bounds_entries_and_total() {
+        let dir = tempfile::tempdir().expect("dir").keep();
+        let path = dir.join("webui-cache.json");
+        let mut cache = StaticCache::load(&path, Arc::new(crate::worker::RealClock));
+        for index in 0..65 {
+            cache.store(
+                &format!("/static/a{index}.js"),
+                StaticEntry {
+                    body: b"x".to_vec(),
+                    mime: "application/javascript".to_string(),
+                    fetched: 1.0,
+                    last_modified: String::new(),
+                },
+                false,
+            );
+        }
+        // RED: all 65 kept. Only the newest 64 may survive.
+        assert!(
+            cache.stale("/static/a0.js").is_none(),
+            "oldest entry must be evicted past 64 entries"
+        );
+        // Five 8 MiB entries exceed the 32 MiB total: oldest-first
+        // eviction keeps only the newest within budget.
+        let mut cache = StaticCache::load(
+            &dir.join("webui-cache2.json"),
+            Arc::new(crate::worker::RealClock),
+        );
+        for name in ["big-a", "big-b", "big-c", "big-d", "big-e"] {
+            cache.store(
+                name,
+                StaticEntry {
+                    body: vec![0u8; 8 * 1024 * 1024],
+                    mime: "application/octet-stream".to_string(),
+                    fetched: 1.0,
+                    last_modified: String::new(),
+                },
+                false,
+            );
+        }
+        assert!(
+            cache.stale("big-a").is_none() && cache.stale("big-e").is_some(),
+            "total must stay within 32 MiB with oldest-first eviction"
+        );
+    }
+
+    #[test]
+    fn static_fetch_refuses_oversize_before_buffering() {
+        block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let port = listener.local_addr().expect("addr").port();
+            let origin = format!("http://127.0.0.1:{port}");
+            tokio::spawn(async move {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = vec![0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let head = b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 9437184\r\nConnection: close\r\n\r\n";
+                stream.write_all(head).await.expect("head");
+                stream
+                    .write_all(&vec![0u8; 9 * 1024 * 1024])
+                    .await
+                    .expect("body");
+            });
+            // RED: the whole 9 MiB body is buffered and returned.
+            assert!(
+                fetch_static(&origin, "/big", None).await.is_err(),
+                "oversize static asset must be refused at the 8 MiB bound"
+            );
+        });
+    }
+
+    #[test]
+    fn static_persisted_cache_load_enforces_bounds() {
+        let dir = tempfile::tempdir().expect("dir").keep();
+        // One 9 MiB entry: skipped on load, never cached.
+        let huge_b64 = "A".repeat(9 * 1024 * 1024 / 3 * 4);
+        let text = format!(
+            "{{\"v\":1,\"entries\":{{\"big\":{{\"body_b64\":\"{huge_b64}\",\"mime\":\"application/octet-stream\",\"fetched\":100.0,\"last_modified\":\"x\"}}}}}}"
+        );
+        let path = dir.join("webui-cache.json");
+        std::fs::write(&path, text).expect("cache file");
+        let cache = StaticCache::load(&path, Arc::new(crate::worker::RealClock));
+        // RED: the oversize entry loads.
+        assert!(
+            cache.stale("big").is_none(),
+            "persisted entry past the 8 MiB bound must be skipped"
+        );
+        // 200 persisted entries: truncated to the newest 64.
+        let mut entries = String::from("{\"v\":1,\"entries\":{");
+        for index in 0..200 {
+            if index > 0 {
+                entries.push(',');
+            }
+            entries.push_str(&format!(
+                "\"e{index}\":{{\"body_b64\":\"eA==\",\"mime\":\"text/plain\",\"fetched\":100.0,\"last_modified\":\"x\"}}"
+            ));
+        }
+        entries.push_str("}}");
+        std::fs::write(&path, entries).expect("cache file");
+        let cache = StaticCache::load(&path, Arc::new(crate::worker::RealClock));
+        let mut kept = 0;
+        for index in 0..200 {
+            if cache.stale(&format!("e{index}")).is_some() {
+                kept += 1;
+            }
+        }
+        assert!(
+            kept <= 64,
+            "persisted entries must truncate to 64, kept {kept}"
+        );
+    }
+
+    #[test]
+    fn gallery_zip_entry_budget_refuses_before_allocation() {
+        let mut app = test_app();
+        let png = png_bytes(8, 8);
+        let guid = task_with_image(&mut app, "9.jpg", &png);
+        let dir = app.task(&guid).expect("task").get_fpath().expect("fpath");
+        std::fs::remove_file(dir.join("9.jpg")).expect("remove loose file");
+        // Declared AND actual 513 MiB of zeros: past the dedicated 512 MiB
+        // ZIP-image budget. RED buffers the whole entry and succeeds.
+        let sibling = std::path::PathBuf::from(format!("{}.zip", dir.display()));
+        {
+            let file = std::fs::File::create(&sibling).expect("zip");
+            let mut archive = zip::ZipWriter::new(file);
+            archive
+                .start_file(
+                    "9.jpg",
+                    zip::write::SimpleFileOptions::default()
+                        .compression_method(zip::CompressionMethod::Stored),
+                )
+                .expect("entry");
+            {
+                use std::io::Write;
+                archive
+                    .write_all(&vec![0u8; 513 * 1024 * 1024])
+                    .expect("bytes");
+            }
+            archive.finish().expect("finish");
+        }
+        assert!(
+            read_gallery_file(&app, &guid, "9").is_err(),
+            "ZIP entry past the 512 MiB budget must be refused before allocation"
+        );
+        std::fs::remove_file(&sibling).expect("cleanup");
+    }
+
+    // --- B3 GREEN: streaming, caps, owned lifecycle -------------------------
+
+    fn pattern_bytes(len: usize) -> Vec<u8> {
+        (0..len).map(|index| (index % 251) as u8).collect()
+    }
+
+    fn pattern_spot(bytes: &[u8], index: usize) {
+        assert_eq!(
+            bytes[index],
+            (index % 251) as u8,
+            "pattern mismatch at {index}"
+        );
+    }
+
+    fn spool_leftovers(dir: &std::path::Path) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.filter_map(|entry| entry.ok()) {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with(".xehentai-spool-") {
+                    out.push(name);
+                }
+            }
+        }
+        out
+    }
+
+    /// Concurrent GET driver: the server and the client run together so a
+    /// multi-chunk stream never wedges on a full duplex buffer.
+    fn get_wire_concurrent(app: App, target: &str) -> Vec<u8> {
+        block_on(async {
+            let (mut client, mut server) = tokio::io::duplex(64 * 1024);
+            let request = format!("GET {target} HTTP/1.0\r\nHost: x\r\n\r\n");
+            let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            let cache_dir = tempfile::tempdir().expect("cache").keep();
+            let shared = Rc::new(RefCell::new(
+                SharedRpc::new(
+                    manifest,
+                    &cache_dir,
+                    Arc::new(crate::worker::RealClock),
+                    None,
+                    "http://127.0.0.1:9".to_string(),
+                )
+                .expect("shared"),
+            ));
+            let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
+            let handle = runtime.handle();
+            let local = tokio::task::LocalSet::new();
+            let (served, read) = local
+                .run_until(async {
+                    tokio::join!(
+                        serve_one(
+                            &mut server,
+                            handle,
+                            shared,
+                            "http://127.0.0.1:9".to_string(),
+                        ),
+                        async {
+                            use tokio::io::AsyncWriteExt;
+                            client.write_all(request.as_bytes()).await.expect("head");
+                            let mut out = Vec::new();
+                            {
+                                use tokio::io::AsyncReadExt;
+                                client.read_to_end(&mut out).await.expect("read");
+                            }
+                            out
+                        }
+                    )
+                })
+                .await;
+            served.expect("serve");
+            read
+        })
+    }
+
+    #[test]
+    fn gallery_stream_large_file_chunks_pattern() {
+        // 70 MiB of known pattern through the owned streaming path: exact
+        // length, first/last bytes and spot checks, no whole-asset Vec, no
+        // spool leftovers for a direct file.
+        let mut app = test_app();
+        let big = pattern_bytes(70 * 1024 * 1024);
+        let guid = task_with_image(&mut app, "big.jpg", &big);
+        let dir = app.task(&guid).expect("task").get_fpath().expect("fpath");
+        let (status, mime, bytes) = serve_media_bytes(
+            app,
+            None,
+            &format!("/img/{}/{guid}/5", hash_link(None, &format!("{guid}/5"))),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(mime.as_deref(), Some("image/jpeg"));
+        assert_eq!(bytes.len(), big.len());
+        pattern_spot(&bytes, 0);
+        pattern_spot(&bytes, 1);
+        pattern_spot(&bytes, 250);
+        pattern_spot(&bytes, 251);
+        pattern_spot(&bytes, 1_000_000);
+        pattern_spot(&bytes, bytes.len() - 1);
+        assert!(spool_leftovers(&dir).is_empty());
+    }
+
+    #[test]
+    fn gallery_stream_wire_framing() {
+        // 8 MiB over real socket bytes: headers carry the exact length, the
+        // body streams in chunks, the newline sits outside Content-Length.
+        let mut app = test_app();
+        let big = pattern_bytes(8 * 1024 * 1024);
+        let guid = task_with_image(&mut app, "big.jpg", &big);
+        let target = format!("/img/{}/{guid}/5", hash_link(None, &format!("{guid}/5")));
+        let raw = get_wire_concurrent(app, &target);
+        let (status, headers, body) = split_response(&raw);
+        assert!(status.contains("200"), "{status}");
+        let declared: usize = headers
+            .iter()
+            .find(|(name, _)| name == "content-length")
+            .expect("content-length")
+            .1
+            .parse()
+            .expect("length");
+        assert_eq!(declared, big.len());
+        assert_eq!(body.len(), big.len());
+        pattern_spot(&body, 0);
+        pattern_spot(&body, 123_456);
+        pattern_spot(&body, body.len() - 1);
+    }
+
+    #[test]
+    fn gallery_stream_large_archive_entries() {
+        // A large valid on-demand archive streams with its real entries,
+        // comment and STORE layout; the client checks entries and spots.
+        let mut app = test_app();
+        let big = pattern_bytes(4 * 1024 * 1024);
+        let guid = task_with_image(&mut app, "big.jpg", &big);
+        let target = format!("/zip/{}/{guid}/gallery.zip", hash_link(None, &guid));
+        let (status, mime, bytes) = serve_media_bytes(app, None, &target);
+        assert_eq!(status, 200);
+        assert_eq!(mime.as_deref(), Some("application/zip"));
+        let cursor = std::io::Cursor::new(&bytes);
+        let mut archive = zip::ZipArchive::new(cursor).expect("open");
+        assert_eq!(archive.len(), 1);
+        let names: Vec<String> = (0..archive.len())
+            .map(|index| archive.by_index(index).expect("entry").name().to_string())
+            .collect();
+        assert_eq!(names, vec!["big.jpg".to_string()]);
+        assert!(archive.comment().starts_with(b"xeHentai Archiver v"));
+        let mut entry = archive.by_name("big.jpg").expect("entry");
+        assert_eq!(entry.compression(), zip::CompressionMethod::Stored);
+        let mut content = Vec::new();
+        {
+            use std::io::Read;
+            entry.read_to_end(&mut content).expect("read");
+        }
+        assert_eq!(content.len(), big.len());
+        pattern_spot(&content, 0);
+        pattern_spot(&content, 999_999);
+        pattern_spot(&content, content.len() - 1);
+    }
+
+    #[test]
+    fn gallery_stream_spool_cleanup() {
+        // ZIP-fallback passthrough spools to a task-owned file, streams it,
+        // and unlinks it: bytes served, nothing retained.
+        let mut app = test_app();
+        let pattern = pattern_bytes(2048);
+        let guid = task_with_image(&mut app, "9.jpg", &pattern);
+        let dir = app.task(&guid).expect("task").get_fpath().expect("fpath");
+        std::fs::remove_file(dir.join("9.jpg")).expect("remove loose");
+        let sibling = std::path::PathBuf::from(format!("{}.zip", dir.display()));
+        {
+            let file = std::fs::File::create(&sibling).expect("zip");
+            let mut archive = zip::ZipWriter::new(file);
+            archive
+                .start_file("9.jpg", zip::write::SimpleFileOptions::default())
+                .expect("entry");
+            {
+                use std::io::Write;
+                archive.write_all(&pattern).expect("bytes");
+            }
+            archive.finish().expect("finish");
+        }
+        let (status, mime, bytes) = serve_media_bytes(
+            app,
+            None,
+            &format!("/img/{}/{guid}/9", hash_link(None, &format!("{guid}/9"))),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(mime.as_deref(), Some("image/jpeg"));
+        assert_eq!(bytes, pattern);
+        assert!(spool_leftovers(&dir).is_empty());
+        std::fs::remove_file(&sibling).expect("cleanup");
+    }
+
+    #[test]
+    fn media_spool_guard_unlinks_on_drop() {
+        use crate::rpc::FileStream;
+        let dir = tempfile::tempdir().expect("dir").keep();
+        let path = dir.join("spool-outlives-nothing");
+        std::fs::write(&path, b"x").expect("spool");
+        {
+            let file = std::fs::File::open(&path).expect("open");
+            let stream = FileStream {
+                file: Some(file),
+                len: 1,
+                cleanup: Some(path.clone()),
+            };
+            drop(stream);
+        }
+        assert!(
+            !path.exists(),
+            "spool file must be unlinked with its stream"
+        );
+    }
+
+    #[test]
+    fn media_permits_gate_heavy_decode() {
+        // The shared heavy permit semaphore gates decode end to end: with
+        // both permits held the owned media path waits; freed, it serves.
+        let mut app = test_app();
+        let png = png_bytes(8, 8);
+        let guid = task_with_image(&mut app, "1.jpg", &png);
+        let target = format!(
+            "/img/{}/{guid}/1?w=4&h=4",
+            hash_link(None, &format!("{guid}/1"))
+        );
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cache_dir = tempfile::tempdir().expect("cache").keep();
+        let shared = Rc::new(RefCell::new(
+            SharedRpc::new(
+                manifest,
+                &cache_dir,
+                Arc::new(crate::worker::RealClock),
+                None,
+                "http://127.0.0.1:9".to_string(),
+            )
+            .expect("shared"),
+        ));
+        let permits = Arc::clone(&shared.borrow().media_permits);
+        let first = block_on(permits.clone().acquire_owned()).expect("permit");
+        let second = block_on(permits.clone().acquire_owned()).expect("permit");
+        assert_eq!(permits.available_permits(), 0);
+        let gated = {
+            let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
+            let handle = runtime.handle();
+            let mut cache = StaticCache::load(
+                &cache_dir.join(crate::rpc::STATIC_CACHE_NAME),
+                Arc::new(crate::worker::RealClock),
+            );
+            let action = dispatch_get(&mut cache, &target, None);
+            let RequestAction::Media(media) = action else {
+                panic!("expected media, got {action:?}");
+            };
+            block_on(async {
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(200),
+                    run_media(handle, permits.clone(), media),
+                )
+                .await
+            })
+        };
+        assert!(
+            gated.is_err(),
+            "heavy decode must wait while both permits are held"
+        );
+        drop(first);
+        drop(second);
+        let mut app = test_app();
+        let guid = task_with_image(&mut app, "1.jpg", &png);
+        let target = format!(
+            "/img/{}/{guid}/1?w=4&h=4",
+            hash_link(None, &format!("{guid}/1"))
+        );
+        let (status, mime, bytes) = serve_media_bytes(app, None, &target);
+        assert_eq!(status, 200);
+        // Thumbnails keep the source format and MIME, not the filename ext.
+        assert_eq!(mime.as_deref(), Some("image/png"));
+        let (width, height) = image_dims(&bytes);
+        assert_eq!((width, height), (4, 4));
+    }
+
+    #[test]
+    fn accept_loop_caps_active_connections_and_reaps() {
+        block_on(async {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = bind("127.0.0.1", 0).await.expect("bind");
+            let port = listener.local_addr().expect("addr").port();
+            let (shutdown_tx, shutdown_rx) = watch::channel(false);
+            let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            let cache_dir = tempfile::tempdir().expect("cache").keep();
+            let shared = Rc::new(RefCell::new(
+                SharedRpc::new(
+                    manifest,
+                    &cache_dir,
+                    Arc::new(crate::worker::RealClock),
+                    None,
+                    "http://127.0.0.1:9".to_string(),
+                )
+                .expect("shared"),
+            ));
+            let runtime = crate::core::Runtime::new(test_app(), manifest.to_path_buf());
+            let handle = runtime.handle();
+            let local = tokio::task::LocalSet::new();
+            let _ = local
+                .run_until(async {
+                    let server = serve_until_closed(
+                        listener,
+                        shutdown_rx,
+                        handle,
+                        Rc::clone(&shared),
+                        "http://127.0.0.1:9".to_string(),
+                    );
+                    let driver = async {
+                        // Fill every slot with a quiet connection.
+                        let mut idle = Vec::new();
+                        for _ in 0..crate::rpc::MAX_ACTIVE_CONN {
+                            idle.push(
+                                tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+                                    .await
+                                    .expect("connect"),
+                            );
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        // Past the cap the 65th connection waits: no task,
+                        // no bytes, until a slot frees.
+                        let mut extra = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+                            .await
+                            .expect("connect");
+                        extra
+                            .write_all(b"GET /ui/ HTTP/1.0\r\nHost: x\r\n\r\n")
+                            .await
+                            .expect("head");
+                        let mut probe = vec![0u8; 1024];
+                        let idle_read = tokio::time::timeout(
+                            std::time::Duration::from_millis(300),
+                            extra.read(&mut probe),
+                        )
+                        .await;
+                        assert!(idle_read.is_err(), "65th connection must wait past the cap");
+                        // Free one slot: the waiter is served for real.
+                        idle.pop();
+                        let mut out = Vec::new();
+                        tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            extra.read_to_end(&mut out),
+                        )
+                        .await
+                        .expect("served after reap")
+                        .expect("read");
+                        let text = String::from_utf8_lossy(&out).into_owned();
+                        assert!(text.starts_with("HTTP/1.0 200 OK"), "{text}");
+                        drop(idle);
+                        let _ = shutdown_tx.send(true);
+                    };
+                    let (server_out, _) = tokio::join!(server, driver);
+                    server_out.expect("drain");
+                })
+                .await;
+        });
+    }
+
+    #[test]
+    fn gallery_disconnect_during_stream_drains_cleanly() {
+        // A client that vanishes mid-stream cannot strand owned work: the
+        // stream ends, the next request still serves, shutdown still drains.
+        block_on(async {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut app = test_app();
+            let big = pattern_bytes(20 * 1024 * 1024);
+            let guid = task_with_image(&mut app, "big.jpg", &big);
+            let target = format!("/img/{}/{guid}/5", hash_link(None, &format!("{guid}/5")));
+            let listener = bind("127.0.0.1", 0).await.expect("bind");
+            let port = listener.local_addr().expect("addr").port();
+            let (shutdown_tx, shutdown_rx) = watch::channel(false);
+            let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            let cache_dir = tempfile::tempdir().expect("cache").keep();
+            let shared = Rc::new(RefCell::new(
+                SharedRpc::new(
+                    manifest,
+                    &cache_dir,
+                    Arc::new(crate::worker::RealClock),
+                    None,
+                    "http://127.0.0.1:9".to_string(),
+                )
+                .expect("shared"),
+            ));
+            let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
+            let handle = runtime.handle();
+            let local = tokio::task::LocalSet::new();
+            let _ = local
+                .run_until(async {
+                    let server = serve_until_closed(
+                        listener,
+                        shutdown_rx,
+                        handle,
+                        Rc::clone(&shared),
+                        "http://127.0.0.1:9".to_string(),
+                    );
+                    let driver = async {
+                        let mut quitter =
+                            tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+                                .await
+                                .expect("connect");
+                        quitter
+                            .write_all(
+                                format!("GET {target} HTTP/1.0\r\nHost: x\r\n\r\n").as_bytes(),
+                            )
+                            .await
+                            .expect("head");
+                        let mut first = vec![0u8; 1024];
+                        quitter.read_exact(&mut first).await.expect("first bytes");
+                        drop(quitter);
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        let mut next = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+                            .await
+                            .expect("connect");
+                        next.write_all(b"GET /ui/ HTTP/1.0\r\nHost: x\r\n\r\n")
+                            .await
+                            .expect("head");
+                        let mut out = Vec::new();
+                        next.read_to_end(&mut out).await.expect("read");
+                        let text = String::from_utf8_lossy(&out).into_owned();
+                        assert!(text.starts_with("HTTP/1.0 200 OK"), "{text}");
+                        let _ = shutdown_tx.send(true);
+                    };
+                    let (server_out, _) = tokio::join!(server, driver);
+                    server_out.expect("drain");
+                })
+                .await;
+        });
+    }
+
+    #[test]
+    fn gallery_responsive_during_media_stream() {
+        // A slow media stream holds no App borrow: getInfo is served while
+        // the chunks are still in flight on the same owner thread.
+        block_on(async {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut app = test_app();
+            let big = pattern_bytes(4 * 1024 * 1024);
+            let guid = task_with_image(&mut app, "big.jpg", &big);
+            let target = format!("/img/{}/{guid}/5", hash_link(None, &format!("{guid}/5")));
+            let (mut media_client, mut media_server) = tokio::io::duplex(64 * 1024);
+            let (mut info_client, mut info_server) = tokio::io::duplex(64 * 1024);
+            let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            let cache_dir = tempfile::tempdir().expect("cache").keep();
+            let shared = Rc::new(RefCell::new(
+                SharedRpc::new(
+                    manifest,
+                    &cache_dir,
+                    Arc::new(crate::worker::RealClock),
+                    None,
+                    "http://127.0.0.1:9".to_string(),
+                )
+                .expect("shared"),
+            ));
+            let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
+            let handle = runtime.handle();
+            let local = tokio::task::LocalSet::new();
+            let body = br#"{"method":"xeH.getInfo","id":41,"params":[[],{}]}"#;
+            let info_request = post_bytes("/jsonrpc", body);
+            let (media_raw, info_raw, media_served, info_served) = local
+                .run_until(async {
+                    tokio::join!(
+                        async {
+                            media_client
+                                .write_all(
+                                    format!("GET {target} HTTP/1.0\r\nHost: x\r\n\r\n").as_bytes(),
+                                )
+                                .await
+                                .expect("head");
+                            // Slow reader: the stream stays in flight.
+                            let mut out = Vec::new();
+                            let mut chunk = vec![0u8; 1024];
+                            loop {
+                                match media_client.read(&mut chunk).await {
+                                    Ok(0) => break,
+                                    Ok(n) => {
+                                        out.extend_from_slice(&chunk[..n]);
+                                        tokio::task::yield_now().await;
+                                    }
+                                    Err(error) => panic!("read: {error}"),
+                                }
+                            }
+                            out
+                        },
+                        async {
+                            info_client.write_all(&info_request).await.expect("head");
+                            let mut out = Vec::new();
+                            info_client.read_to_end(&mut out).await.expect("read");
+                            out
+                        },
+                        // Both serves run concurrently on the owner thread:
+                        // getInfo must complete while chunks are in flight.
+                        serve_one(
+                            &mut media_server,
+                            handle.clone(),
+                            Rc::clone(&shared),
+                            "http://127.0.0.1:9".to_string(),
+                        ),
+                        serve_one(
+                            &mut info_server,
+                            handle,
+                            shared,
+                            "http://127.0.0.1:9".to_string(),
+                        )
+                    )
+                })
+                .await;
+            media_served.expect("media");
+            info_served.expect("info");
+            let (status, _, media) = split_response(&media_raw);
+            assert!(status.contains("200"), "{status}");
+            assert_eq!(media.len(), big.len());
+            pattern_spot(&media, 77);
+            let (status, _, info) = split_response(&info_raw);
+            assert!(status.contains("200"), "{status}");
+            let envelope: Value = serde_json::from_slice(&info).expect("envelope");
+            assert!(envelope.get("result").is_some());
+        });
     }
 
     // --- static cache: TTL, 304, stale fallback, persistence -----------------
@@ -2670,9 +4135,9 @@ mod tests {
         assert!(cache.fresh("/static/app.js").is_none());
         // Restart: the JSON cache reloads; a legacy pickle never loads.
         std::fs::write(dir.join("webui.gz"), b"not a pickle").expect("legacy");
-        let reloaded = StaticCache::load(&path, Arc::clone(&clock) as Arc<dyn HttpClock>);
+        let mut reloaded = StaticCache::load(&path, Arc::clone(&clock) as Arc<dyn HttpClock>);
         assert!(reloaded.fresh("/").is_some());
-        let broken = StaticCache::load(
+        let mut broken = StaticCache::load(
             &dir.join("missing.json"),
             Arc::clone(&clock) as Arc<dyn HttpClock>,
         );

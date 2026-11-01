@@ -620,6 +620,15 @@ NATIVE_CASE_MAP = {
         "rpc::server::tests::update_config_with_proxy_applies_and_dir_without_proxy_is_noop": [
             "rpc.updateConfig.proxy",
         ],
+        "rpc::server::tests::update_config_proxy_nodir_isolated_applies_and_returns_config": [
+            "rpc.updateConfig.proxy-nodir-isolated",
+        ],
+        "rpc::server::tests::update_config_proxy_empty_isolated_keeps_pool_semantics": [
+            "rpc.updateConfig.proxy-empty-isolated",
+        ],
+        "rpc::server::tests::update_config_proxy_existing_pool_is_additive": [
+            "rpc.updateConfig.proxy-existing-isolated",
+        ],
         "rpc::server::tests::list_tasks_levels_negation_and_invalid": [
             "rpc.listTasks.level",
         ],
@@ -648,8 +657,39 @@ NATIVE_CASE_MAP = {
         "rpc::server::tests::rss_mutant_changes_list_tasks_selection": [
             "rpc.rss.mutant",
         ],
+        "rpc::server::tests::rss_mutant_changes_drain_routing": [
+            "rpc.rss.mutant",
+        ],
         "rpc::server::tests::runtime_mounted_pause_and_delete_drain": [
             "rpc.server.drain"
+        ],
+        "rpc::server::tests::secret_login_authenticates_once_and_prepares_credentials": [
+            "rpc.auth.exact",
+        ],
+        "rpc::server::tests::login_arity_and_type_errors_survive_single_auth": [
+            "rpc.auth.exact",
+        ],
+        "rpc::server::tests::secret_login_runs_real_loopback_login_and_keeps_session": [
+            "rpc.auth.exact",
+        ],
+        "rpc::server::tests::snake_pause_and_delete_take_the_runtime_drain_path": [
+            "rpc.task.lifecycle",
+        ],
+        "rpc::server::tests::snake_pause_and_delete_drain_over_wire": [
+            "rpc.task.lifecycle",
+        ],
+        "rpc::server::tests::snake_delete_running_is_refused_over_wire": [
+            "rpc.task.lifecycle",
+            "rpc.delTask.running",
+        ],
+        "rpc::server::tests::accept_loop_caps_active_connections_and_reaps": [
+            "rpc.server.conn-cap",
+        ],
+        "rpc::server::tests::media_permits_gate_heavy_decode": [
+            "rpc.media.permit-queue",
+        ],
+        "rpc::server::tests::media_spool_guard_unlinks_on_drop": [
+            "gallery.stream.spool-cleanup",
         ],
         "rpc::server::tests::signed_gallery_paths_validate_real_signatures": [
             "rpc.sign.pending",
@@ -688,6 +728,52 @@ NATIVE_CASE_MAP = {
         ],
         "rpc::server::tests::pixel_bound_rejects_huge_dimensions": [
             "gallery.pixel-bound",
+        ],
+        "rpc::server::tests::gallery_symlink_escape_and_reserved_are_denied": [
+            "gallery.traversal",
+        ],
+        "rpc::server::tests::gallery_sibling_archive_symlink_is_denied": [
+            "gallery.read.task-zip.2",
+            "gallery.read.task-zip.9",
+        ],
+        "rpc::server::tests::gallery_dispatch_releases_before_reads": [
+            "gallery.read.task-wait.1",
+        ],
+        "rpc::server::tests::gallery_thumbnail_input_budgets_fire_before_decode": [
+            "gallery.pixel-bound",
+        ],
+        "rpc::server::tests::gallery_zip_entry_budget_refuses_before_allocation": [
+            "gallery.read.task-zip.2",
+            "gallery.read.task-zip.9",
+        ],
+        "rpc::server::tests::gallery_stream_large_file_chunks_pattern": [
+            "gallery.stream.large-file",
+        ],
+        "rpc::server::tests::gallery_stream_wire_framing": [
+            "gallery.stream.large-file",
+            "rpc.wire.framing",
+        ],
+        "rpc::server::tests::gallery_stream_large_archive_entries": [
+            "gallery.stream.large-file",
+            "gallery.archive.task-wait",
+        ],
+        "rpc::server::tests::gallery_stream_spool_cleanup": [
+            "gallery.stream.spool-cleanup",
+        ],
+        "rpc::server::tests::gallery_disconnect_during_stream_drains_cleanly": [
+            "rpc.media.disconnect-drain",
+        ],
+        "rpc::server::tests::gallery_responsive_during_media_stream": [
+            "gallery.stream.large-file",
+        ],
+        "rpc::server::tests::static_cache_bounds_entries_and_total": [
+            "rpc.static.cache",
+        ],
+        "rpc::server::tests::static_persisted_cache_load_enforces_bounds": [
+            "rpc.static.cache",
+        ],
+        "rpc::server::tests::static_fetch_refuses_oversize_before_buffering": [
+            "rpc.static.fetch",
         ],
     },
     "webui": {
@@ -784,6 +870,11 @@ NATIVE_COMMANDS = {
         ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::signed_gallery"],
         ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::thumbnail_query"],
         ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::gallery_names"],
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::secret_login"],
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::login_arity"],
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::snake_"],
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::accept_loop"],
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::media_"],
     ],
     "gallery": [
         ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::gallery_"],
@@ -4525,6 +4616,53 @@ def self_check(suite, oracle, candidate):
         cases = {}
         compare_rpc(cases, oracle, mutated)
         checks.append(("error-code", not cases.get("rpc.listTasks.invalid", True)))
+        if isinstance(oracle, dict) and "isolated" in oracle:
+            iso_case = "rpc.updateConfig.proxy-nodir-isolated"
+
+            def isolated_mutant(mutator):
+                import copy as _copy
+                mutated_oracle = _copy.deepcopy(oracle["isolated"])
+                mutated_candidate = _copy.deepcopy(candidate["isolated"])
+                mutator(mutated_oracle, mutated_candidate)
+                probe = {}
+                compare_rpc_isolated(
+                    probe, mutated_oracle, mutated_candidate)
+                return probe
+
+            def new_measured(mutated):
+                for entry in mutated["cases"]:
+                    if entry["id"] == iso_case:
+                        return entry
+                raise AssertionError("isolated case missing")
+
+            checks.append(("isolated-body-proxy", not isolated_mutant(
+                lambda old, new: new_measured(new).update(
+                    {"body": new_measured(new)["body"].replace(
+                        ISOLATED_PROXY, "socks5://127.0.0.1:1099")})
+            ).get(iso_case, True)))
+            checks.append(("isolated-status", not isolated_mutant(
+                lambda old, new: new_measured(new).update(
+                    {"status": "HTTP/1.0 500 Internal Server Error"})
+            ).get(iso_case, True)))
+            checks.append(("isolated-pool-members", not isolated_mutant(
+                lambda old, new: new_measured(new)["after"][
+                    "proxy_members"].append("socks5://127.0.0.1:1099")
+            ).get(iso_case, True)))
+            checks.append(("isolated-pool-count", not isolated_mutant(
+                lambda old, new: new_measured(new)["after"].update(
+                    {"proxy_count": 99})
+            ).get(iso_case, True)))
+            checks.append(("isolated-cfg-other", not isolated_mutant(
+                lambda old, new: new_measured(new)["after"]["cfg"].update(
+                    {"download_thread_cnt": 1})
+            ).get(iso_case, True)))
+            checks.append(("isolated-oracle-cfg", not isolated_mutant(
+                lambda old, new: new_measured(old)["after"]["cfg"].update(
+                    {"proxy": []})
+            ).get(iso_case, True)))
+            checks.append(("isolated-oracle-outcome", not isolated_mutant(
+                lambda old, new: new_measured(old).update({"dropped": False})
+            ).get(iso_case, True)))
     elif suite == "gallery":
         mutated = copy.deepcopy(candidate)
         mutated["reads"][0]["bytes"] = "mutated"
@@ -4896,6 +5034,63 @@ def _rpc_snapshot_app(app):
     }
 
 
+# Volatile operational files excluded from directory snapshots on both
+# sides (routine logger/session/cache output, never directory creation).
+# The top-level harness isolation dirs (home/cache/tmp from clean_env) are
+# likewise excluded: oracle runs execute with cwd inside the isolated root
+# while the candidate probe does not, so they are harness artifacts.
+DIR_SNAPSHOT_EXCLUDED = {"h.json", "eh.log", "webui.gz", "webui-cache.json"}
+DIR_SNAPSHOT_TOP_EXCLUDED = {"home", "cache", "tmp"}
+
+
+def _rpc_public_cfg(app):
+    return {
+        key: value
+        for key, value in app.cfg.items()
+        if not key.startswith("rpc_") and key not in ("urls",)
+    }
+
+
+def _dir_paths(root):
+    import os
+
+    out = []
+    stack = [str(root)]
+    while stack:
+        directory = stack.pop()
+        try:
+            names = sorted(os.listdir(directory))
+        except OSError:
+            continue
+        for name in names:
+            full = os.path.join(directory, name)
+            rel = os.path.relpath(full, str(root)).replace(os.sep, "/")
+            if "/" not in rel and rel in DIR_SNAPSHOT_TOP_EXCLUDED:
+                continue
+            if os.path.isdir(full) and not os.path.islink(full):
+                out.append(rel + "/")
+                stack.append(full)
+            elif os.path.islink(full):
+                out.append("%s -> %s" % (rel, os.readlink(full)))
+            elif name in DIR_SNAPSHOT_EXCLUDED:
+                continue
+            else:
+                out.append(rel)
+    return sorted(out)
+
+
+def _rpc_snapshot_full(app, work):
+    snapshot = _rpc_snapshot_app(app)
+    # Cookies normalize to sorted pairs on both sides (the oracle view is
+    # a dict, the candidate a pair list); login state stays exact.
+    snapshot["cookies"] = sorted(
+        [list(item) for item in dict(app.cookies).items()])
+    snapshot["cfg"] = _rpc_public_cfg(app)
+    snapshot["proxy_members"] = list(app.proxy.proxies.keys()) if app.proxy else []
+    snapshot["dirs"] = _dir_paths(work)
+    return snapshot
+
+
 def oracle_rpc(upstream, request):
     import importlib
     import json as pyjson
@@ -4922,7 +5117,10 @@ def oracle_rpc(upstream, request):
     transcripts = []
     try:
         for case in request["cases"]:
-            before = _rpc_snapshot_app(app)
+            if request.get("snapshot") == "full":
+                before = _rpc_snapshot_full(app, work)
+            else:
+                before = _rpc_snapshot_app(app)
             entry = {"id": case["id"]}
             try:
                 sock = socket.create_connection(("127.0.0.1", port), timeout=15)
@@ -4993,7 +5191,11 @@ def oracle_rpc(upstream, request):
                 entry["body"] = rest[:declared].decode("latin-1")
                 entry["trailing_newline"] = rest[declared:declared + 1] == b"\n"
             entry["before"] = before
-            entry["after"] = _rpc_snapshot_app(app)
+            if request.get("snapshot") == "full":
+                full_snapshot = _rpc_snapshot_full(app, work)
+                entry["after"] = full_snapshot
+            else:
+                entry["after"] = _rpc_snapshot_app(app)
             transcripts.append(entry)
     finally:
         server.shutdown()
@@ -5318,6 +5520,203 @@ RPC_DELTA_CASES = {
         "candidate": (False, "HTTP/1.0 403"),
     },
 }
+
+# --- B2: isolated missing-dir crash-repair proof ---------------------------
+#
+# The shared transcript runs proxy-dir before proxy-nodir with the SAME
+# proxy, masking the pool state change. These variants run on FRESH apps
+# with a DISTINCT proxy plus another known config change, and compare the
+# complete outcome, body and full after-state on both sides independently.
+ISOLATED_PROXY = "socks5://127.0.0.1:1081"
+ISOLATED_SEED_PROXY = "socks5://127.0.0.1:1079"
+ISOLATED_THREAD_CNT = 9
+
+
+def rpc_isolated_variants(downloads_dir):
+    import json as _json
+
+    def body(params):
+        return _json.dumps(
+            {"method": "xeH.updateConfig", "id": 4, "params": [[], params]}
+        )
+
+    seed = {
+        "id": "rpc.updateConfig.proxy-seeded",
+        "method": "POST",
+        "target": "/jsonrpc",
+        "body": body({"proxy": [ISOLATED_SEED_PROXY], "dir": downloads_dir}),
+    }
+    measured = {
+        "id": "rpc.updateConfig.proxy-nodir-isolated",
+        "method": "POST",
+        "target": "/jsonrpc",
+        "body": body(
+            {"proxy": [ISOLATED_PROXY],
+             "download_thread_cnt": ISOLATED_THREAD_CNT}
+        ),
+    }
+    empty = {
+        "id": "rpc.updateConfig.proxy-empty-isolated",
+        "method": "POST",
+        "target": "/jsonrpc",
+        "body": body({"proxy": [], "download_thread_cnt": ISOLATED_THREAD_CNT}),
+    }
+    existing = {
+        "id": "rpc.updateConfig.proxy-existing-isolated",
+        "method": "POST",
+        "target": "/jsonrpc",
+        "body": body(
+            {"proxy": [ISOLATED_PROXY],
+             "download_thread_cnt": ISOLATED_THREAD_CNT}
+        ),
+    }
+    return [
+        {"case_id": measured["id"], "seed": [], "measured": measured,
+         "expect_members": [ISOLATED_PROXY]},
+        {"case_id": empty["id"], "seed": [], "measured": empty,
+         "expect_members": []},
+        {"case_id": existing["id"], "seed": [seed], "measured": existing,
+         "expect_members": [ISOLATED_SEED_PROXY, ISOLATED_PROXY]},
+    ]
+
+
+def _isolated_scrub(value, roots):
+    if isinstance(value, str):
+        for root in roots:
+            if root and root in value:
+                value = value.replace(root, "<root>")
+        return value
+    if isinstance(value, list):
+        return [_isolated_scrub(item, roots) for item in value]
+    if isinstance(value, dict):
+        return {key: _isolated_scrub(item, roots) for key, item in value.items()}
+    return value
+
+
+def compare_rpc_isolated_one(cases, case_id, old, new, roots, expect_members):
+    """Exact independent comparison for one isolated proxy-nodir variant."""
+    import json as _json
+
+    diffs = []
+    # The reference MUST still record the crash: KeyError on the missing dir
+    # drops the connection after the partial in-memory side effects.
+    if not old.get("dropped"):
+        diffs.append(f"{case_id}: oracle no longer drops (source behavior changed)")
+        cases[case_id] = False
+        return diffs
+    # The candidate MUST answer 200 with the real post-update view.
+    if new.get("dropped"):
+        diffs.append(f"{case_id}: candidate dropped, want HTTP 200")
+        cases[case_id] = False
+        return diffs
+    if new.get("status") != "HTTP/1.0 200 OK":
+        diffs.append(f"{case_id}: candidate status {new.get('status')} != HTTP/1.0 200 OK")
+        cases[case_id] = False
+        return diffs
+    if not new.get("trailing_newline"):
+        diffs.append(f"{case_id}: candidate lost the trailing newline")
+        cases[case_id] = False
+    try:
+        new_body = _isolated_scrub(_json.loads(new.get("body", "")), roots)
+    except ValueError:
+        diffs.append(f"{case_id}: candidate body is not JSON")
+        cases[case_id] = False
+        return diffs
+    result = new_body.get("result")
+    if not isinstance(result, dict):
+        diffs.append(f"{case_id}: candidate body has no result view: {new_body!r}"[:200])
+        cases[case_id] = False
+        return diffs
+    # Full after-state must converge exactly: cfg, pool members+count,
+    # queue/states, cookies/login, dirs.
+    old_after = _isolated_scrub(old.get("after", {}), roots)
+    new_after = _isolated_scrub(new.get("after", {}), roots)
+    for key in ("cfg", "proxy_members", "proxy_count", "queue_len",
+                "has_login", "cookies", "states", "cfg_dir", "dirs"):
+        if old_after.get(key) != new_after.get(key):
+            diffs.append(
+                f"{case_id}: after.{key} differs: "
+                f"{str(old_after.get(key))[:160]!r} != {str(new_after.get(key))[:160]!r}")
+    # The body IS the post-update public config: it must equal the
+    # candidate's own after-cfg and the oracle's after-cfg.
+    if new_after.get("cfg") != result:
+        diffs.append(f"{case_id}: candidate body is not its own post-update config")
+    if old_after.get("cfg") != result:
+        diffs.append(f"{case_id}: candidate body differs from oracle after-config")
+    # The requested effects landed: distinct proxy member(s) plus the other
+    # config change; the directory is untouched; no tree growth.
+    if new_after.get("proxy_members") != expect_members:
+        diffs.append(
+            f"{case_id}: pool members {new_after.get('proxy_members')} != {expect_members}")
+    if new_after.get("proxy_count") != len(expect_members):
+        diffs.append(f"{case_id}: pool count {new_after.get('proxy_count')} != {len(expect_members)}")
+    if (result.get("download_thread_cnt") if isinstance(result, dict) else None) != ISOLATED_THREAD_CNT:
+        diffs.append(f"{case_id}: other config change missing from body")
+    old_before = _isolated_scrub(old.get("before", {}), roots)
+    new_before = _isolated_scrub(new.get("before", {}), roots)
+    if old_after.get("cfg_dir") != old_before.get("cfg_dir"):
+        diffs.append(f"{case_id}: oracle dir moved")
+    if new_after.get("cfg_dir") != new_before.get("cfg_dir"):
+        diffs.append(f"{case_id}: candidate dir moved")
+    if old_after.get("dirs") != old_before.get("dirs"):
+        diffs.append(f"{case_id}: oracle tree grew (extra directory creation)")
+    if new_after.get("dirs") != new_before.get("dirs"):
+        diffs.append(f"{case_id}: candidate tree grew (extra directory creation)")
+    cases[case_id] = not diffs
+    return diffs
+
+
+def compare_rpc_isolated(cases, oracle, candidate):
+    """Compare every isolated variant plus its seed on fresh apps."""
+    diffs = []
+    roots = oracle.get("roots", [oracle.get("root", "")]) + candidate.get(
+        "roots", [candidate.get("root", "")])
+    for variant in oracle.get("variants", []):
+        case_id = variant["case_id"]
+        old_map = {entry["id"]: entry for entry in oracle["cases"]}
+        new_map = {entry["id"]: entry for entry in candidate["cases"]}
+        seed_ids = [case["id"] for case in variant.get("seed", [])]
+        for seed_id in seed_ids:
+            old_seed, new_seed = old_map.get(seed_id), new_map.get(seed_id)
+            if old_seed is None or new_seed is None:
+                diffs.append(f"{case_id}: missing seed transcript {seed_id}")
+                cases[seed_id] = False
+                continue
+            # The seed carries a dir, so both sides answer 200 with the
+            # same public view; compare exactly like any ordinary case.
+            if old_seed.get("dropped") or new_seed.get("dropped"):
+                diffs.append(f"{case_id}: seed dropped: {seed_id}")
+                cases[seed_id] = False
+                continue
+            if (old_seed.get("status", "")[:12] != "HTTP/1.0 200"
+                    or new_seed.get("status", "")[:12] != "HTTP/1.0 200"):
+                diffs.append(f"{case_id}: seed status: {seed_id}")
+                cases[seed_id] = False
+                continue
+            import json as _json
+            try:
+                old_body = _isolated_scrub(
+                    _json.loads(old_seed.get("body", "")), roots)
+                new_body = _isolated_scrub(
+                    _json.loads(new_seed.get("body", "")), roots)
+            except ValueError:
+                diffs.append(f"{case_id}: seed body not JSON: {seed_id}")
+                cases[seed_id] = False
+                continue
+            if old_body != new_body:
+                diffs.append(f"{case_id}: seed body differs: {seed_id}")
+                cases[seed_id] = False
+                continue
+            cases[seed_id] = True
+        old, new = old_map.get(case_id), new_map.get(case_id)
+        if old is None or new is None:
+            diffs.append(f"{case_id}: missing isolated transcript")
+            cases[case_id] = False
+            continue
+        diffs.extend(compare_rpc_isolated_one(
+            cases, case_id, old, new, roots, variant["expect_members"]))
+    return diffs
+
 
 RPC_CASE_IDS = [case["id"] for case in rpc_wire_cases()]
 
@@ -5965,6 +6364,67 @@ def run_suite(suite, output_root, upstream, target_dir):
             candidate = {"open": candidate_open, "auth": candidate_auth}
             cases = {}
             diffs = compare_rpc(cases, oracle, candidate)
+            # B2 isolated legs: one fresh app per variant per side, full
+            # state snapshots, exact independent comparison.
+            isolated_oracle = {"roots": [], "cases": [], "variants": []}
+            isolated_candidate = {"roots": [], "cases": [], "variants": []}
+            for index in (1, 2, 3):
+                oracle_iso = root / f"isolated-oracle-{index}"
+                oracle_iso.mkdir()
+                candidate_iso = root / f"candidate-isolated-{index}"
+                candidate_iso.mkdir()
+                isolated_oracle["roots"].append(str(oracle_iso))
+                isolated_candidate["roots"].append(str(candidate_iso))
+            template = rpc_isolated_variants("")
+            iso_pairs = list(zip(
+                isolated_oracle["roots"], isolated_candidate["roots"]))
+            for position, (oracle_iso, candidate_iso) in enumerate(iso_pairs):
+                import copy as _copy
+                variant = _copy.deepcopy(template[position])
+                # Seed transcripts share one id across variants; scope each
+                # seed to its own fresh app.
+                for seed_case in variant["seed"]:
+                    seed_case["id"] = f"{seed_case['id']}-{position}"
+                oracle_bodies = rpc_isolated_variants(
+                    str(Path(oracle_iso) / "downloads"))[position]
+                candidate_bodies = rpc_isolated_variants(
+                    str(Path(candidate_iso) / "downloads"))[position]
+                for seed_case in oracle_bodies["seed"]:
+                    seed_case["id"] = f"{seed_case['id']}-{position}"
+                for seed_case in candidate_bodies["seed"]:
+                    seed_case["id"] = f"{seed_case['id']}-{position}"
+                oracle_cases = (oracle_bodies["seed"]
+                                + [oracle_bodies["measured"]])
+                candidate_cases = (candidate_bodies["seed"]
+                                   + [candidate_bodies["measured"]])
+                isolated_oracle["variants"].append(variant)
+                isolated_candidate["variants"].append(variant)
+                oracle_iso_result = run_oracle(
+                    "rpc",
+                    {"root": oracle_iso, "secret": None,
+                     "tasks": RPC_TASKS, "cases": oracle_cases,
+                     "snapshot": "full"},
+                    root,
+                    upstream,
+                    root / f"oracle-rpc-isolated-{position}.log",
+                    cwd=Path(oracle_iso),
+                )
+                isolated_oracle["cases"].extend(oracle_iso_result["cases"])
+                candidate_iso_result = run_probe(
+                    "rpc",
+                    {"root": candidate_iso, "secret": None,
+                     "tasks": RPC_TASKS, "cases": candidate_cases,
+                     "snapshot": "full"},
+                    root,
+                    target_dir,
+                    root / f"probe-rpc-isolated-{position}.log",
+                )
+                isolated_candidate["cases"].extend(
+                    candidate_iso_result["cases"])
+            diffs.extend(compare_rpc_isolated(
+                cases, isolated_oracle, isolated_candidate))
+            oracle["isolated"] = isolated_oracle
+            candidate["isolated"] = isolated_candidate
         elif suite == "gallery":
             oracle_root = root / "oracle-work"
             candidate_root = root / "candidate-work"

@@ -1295,16 +1295,41 @@ impl GalleryFail {
     }
 }
 
-/// Resolve one gallery file for `/img` without touching URL path text as a
-/// filesystem authority: the fid comes from the integer segment, the file
-/// name from the owned task record, and the join is confined to the task
-/// directory. Directory traversal, symlink escape and reserved persistence
-/// access are refused; the reference ZIP fallback is preserved.
-pub fn read_gallery_file(
+/// Owned gallery snapshot captured under a SHORT App borrow and released
+/// before any disk read, ZIP build, decode or network work. Only the task
+/// directory, the validated file name and the reserved persistence set move
+/// out; no borrow and no task handle is kept.
+#[derive(Clone, Debug)]
+pub struct GallerySnap {
+    pub root: PathBuf,
+    pub name: String,
+    pub reserved: Vec<PathBuf>,
+}
+
+/// What opening a snapshot found: an owned regular file, a genuinely missing
+/// file (the reference ZIP fallback may apply), or a denied target (no
+/// fallback; the denial stands).
+pub enum OpenOutcome {
+    File(GalleryFile),
+    Missing,
+    Denied,
+}
+
+/// One validated regular file plus its MIME, owned with no App borrow held.
+pub struct GalleryFile {
+    pub file: std::fs::File,
+    pub len: u64,
+    pub mime: String,
+}
+
+/// Resolve one gallery file name without touching disk beyond the task
+/// record: the fid comes from the integer segment, the file name from the
+/// owned task record, confined to the task directory.
+pub fn snapshot_gallery_file(
     app: &crate::core::App,
     guid: &str,
     fid_text: &str,
-) -> Result<(Vec<u8>, String), GalleryFail> {
+) -> Result<GallerySnap, GalleryFail> {
     let fid: i64 = fid_text.parse().map_err(|_| GalleryFail::BadRequest)?;
     let task = app.task(guid).ok_or(GalleryFail::NotFound)?;
     let mapped = {
@@ -1322,21 +1347,101 @@ pub fn read_gallery_file(
     };
     refuse_unsafe_name(&name)?;
     let root = task.get_fpath().map_err(|_| GalleryFail::NotFound)?;
-    let path = root.join(&name);
-    if let Ok(bytes) = std::fs::read(&path) {
-        let ext = Path::new(&name)
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or("");
-        return Ok((bytes, image_mime(ext).to_string()));
+    // Reserved persistence that must never serve as gallery bytes, even if a
+    // link ever resolved inside the gallery root.
+    let base = app.base_dir().to_path_buf();
+    let log_path = Path::new(&app.cfg.log_path);
+    let log_path = if log_path.is_absolute() {
+        log_path.to_path_buf()
+    } else {
+        base.join(log_path)
+    };
+    let reserved = vec![
+        base.join(crate::core::SESSION_FILE),
+        log_path,
+        base.join(crate::config::CONFIG_FILE),
+        base.join(crate::config::LEGACY_CONFIG_FILE),
+    ];
+    Ok(GallerySnap {
+        root,
+        name,
+        reserved,
+    })
+}
+
+/// Validate the final target against the owned gallery root and open it.
+/// A symlink inside the gallery may be followed only when its canonical
+/// target stays inside the owned root and off the reserved persistence set;
+/// outside/reserved targets, pipes, devices, sockets and directories are
+/// denied before any read. Validation runs again on the opened handle, so a
+/// swap between check and open cannot smuggle bytes in.
+pub fn probe_gallery_file(snap: &GallerySnap) -> Result<OpenOutcome, GalleryFail> {
+    use crate::task::{boundary_path, path_within};
+    let path = snap.root.join(&snap.name);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(OpenOutcome::Missing);
+        }
+        Err(_) => return Err(GalleryFail::NotFound),
+    };
+    if metadata.file_type().is_symlink() {
+        let target = boundary_path(&path).map_err(|_| GalleryFail::NotFound)?;
+        let root_real = boundary_path(&snap.root).map_err(|_| GalleryFail::NotFound)?;
+        if !path_within(&root_real, &target) {
+            return Ok(OpenOutcome::Denied);
+        }
+        if snap.reserved.iter().any(|reserved| {
+            boundary_path(reserved)
+                .map(|real| real == target)
+                .unwrap_or(false)
+        }) {
+            return Ok(OpenOutcome::Denied);
+        }
     }
-    // Reference ZIP fallback (`rpc.py:212-226`): read the entry from the
-    // sibling archive instead.
-    let suffixed = PathBuf::from(format!("{}.zip", root.display()));
-    if !suffixed.is_file() {
-        return Err(GalleryFail::NotFound);
+    let file = std::fs::File::open(&path).map_err(|_| GalleryFail::NotFound)?;
+    let opened = file.metadata().map_err(|_| GalleryFail::NotFound)?;
+    if !opened.is_file() {
+        // Directories, pipes, devices and sockets are never gallery bytes.
+        return Ok(OpenOutcome::Denied);
     }
-    read_zip_entry(&suffixed, &name)
+    let mime = Path::new(&snap.name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_string();
+    Ok(OpenOutcome::File(GalleryFile {
+        len: opened.len(),
+        file,
+        mime: image_mime(&mime).to_string(),
+    }))
+}
+
+/// Resolve one gallery file for `/img` without touching URL path text as a
+/// filesystem authority: the fid comes from the integer segment, the file
+/// name from the owned task record, and the final target is confined to the
+/// owned gallery root with reserved persistence denied. Directory traversal,
+/// symlink escape and reserved persistence access are refused; the reference
+/// ZIP fallback is preserved for genuinely missing files.
+pub fn read_gallery_file(
+    app: &crate::core::App,
+    guid: &str,
+    fid_text: &str,
+) -> Result<(Vec<u8>, String), GalleryFail> {
+    let snap = snapshot_gallery_file(app, guid, fid_text)?;
+    match probe_gallery_file(&snap).map_err(|_| GalleryFail::NotFound)? {
+        OpenOutcome::Denied => Err(GalleryFail::NotFound),
+        OpenOutcome::Missing => read_zip_fallback(&snap),
+        OpenOutcome::File(mut opened) => {
+            let mut bytes = Vec::new();
+            use std::io::Read;
+            opened
+                .file
+                .read_to_end(&mut bytes)
+                .map_err(|_| GalleryFail::NotFound)?;
+            Ok((bytes, opened.mime))
+        }
+    }
 }
 
 pub(crate) fn refuse_unsafe_name(name: &str) -> Result<(), GalleryFail> {
@@ -1355,15 +1460,52 @@ pub(crate) fn refuse_unsafe_name(name: &str) -> Result<(), GalleryFail> {
     Ok(())
 }
 
+/// Sibling-archive fallback for a genuinely missing loose file
+/// (`rpc.py:212-226`): the sibling path needs the exact owned archive
+/// authority, and the entry faces the dedicated ZIP-image budget. Shared by
+/// the buffered probe path and the streaming server path.
+pub fn read_zip_fallback(snap: &GallerySnap) -> Result<(Vec<u8>, String), GalleryFail> {
+    let suffixed = PathBuf::from(format!("{}.zip", snap.root.display()));
+    match std::fs::symlink_metadata(&suffixed) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(GalleryFail::NotFound);
+        }
+        Ok(metadata) if !metadata.is_file() => return Err(GalleryFail::NotFound),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(GalleryFail::NotFound);
+        }
+        Err(_) => return Err(GalleryFail::NotFound),
+        Ok(_) => {}
+    }
+    read_zip_entry_bounded(&suffixed, &snap.name)
+}
+
 fn read_zip_entry(zip_path: &Path, name: &str) -> Result<(Vec<u8>, String), GalleryFail> {
+    read_zip_entry_bounded(zip_path, name)
+}
+
+/// Bounded ZIP-image entry read for the gallery fallback: the declared
+/// uncompressed size and the actual decoded bytes each face the dedicated
+/// 512 MiB budget before any unbounded allocation, so oversize or zip-bomb
+/// entries fail instead of exhausting memory. The entry is validated (CRC)
+/// before any response headers exist, so no 200 ever carries silently
+/// incomplete or corrupt content.
+fn read_zip_entry_bounded(zip_path: &Path, name: &str) -> Result<(Vec<u8>, String), GalleryFail> {
     use std::io::Read;
     let file = std::fs::File::open(zip_path).map_err(|_| GalleryFail::NotFound)?;
     let mut archive = zip::ZipArchive::new(file).map_err(|_| GalleryFail::NotFound)?;
-    let mut entry = archive.by_name(name).map_err(|_| GalleryFail::NotFound)?;
+    let entry = archive.by_name(name).map_err(|_| GalleryFail::NotFound)?;
+    if entry.size() > MAX_ZIP_IMAGE_ENTRY {
+        return Err(GalleryFail::NotFound);
+    }
+    let mut limited = entry.take(MAX_ZIP_IMAGE_ENTRY + 1);
     let mut bytes = Vec::new();
-    entry
+    limited
         .read_to_end(&mut bytes)
         .map_err(|_| GalleryFail::NotFound)?;
+    if bytes.len() as u64 > MAX_ZIP_IMAGE_ENTRY {
+        return Err(GalleryFail::NotFound);
+    }
     let ext = Path::new(name)
         .extension()
         .and_then(|ext| ext.to_str())
@@ -1396,7 +1538,12 @@ pub enum ThumbError {
 
 /// Native thumbnail (`rpc.py:85-105` PIL branch): fit inside the `w`/`h` box
 /// preserving aspect ratio, never upscale, encode in the source format.
-/// Booking the decode behind an explicit pixel bound.
+/// Decode happens behind explicit pre-allocation budgets: the encoded input
+/// is capped, the header dimensions are read through the image reader and
+/// checked against the pixel bound and the decoded-allocation budget BEFORE
+/// the full pixel allocation, and the decoded dimensions are re-checked
+/// afterwards (headers may lie). Output stays bounded by the never-upscale
+/// rule.
 pub fn thumbnail(
     data: &[u8],
     width: Option<u32>,
@@ -1411,6 +1558,12 @@ pub fn thumbnail(
         }
         _ => {}
     }
+    if data.len() > MAX_THUMB_ENCODED {
+        return Err(ThumbError::Decode(format!(
+            "thumbnail source {} bytes exceeds the {MAX_THUMB_ENCODED}-byte encoded bound",
+            data.len()
+        )));
+    }
     let format =
         image::guess_format(data).map_err(|_| ThumbError::Decode("unknown image format".into()))?;
     let mime = match format {
@@ -1421,9 +1574,35 @@ pub fn thumbnail(
         image::ImageFormat::WebP => "image/webp",
         _ => return Err(ThumbError::Decode("unsupported image format".into())),
     };
+    // Header dimensions through the reader, before any pixel allocation.
+    let (claimed_w, claimed_h) = image::ImageReader::new(std::io::Cursor::new(data))
+        .with_guessed_format()
+        .map_err(|error| ThumbError::Decode(error.to_string()))?
+        .into_dimensions()
+        .map_err(|error| ThumbError::Decode(error.to_string()))?;
+    check_pixels(claimed_w, claimed_h)?;
+    let decoded_bytes = (claimed_w as u64)
+        .checked_mul(claimed_h as u64)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| ThumbError::Decode("thumbnail dimensions overflow".into()))?;
+    if decoded_bytes > MAX_THUMB_DECODED {
+        return Err(ThumbError::Decode(format!(
+            "thumbnail decoded allocation {decoded_bytes} bytes exceeds the {MAX_THUMB_DECODED}-byte bound"
+        )));
+    }
     let image =
         image::load_from_memory(data).map_err(|error| ThumbError::Decode(error.to_string()))?;
+    // The header may lie: re-check what was actually allocated.
     check_pixels(image.width(), image.height())?;
+    let actual = (image.width() as u64)
+        .checked_mul(image.height() as u64)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| ThumbError::Decode("thumbnail dimensions overflow".into()))?;
+    if actual > MAX_THUMB_DECODED {
+        return Err(ThumbError::Decode(format!(
+            "thumbnail decoded allocation {actual} bytes exceeds the {MAX_THUMB_DECODED}-byte bound"
+        )));
+    }
     let (src_w, src_h) = (image.width() as f64, image.height() as f64);
     let scale = match (width, height) {
         (Some(w), Some(h)) => (w as f64 / src_w).min(h as f64 / src_h),
@@ -1506,6 +1685,7 @@ pub struct StaticEntry {
 
 pub struct StaticCache {
     entries: indexmap::IndexMap<String, StaticEntry>,
+    total_bytes: u64,
     clock: Arc<dyn crate::worker::HttpClock>,
     path: PathBuf,
 }
@@ -1514,58 +1694,113 @@ impl StaticCache {
     pub fn load(path: &Path, clock: Arc<dyn crate::worker::HttpClock>) -> Self {
         let mut cache = Self {
             entries: indexmap::IndexMap::new(),
+            total_bytes: 0,
             clock,
             path: path.to_path_buf(),
         };
         // Legacy `webui.gz` pickle payloads are never loaded; any unreadable
-        // or version-mismatched cache rebuilds empty and is documented.
-        if let Ok(text) = std::fs::read_to_string(path)
-            && let Ok(root) = serde_json::from_str::<Value>(&text)
-            && root.get("v").and_then(|v| v.as_u64()) == Some(STATIC_CACHE_VERSION as u64)
-            && let Some(entries) = root.get("entries").and_then(|v| v.as_object())
-        {
-            for (name, entry) in entries {
-                let body = entry
-                    .get("body_b64")
-                    .and_then(|v| v.as_str())
-                    .and_then(base64_body);
-                let mime = entry.get("mime").and_then(|v| v.as_str());
-                let fetched = entry.get("fetched").and_then(|v| v.as_f64());
-                let last_modified = entry.get("last_modified").and_then(|v| v.as_str());
-                if let (Some(body), Some(mime), Some(fetched), Some(last_modified)) =
-                    (body, mime, fetched, last_modified)
-                {
-                    cache.entries.insert(
-                        name.clone(),
-                        StaticEntry {
-                            body,
-                            mime: mime.to_string(),
-                            fetched,
-                            last_modified: last_modified.to_string(),
-                        },
-                    );
+        // or version-mismatched cache rebuilds empty and is documented. The
+        // persisted file itself is read through a bound: a full cache is
+        // ~43 MiB of base64 on disk, anything past the persist bound is
+        // refused before allocation. Each entry faces the per-asset budget
+        // and the total/count caps on the way in.
+        if let Ok(file) = std::fs::File::open(path) {
+            let mut limited = file.take(MAX_CACHE_FILE + 1);
+            let mut text = Vec::new();
+            use std::io::Read;
+            if limited.read_to_end(&mut text).is_err() || text.len() as u64 > MAX_CACHE_FILE {
+                return cache;
+            }
+            let text = match String::from_utf8(text) {
+                Ok(text) => text,
+                Err(_) => return cache,
+            };
+            if let Ok(root) = serde_json::from_str::<Value>(&text)
+                && root.get("v").and_then(|v| v.as_u64()) == Some(STATIC_CACHE_VERSION as u64)
+                && let Some(entries) = root.get("entries").and_then(|v| v.as_object())
+            {
+                for (name, entry) in entries {
+                    let body = entry
+                        .get("body_b64")
+                        .and_then(|v| v.as_str())
+                        .and_then(base64_body);
+                    let mime = entry.get("mime").and_then(|v| v.as_str());
+                    let fetched = entry.get("fetched").and_then(|v| v.as_f64());
+                    let last_modified = entry.get("last_modified").and_then(|v| v.as_str());
+                    if let (Some(body), Some(mime), Some(fetched), Some(last_modified)) =
+                        (body, mime, fetched, last_modified)
+                    {
+                        cache.insert_capped(
+                            name.clone(),
+                            StaticEntry {
+                                body,
+                                mime: mime.to_string(),
+                                fetched,
+                                last_modified: last_modified.to_string(),
+                            },
+                        );
+                    }
                 }
             }
         }
         cache
     }
 
-    pub fn fresh(&self, name: &str) -> Option<&StaticEntry> {
-        self.entries
+    pub fn fresh(&mut self, name: &str) -> Option<&StaticEntry> {
+        let hit = self
+            .entries
             .get(name)
             .filter(|entry| self.clock.now() - STATIC_TTL < entry.fetched)
+            .is_some();
+        if hit {
+            // True LRU: a fresh hit moves to the newest position so
+            // frequently served assets survive eviction.
+            if let Some(entry) = self.entries.shift_remove(name) {
+                self.entries.insert(name.to_string(), entry);
+            }
+        }
+        self.entries.get(name).filter(|entry| {
+            let now = self.clock.now();
+            now - STATIC_TTL < entry.fetched
+        })
     }
 
     pub fn stale(&self, name: &str) -> Option<&StaticEntry> {
         self.entries.get(name)
     }
 
+    /// Insert with real accounting: oversize single entries are refused (the
+    /// caller still serves the fetched bytes inline; they are just never
+    /// cached), and oldest-first eviction keeps the total and the count
+    /// within their bounds.
+    fn insert_capped(&mut self, name: String, entry: StaticEntry) {
+        if entry.body.len() > MAX_STATIC_ENTRY {
+            return;
+        }
+        if let Some(old) = self.entries.shift_remove(&name) {
+            self.total_bytes = self.total_bytes.saturating_sub(old.body.len() as u64);
+        }
+        while (self.total_bytes + entry.body.len() as u64 > MAX_STATIC_TOTAL
+            || self.entries.len() >= MAX_STATIC_ENTRIES)
+            && !self.entries.is_empty()
+        {
+            if let Some((_, old)) = self.entries.shift_remove_index(0) {
+                self.total_bytes = self.total_bytes.saturating_sub(old.body.len() as u64);
+            } else {
+                break;
+            }
+        }
+        self.total_bytes += entry.body.len() as u64;
+        self.entries.insert(name, entry);
+    }
+
     pub fn store(&mut self, name: &str, entry: StaticEntry, clear_others: bool) {
         if clear_others {
             // `rpc.py:281-283`: a refreshed index invalidates asset keys.
             self.entries.clear();
+            self.total_bytes = 0;
         }
-        self.entries.insert(name.to_string(), entry);
+        self.insert_capped(name.to_string(), entry);
         let _ = self.save();
     }
 
@@ -1779,6 +2014,44 @@ pub const MAX_HEAD_BYTES: usize = 32 * 1024;
 /// Native image decode bound: refuse images above 64 megapixels before any
 /// resize work, instead of trusting the container header.
 pub const MAX_IMAGE_PIXELS: u64 = 64 * 1024 * 1024;
+/// Dedicated thumbnail input budget: encoded sources above 64 MiB are refused
+/// before parsing. Separate from the ZIP-image entry budget below and never
+/// applied to raw `/zip` or ordinary passthrough file streaming.
+pub const MAX_THUMB_ENCODED: usize = 64 * 1024 * 1024;
+/// Decoded thumbnail allocation budget: `width * height * 4` bytes above
+/// 256 MiB are refused before the full pixel allocation.
+pub const MAX_THUMB_DECODED: u64 = 256 * 1024 * 1024;
+/// Dedicated ZIP-image entry budget: a gallery ZIP fallback entry whose
+/// declared or actual uncompressed size passes 512 MiB is refused before
+/// unbounded allocation. Separate from the thumbnail buffer and never a cap
+/// on raw `/zip` or ordinary file passthrough streaming.
+pub const MAX_ZIP_IMAGE_ENTRY: u64 = 512 * 1024 * 1024;
+/// Static remote asset budget: origins answering past 8 MiB are refused
+/// before buffering and never cached.
+pub const MAX_STATIC_ENTRY: usize = 8 * 1024 * 1024;
+/// Static cache capacity: 32 MiB total across at most 64 entries, oldest
+/// first eviction with real byte accounting.
+pub const MAX_STATIC_TOTAL: u64 = 32 * 1024 * 1024;
+/// Maximum retained static entries.
+pub const MAX_STATIC_ENTRIES: usize = 64;
+/// Bounded read for the persisted static cache file: a full 32 MiB cache is
+/// ~43 MiB of base64 on disk, so 64 MiB leaves margin while refusing
+/// unbounded files before allocation.
+pub const MAX_CACHE_FILE: u64 = 64 * 1024 * 1024;
+/// Owned streaming chunk: media files stream in 64 KiB backpressured pieces.
+pub const IO_CHUNK: usize = 64 * 1024;
+/// Per-I/O idle bounds: a quiet read or a stalled write fails the connection
+/// after 30 s. Legit large files stream continuously, so per-operation
+/// bounds never cap total transfer time.
+pub const READ_IDLE_SECS: u64 = 30;
+/// Per-write stall bound for response streaming.
+pub const WRITE_IDLE_SECS: u64 = 30;
+/// Standard active-connection bound: the accept loop defers (listener
+/// backlog) past 64 live connections and reaps finished records.
+pub const MAX_ACTIVE_CONN: usize = 64;
+/// Heavy decode/archive worker bound: at most 2 concurrent blocking
+/// decode/build jobs, queued on one owned semaphore.
+pub const MAX_HEAVY_WORKERS: usize = 2;
 
 pub const VERSION_HEADER: &str = "xeHentai/2.023-rss";
 
@@ -1787,11 +2060,55 @@ pub struct Response {
     pub status: u16,
     pub reason: &'static str,
     pub mime: Option<String>,
-    pub body: Vec<u8>,
+    pub body: ResponseBody,
+}
+
+/// Response payload: small control bytes inline, or an owned file streamed
+/// in bounded chunks. Streaming holds one file handle plus a single 64 KiB
+/// buffer per connection; no whole-asset Vec exists on that path.
+pub enum ResponseBody {
+    Inline(Vec<u8>),
+    Stream(FileStream),
+}
+
+impl std::fmt::Debug for ResponseBody {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Inline(bytes) => formatter.debug_tuple("Inline").field(&bytes.len()).finish(),
+            Self::Stream(stream) => formatter.debug_tuple("Stream").field(&stream.len).finish(),
+        }
+    }
+}
+
+/// One owned media file plus its exact length, streamed in [`IO_CHUNK`]
+/// backpressured pieces. The connection task owns the handle; dropping it
+/// (disconnect, error, shutdown) closes the file. A spool `cleanup` path is
+/// unlinked on drop, so staged entry bytes never outlive their response.
+/// The handle sits in an `Option` so the streaming writer can take it out of
+/// a `Drop` type without moving the whole value.
+pub struct FileStream {
+    pub file: Option<std::fs::File>,
+    pub len: u64,
+    pub cleanup: Option<PathBuf>,
+}
+
+impl Drop for FileStream {
+    fn drop(&mut self) {
+        if let Some(path) = self.cleanup.take() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
 
 impl Response {
-    pub fn bytes(&self, cors: bool) -> Vec<u8> {
+    pub fn content_len(&self) -> u64 {
+        match &self.body {
+            ResponseBody::Inline(bytes) => bytes.len() as u64,
+            ResponseBody::Stream(stream) => stream.len,
+        }
+    }
+
+    pub fn head_bytes(&self, cors: bool) -> Vec<u8> {
         let mut out = format!(
             "HTTP/1.0 {} {}\r\nServer: {}\r\n",
             self.status, self.reason, VERSION_HEADER
@@ -1802,13 +2119,9 @@ impl Response {
         if let Some(mime) = &self.mime {
             out.push_str(&format!("Content-Type: {mime}\r\n"));
         }
-        out.push_str(&format!("Content-Length: {}\r\n", self.body.len()));
+        out.push_str(&format!("Content-Length: {}\r\n", self.content_len()));
         out.push_str("Connection: close\r\n\r\n");
-        let mut bytes = out.into_bytes();
-        bytes.extend_from_slice(&self.body);
-        // `rpc.py:319/396`: the newline sits outside Content-Length.
-        bytes.push(b'\n');
-        bytes
+        out.into_bytes()
     }
 }
 
@@ -1834,7 +2147,7 @@ pub fn cors_404() -> Response {
         status: 404,
         reason: reason_of(404),
         mime: None,
-        body: Vec::new(),
+        body: ResponseBody::Inline(Vec::new()),
     }
 }
 
@@ -1845,7 +2158,7 @@ pub fn options_response() -> Response {
         status: 200,
         reason: reason_of(200),
         mime: None,
-        body: Vec::new(),
+        body: ResponseBody::Inline(Vec::new()),
     }
 }
 
@@ -1910,13 +2223,23 @@ pub async fn fetch_static(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let body = response
-        .into_body()
+    // Bounded collection: the origin cannot make the server buffer past
+    // the per-asset bound, no matter what Content-Length claims.
+    let limited = http_body_util::Limited::new(response.into_body(), MAX_STATIC_ENTRY + 1);
+    let body = limited
         .collect()
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|_| format!("static asset {name} past the {MAX_STATIC_ENTRY}-byte bound"))?
         .to_bytes()
         .to_vec();
+    if body.len() > MAX_STATIC_ENTRY {
+        // Past the per-asset bound: refused before caching, served only
+        // through the stale fallback or the offline pack.
+        return Err(format!(
+            "static asset {name} is {} bytes, past the {MAX_STATIC_ENTRY}-byte bound",
+            body.len()
+        ));
+    }
     Ok(Some((body, mime, last_modified)))
 }
 
