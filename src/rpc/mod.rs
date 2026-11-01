@@ -17,6 +17,8 @@
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
+use image::ImageDecoder;
+
 use serde_json::{Map as JsonMap, Value};
 use vm::{
     CompileSourceFileOptions, HostApiBuilder, HostApiCatalog, HostFunctionRegistry, SourceFlavor,
@@ -1304,6 +1306,10 @@ pub struct GallerySnap {
     pub root: PathBuf,
     pub name: String,
     pub reserved: Vec<PathBuf>,
+    /// FD identity of the gallery root when the snapshot was taken. The
+    /// confined open re-validates it, so a root/parent swap between the
+    /// snapshot and the open fails closed.
+    pub root_id: Option<crate::task::DirIdentity>,
 }
 
 /// What opening a snapshot found: an owned regular file, a genuinely missing
@@ -1363,6 +1369,7 @@ pub fn snapshot_gallery_file(
         base.join(crate::config::LEGACY_CONFIG_FILE),
     ];
     Ok(GallerySnap {
+        root_id: crate::task::dir_identity(&root),
         root,
         name,
         reserved,
@@ -1370,55 +1377,40 @@ pub fn snapshot_gallery_file(
 }
 
 /// Validate the final target against the owned gallery root and open it.
-/// A symlink inside the gallery may be followed only when its canonical
-/// target stays inside the owned root and off the reserved persistence set;
-/// outside/reserved targets, pipes, devices, sockets and directories are
-/// denied before any read. Validation runs again on the opened handle, so a
-/// swap between check and open cannot smuggle bytes in.
+///
+/// The open is anchored: the leaf opens relative to a pinned root directory
+/// FD and the OPENED descriptor's identity is validated against the owned
+/// root and the reserved persistence set, so a regular inside-gallery file
+/// swapped for an outside/reserved symlink (or a swapped parent/root)
+/// between check and open cannot smuggle bytes in. A symlink leaf is denied
+/// on the fast path; an inside-root alias is served only when the opened
+/// FD is that contained, non-reserved target. Outside/reserved targets,
+/// pipes, FIFOs, devices, sockets and directories are denied before any
+/// read. A genuinely missing file (or root) reports `Missing` so the
+/// reference ZIP fallback still applies; every confinement failure reports
+/// `Denied` with no fallback.
 pub fn probe_gallery_file(snap: &GallerySnap) -> Result<OpenOutcome, GalleryFail> {
-    use crate::task::{boundary_path, path_within};
-    let path = snap.root.join(&snap.name);
-    let metadata = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(OpenOutcome::Missing);
-        }
-        Err(_) => return Err(GalleryFail::NotFound),
+    let opened = match crate::task::open_confined_regular(
+        &snap.root,
+        snap.root_id,
+        &snap.name,
+        &snap.reserved,
+    ) {
+        Ok(None) => return Ok(OpenOutcome::Missing),
+        Ok(Some(file)) => file,
+        Err(_) => return Ok(OpenOutcome::Denied),
     };
-    if metadata.file_type().is_symlink() {
-        let target = boundary_path(&path).map_err(|_| GalleryFail::NotFound)?;
-        let root_real = boundary_path(&snap.root).map_err(|_| GalleryFail::NotFound)?;
-        if !path_within(&root_real, &target) {
-            return Ok(OpenOutcome::Denied);
-        }
-        if snap.reserved.iter().any(|reserved| {
-            boundary_path(reserved)
-                .map(|real| real == target)
-                .unwrap_or(false)
-        }) {
-            return Ok(OpenOutcome::Denied);
-        }
-    }
-    #[cfg(test)]
-    {
-        // Deterministic TEST-ONLY race window: an armed swap lands here,
-        // between the precheck above and the authority open below.
-        crate::task::run_preopen_seam(&snap.root, &snap.name);
-    }
-    let file = std::fs::File::open(&path).map_err(|_| GalleryFail::NotFound)?;
-    let opened = file.metadata().map_err(|_| GalleryFail::NotFound)?;
-    if !opened.is_file() {
-        // Directories, pipes, devices and sockets are never gallery bytes.
-        return Ok(OpenOutcome::Denied);
-    }
+    // The confined open already validated the descriptor (regular file,
+    // contained, non-reserved); the length is taken from the same handle.
+    let len = opened.metadata().map_err(|_| GalleryFail::NotFound)?.len();
     let mime = Path::new(&snap.name)
         .extension()
         .and_then(|ext| ext.to_str())
         .unwrap_or("")
         .to_string();
     Ok(OpenOutcome::File(GalleryFile {
-        len: opened.len(),
-        file,
+        len,
+        file: opened,
         mime: image_mime(&mime).to_string(),
     }))
 }
@@ -1468,26 +1460,38 @@ pub(crate) fn refuse_unsafe_name(name: &str) -> Result<(), GalleryFail> {
 
 /// Sibling-archive fallback for a genuinely missing loose file
 /// (`rpc.py:212-226`): the sibling path needs the exact owned archive
-/// authority, and the entry faces the dedicated ZIP-image budget. Shared by
-/// the buffered probe path and the streaming server path.
+/// authority, and the entry faces the dedicated ZIP-image budget. The
+/// sibling opens through the same anchored confined open as gallery files
+/// (rooted at the gallery parent, bound to its snapshot identity), so a
+/// swapped sibling or parent between check and open cannot smuggle bytes
+/// in. Shared by the buffered probe path and the streaming server path.
 pub fn read_zip_fallback(snap: &GallerySnap) -> Result<(Vec<u8>, String), GalleryFail> {
     let suffixed = PathBuf::from(format!("{}.zip", snap.root.display()));
-    match std::fs::symlink_metadata(&suffixed) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err(GalleryFail::NotFound);
-        }
-        Ok(metadata) if !metadata.is_file() => return Err(GalleryFail::NotFound),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(GalleryFail::NotFound);
-        }
-        Err(_) => return Err(GalleryFail::NotFound),
-        Ok(_) => {}
-    }
-    read_zip_entry_bounded(&suffixed, &snap.name)
+    let parent = suffixed.parent().ok_or(GalleryFail::NotFound)?;
+    let leaf = suffixed
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(GalleryFail::NotFound)?;
+    let parent_id = crate::task::dir_identity(parent);
+    let file = match crate::task::open_confined_regular(parent, parent_id, leaf, &snap.reserved) {
+        Ok(Some(file)) => file,
+        Ok(None) | Err(_) => return Err(GalleryFail::NotFound),
+    };
+    read_zip_entry_bounded(file, &snap.name)
 }
 
 fn read_zip_entry(zip_path: &Path, name: &str) -> Result<(Vec<u8>, String), GalleryFail> {
-    read_zip_entry_bounded(zip_path, name)
+    let parent = zip_path.parent().ok_or(GalleryFail::NotFound)?;
+    let leaf = zip_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(GalleryFail::NotFound)?;
+    let parent_id = crate::task::dir_identity(parent);
+    let file = match crate::task::open_confined_regular(parent, parent_id, leaf, &[]) {
+        Ok(Some(file)) => file,
+        Ok(None) | Err(_) => return Err(GalleryFail::NotFound),
+    };
+    read_zip_entry_bounded(file, name)
 }
 
 /// Bounded ZIP-image entry read for the gallery fallback: the declared
@@ -1495,19 +1499,13 @@ fn read_zip_entry(zip_path: &Path, name: &str) -> Result<(Vec<u8>, String), Gall
 /// 512 MiB budget before any unbounded allocation, so oversize or zip-bomb
 /// entries fail instead of exhausting memory. The entry is validated (CRC)
 /// before any response headers exist, so no 200 ever carries silently
-/// incomplete or corrupt content.
-fn read_zip_entry_bounded(zip_path: &Path, name: &str) -> Result<(Vec<u8>, String), GalleryFail> {
+/// incomplete or corrupt content. The archive handle arrives already
+/// confined; only the entry budget is enforced here.
+fn read_zip_entry_bounded(
+    file: std::fs::File,
+    name: &str,
+) -> Result<(Vec<u8>, String), GalleryFail> {
     use std::io::Read;
-    #[cfg(test)]
-    {
-        // Same deterministic TEST-ONLY window for the sibling archive: the
-        // armed swap lands between the precheck in `read_zip_fallback` and
-        // this authority open.
-        if let (Some(parent), Some(leaf)) = (zip_path.parent(), zip_path.file_name()) {
-            crate::task::run_preopen_seam(parent, &leaf.to_string_lossy());
-        }
-    }
-    let file = std::fs::File::open(zip_path).map_err(|_| GalleryFail::NotFound)?;
     let mut archive = zip::ZipArchive::new(file).map_err(|_| GalleryFail::NotFound)?;
     let entry = archive.by_name(name).map_err(|_| GalleryFail::NotFound)?;
     if entry.size() > MAX_ZIP_IMAGE_ENTRY {
@@ -1530,6 +1528,8 @@ fn read_zip_entry_bounded(zip_path: &Path, name: &str) -> Result<(Vec<u8>, Strin
 
 /// Build (on demand, like the reference) and read one task archive for
 /// `/zip`. `remove=false` keeps the gallery, exactly like `_get_archive_path`.
+/// The committed sibling opens through the anchored confined open, so a
+/// swapped sibling or parent cannot smuggle bytes into the read.
 pub fn read_archive(app: &crate::core::App, guid: &str) -> Result<Vec<u8>, GalleryFail> {
     use crate::task::TaskError;
     let task = app.task(guid).ok_or(GalleryFail::NotFound)?;
@@ -1540,7 +1540,21 @@ pub fn read_archive(app: &crate::core::App, guid: &str) -> Result<Vec<u8>, Galle
             TaskError::UnsafePath { .. } => GalleryFail::NotFound,
             _ => GalleryFail::Server(error.to_string()),
         })?;
-    std::fs::read(&path).map_err(|_| GalleryFail::NotFound)
+    let parent = path.parent().ok_or(GalleryFail::NotFound)?;
+    let leaf = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(GalleryFail::NotFound)?;
+    let parent_id = crate::task::dir_identity(parent);
+    let mut file = match crate::task::open_confined_regular(parent, parent_id, leaf, &[]) {
+        Ok(Some(file)) => file,
+        Ok(None) | Err(_) => return Err(GalleryFail::NotFound),
+    };
+    let mut bytes = Vec::new();
+    use std::io::Read;
+    file.read_to_end(&mut bytes)
+        .map_err(|_| GalleryFail::NotFound)?;
+    Ok(bytes)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1553,16 +1567,48 @@ pub enum ThumbError {
 
 /// Native thumbnail (`rpc.py:85-105` PIL branch): fit inside the `w`/`h` box
 /// preserving aspect ratio, never upscale, encode in the source format.
-/// Decode happens behind explicit pre-allocation budgets: the encoded input
-/// is capped, the header dimensions are read through the image reader and
-/// checked against the pixel bound and the decoded-allocation budget BEFORE
-/// the full pixel allocation, and the decoded dimensions are re-checked
+/// A single given axis forms a SQUARE box from that axis
+/// (`size=(w or h, h or w)`); the box then fits the source preserving
+/// aspect with PIL's floor/ceil aspect-best rounding (exact integer math,
+/// ties go to floor), never upscaling. Decode happens behind explicit
+/// pre-allocation budgets: the encoded input is capped, the actual reader
+/// carries the 256 MiB allocation limit and the 64 MP pixel bound BEFORE
+/// any pixel allocation, and the decoded dimensions are re-checked
 /// afterwards (headers may lie). Output stays bounded by the never-upscale
-/// rule.
+/// rule. Pixel content equivalence with the reference resampler is
+/// documented as mean-channel proximity, not byte identity.
 pub fn thumbnail(
     data: &[u8],
     width: Option<u32>,
     height: Option<u32>,
+) -> Result<(Vec<u8>, String), ThumbError> {
+    thumbnail_with_limits(data, width, height, MAX_THUMB_DECODED)
+}
+
+/// The exact budget production wires into every thumbnail reader.
+pub(crate) fn production_thumb_limits() -> image::Limits {
+    thumb_limits(MAX_THUMB_DECODED)
+}
+
+/// Production decoder budget: 256 MiB of decoder allocation with the 64 MP
+/// pixel bound enforced separately by [`check_pixels`].
+fn thumb_limits(max_alloc: u64) -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = None;
+    limits.max_image_height = None;
+    limits.max_alloc = Some(max_alloc);
+    limits
+}
+
+/// [`thumbnail`] with an injectable allocation budget. Production always
+/// passes [`MAX_THUMB_DECODED`]; tests inject a tiny budget to prove the
+/// real library limit fires before any pixel allocation, on an image whose
+/// header estimate still passes.
+pub(crate) fn thumbnail_with_limits(
+    data: &[u8],
+    width: Option<u32>,
+    height: Option<u32>,
+    max_alloc: u64,
 ) -> Result<(Vec<u8>, String), ThumbError> {
     match (width, height) {
         (None, None) => return Err(ThumbError::Passthrough),
@@ -1589,12 +1635,20 @@ pub fn thumbnail(
         image::ImageFormat::WebP => "image/webp",
         _ => return Err(ThumbError::Decode("unsupported image format".into())),
     };
-    // Header dimensions through the reader, before any pixel allocation.
-    let (claimed_w, claimed_h) = image::ImageReader::new(std::io::Cursor::new(data))
+    // The actual reader carries the allocation limit BEFORE any decoder
+    // allocation: header dimensions, per-decoder buffers and the final
+    // pixel allocation all face it, not the 512 MiB library default.
+    // Formats whose decoder cannot support the limit fail closed here.
+    let reader = image::ImageReader::new(std::io::Cursor::new(data))
         .with_guessed_format()
-        .map_err(|error| ThumbError::Decode(error.to_string()))?
-        .into_dimensions()
         .map_err(|error| ThumbError::Decode(error.to_string()))?;
+    let mut reader = reader;
+    reader.limits(thumb_limits(max_alloc));
+    let decoder = reader
+        .into_decoder()
+        .map_err(|error| ThumbError::Decode(error.to_string()))?;
+    // Header dimensions through the limited decoder, before any pixels.
+    let (claimed_w, claimed_h) = decoder.dimensions();
     check_pixels(claimed_w, claimed_h)?;
     let decoded_bytes = (claimed_w as u64)
         .checked_mul(claimed_h as u64)
@@ -1605,8 +1659,14 @@ pub fn thumbnail(
             "thumbnail decoded allocation {decoded_bytes} bytes exceeds the {MAX_THUMB_DECODED}-byte bound"
         )));
     }
-    let image =
-        image::load_from_memory(data).map_err(|error| ThumbError::Decode(error.to_string()))?;
+    // Strict library gate on what the decoder is actually about to
+    // allocate (16-bit or high-channel content needs more than the
+    // header estimate): this fires before any pixel allocation.
+    let mut gate = thumb_limits(max_alloc);
+    gate.reserve(decoder.total_bytes())
+        .map_err(|error| ThumbError::Decode(format!("thumbnail decoder limit: {error}")))?;
+    let image = image::DynamicImage::from_decoder(decoder)
+        .map_err(|error| ThumbError::Decode(error.to_string()))?;
     // The header may lie: re-check what was actually allocated.
     check_pixels(image.width(), image.height())?;
     let actual = (image.width() as u64)
@@ -1618,21 +1678,22 @@ pub fn thumbnail(
             "thumbnail decoded allocation {actual} bytes exceeds the {MAX_THUMB_DECODED}-byte bound"
         )));
     }
-    let (src_w, src_h) = (image.width() as f64, image.height() as f64);
-    let scale = match (width, height) {
-        (Some(w), Some(h)) => (w as f64 / src_w).min(h as f64 / src_h),
-        (Some(w), None) => w as f64 / src_w,
-        (None, Some(h)) => h as f64 / src_h,
+    let (src_w, src_h) = (image.width(), image.height());
+    // Single-axis bounds form a square box from the given axis, exactly
+    // like the reference `size=(w or h, h or w)`.
+    let (box_w, box_h) = match (width, height) {
+        (Some(w), Some(h)) => (w, h),
+        (Some(w), None) => (w, w),
+        (None, Some(h)) => (h, h),
         (None, None) => unreachable!(),
     };
-    // PIL `thumbnail` never enlarges.
-    let scale = scale.min(1.0);
-    if scale >= 1.0 {
+    // PIL `thumbnail` never enlarges: a box covering the source in both
+    // axes serves the original bytes.
+    if box_w >= src_w && box_h >= src_h {
         return Ok((data.to_vec(), mime.to_string()));
     }
-    let out_w = ((src_w * scale).round() as u32).max(1);
-    let out_h = ((src_h * scale).round() as u32).max(1);
-    let resized = image.resize(out_w, out_h, image::imageops::FilterType::Lanczos3);
+    let (out_w, out_h) = thumbnail_box_fit(src_w, src_h, box_w, box_h);
+    let resized = image.resize_exact(out_w, out_h, image::imageops::FilterType::Lanczos3);
     let mut out = Vec::new();
     {
         let mut cursor = std::io::Cursor::new(&mut out);
@@ -1641,6 +1702,68 @@ pub fn thumbnail(
             .map_err(|error| ThumbError::Decode(error.to_string()))?;
     }
     Ok((out, mime.to_string()))
+}
+
+/// PIL `thumbnail` box fit with exact integer math. `src_w`/`src_h` are the
+/// decoded source dimensions (both nonzero, product within 64 MP by the
+/// time this runs); `box_w`/`box_h` are the normalized box (both nonzero,
+/// and not both covering the source). Returns the fitted dimensions:
+/// the clamped axis keeps the box value, the other is the floor/ceil of
+/// the exact ratio that preserves the aspect best (ties go to floor,
+/// matching PIL's `min(floor, ceil, key=...)`), at least 1.
+fn thumbnail_box_fit(src_w: u32, src_h: u32, box_w: u32, box_h: u32) -> (u32, u32) {
+    debug_assert!(src_w > 0 && src_h > 0 && box_w > 0 && box_h > 0);
+    let (sw, sh, bw, bh) = (src_w as u128, src_h as u128, box_w as u128, box_h as u128);
+    // `box_w / box_h >= src_w / src_h`: the box is relatively wider, so the
+    // height binds and the width fits; otherwise the width binds and the
+    // height fits.
+    if bw * sh >= bh * sw {
+        // Fit width: exact `box_h * src_w / src_h`, ties to floor.
+        let num = bh * sw;
+        let floor = (num / sh) as u32;
+        let ceil = num.div_ceil(sh) as u32;
+        (pick_width_fit(sw, sh, bh, floor, ceil), box_h)
+    } else {
+        // Fit height: exact `box_w * src_h / src_w`, ties to floor.
+        let num = bw * sh;
+        let floor = (num / sw) as u32;
+        let ceil = num.div_ceil(sw) as u32;
+        (box_w, pick_height_fit(sw, sh, bw, floor, ceil))
+    }
+}
+
+/// Width-fit choice: the height is clamped at `hc`, candidates fit the
+/// width. PIL picks `min(floor, ceil, key=|aspect - n/hc|)`, ties to floor.
+/// Compared as `|src_w*hc - n*src_h|` (common denominator), at least 1.
+fn pick_width_fit(sw: u128, sh: u128, hc: u128, floor: u32, ceil: u32) -> u32 {
+    if floor == ceil {
+        return floor.max(1);
+    }
+    let (floor, ceil) = (floor as u128, ceil as u128);
+    let target = sw * hc;
+    if target.abs_diff(ceil * sh) < target.abs_diff(floor * sh) {
+        ceil as u32
+    } else {
+        floor as u32
+    }
+    .max(1)
+}
+
+/// Height-fit choice: the width is clamped at `wc`, candidates fit the
+/// height. PIL picks `min(floor, ceil, key=|aspect - wc/n|)`, ties to
+/// floor. Compared exactly by cross-multiplication
+/// (`|src_w*n - wc*src_h| / (src_h*n)`), at least 1.
+fn pick_height_fit(sw: u128, sh: u128, wc: u128, floor: u32, ceil: u32) -> u32 {
+    if floor == ceil {
+        return floor.max(1);
+    }
+    let (floor, ceil) = (floor as u128, ceil as u128);
+    if (sw * ceil).abs_diff(wc * sh) * floor < (sw * floor).abs_diff(wc * sh) * ceil {
+        ceil as u32
+    } else {
+        floor as u32
+    }
+    .max(1)
 }
 
 pub fn check_pixels(width: u32, height: u32) -> Result<(), ThumbError> {

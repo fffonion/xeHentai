@@ -303,6 +303,307 @@ pub fn path_within(root: &Path, candidate: &Path) -> bool {
     candidate.starts_with(root)
 }
 
+/// An FD-identity snapshot of a directory: the device and inode the path
+/// resolved to when the snapshot was taken. Compared against the actually
+/// opened directory FD, so a parent swap between snapshot and open fails
+/// closed instead of serving the replacement.
+pub type DirIdentity = (u64, u64);
+
+/// Directory FD identity via `fstat`, or `None` when the path cannot be
+/// stated (missing root: the caller treats this as a missing leaf, and the
+/// binding check is skipped).
+pub fn dir_identity(path: &Path) -> Option<DirIdentity> {
+    let file = std::fs::File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_dir() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some((metadata.dev(), metadata.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Race-safe confined open (M5 R2 B3.2).
+// ---------------------------------------------------------------------------
+
+/// Open `root/name` as a regular file confined to the owned gallery root,
+/// validating the OPENED file descriptor (never just the prechecked path),
+/// so a swap between check and open cannot smuggle bytes in.
+///
+/// The leaf is opened relative to a pinned root directory FD. A symlink
+/// leaf is denied on the fast path; an inside-root alias is served only
+/// when the opened FD's identity matches the resolved target and the
+/// target stays inside the freshly canonicalized root and off the reserved
+/// persistence set. Magic links, outside targets and reserved targets are
+/// denied before any read, as are non-regular files (directories, pipes,
+/// devices, sockets). The opened root FD must also still be the freshly
+/// canonicalized root AND the snapshot-time identity, so parent/root swaps
+/// fail closed. `O_NONBLOCK` avoids hangs on FIFOs during the open; it is
+/// cleared before the handle is returned.
+///
+/// Returns `Ok(None)` only when the leaf (or the root itself) is genuinely
+/// missing, so the caller can apply the reference ZIP fallback; every
+/// confinement failure is `Err` (denied: no fallback, no bytes).
+/// No production debug hook exists; the `#[cfg(test)]` seam below is the
+/// only deterministic window and is compiled out of production builds.
+pub fn open_confined_regular(
+    root: &Path,
+    snapshot_id: Option<DirIdentity>,
+    name: &str,
+    reserved: &[PathBuf],
+) -> Result<Option<std::fs::File>, TaskError> {
+    use rustix::fs::{Mode, OFlags};
+    check_component(name)?;
+    let root_fd = match rustix::fs::open(
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(error) if error == rustix::io::Errno::NOENT => return Ok(None),
+        Err(error) => {
+            return Err(TaskError::Io {
+                path: root.to_path_buf(),
+                source: std::io::Error::from_raw_os_error(error.raw_os_error()),
+            });
+        }
+    };
+    let root_stat = rustix::fs::fstat(&root_fd).map_err(|error| TaskError::Io {
+        path: root.to_path_buf(),
+        source: std::io::Error::from_raw_os_error(error.raw_os_error()),
+    })?;
+    if rustix::fs::FileType::from_raw_mode(root_stat.st_mode) != rustix::fs::FileType::Directory {
+        return Err(TaskError::UnsafePath {
+            path: root.to_path_buf(),
+            reason: "confined root is not a directory",
+        });
+    }
+    #[cfg(test)]
+    run_preopen_seam(root, name);
+    let leaf = match rustix::fs::openat(
+        &root_fd,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(error) if error == rustix::io::Errno::LOOP => {
+            return open_confined_alias(&root_fd, root, snapshot_id, name, reserved);
+        }
+        Err(error) if error == rustix::io::Errno::NOENT => return Ok(None),
+        Err(error) => {
+            return Err(TaskError::Io {
+                path: root.join(name),
+                source: std::io::Error::from_raw_os_error(error.raw_os_error()),
+            });
+        }
+    };
+    finish_confined_leaf(root_fd, leaf, root, snapshot_id, name, reserved)
+}
+
+/// Symlink-leaf path: the leaf is a link. Follow it, then serve the opened
+/// FD only when its identity matches the contained, non-reserved resolved
+/// target. Any mismatch (including a link swap racing the resolve) denies.
+fn open_confined_alias(
+    root_fd: &rustix::fd::OwnedFd,
+    root: &Path,
+    snapshot_id: Option<DirIdentity>,
+    name: &str,
+    reserved: &[PathBuf],
+) -> Result<Option<std::fs::File>, TaskError> {
+    use rustix::fs::{Mode, OFlags};
+    let leaf = match rustix::fs::openat(
+        root_fd,
+        name,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(error) if error == rustix::io::Errno::NOENT => return Ok(None),
+        Err(error) => {
+            return Err(TaskError::Io {
+                path: root.join(name),
+                source: std::io::Error::from_raw_os_error(error.raw_os_error()),
+            });
+        }
+    };
+    let leaf_stat = rustix::fs::fstat(&leaf).map_err(|error| TaskError::Io {
+        path: root.join(name),
+        source: std::io::Error::from_raw_os_error(error.raw_os_error()),
+    })?;
+    if rustix::fs::FileType::from_raw_mode(leaf_stat.st_mode) != rustix::fs::FileType::RegularFile {
+        return Err(TaskError::UnsafePath {
+            path: root.join(name),
+            reason: "confined alias target is not a regular file",
+        });
+    }
+    // Resolve the link through the pinned root FD and require containment;
+    // the opened FD must then BE that resolved target (dev, ino).
+    let target =
+        rustix::fs::readlinkat(root_fd, name, Vec::new()).map_err(|error| TaskError::Io {
+            path: root.join(name),
+            source: std::io::Error::from_raw_os_error(error.raw_os_error()),
+        })?;
+    let target = target.to_string_lossy();
+    let fresh_real = canonical_root(root)?;
+    let resolved = if Path::new(target.as_ref()).is_absolute() {
+        normalize(Path::new(target.as_ref()))
+    } else {
+        normalize(&fresh_real.join(Path::new(target.as_ref())))
+    };
+    if !path_within(&fresh_real, &resolved) {
+        return Err(TaskError::UnsafePath {
+            path: root.join(name),
+            reason: "link target escapes the gallery root",
+        });
+    }
+    let resolved_stat = std::fs::metadata(&resolved).map_err(|_| TaskError::UnsafePath {
+        path: root.join(name),
+        reason: "link target cannot be stated",
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (resolved_stat.dev(), resolved_stat.ino()) != (leaf_stat.st_dev, leaf_stat.st_ino) {
+            return Err(TaskError::UnsafePath {
+                path: root.join(name),
+                reason: "link target changed under the open",
+            });
+        }
+    }
+    deny_reserved(&leaf_stat, root.join(name), reserved)?;
+    bind_root(root_fd, &root_stat_of(root_fd)?, root, snapshot_id)?;
+    Ok(Some(clear_nonblock(leaf, root.join(name))?))
+}
+
+/// Validate the fast-path (non-link) leaf: regular file, off the reserved
+/// set, root still bound; then clear `O_NONBLOCK` and hand over the file.
+fn finish_confined_leaf(
+    root_fd: rustix::fd::OwnedFd,
+    leaf: rustix::fd::OwnedFd,
+    root: &Path,
+    snapshot_id: Option<DirIdentity>,
+    name: &str,
+    reserved: &[PathBuf],
+) -> Result<Option<std::fs::File>, TaskError> {
+    let leaf_stat = rustix::fs::fstat(&leaf).map_err(|error| TaskError::Io {
+        path: root.join(name),
+        source: std::io::Error::from_raw_os_error(error.raw_os_error()),
+    })?;
+    if rustix::fs::FileType::from_raw_mode(leaf_stat.st_mode) != rustix::fs::FileType::RegularFile {
+        return Err(TaskError::UnsafePath {
+            path: root.join(name),
+            reason: "confined target is not a regular file",
+        });
+    }
+    deny_reserved(&leaf_stat, root.join(name), reserved)?;
+    let root_stat = rustix::fs::fstat(&root_fd).map_err(|error| TaskError::Io {
+        path: root.to_path_buf(),
+        source: std::io::Error::from_raw_os_error(error.raw_os_error()),
+    })?;
+    bind_root(&root_fd, &root_stat_of_fd(&root_stat), root, snapshot_id)?;
+    Ok(Some(clear_nonblock(leaf, root.join(name))?))
+}
+
+/// Deny when the opened leaf IS a reserved persistence file (dev, ino).
+fn deny_reserved(
+    leaf_stat: &rustix::fs::Stat,
+    path: PathBuf,
+    reserved: &[PathBuf],
+) -> Result<(), TaskError> {
+    for entry in reserved {
+        let Ok(metadata) = std::fs::metadata(entry) else {
+            continue;
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if (metadata.dev(), metadata.ino()) == (leaf_stat.st_dev, leaf_stat.st_ino) {
+                return Err(TaskError::UnsafePath {
+                    path,
+                    reason: "target is reserved persistence",
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Bind the pinned root FD to the freshly canonicalized root and, when the
+/// caller has one, to the snapshot-time identity. Any replacement of the
+/// root (or of a parent component) between snapshot and open fails closed.
+fn bind_root(
+    _root_fd: &rustix::fd::OwnedFd,
+    root_stat: &DirIdentity,
+    root: &Path,
+    snapshot_id: Option<DirIdentity>,
+) -> Result<(), TaskError> {
+    if let Some(snapshot) = snapshot_id
+        && *root_stat != snapshot
+    {
+        return Err(TaskError::UnsafePath {
+            path: root.to_path_buf(),
+            reason: "gallery root changed since the snapshot",
+        });
+    }
+    let fresh_real = canonical_root(root)?;
+    let fresh_stat = std::fs::metadata(&fresh_real).map_err(|_| TaskError::UnsafePath {
+        path: root.to_path_buf(),
+        reason: "gallery root cannot be stated",
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (fresh_stat.dev(), fresh_stat.ino()) != *root_stat {
+            return Err(TaskError::UnsafePath {
+                path: root.to_path_buf(),
+                reason: "gallery root changed under the open",
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Canonicalize the root for the containment/binding checks. Fail closed:
+/// any canonicalization failure denies instead of serving.
+fn canonical_root(root: &Path) -> Result<PathBuf, TaskError> {
+    boundary_path(root).map_err(|_| TaskError::UnsafePath {
+        path: root.to_path_buf(),
+        reason: "gallery root cannot be canonicalized",
+    })
+}
+
+fn root_stat_of(root_fd: &rustix::fd::OwnedFd) -> Result<DirIdentity, TaskError> {
+    let stat = rustix::fs::fstat(root_fd).map_err(|error| TaskError::Io {
+        path: PathBuf::from("<gallery root>"),
+        source: std::io::Error::from_raw_os_error(error.raw_os_error()),
+    })?;
+    Ok(root_stat_of_fd(&stat))
+}
+
+fn root_stat_of_fd(stat: &rustix::fs::Stat) -> DirIdentity {
+    (stat.st_dev, stat.st_ino)
+}
+
+/// Clear `O_NONBLOCK` (set only to avoid hangs while opening) so the
+/// returned file has ordinary blocking semantics for the streaming reader.
+fn clear_nonblock(leaf: rustix::fd::OwnedFd, path: PathBuf) -> Result<std::fs::File, TaskError> {
+    use rustix::fs::OFlags;
+    rustix::fs::fcntl_setfl(&leaf, OFlags::empty()).map_err(|error| TaskError::Io {
+        path: path.clone(),
+        source: std::io::Error::from_raw_os_error(error.raw_os_error()),
+    })?;
+    Ok(std::fs::File::from(leaf))
+}
+
 // ---------------------------------------------------------------------------
 // TEST-ONLY deterministic barrier between precheck and open.
 // ---------------------------------------------------------------------------

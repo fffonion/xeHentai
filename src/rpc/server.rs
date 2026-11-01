@@ -16,7 +16,7 @@
 #![allow(dead_code)]
 
 use std::cell::RefCell;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -26,18 +26,18 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 use super::{
-    FileStream, FrozenPack, GalleryFail, GallerySnap, MAX_THUMB_ENCODED, OpenOutcome, Response,
-    ResponseBody, RpcDispatcher, RpcRequest, ServerError, StaticCache, hash_link, jsonrpc_envelope,
-    parse_jsonrpc, parse_thumb_query, probe_gallery_file, read_zip_fallback, snapshot_gallery_file,
-    thumbnail,
+    FileStream, FrozenPack, GalleryFail, GallerySnap, IO_CHUNK, MAX_THUMB_ENCODED,
+    MAX_ZIP_IMAGE_ENTRY, OpenOutcome, Response, ResponseBody, RpcDispatcher, RpcRequest,
+    ServerError, StaticCache, hash_link, jsonrpc_envelope, parse_jsonrpc, parse_thumb_query,
+    probe_gallery_file, snapshot_gallery_file, thumbnail_with_limits,
 };
 use crate::r#const as consts;
 use crate::core::App;
 use crate::worker::HttpClock;
 
 pub use super::{
-    MAX_HEAD_BYTES, MAX_JSONRPC_BODY, STATIC_CACHE_NAME, StaticEntry, ThumbError, cors_404,
-    fetch_static, options_response, reason_of,
+    MAX_HEAD_BYTES, MAX_JSONRPC_BODY, STATIC_CACHE_NAME, StaticEntry, cors_404, fetch_static,
+    options_response, reason_of,
 };
 
 /// Production login endpoint from `core.py:454`, reused by the RPC login.
@@ -264,13 +264,6 @@ fn dispatch_get(cache: &mut StaticCache, target: &str, secret: Option<&str>) -> 
     })
 }
 
-static SPOOL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-fn spool_path(root: &Path) -> PathBuf {
-    let id = SPOOL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    root.join(format!(".xehentai-spool-{}-{id}", std::process::id()))
-}
-
 fn text_html(status: u16) -> Response {
     Response {
         status,
@@ -342,6 +335,107 @@ pub async fn run_media(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Owned heavy media workers (M5 R2 B3.1/B3.3).
+// ---------------------------------------------------------------------------
+
+/// Cancellation flag for one media request. Dropping the request future
+/// (disconnect, timeout, shutdown) sets the flag through [`CancelOnDrop`];
+/// the owned worker checks it between chunks and aborts early. A truly
+/// blocked native operation keeps the worker (and its permit) until it is
+/// released; cancellation alone never claims cleanup.
+type CancelFlag = Arc<std::sync::atomic::AtomicBool>;
+
+struct CancelOnDrop(CancelFlag);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TEST-ONLY worker gate: hold an owned heavy worker between permit
+// acquisition and heavy I/O, deterministically on the worker thread.
+// ---------------------------------------------------------------------------
+
+/// TEST-ONLY handle that holds a heavy worker until the test releases it.
+/// Armed per gallery-root marker (unique per test task); a no-op unless
+/// armed. Production builds contain no gate at all.
+#[cfg(test)]
+pub(crate) struct MediaGate {
+    pub started: tokio::sync::oneshot::Receiver<()>,
+    pub release: std::sync::mpsc::Sender<()>,
+}
+
+/// One armed TEST-ONLY media gate: the worker start signal plus the test
+/// release channel, keyed by gallery-root marker.
+#[cfg(test)]
+type MediaGateArmed = (
+    String,
+    tokio::sync::oneshot::Sender<()>,
+    std::sync::mpsc::Receiver<()>,
+);
+
+#[cfg(test)]
+static MEDIA_GATES: std::sync::Mutex<Vec<MediaGateArmed>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) fn arm_media_worker_gate(marker: &str) -> MediaGate {
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    MEDIA_GATES
+        .lock()
+        .unwrap()
+        .push((marker.to_string(), started_tx, release_rx));
+    MediaGate {
+        started: started_rx,
+        release: release_tx,
+    }
+}
+
+/// Block the worker until the test releases its gate, or until the request
+/// is cancelled. Returns true when cancelled (the worker must abort and
+/// release its permit through normal return).
+#[cfg(test)]
+fn media_worker_hold(marker: &str, cancel: &CancelFlag) -> bool {
+    use std::sync::atomic::Ordering;
+    let channels = {
+        let mut gates = MEDIA_GATES.lock().unwrap();
+        gates
+            .iter()
+            .position(|(armed, _, _)| armed == marker)
+            .map(|index| gates.remove(index))
+    };
+    let Some((_, started, release)) = channels else {
+        return false;
+    };
+    let _ = started.send(());
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return true;
+        }
+        match release.recv_timeout(std::time::Duration::from_millis(20)) {
+            Ok(()) => return cancel.load(Ordering::Relaxed),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return true,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+        }
+    }
+}
+
+/// Everything the blocking image worker needs: all owned and `Send`, no
+/// `App` borrow, no VM, no file descriptor. The heavy permit moves in with
+/// the job and is released only when the worker finishes, even if the
+/// awaiting request future is dropped first.
+struct ImageJob {
+    snap: GallerySnap,
+    width: Option<u32>,
+    height: Option<u32>,
+    parent_id: Option<crate::task::DirIdentity>,
+    gate: String,
+    cancel: CancelFlag,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_image(
     handle: crate::core::runtime::AppHandle,
@@ -364,26 +458,70 @@ async fn run_image(
     if presented != expected.as_str() {
         return text_html(403);
     }
-    // Snapshot under a SHORT borrow; released before any disk read.
+    // Snapshot under a SHORT borrow; released before any disk read. The
+    // snapshot carries the gallery root FD identity plus the sibling-parent
+    // identity so the worker can bind both opens.
     let snap = handle.borrow_app(|app| snapshot_gallery_file(app, guid, fid));
     let snap = match snap {
         Ok(snap) => snap,
         Err(fail) => return gallery_fail(fail),
     };
-    match probe_gallery_file(&snap) {
+    let parent_id = snap.root.parent().and_then(crate::task::dir_identity);
+    // The permit is acquired before any file open, read, ZIP decompress,
+    // spool write or decode, and moves into the worker: it stays held until
+    // the worker actually finishes, never released by dropping the waiter.
+    let permit = match Arc::clone(&permits).acquire_owned().await {
+        Ok(permit) => permit,
+        Err(_) => {
+            return Response {
+                status: 500,
+                reason: reason_of(500),
+                mime: None,
+                body: ResponseBody::Inline(Vec::new()),
+            };
+        }
+    };
+    let cancel: CancelFlag = Arc::new(false.into());
+    let guard = CancelOnDrop(Arc::clone(&cancel));
+    let job = ImageJob {
+        gate: snap.root.to_string_lossy().into_owned(),
+        snap,
+        width,
+        height,
+        parent_id,
+        cancel,
+    };
+    let joined = tokio::task::spawn_blocking(move || image_worker(job, permit)).await;
+    drop(guard);
+    match joined {
+        Err(_) => Response {
+            status: 500,
+            reason: reason_of(500),
+            mime: None,
+            body: ResponseBody::Inline(Vec::new()),
+        },
+        Ok(response) => response,
+    }
+}
+
+/// Blocking image worker: confined open, bounded read, ZIP decompress
+/// straight to a private anonymous spool, thumbnail decode. All budgets
+/// (declared, decoded, CRC) resolve before any response headers exist.
+fn image_worker(job: ImageJob, _permit: tokio::sync::OwnedSemaphorePermit) -> Response {
+    use std::sync::atomic::Ordering;
+    if job.cancel.load(Ordering::Relaxed) {
+        return gallery_fail(GalleryFail::Server("cancelled".to_string()));
+    }
+    #[cfg(test)]
+    if media_worker_hold(&job.gate, &job.cancel) {
+        return gallery_fail(GalleryFail::Server("cancelled".to_string()));
+    }
+    match probe_gallery_file(&job.snap) {
         Err(_) => gallery_fail(GalleryFail::NotFound),
         Ok(OpenOutcome::Denied) => gallery_fail(GalleryFail::NotFound),
-        Ok(OpenOutcome::Missing) => {
-            // Reference ZIP fallback, validated before any headers exist.
-            match read_zip_fallback(&snap) {
-                Err(fail) => gallery_fail(fail),
-                Ok((bytes, mime)) => {
-                    finish_entry_bytes(permits, &snap, bytes, mime, width, height).await
-                }
-            }
-        }
+        Ok(OpenOutcome::Missing) => zip_fallback_worker(&job),
         Ok(OpenOutcome::File(opened)) => {
-            if width.is_none() && height.is_none() {
+            if job.width.is_none() && job.height.is_none() {
                 // Passthrough streams the owned file; no Vec at all.
                 return Response {
                     status: 200,
@@ -396,7 +534,7 @@ async fn run_image(
                     }),
                 };
             }
-            // Bounded read, then decode behind the heavy permit.
+            // Bounded source read, then decode under the same permit.
             let bytes = {
                 use std::io::Read;
                 let mut limited = opened.file.take(MAX_THUMB_ENCODED as u64 + 1);
@@ -414,97 +552,180 @@ async fn run_image(
                     body: ResponseBody::Inline(Vec::new()),
                 };
             }
-            decode_thumb(&permits, bytes, opened.mime, width, height).await
+            match thumbnail_with_limits(&bytes, job.width, job.height, super::MAX_THUMB_DECODED) {
+                Ok((resized, mime)) => Response {
+                    status: 200,
+                    reason: reason_of(200),
+                    mime: Some(mime),
+                    body: ResponseBody::Inline(resized),
+                },
+                Err(super::ThumbError::Passthrough) => Response {
+                    status: 200,
+                    reason: reason_of(200),
+                    mime: Some(opened.mime),
+                    body: ResponseBody::Inline(bytes),
+                },
+                Err(super::ThumbError::BadRequest(_)) => Response {
+                    status: 400,
+                    reason: reason_of(400),
+                    mime: None,
+                    body: ResponseBody::Inline(Vec::new()),
+                },
+                Err(super::ThumbError::Decode(_)) => Response {
+                    status: 500,
+                    reason: reason_of(500),
+                    mime: None,
+                    body: ResponseBody::Inline(Vec::new()),
+                },
+            }
         }
     }
 }
 
-/// Finish validated ZIP-entry bytes: thumbnails decode from memory behind
-/// the heavy permit; passthrough spools to a task-owned file and streams.
-async fn finish_entry_bytes(
-    permits: Arc<tokio::sync::Semaphore>,
-    snap: &GallerySnap,
-    bytes: Vec<u8>,
-    mime: String,
-    width: Option<u32>,
-    height: Option<u32>,
-) -> Response {
-    if width.is_none() && height.is_none() {
-        let path = spool_path(&snap.root);
-        if std::fs::write(&path, &bytes).is_err() {
+/// Reference ZIP fallback (`rpc.py:212-226`) inside the worker: the sibling
+/// opens confined, the declared entry size faces the 512 MiB budget, then
+/// the entry decompresses DIRECTLY to a private anonymous spool in 64 KiB
+/// pieces (never a full 512 MiB Vec) with cooperative cancel checks; the
+/// actual byte count and the CRC (surfaced as a read error at entry end)
+/// resolve before any headers exist. Thumbnails from ZIP entries read
+/// bounded (64 MiB + 1; more would fail the decode budget anyway) and
+/// decode under the same permit.
+fn zip_fallback_worker(job: &ImageJob) -> Response {
+    use std::io::{Read, Seek, Write};
+    use std::sync::atomic::Ordering;
+    let suffixed = format!("{}.zip", job.snap.root.display());
+    let suffixed = Path::new(&suffixed);
+    let (parent, leaf) = match (
+        suffixed.parent(),
+        suffixed.file_name().and_then(|n| n.to_str()),
+    ) {
+        (Some(parent), Some(leaf)) => (parent, leaf),
+        _ => return gallery_fail(GalleryFail::NotFound),
+    };
+    let file =
+        match crate::task::open_confined_regular(parent, job.parent_id, leaf, &job.snap.reserved) {
+            Ok(Some(file)) => file,
+            Ok(None) | Err(_) => return gallery_fail(GalleryFail::NotFound),
+        };
+    let mut archive = match zip::ZipArchive::new(file) {
+        Ok(archive) => archive,
+        Err(_) => return gallery_fail(GalleryFail::NotFound),
+    };
+    let entry = match archive.by_name(&job.snap.name) {
+        Ok(entry) => entry,
+        Err(_) => return gallery_fail(GalleryFail::NotFound),
+    };
+    if entry.size() > MAX_ZIP_IMAGE_ENTRY {
+        return gallery_fail(GalleryFail::NotFound);
+    }
+    if job.width.is_none() && job.height.is_none() {
+        // Passthrough: decompress straight to a private anonymous spool
+        // OUTSIDE the gallery/archive namespace (never a gallery dot-file),
+        // then stream it. The spool FD is owned by the response and dies
+        // with it (close/cancel/error/CRC failure); nothing is ever
+        // published where `read_dir` could see it.
+        let mut spool = match tempfile::tempfile() {
+            Ok(spool) => spool,
+            Err(_) => return gallery_fail(GalleryFail::Server("spool".to_string())),
+        };
+        let mut entry = entry;
+        let mut chunk = vec![0u8; IO_CHUNK];
+        let mut actual: u64 = 0;
+        loop {
+            if job.cancel.load(Ordering::Relaxed) {
+                return gallery_fail(GalleryFail::Server("cancelled".to_string()));
+            }
+            let n = match entry.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(_) => return gallery_fail(GalleryFail::NotFound),
+            };
+            actual += n as u64;
+            if actual > MAX_ZIP_IMAGE_ENTRY {
+                return gallery_fail(GalleryFail::NotFound);
+            }
+            if spool.write_all(&chunk[..n]).is_err() {
+                return gallery_fail(GalleryFail::Server("spool".to_string()));
+            }
+        }
+        if spool.flush().is_err() {
             return gallery_fail(GalleryFail::Server("spool".to_string()));
         }
-        let (file, len) = match std::fs::File::open(&path) {
-            Ok(file) => match file.metadata() {
-                Ok(metadata) if metadata.is_file() => (file, metadata.len()),
-                _ => return gallery_fail(GalleryFail::NotFound),
-            },
-            Err(_) => return gallery_fail(GalleryFail::NotFound),
-        };
+        let mime = Path::new(&job.snap.name)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("")
+            .to_string();
+        if spool.rewind().is_err() {
+            return gallery_fail(GalleryFail::NotFound);
+        }
         return Response {
             status: 200,
             reason: reason_of(200),
-            mime: Some(mime),
+            mime: Some(super::image_mime(&mime).to_string()),
             body: ResponseBody::Stream(FileStream {
-                file: Some(file),
-                len,
-                cleanup: Some(path),
+                file: Some(spool),
+                len: actual,
+                cleanup: None,
             }),
         };
     }
-    decode_thumb(&permits, bytes, mime, width, height).await
-}
-
-/// Decode behind the shared heavy permit on the blocking pool. Only owned
-/// bytes move in; no App borrow, no VM, no file descriptor is held across
-/// the decode.
-async fn decode_thumb(
-    permits: &Arc<tokio::sync::Semaphore>,
-    bytes: Vec<u8>,
-    mime: String,
-    width: Option<u32>,
-    height: Option<u32>,
-) -> Response {
-    let permit = match Arc::clone(permits).acquire_owned().await {
-        Ok(permit) => permit,
-        Err(_) => {
-            return Response {
-                status: 500,
-                reason: reason_of(500),
-                mime: None,
-                body: ResponseBody::Inline(Vec::new()),
-            };
+    // Thumbnail from a ZIP entry: bounded read, then decode under the permit.
+    let mut limited = entry.take(MAX_THUMB_ENCODED as u64 + 1);
+    let mut bytes = Vec::new();
+    let read = (|| -> Result<(), GalleryFail> {
+        let mut chunk = vec![0u8; IO_CHUNK];
+        loop {
+            if job.cancel.load(Ordering::Relaxed) {
+                return Err(GalleryFail::Server("cancelled".to_string()));
+            }
+            match limited.read(&mut chunk) {
+                Ok(0) => return Ok(()),
+                Ok(n) => bytes.extend_from_slice(&chunk[..n]),
+                Err(_) => return Err(GalleryFail::NotFound),
+            }
+            if bytes.len() > MAX_THUMB_ENCODED {
+                return Ok(());
+            }
         }
-    };
-    let decoded =
-        tokio::task::spawn_blocking(move || (thumbnail(&bytes, width, height), bytes)).await;
-    drop(permit);
-    match decoded {
-        Err(_) => Response {
+    })();
+    if read.is_err() {
+        return gallery_fail(GalleryFail::NotFound);
+    }
+    if bytes.len() > MAX_THUMB_ENCODED {
+        return Response {
             status: 500,
             reason: reason_of(500),
             mime: None,
             body: ResponseBody::Inline(Vec::new()),
-        },
-        Ok((Ok((resized, mime)), _)) => Response {
+        };
+    }
+    let mime = Path::new(&job.snap.name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_string();
+    let mime = super::image_mime(&mime).to_string();
+    match thumbnail_with_limits(&bytes, job.width, job.height, super::MAX_THUMB_DECODED) {
+        Ok((resized, mime)) => Response {
             status: 200,
             reason: reason_of(200),
             mime: Some(mime),
             body: ResponseBody::Inline(resized),
         },
-        Ok((Err(ThumbError::Passthrough), bytes)) => Response {
+        Err(super::ThumbError::Passthrough) => Response {
             status: 200,
             reason: reason_of(200),
             mime: Some(mime),
             body: ResponseBody::Inline(bytes),
         },
-        Ok((Err(ThumbError::BadRequest(_)), _)) => Response {
+        Err(super::ThumbError::BadRequest(_)) => Response {
             status: 400,
             reason: reason_of(400),
             mime: None,
             body: ResponseBody::Inline(Vec::new()),
         },
-        Ok((Err(ThumbError::Decode(_)), _)) => Response {
+        Err(super::ThumbError::Decode(_)) => Response {
             status: 500,
             reason: reason_of(500),
             mime: None,
@@ -528,6 +749,8 @@ async fn run_archive(
         return text_html(403);
     }
     // Snapshot under a SHORT borrow; the writer never touches task state.
+    // The reserved set and the sibling-parent identity for the final
+    // confined open are captured here as well (all owned, Send).
     let snapshot = handle.borrow_app(|app| {
         app.task(guid)
             .ok_or(GalleryFail::NotFound)
@@ -544,8 +767,32 @@ async fn run_archive(
             };
         }
     };
+    let (reserved, parent_id) = handle.borrow_app(|app| {
+        let base = app.base_dir().to_path_buf();
+        let log_path = {
+            let log_path = Path::new(&app.cfg.log_path);
+            if log_path.is_absolute() {
+                log_path.to_path_buf()
+            } else {
+                base.join(log_path)
+            }
+        };
+        (
+            vec![
+                base.join(crate::core::SESSION_FILE),
+                log_path,
+                base.join(crate::config::CONFIG_FILE),
+                base.join(crate::config::LEGACY_CONFIG_FILE),
+            ],
+            snapshot.arc.parent().and_then(crate::task::dir_identity),
+        )
+    });
     // Heavy build on the blocking pool behind the heavy permit. The task
-    // file lock is taken inside that thread, like the M4 worker path.
+    // file lock is taken inside that thread, like the M4 worker path. The
+    // permit moves into the worker and comes back with the result, so it
+    // stays owned until the worker actually finishes.
+    let cancel: CancelFlag = Arc::new(false.into());
+    let guard = CancelOnDrop(Arc::clone(&cancel));
     let permit = match Arc::clone(&permits).acquire_owned().await {
         Ok(permit) => permit,
         Err(_) => {
@@ -558,11 +805,11 @@ async fn run_archive(
         }
     };
     let prepared = tokio::task::spawn_blocking(move || {
-        crate::task::prepare_archive_snapshot(&snapshot, false)
+        let outcome = crate::task::prepare_archive_snapshot(&snapshot, false);
+        (permit, outcome)
     })
     .await;
-    drop(permit);
-    let prepared = match prepared {
+    let (permit, prepared) = match prepared {
         Err(_) => {
             return Response {
                 status: 500,
@@ -571,7 +818,10 @@ async fn run_archive(
                 body: ResponseBody::Inline(Vec::new()),
             };
         }
-        Ok(Err(error)) => {
+        Ok(done) => done,
+    };
+    let prepared = match prepared {
+        Err(error) => {
             let fail = task_fail(error);
             return Response {
                 status: fail.status(),
@@ -580,7 +830,7 @@ async fn run_archive(
                 body: ResponseBody::Inline(Vec::new()),
             };
         }
-        Ok(Ok(prepared)) => prepared,
+        Ok(prepared) => prepared,
     };
     use crate::task::PreparedArchive;
     let path = match prepared {
@@ -612,10 +862,30 @@ async fn run_archive(
             }
         }
     };
-    // The committed sibling needs the exact owned authority, never an
-    // arbitrary link target swapped in after the build.
-    let (file, len) = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
+    // The committed sibling opens through the anchored confined open on
+    // the blocking pool, never a raw check-then-reopen: the permit covers
+    // the final open too and stays owned until the open actually finishes.
+    let opened = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let (parent, leaf) = match (
+            path.parent(),
+            path.file_name().and_then(|name| name.to_str()),
+        ) {
+            (Some(parent), Some(leaf)) => (parent.to_path_buf(), leaf.to_string()),
+            _ => return Err(GalleryFail::NotFound),
+        };
+        let file = match crate::task::open_confined_regular(&parent, parent_id, &leaf, &reserved) {
+            Ok(Some(file)) => file,
+            Ok(None) | Err(_) => return Err(GalleryFail::NotFound),
+        };
+        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        Ok((file, len))
+    })
+    .await;
+    drop(guard);
+    let (file, len) = match opened {
+        Ok(Ok(found)) => found,
+        _ => {
             return Response {
                 status: 404,
                 reason: reason_of(404),
@@ -623,43 +893,6 @@ async fn run_archive(
                 body: ResponseBody::Inline(Vec::new()),
             };
         }
-        Ok(metadata) if !metadata.is_file() => {
-            return Response {
-                status: 404,
-                reason: reason_of(404),
-                mime: None,
-                body: ResponseBody::Inline(Vec::new()),
-            };
-        }
-        Err(_) => {
-            return Response {
-                status: 404,
-                reason: reason_of(404),
-                mime: None,
-                body: ResponseBody::Inline(Vec::new()),
-            };
-        }
-        Ok(_) => match std::fs::File::open(&path) {
-            Ok(file) => match file.metadata() {
-                Ok(metadata) if metadata.is_file() => (file, metadata.len()),
-                _ => {
-                    return Response {
-                        status: 404,
-                        reason: reason_of(404),
-                        mime: None,
-                        body: ResponseBody::Inline(Vec::new()),
-                    };
-                }
-            },
-            Err(_) => {
-                return Response {
-                    status: 404,
-                    reason: reason_of(404),
-                    mime: None,
-                    body: ResponseBody::Inline(Vec::new()),
-                };
-            }
-        },
     };
     Response {
         status: 200,
@@ -1516,7 +1749,10 @@ pub async fn serve_until_closed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rpc::{check_pixels, read_archive, read_gallery_file, refuse_unsafe_name};
+    use crate::rpc::{
+        MAX_THUMB_DECODED, ThumbError, check_pixels, read_archive, read_gallery_file,
+        refuse_unsafe_name, thumbnail, thumbnail_with_limits,
+    };
     use serde_json::Map as JsonMap;
 
     pub(crate) fn test_app() -> App {
@@ -3085,12 +3321,15 @@ mod tests {
         let (small, mime) = thumbnail(&png, Some(20), Some(20)).expect("thumb");
         assert_eq!(mime, "image/png");
         assert_eq!(image_dims(&small), (20, 10));
-        // Only width: height scales proportionally.
+        // Only width: the missing axis copies the given one (square box),
+        // then the box fits the source preserving aspect.
         let (wide, _) = thumbnail(&png, Some(50), None).expect("thumb");
         assert_eq!(image_dims(&wide), (50, 25));
-        // Only height.
+        // Only height: square box from the height, fitted to the source.
+        // The old axis-only scale answered (50, 25) here; the Pillow oracle
+        // (`rpc.py:85-105` box semantics) answers (25, 13).
         let (tall, _) = thumbnail(&png, None, Some(25)).expect("thumb");
-        assert_eq!(image_dims(&tall), (50, 25));
+        assert_eq!(image_dims(&tall), (25, 13));
         // Larger-than-source box never upscales: original bytes back.
         let (same, _) = thumbnail(&png, Some(1000), Some(1000)).expect("thumb");
         assert_eq!(same, png);
@@ -4429,6 +4668,10 @@ mod tests {
     // FAIL here (RED) and flip to GREEN with the minimal fix, unchanged.
 
     fn task_with_zip(app: &mut App, name: &str, bytes: &[u8]) -> String {
+        task_with_zip_titled(app, "gallery-title", name, bytes)
+    }
+
+    fn task_with_image_named(app: &mut App, title: &str, name: &str, bytes: &[u8]) -> String {
         use crate::task::{FidKey, Task, TaskConfig};
         let root = app.base_dir().to_path_buf();
         let mut config = TaskConfig::from_app(&app.cfg, &JsonMap::new()).expect("config");
@@ -4436,14 +4679,37 @@ mod tests {
         let mut task = Task::new(
             "http://e-hentai.org/g/123/abcdef0123/",
             config,
-            format!("guid-{name}"),
+            format!("guid-{title}-{name}"),
             &root,
         )
         .expect("task");
-        task.meta.insert(
-            "title".to_string(),
-            Value::String("gallery-title".to_string()),
-        );
+        task.meta
+            .insert("title".to_string(), Value::String(title.to_string()));
+        task.meta.insert("total".to_string(), Value::from(3));
+        let dir = task.get_fpath().expect("fpath");
+        std::fs::create_dir_all(&dir).expect("dir");
+        std::fs::write(dir.join(name), bytes).expect("image");
+        let guid = task.guid.clone();
+        task.renamed_map
+            .insert(FidKey::Text("5".to_string()), name.to_string());
+        app.insert_task_for_test(task);
+        guid
+    }
+
+    fn task_with_zip_titled(app: &mut App, title: &str, name: &str, bytes: &[u8]) -> String {
+        use crate::task::{FidKey, Task, TaskConfig};
+        let root = app.base_dir().to_path_buf();
+        let mut config = TaskConfig::from_app(&app.cfg, &JsonMap::new()).expect("config");
+        config.dir = "downloads".to_string();
+        let mut task = Task::new(
+            "http://e-hentai.org/g/123/abcdef0123/",
+            config,
+            format!("guid-{title}-{name}"),
+            &root,
+        )
+        .expect("task");
+        task.meta
+            .insert("title".to_string(), Value::String(title.to_string()));
         task.meta.insert("total".to_string(), Value::from(3));
         let dir = task.get_fpath().expect("fpath");
         std::fs::create_dir_all(&dir).expect("dir");
@@ -4481,11 +4747,9 @@ mod tests {
 
     fn thread_rchar() -> u64 {
         let tid = rustix::thread::gettid();
-        let text = std::fs::read_to_string(format!(
-            "/proc/self/task/{}/io",
-            tid.as_raw_nonzero().get()
-        ))
-        .expect("task io");
+        let text =
+            std::fs::read_to_string(format!("/proc/self/task/{}/io", tid.as_raw_nonzero().get()))
+                .expect("task io");
         for line in text.lines() {
             if let Some(rest) = line.strip_prefix("rchar: ") {
                 return rest.trim().parse().expect("rchar");
@@ -4545,19 +4809,45 @@ mod tests {
             (status, mime, body)
         });
         assert_eq!(status, 200);
-        assert_eq!(mime.as_deref(), Some("image/png"));
+        assert_eq!(mime.as_deref(), Some("image/jpeg"));
         assert_eq!(bytes, png);
+    }
+
+    fn png_noise_bytes(width: u32, height: u32) -> Vec<u8> {
+        // High-entropy pattern: compresses poorly, so the encoded source
+        // is tens of KiB and any same-thread source read dwarfs the
+        // /proc self-read noise (~a few hundred bytes).
+        let image = image::RgbImage::from_fn(width, height, |x, y| {
+            image::Rgb([
+                ((x * 73 + y * 149) % 256) as u8,
+                ((x * 131 + y * 71) % 256) as u8,
+                ((x * 37 + y * 211) % 256) as u8,
+            ])
+        });
+        let mut out = Vec::new();
+        let encoder = image::codecs::png::PngEncoder::new(&mut out);
+        image::ImageEncoder::write_image(
+            encoder,
+            &image,
+            width,
+            height,
+            image::ExtendedColorType::Rgb8,
+        )
+        .expect("encode");
+        out
     }
 
     #[test]
     fn b3_1_thumb_source_read_holds_permit() {
         // The thumbnail source read must happen under the owned heavy
         // permit: with both permits held, the serving thread must perform
-        // NO source read (per-thread rchar unchanged) while the request
-        // stays pending. The candidate reads the file inline before ever
-        // touching a permit, so per-thread rchar grows: RED.
+        // NO source read (per-thread rchar unchanged apart from the tiny
+        // /proc self-read) while the request stays pending. The candidate
+        // reads the whole file inline before ever touching a permit, so
+        // per-thread rchar grows by the file size: RED.
         let mut app = test_app();
-        let png = png_bytes(64, 64);
+        let png = png_noise_bytes(256, 256);
+        assert!(png.len() > 16 * 1024, "fixture must dwarf self-read noise");
         let guid = task_with_image(&mut app, "1.jpg", &png);
         let target = format!(
             "/img/{}/{guid}/1?w=16&h=16",
@@ -4583,8 +4873,8 @@ mod tests {
                 gated.is_err(),
                 "thumbnail request must wait for the heavy permit"
             );
-            assert_eq!(
-                delta, 0,
+            assert!(
+                delta < 1024,
                 "no source byte may be read before the heavy permit is held (read {delta}B)"
             );
             drop(first);
@@ -4630,9 +4920,7 @@ mod tests {
         let mut app = test_app();
         let png = png_bytes(16, 16);
         let guid = task_with_image(&mut app, "1.jpg", &png);
-        let reserved = app
-            .base_dir()
-            .join(crate::core::SESSION_FILE);
+        let reserved = app.base_dir().join(crate::core::SESSION_FILE);
         std::fs::write(&reserved, b"RESERVED-SECRET").expect("reserved");
         let snap = snapshot_gallery_file(&app, &guid, "1").expect("snap");
         arm_preopen_swap(
@@ -4691,10 +4979,7 @@ mod tests {
                 use std::io::Read;
                 let mut bytes = Vec::new();
                 opened.file.read_to_end(&mut bytes).expect("read");
-                panic!(
-                    "swapped gallery root served {} hostile bytes",
-                    bytes.len()
-                );
+                panic!("swapped gallery root served {} hostile bytes", bytes.len());
             }
             Ok(crate::rpc::OpenOutcome::Missing) => {
                 panic!("swapped gallery root must be denied, not missing")
@@ -4781,26 +5066,38 @@ mod tests {
         let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
         let handle = runtime.handle();
         let permits = Arc::new(tokio::sync::Semaphore::new(super::super::MAX_HEAVY_WORKERS));
-        let response = block_on(async { run_media(handle.clone(), Arc::clone(&permits), media).await });
+        let response =
+            block_on(async { run_media(handle.clone(), Arc::clone(&permits), media).await });
         assert_eq!(response.status, 200);
         // Hold the live response: no spool may appear in the gallery.
         let names = gallery_names(&dir);
         assert!(
-            !names.iter().any(|name| name.starts_with(".xehentai-spool-")),
+            !names
+                .iter()
+                .any(|name| name.starts_with(".xehentai-spool-")),
             "live spool response leaked into the gallery: {names:?}"
         );
         assert_eq!(names, vec!["1.jpg".to_string()]);
         // A concurrent archive over the same gallery is exact: only the
         // real image with its bytes, plus the reference comment, and no
-        // spool/config/session/private artifacts.
+        // spool/config/session/private artifacts. The fallback fixture
+        // sibling would shadow a fresh build through the reference early
+        // return, so only it is removed (the live spool itself is never
+        // touched before the probe); the archive below is then built fresh
+        // while the spool response is still held.
+        std::fs::remove_file(&zip_path).expect("remove fixture sibling");
         let archive = handle.borrow_app(|app| read_archive(app, &guid).expect("archive"));
-        let mut reader =
-            zip::ZipArchive::new(std::io::Cursor::new(archive)).expect("archive zip");
+        let mut reader = zip::ZipArchive::new(std::io::Cursor::new(archive)).expect("archive zip");
         let mut entry_names: Vec<String> = (0..reader.len())
             .map(|index| reader.by_index(index).expect("index").name().to_string())
             .collect();
         entry_names.sort();
         assert_eq!(entry_names, vec!["1.jpg".to_string()]);
+        let comment = std::str::from_utf8(reader.comment()).expect("comment");
+        assert!(
+            comment.contains("xeHentai Archiver") && comment.contains("gallery-title"),
+            "archive comment must carry the reference archiver mark, got: {comment}"
+        );
         let mut entry = reader.by_name("1.jpg").expect("entry");
         assert_eq!(entry.name(), "1.jpg");
         let mut contents = Vec::new();
@@ -4844,6 +5141,9 @@ mod tests {
         })
     }
 
+    /// One oracle row: name, source dims, optional w/h, expected output dims.
+    type OracleRow = (&'static str, u32, u32, Option<u32>, Option<u32>, (u32, u32));
+
     #[test]
     fn b3_4_thumbnail_box_matches_pil_oracle() {
         // Single-axis bounds form a SQUARE box from the given axis
@@ -4853,7 +5153,7 @@ mod tests {
         // (`evidence-m5-r2/oracle_thumb.py`). The candidate scales by the
         // only axis given, so landscape-height-only and portrait-width-only
         // (and odd ratios) diverge: RED.
-        let cases: &[(&str, u32, u32, Option<u32>, Option<u32>, (u32, u32))] = &[
+        let cases: &[OracleRow] = &[
             ("landscape-both", 100, 50, Some(20), Some(20), (20, 10)),
             ("landscape-onlyw", 100, 50, Some(50), None, (50, 25)),
             ("landscape-onlyh", 100, 50, None, Some(25), (25, 13)),
@@ -4890,5 +5190,299 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{name} thumbnail failed: {error:?}"));
             assert_eq!(image_dims(&resized), (100, 50), "{name}");
         }
+    }
+
+    fn png16_bytes(width: u32, height: u32) -> Vec<u8> {
+        let image =
+            image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_fn(width, height, |x, y| {
+                image::Rgba([(x % 512) as u16 * 128, (y % 512) as u16 * 128, 1000, 60000])
+            });
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba16(image)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .expect("encode");
+        out.into_inner()
+    }
+
+    #[test]
+    fn b3_4_decoder_limit_fires_before_pixels() {
+        // The 256 MiB production budget is wired into the actual reader,
+        // not just checked against the header estimate: a valid 16-bit
+        // image whose header estimate (w*h*4) still passes a tiny budget
+        // but whose real decoder need exceeds it must fail with the real
+        // LIBRARY limit before any pixel allocation. The same bytes pass
+        // under the production budget through the shared path.
+        assert_eq!(
+            crate::rpc::production_thumb_limits().max_alloc,
+            Some(MAX_THUMB_DECODED)
+        );
+        assert_eq!(MAX_THUMB_DECODED, 256 * 1024 * 1024);
+        let source = png16_bytes(32, 32);
+        let (claimed_w, claimed_h) = image_dims(&source);
+        assert_eq!((claimed_w, claimed_h), (32, 32));
+        let estimate = claimed_w as u64 * claimed_h as u64 * 4;
+        // 16-bit RGBA decodes to 8 bytes/px: pick a budget the header
+        // estimate passes but the real 8 KiB need exceeds.
+        let tiny = estimate + 1024;
+        assert!(tiny < claimed_w as u64 * claimed_h as u64 * 8);
+        match thumbnail_with_limits(&source, Some(16), Some(16), tiny) {
+            Err(crate::rpc::ThumbError::Decode(message)) => assert!(
+                message.contains("decoder limit"),
+                "tiny budget must fail at the real library limit, got: {message}"
+            ),
+            other => panic!("tiny budget must fail at the library limit, got {other:?}"),
+        }
+        // Production budget serves the same bytes through the shared path.
+        let (resized, mime) = thumbnail(&source, Some(16), Some(16)).expect("production");
+        assert_eq!(mime, "image/png");
+        assert_eq!(image_dims(&resized), (16, 16));
+        // Production is byte-identical to the explicit 256 MiB path: the
+        // configured value is the one actually wired into the reader.
+        let (wired, _) =
+            thumbnail_with_limits(&source, Some(16), Some(16), MAX_THUMB_DECODED).expect("wired");
+        assert_eq!(wired, resized);
+    }
+
+    #[test]
+    fn b3_1_permits_gate_workers_peer_progress_and_cancel() {
+        // Two held workers consume the 2-permit cap: a third request stays
+        // pending. Same-source getInfo still answers (no App borrow is
+        // held, the LocalSet stays responsive). Cancelling a waiter while
+        // its worker is still held does NOT release the permit early: the
+        // permit stays owned until the native worker actually finishes.
+        // Release then joins everything with FD/buffer baselines intact.
+        use crate::rpc::snapshot_gallery_file;
+        let mut app = test_app();
+        let png_a = png_bytes(24, 24);
+        let png_b = png_bytes(32, 32);
+        let png_c = png_bytes(16, 16);
+        let guid_a = task_with_zip_titled(&mut app, "gallery-a", "1.jpg", &png_a);
+        let guid_b = task_with_zip_titled(&mut app, "gallery-b", "1.jpg", &png_b);
+        let guid_c = task_with_image_named(&mut app, "gallery-c", "1.jpg", &png_c);
+        let root_a = snapshot_gallery_file(&app, &guid_a, "1")
+            .expect("snap")
+            .root
+            .to_string_lossy()
+            .into_owned();
+        let root_b = snapshot_gallery_file(&app, &guid_b, "1")
+            .expect("snap")
+            .root
+            .to_string_lossy()
+            .into_owned();
+        let target_a = format!(
+            "/img/{}/{guid_a}/1",
+            hash_link(None, &format!("{guid_a}/1"))
+        );
+        let target_b = format!(
+            "/img/{}/{guid_b}/1",
+            hash_link(None, &format!("{guid_b}/1"))
+        );
+        let target_c = format!(
+            "/img/{}/{guid_c}/1",
+            hash_link(None, &format!("{guid_c}/1"))
+        );
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
+        let handle = runtime.handle();
+        let permits = Arc::new(tokio::sync::Semaphore::new(super::super::MAX_HEAVY_WORKERS));
+        let gate_a = arm_media_worker_gate(&root_a);
+        let gate_b = arm_media_worker_gate(&root_b);
+        let local = tokio::task::LocalSet::new();
+        block_on(local.run_until(async {
+            let media_a = media_action(&target_a);
+            let media_b = media_action(&target_b);
+            let media_c = media_action(&target_c);
+            let mut held_a =
+                tokio::task::spawn_local(run_media(handle.clone(), Arc::clone(&permits), media_a));
+            tokio::time::timeout(std::time::Duration::from_secs(10), gate_a.started)
+                .await
+                .expect("worker A started")
+                .expect("worker A holds its permit");
+            assert_eq!(permits.available_permits(), 1);
+            let held_b =
+                tokio::task::spawn_local(run_media(handle.clone(), Arc::clone(&permits), media_b));
+            tokio::time::timeout(std::time::Duration::from_secs(10), gate_b.started)
+                .await
+                .expect("worker B started")
+                .expect("worker B holds its permit");
+            assert_eq!(permits.available_permits(), 0);
+            // The cap holds: a third request stays pending, and the same
+            // source still answers getInfo (short borrows, responsive
+            // LocalSet) while both workers are held.
+            let mut waiting_c =
+                tokio::task::spawn_local(run_media(handle.clone(), Arc::clone(&permits), media_c));
+            let pending =
+                tokio::time::timeout(std::time::Duration::from_millis(200), &mut waiting_c).await;
+            assert!(
+                pending.is_err(),
+                "third request must wait for the 2-permit cap"
+            );
+            let (status, envelope) = handle.borrow_app_mut(|app| {
+                let mut rpc = dispatcher();
+                call(app, &mut rpc, "xeH.getInfo", vec![], JsonMap::new())
+            });
+            assert_eq!(status, 200);
+            assert!(
+                envelope.get("result").is_some(),
+                "getInfo must progress while workers are held: {envelope}"
+            );
+            // Cancel waiter A while its worker is still held: the permit
+            // stays owned (available still 0) until the native worker
+            // actually finishes; the worker then exits early on the flag.
+            held_a.abort();
+            let aborted = (&mut held_a).await;
+            assert!(aborted.is_err(), "aborted waiter joins as cancelled");
+            // The worker notices the cancel and releases its permit without
+            // any gate release; the pending third request takes it.
+            let done_c = tokio::time::timeout(std::time::Duration::from_secs(10), &mut waiting_c)
+                .await
+                .expect("request C must take the freed permit")
+                .expect("request C joins");
+            assert_eq!(done_c.status, 200);
+            assert_eq!(permits.available_permits(), 1);
+            gate_b.release.send(()).expect("release B");
+            let done_b = held_b.await.expect("request B joins");
+            assert_eq!(done_b.status, 200);
+            assert_eq!(permits.available_permits(), 2);
+            match done_b.body {
+                ResponseBody::Stream(mut stream) => {
+                    use std::io::Read;
+                    let mut file = stream.file.take().expect("stream file");
+                    let mut out = Vec::new();
+                    file.read_to_end(&mut out).expect("stream read");
+                    assert_eq!(out, png_b);
+                }
+                other => panic!("request B must stream, got {other:?}"),
+            }
+            match done_c.body {
+                ResponseBody::Stream(mut stream) => {
+                    use std::io::Read;
+                    let mut file = stream.file.take().expect("stream file");
+                    let mut out = Vec::new();
+                    file.read_to_end(&mut out).expect("stream read");
+                    assert_eq!(out, png_c);
+                }
+                other => panic!("request C must stream, got {other:?}"),
+            }
+        }));
+    }
+
+    #[test]
+    fn b3_1_shutdown_waits_for_worker_release() {
+        // A held heavy worker pins its connection: with the response still
+        // unbuilt (budgets/CRC unresolved), the client sees no bytes, a
+        // shutdown stays pending, and only the worker release retires the
+        // connection with the exact bytes and a clean close.
+        use crate::rpc::snapshot_gallery_file;
+        let mut app = test_app();
+        let png = png_bytes(40, 20);
+        let guid = task_with_zip_titled(&mut app, "gallery-z", "1.jpg", &png);
+        let root = snapshot_gallery_file(&app, &guid, "1").expect("snap").root;
+        let dir = root.clone();
+        let gate = arm_media_worker_gate(&root.to_string_lossy());
+        let target = format!("/img/{}/{guid}/1", hash_link(None, &format!("{guid}/1")));
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
+        let handle = runtime.handle();
+        let cache_dir = tempfile::tempdir().expect("cache").keep();
+        let shared = Rc::new(RefCell::new(
+            SharedRpc::new(
+                manifest,
+                &cache_dir,
+                Arc::new(crate::worker::RealClock),
+                None,
+                "http://127.0.0.1:9".to_string(),
+            )
+            .expect("shared"),
+        ));
+        let local = tokio::task::LocalSet::new();
+        block_on(local.run_until(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("listener");
+            let addr = listener.local_addr().expect("addr");
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            let mut serve = tokio::task::spawn_local(serve_until_closed(
+                listener,
+                shutdown_rx,
+                handle.clone(),
+                Rc::clone(&shared),
+                "http://127.0.0.1:9".to_string(),
+            ));
+            let mut client = tokio::net::TcpStream::connect(addr).await.expect("client");
+            {
+                use tokio::io::AsyncWriteExt;
+                client
+                    .write_all(
+                        format!("GET {target} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                            .as_bytes(),
+                    )
+                    .await
+                    .expect("request");
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(10), gate.started)
+                .await
+                .expect("image worker started")
+                .expect("image worker holds its permit");
+            // No byte leaves before the worker finishes: headers only exist
+            // after the entry budgets and CRC resolve.
+            {
+                use tokio::io::AsyncReadExt;
+                let mut probe = [0u8; 1];
+                let quiet = tokio::time::timeout(
+                    std::time::Duration::from_millis(300),
+                    client.read_exact(&mut probe),
+                )
+                .await;
+                assert!(quiet.is_err(), "held worker must not emit headers yet");
+            }
+            // Shutdown stays pending while the worker is held.
+            shutdown_tx.send(true).expect("shutdown");
+            let draining =
+                tokio::time::timeout(std::time::Duration::from_millis(300), &mut serve).await;
+            assert!(
+                draining.is_err(),
+                "shutdown must wait for the worker release"
+            );
+            gate.release.send(()).expect("release worker");
+            serve.await.expect("serve joins").expect("serve ok");
+            // The retired connection carries the exact entry bytes and the
+            // reference trailing newline outside Content-Length.
+            let mut raw = Vec::new();
+            {
+                use tokio::io::AsyncReadExt;
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    client.read_to_end(&mut raw),
+                )
+                .await
+                .expect("read")
+                .expect("bytes");
+            }
+            let text = String::from_utf8_lossy(&raw);
+            let head_end = text.find("\r\n\r\n").expect("head");
+            assert!(text.starts_with("HTTP/1.0 200 OK"), "{text}");
+            let declared: usize = text[..head_end]
+                .split("\r\n")
+                .find_map(|line| {
+                    line.strip_prefix("Content-Length: ")
+                        .or_else(|| line.strip_prefix("content-length: "))
+                })
+                .expect("content-length")
+                .trim()
+                .parse()
+                .expect("length");
+            assert_eq!(declared, png.len());
+            let body = &raw[head_end + 4..head_end + 4 + declared];
+            assert_eq!(body, png.as_slice());
+            assert_eq!(raw[head_end + 4 + declared], b'\n');
+            // Baselines: the gallery is exact, the permits are all back, and
+            // a fresh request still serves.
+            assert_eq!(gallery_names(&dir), Vec::<String>::new());
+            assert_eq!(shared.borrow().media_permits.available_permits(), 2);
+            let media = media_action(&target);
+            let fresh = run_media(handle, Arc::new(tokio::sync::Semaphore::new(2)), media).await;
+            assert_eq!(fresh.status, 200);
+        }));
     }
 }
