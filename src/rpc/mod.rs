@@ -1306,10 +1306,16 @@ pub struct GallerySnap {
     pub root: PathBuf,
     pub name: String,
     pub reserved: Vec<PathBuf>,
-    /// FD identity of the gallery root when the snapshot was taken. The
-    /// confined open re-validates it, so a root/parent swap between the
-    /// snapshot and the open fails closed.
-    pub root_id: Option<crate::task::DirIdentity>,
+    /// Frozen observation of the gallery root taken at this boundary. A
+    /// `Present` identity is re-validated by the confined open; `Missing` and
+    /// `Unavailable` stay frozen for the whole request, so a directory that
+    /// appears during a later wait can never become authority here.
+    pub root_id: crate::task::DirectoryObservation,
+    /// Frozen observation of the gallery parent, i.e. the directory that owns
+    /// the sibling `<gallery>.zip`. It is captured at the same pre-permit
+    /// moment as `root_id`: a parent that was missing or unavailable then can
+    /// never grant sibling-archive authority later in this request.
+    pub parent: crate::task::DirectoryObservation,
 }
 
 /// What opening a snapshot found: an owned regular file, a genuinely missing
@@ -1368,12 +1374,29 @@ pub fn snapshot_gallery_file(
         base.join(crate::config::CONFIG_FILE),
         base.join(crate::config::LEGACY_CONFIG_FILE),
     ];
+    // The observation is the snapshot boundary: captured here, under the same
+    // short borrow, before any permit, read or network work.
+    #[cfg(test)]
+    crate::task::run_observation_swap(&root);
+    let root_id = crate::task::observe_directory(&root);
     Ok(GallerySnap {
-        root_id: crate::task::dir_identity(&root),
+        root_id,
+        parent: observe_sibling_parent(&root),
         root,
         name,
         reserved,
     })
+}
+
+/// Frozen observation of the sibling-archive parent for `root`, or
+/// `Unavailable(Unsupported)` when the path has no parent at all (there is no
+/// sibling archive authority then). Used at the snapshot boundary so the
+/// fallback never re-observes the parent after a wait.
+pub fn observe_sibling_parent(root: &Path) -> crate::task::DirectoryObservation {
+    match root.parent() {
+        Some(parent) => crate::task::observe_directory(parent),
+        None => crate::task::DirectoryObservation::Unavailable(std::io::ErrorKind::Unsupported),
+    }
 }
 
 /// Validate the final target against the owned gallery root and open it.
@@ -1472,8 +1495,10 @@ pub fn read_zip_fallback(snap: &GallerySnap) -> Result<(Vec<u8>, String), Galler
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or(GalleryFail::NotFound)?;
-    let parent_id = crate::task::dir_identity(parent);
-    let file = match crate::task::open_confined_regular(parent, parent_id, leaf, &snap.reserved) {
+    // The parent observation is the one frozen with the snapshot: re-observing
+    // here (after any permit wait) is exactly the retrospective grant this
+    // boundary forbids.
+    let file = match crate::task::open_confined_regular(parent, snap.parent, leaf, &snap.reserved) {
         Ok(Some(file)) => file,
         Ok(None) | Err(_) => return Err(GalleryFail::NotFound),
     };
@@ -1486,7 +1511,7 @@ fn read_zip_entry(zip_path: &Path, name: &str) -> Result<(Vec<u8>, String), Gall
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or(GalleryFail::NotFound)?;
-    let parent_id = crate::task::dir_identity(parent);
+    let parent_id = crate::task::observe_directory(parent);
     let file = match crate::task::open_confined_regular(parent, parent_id, leaf, &[]) {
         Ok(Some(file)) => file,
         Ok(None) | Err(_) => return Err(GalleryFail::NotFound),
@@ -1545,7 +1570,7 @@ pub fn read_archive(app: &crate::core::App, guid: &str) -> Result<Vec<u8>, Galle
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or(GalleryFail::NotFound)?;
-    let parent_id = crate::task::dir_identity(parent);
+    let parent_id = crate::task::observe_directory(parent);
     let mut file = match crate::task::open_confined_regular(parent, parent_id, leaf, &[]) {
         Ok(Some(file)) => file,
         Ok(None) | Err(_) => return Err(GalleryFail::NotFound),

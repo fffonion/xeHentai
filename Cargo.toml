@@ -35,8 +35,13 @@ httparse = "1"
 percent-encoding = "2"
 image = "0.25"
 md5 = "0.7"
-rustix = { version = "1", features = ["fs", "thread"] }
 tempfile = "3"
+
+# The confined gallery/archive opens are a Unix backend: `rustix::fs` is only
+# compiled on Unix targets, and `src/task/file_ops.rs` keeps the whole backend
+# behind `cfg(unix)` with an explicit `Unsupported` denial elsewhere.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs", "thread"] }
 
 [dev-dependencies]
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }

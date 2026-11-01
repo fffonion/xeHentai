@@ -49,10 +49,13 @@ pub struct RenameError {
 }
 pub use file_ops::resolve_dir;
 pub use file_ops::{
-    DirIdentity, boundary_path, dir_identity, normalize, open_confined_regular, path_within,
+    DirectoryObservation, boundary_path, normalize, observe_directory, open_confined_regular,
+    path_within,
 };
 #[cfg(test)]
-pub(crate) use file_ops::{PreopenSwap, arm_preopen_swap};
+pub(crate) use file_ops::{
+    ObservationSwap, PreopenSwap, arm_observation_swap, arm_preopen_swap, run_observation_swap,
+};
 
 /// The fourteen configuration keys captured when a task is created, in the
 /// order the reference `config.py` defines them.

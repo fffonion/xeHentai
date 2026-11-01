@@ -446,7 +446,7 @@ struct ImageJob {
     snap: GallerySnap,
     width: Option<u32>,
     height: Option<u32>,
-    parent_id: Option<crate::task::DirIdentity>,
+    parent_id: crate::task::DirectoryObservation,
     gate: String,
     cancel: CancelFlag,
 }
@@ -485,7 +485,7 @@ async fn run_image(
         Ok(found) => found,
         Err(fail) => return gallery_fail(fail),
     };
-    let parent_id = snap.root.parent().and_then(crate::task::dir_identity);
+    let parent_id = snap.parent;
     // Bound the abandoned-record set before acquiring capacity: records whose
     // workers already finished are joined and dropped at the submission
     // boundary instead of accumulating until shutdown.
@@ -820,7 +820,13 @@ async fn run_archive(
                 base.join(crate::config::CONFIG_FILE),
                 base.join(crate::config::LEGACY_CONFIG_FILE),
             ],
-            snapshot.arc.parent().and_then(crate::task::dir_identity),
+            snapshot
+                .arc
+                .parent()
+                .map(crate::task::observe_directory)
+                .unwrap_or(crate::task::DirectoryObservation::Unavailable(
+                    std::io::ErrorKind::Unsupported,
+                )),
         )
     });
     // Bound abandoned native records before taking capacity.
@@ -3633,6 +3639,488 @@ mod tests {
         assert!(read_gallery_file(&app, &guid, "3").is_err());
     }
 
+    // --- M5 frozen directory observations (snapshot boundary) ---------------
+
+    /// Exact name of the child helper below. The parent drives it through
+    /// `--exact --ignored` in a bounded child of THIS test binary, so the
+    /// real production snapshot runs in its own process and a blocking open
+    /// can be killed and reaped instead of hanging the suite.
+    const M5_CHILD_FIFO_TEST: &str = "rpc::server::tests::m5_child_root_fifo_snapshot";
+
+    /// Child half of [`m5_root_fifo_snapshot_is_bounded`]. The parent owns the
+    /// fixture (a real gallery directory) and passes its paths in; this helper
+    /// arms the deterministic form of the production race — the gallery path
+    /// was a directory for the task check and is a FIFO for the observation —
+    /// writes the READY marker, and then runs the real production snapshot.
+    #[test]
+    #[ignore = "bounded child helper driven by m5_root_fifo_snapshot_is_bounded"]
+    fn m5_child_root_fifo_snapshot() {
+        use crate::task::{ObservationSwap, arm_observation_swap};
+
+        let base = std::path::PathBuf::from(std::env::var("XE_M5_FIFO_BASE").expect(
+            "XE_M5_FIFO_BASE missing: this helper is driven by m5_root_fifo_snapshot_is_bounded",
+        ));
+        let expected =
+            std::path::PathBuf::from(std::env::var("XE_M5_FIFO_ROOT").expect("XE_M5_FIFO_ROOT"));
+        let ready =
+            std::path::PathBuf::from(std::env::var("XE_M5_READY_FILE").expect("XE_M5_READY_FILE"));
+        let (app, guid, fpath) = m5_fifo_task(&base);
+        assert_eq!(
+            fpath, expected,
+            "child fixture must address exactly the parent's gallery root"
+        );
+        arm_observation_swap(&fpath, ObservationSwap::RootFifo);
+        std::fs::write(&ready, b"ready").expect("READY marker");
+        let snap = snapshot_gallery_file(&app, &guid, "2").expect("production snapshot");
+        assert_eq!(
+            snap.root, expected,
+            "snapshot must keep the task gallery root"
+        );
+        assert!(
+            matches!(probe_gallery_file(&snap), Ok(OpenOutcome::Denied) | Err(_)),
+            "a FIFO gallery root must be denied, never served or turned into a fallback grant"
+        );
+        println!("m5-child: production snapshot returned without opening the FIFO");
+    }
+
+    /// Build the real App/Task pair the production gallery snapshot reads,
+    /// with one real loose image and the FIFO swap armed by the caller.
+    fn m5_fifo_task(base: &std::path::Path) -> (App, String, std::path::PathBuf) {
+        use crate::task::{FidKey, Task, TaskConfig};
+        let config = crate::config::Config::default();
+        let logger = crate::util::logger::Logger::with_output(Box::new(Vec::new()), false);
+        let mut app = App::new(config, logger, base, base).expect("app");
+        let mut config = TaskConfig::from_app(&app.cfg, &JsonMap::new()).expect("config");
+        config.dir = "downloads".to_string();
+        let mut task = Task::new(
+            "http://e-hentai.org/g/123/abcdef0123/",
+            config,
+            "guid-fifo-gallery".to_string(),
+            base,
+        )
+        .expect("task");
+        task.meta.insert(
+            "title".to_string(),
+            Value::String("fifo-gallery".to_string()),
+        );
+        task.meta.insert("total".to_string(), Value::from(3));
+        let fpath = task.get_fpath().expect("fpath");
+        std::fs::create_dir_all(&fpath).expect("gallery dir");
+        std::fs::write(fpath.join("1.jpg"), png_bytes(8, 8)).expect("image");
+        let guid = task.guid.clone();
+        task.renamed_map
+            .insert(FidKey::Text("5".to_string()), "1.jpg".to_string());
+        app.insert_task_for_test(task);
+        (app, guid, fpath)
+    }
+
+    fn m5_tail(text: &str, limit: usize) -> String {
+        if text.len() <= limit {
+            return text.to_string();
+        }
+        let mut start = text.len() - limit;
+        while start < text.len() && !text.is_char_boundary(start) {
+            start += 1;
+        }
+        format!("...{}", &text[start..])
+    }
+
+    /// The gallery root becomes a FIFO in the window between the task
+    /// directory check and the snapshot's directory observation, and the real
+    /// production snapshot must still return promptly: a metadata observation
+    /// never opens the path, while the candidate's `File::open` blocks until a
+    /// writer appears.
+    ///
+    /// The child is owned end to end: the parent spawns it on exclusive
+    /// stdout/stderr files, waits for the child's READY marker (so the bound
+    /// starts when the snapshot is really entered), and on timeout kills and
+    /// actually reaps it BEFORE reading the child output or touching the
+    /// fixture.
+    #[test]
+    #[cfg(all(unix, not(target_vendor = "apple")))]
+    fn m5_root_fifo_snapshot_is_bounded() {
+        let fixture = tempfile::tempdir().expect("fixture root");
+        let base = fixture.path().join("base");
+        std::fs::create_dir_all(base.join("downloads")).expect("fixture dirs");
+        let gallery = base.join("downloads").join("fifo-gallery");
+        std::fs::create_dir_all(&gallery).expect("gallery dir");
+        std::fs::write(gallery.join("1.jpg"), png_bytes(8, 8)).expect("image");
+
+        let out_path = fixture.path().join("child.stdout");
+        let err_path = fixture.path().join("child.stderr");
+        let ready_path = fixture.path().join("child.ready");
+        let exclusive = |path: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .expect("exclusive child stream file")
+        };
+        let mut child = std::process::Command::new(std::env::current_exe().expect("current_exe"))
+            .arg("--exact")
+            .arg(M5_CHILD_FIFO_TEST)
+            .arg("--ignored")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env("XE_M5_FIFO_BASE", &base)
+            .env("XE_M5_FIFO_ROOT", &gallery)
+            .env("XE_M5_READY_FILE", &ready_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(exclusive(&out_path))
+            .stderr(exclusive(&err_path))
+            .spawn()
+            .expect("spawn bounded child");
+
+        // READY handshake: the bound below must not start before the child is
+        // inside the real snapshot call.
+        let mut entered = false;
+        let mut exited_early = None;
+        let ready_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < ready_deadline {
+            if ready_path.exists() {
+                entered = true;
+                break;
+            }
+            if let Some(status) = child.try_wait().expect("try_wait") {
+                exited_early = Some(status);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let mut finished = None;
+        if entered {
+            let bound = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while std::time::Instant::now() < bound {
+                if let Some(status) = child.try_wait().expect("try_wait") {
+                    finished = Some(status);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        let timed_out = entered && finished.is_none();
+        if !entered || timed_out {
+            let _ = child.kill();
+        }
+        // Actual wait/reap FIRST: the status and the exclusive stream files are
+        // only consumed after the child can no longer write them.
+        let status = child.wait().expect("reap bounded child");
+        let out = std::fs::read_to_string(&out_path).unwrap_or_default();
+        let err = std::fs::read_to_string(&err_path).unwrap_or_default();
+        let report = || {
+            format!(
+                "child status={status:?} entered={entered} timed_out={timed_out} early={exited_early:?}\n--- child stdout ---\n{}\n--- child stderr ---\n{}",
+                m5_tail(&out, 4000),
+                m5_tail(&err, 4000)
+            )
+        };
+
+        assert!(
+            entered,
+            "child never entered the production snapshot: {}",
+            report()
+        );
+        assert!(
+            !timed_out,
+            "production gallery snapshot did not return within 10s for a FIFO root (killed and reaped): {}",
+            report()
+        );
+        assert!(status.success(), "child failed: {}", report());
+        // A zero-filter run exits 0 with nothing executed: require the named
+        // helper to be the one test that actually ran and passed.
+        let result_line = out
+            .lines()
+            .find(|line| line.trim_start().starts_with("test result:"))
+            .unwrap_or("");
+        assert!(
+            result_line.contains("1 passed") && result_line.contains("0 failed"),
+            "expected exactly one executed helper test, got {result_line:?}: {}",
+            report()
+        );
+        assert!(
+            out.contains("m5-child: production snapshot returned"),
+            "child did not reach the end of the real snapshot: {}",
+            report()
+        );
+    }
+
+    /// A real task whose gallery directory does not exist yet. The returned
+    /// path is the directory a later legitimate request would create.
+    fn task_without_gallery(app: &mut App, title: &str) -> (String, std::path::PathBuf) {
+        use crate::task::{Task, TaskConfig};
+        let root = app.base_dir().to_path_buf();
+        let mut config = TaskConfig::from_app(&app.cfg, &JsonMap::new()).expect("config");
+        config.dir = "downloads".to_string();
+        let mut task = Task::new(
+            "http://e-hentai.org/g/123/abcdef0123/",
+            config,
+            format!("guid-late-{title}"),
+            &root,
+        )
+        .expect("task");
+        task.meta
+            .insert("title".to_string(), Value::String(title.to_string()));
+        task.meta.insert("total".to_string(), Value::from(3));
+        let fpath = task.get_fpath().expect("fpath");
+        let guid = task.guid.clone();
+        app.insert_task_for_test(task);
+        (guid, fpath)
+    }
+
+    fn response_body(response: Response) -> Vec<u8> {
+        match response.body {
+            ResponseBody::Inline(body) => body,
+            ResponseBody::Stream(mut stream) => {
+                use std::io::Read;
+                let mut file = stream.file.take().expect("stream file");
+                let mut out = Vec::new();
+                file.read_to_end(&mut out).expect("stream read");
+                out
+            }
+        }
+    }
+
+    /// The snapshot runs BEFORE the heavy permit. A gallery directory that was
+    /// genuinely missing at that moment must stay missing for the whole
+    /// request: a directory plus image created while the request waits for
+    /// capacity is a NEW observation, not a retrospective grant. A fresh
+    /// request may of course serve it.
+    ///
+    /// The request is driven through the real `run_media` path inside a
+    /// `LocalSet`, with a peer future proving the same executor keeps running
+    /// while the request is parked on capacity.
+    #[test]
+    fn m5_missing_gallery_snapshot_is_frozen() {
+        let mut app = test_app();
+        let png = png_bytes(16, 16);
+        let (guid, gallery) = task_without_gallery(&mut app, "late-gallery");
+        assert!(
+            !gallery.exists(),
+            "fixture must start without a gallery directory"
+        );
+        let target = format!("/img/{}/{guid}/1", hash_link(None, &format!("{guid}/1")));
+        let media = media_action(&target);
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
+        let handle = runtime.handle();
+        let permits = Arc::new(tokio::sync::Semaphore::new(super::super::MAX_HEAVY_WORKERS));
+        let late = gallery.clone();
+        let late_png = png.clone();
+        let gated_handle = handle.clone();
+        let gated_permits = Arc::clone(&permits);
+        block_on(async move {
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async move {
+                    let first = gated_permits.clone().acquire_owned().await.expect("permit");
+                    let second = gated_permits.clone().acquire_owned().await.expect("permit");
+                    assert_eq!(gated_permits.available_permits(), 0);
+                    let mut request =
+                        Box::pin(run_media(gated_handle, Arc::clone(&gated_permits), media));
+                    // Drive the request until it parks on capacity: its gallery
+                    // snapshot (Missing) is already captured at this point.
+                    assert!(
+                        tokio::time::timeout(
+                            std::time::Duration::from_millis(400),
+                            &mut request
+                        )
+                        .await
+                        .is_err(),
+                        "the request must wait for the heavy permit"
+                    );
+                    // Same executor, real peer progress while it is parked.
+                    let peer = tokio::task::spawn_local(async { 7u8 });
+                    assert_eq!(peer.await.expect("peer task"), 7);
+                    // The legitimate directory and image appear during the wait.
+                    std::fs::create_dir_all(&late).expect("late gallery");
+                    std::fs::write(late.join("1.jpg"), &late_png).expect("late image");
+                    drop(first);
+                    drop(second);
+                    let response = request.await;
+                    assert_eq!(
+                        response.status, 404,
+                        "the same request must not be served from a directory created after its Missing snapshot"
+                    );
+                })
+                .await;
+        });
+        // A fresh request observes the new directory legitimately.
+        let media = media_action(&target);
+        let (status, body) = block_on(async {
+            let response = run_media(handle, Arc::clone(&permits), media).await;
+            (response.status, response_body(response))
+        });
+        assert_eq!(status, 200, "a fresh request may serve the new gallery");
+        assert_eq!(body, png);
+    }
+
+    /// The sibling-archive parent is captured at the same pre-permit moment as
+    /// the gallery root. A parent that was genuinely missing then must not
+    /// become ZIP authority later: the archive created during the capacity
+    /// wait belongs to a NEW observation. A fresh request may serve it.
+    #[test]
+    fn m5_missing_parent_cannot_grant_zip_fallback() {
+        use crate::rpc::{read_zip_fallback, snapshot_gallery_file};
+
+        let mut app = test_app();
+        let png = png_bytes(16, 16);
+        let (guid, gallery) = task_without_gallery(&mut app, "late-zip");
+        let parent = gallery.parent().expect("parent").to_path_buf();
+        assert!(!parent.exists(), "fixture must start without the parent");
+        let zip_name = format!(
+            "{}.zip",
+            gallery.file_name().expect("name").to_string_lossy()
+        );
+        let target = format!("/img/{}/{guid}/1", hash_link(None, &format!("{guid}/1")));
+        let media = media_action(&target);
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
+        let handle = runtime.handle();
+        let permits = Arc::new(tokio::sync::Semaphore::new(super::super::MAX_HEAVY_WORKERS));
+        let late_parent = parent.clone();
+        let late_zip = zip_name.clone();
+        let late_png = png.clone();
+        let gated_handle = handle.clone();
+        let gated_permits = Arc::clone(&permits);
+        block_on(async move {
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async move {
+                    let first = gated_permits.clone().acquire_owned().await.expect("permit");
+                    let second = gated_permits.clone().acquire_owned().await.expect("permit");
+                    let mut request =
+                        Box::pin(run_media(gated_handle, Arc::clone(&gated_permits), media));
+                    assert!(
+                        tokio::time::timeout(
+                            std::time::Duration::from_millis(400),
+                            &mut request
+                        )
+                        .await
+                        .is_err(),
+                        "the request must wait for the heavy permit"
+                    );
+                    // The archive appears while the request is parked: the
+                    // parent observation it froze was Missing.
+                    std::fs::create_dir_all(&late_parent).expect("late parent");
+                    m5_write_zip(&late_parent.join(&late_zip), "1.jpg", &late_png);
+                    drop(first);
+                    drop(second);
+                    let response = request.await;
+                    assert_eq!(
+                        response.status, 404,
+                        "a parent created after a Missing observation must not grant ZIP authority to the same request"
+                    );
+                })
+                .await;
+        });
+        // A fresh request observes the parent legitimately and serves the entry.
+        let media = media_action(&target);
+        let (status, body) = block_on(async {
+            let response = run_media(handle, Arc::clone(&permits), media).await;
+            (response.status, response_body(response))
+        });
+        assert_eq!(status, 200, "a fresh request may serve the new archive");
+        assert_eq!(body, png);
+
+        // Same rule at the buffered module entry point.
+        let mut app = test_app();
+        let (guid, gallery) = task_without_gallery(&mut app, "late-zip-module");
+        let parent = gallery.parent().expect("parent").to_path_buf();
+        let snap = snapshot_gallery_file(&app, &guid, "1").expect("snapshot");
+        std::fs::create_dir_all(&parent).expect("late parent");
+        m5_write_zip(
+            &parent.join(format!(
+                "{}.zip",
+                gallery.file_name().expect("name").to_string_lossy()
+            )),
+            "1.jpg",
+            &png,
+        );
+        assert!(
+            read_zip_fallback(&snap).is_err(),
+            "a captured missing parent cannot gain ZIP authority later"
+        );
+        let fresh = snapshot_gallery_file(&app, &guid, "1").expect("fresh snapshot");
+        let (bytes, _) = read_zip_fallback(&fresh).expect("fresh fallback");
+        assert_eq!(bytes, png);
+    }
+
+    /// The non-Unix backend answers `Unavailable(Unsupported)` before any
+    /// filesystem operation, and the denial mapping it shares with the real
+    /// `Unavailable` arm is platform independent. Pin that class here on
+    /// Linux: `Unavailable` never becomes `Ok(None)`, never opens, and never
+    /// falls back to the sibling archive, while only a real `NotFound` is
+    /// `Missing`.
+    #[test]
+    fn m5_unavailable_observation_denies_without_fallback() {
+        use crate::rpc::read_zip_fallback;
+        use crate::task::{
+            DirectoryObservation, TaskError, observe_directory, open_confined_regular,
+        };
+
+        let mut app = test_app();
+        let png = png_bytes(8, 8);
+        let guid = task_with_image(&mut app, "1.jpg", &png);
+        let gallery = app.task(&guid).expect("task").get_fpath().expect("fpath");
+        m5_write_zip(&gallery.with_extension("zip"), "1.jpg", &png);
+        let snap = snapshot_gallery_file(&app, &guid, "1").expect("snap");
+
+        // Classification: only a genuine NotFound is Missing.
+        assert_eq!(
+            observe_directory(&gallery.join("absent.jpg")),
+            DirectoryObservation::Missing
+        );
+        assert_eq!(
+            observe_directory(&gallery.join("1.jpg")),
+            DirectoryObservation::Unavailable(std::io::ErrorKind::NotADirectory)
+        );
+        match snap.root_id {
+            DirectoryObservation::Present(_) => {}
+            other => panic!("a real gallery directory must observe Present, got {other:?}"),
+        }
+
+        // The non-Unix entry point denies, without falling back to the ZIP.
+        let denied = GallerySnap {
+            root_id: DirectoryObservation::Unavailable(std::io::ErrorKind::Unsupported),
+            parent: DirectoryObservation::Unavailable(std::io::ErrorKind::Unsupported),
+            ..snap.clone()
+        };
+        assert!(
+            matches!(probe_gallery_file(&denied), Ok(OpenOutcome::Denied)),
+            "an Unsupported observation must be a denial, not a missing leaf"
+        );
+        assert!(
+            read_zip_fallback(&denied).is_err(),
+            "an Unsupported parent observation must not grant the sibling archive"
+        );
+        let error =
+            open_confined_regular(&denied.root, denied.root_id, &denied.name, &denied.reserved)
+                .expect_err("Unsupported observation must not open anything");
+        assert!(
+            matches!(error, TaskError::UnsafePath { .. }),
+            "Unsupported observation must be a typed denial, got {error:?}"
+        );
+        // Control: the real Present snapshot is untouched.
+        assert!(matches!(
+            probe_gallery_file(&snap),
+            Ok(OpenOutcome::File(_))
+        ));
+    }
+
+    fn m5_write_zip(path: &std::path::Path, name: &str, bytes: &[u8]) {
+        let file = std::fs::File::create(path).expect("zip");
+        let mut writer = zip::ZipWriter::new(file);
+        writer
+            .start_file(name, zip::write::SimpleFileOptions::default())
+            .expect("entry");
+        {
+            use std::io::Write;
+            writer.write_all(bytes).expect("zip bytes");
+        }
+        writer.finish().expect("finish");
+    }
+
     #[test]
     fn archive_builds_on_demand_and_reuses() {
         let mut app = test_app();
@@ -4925,6 +5413,10 @@ mod tests {
         }
     }
 
+    /// Per-thread bytes-read telemetry from `/proc`, which only Linux exposes.
+    /// Linux-only on purpose: this is a test observer, not portable product
+    /// behavior, so it must not be treated as a cross-platform contract.
+    #[cfg(target_os = "linux")]
     fn thread_rchar() -> u64 {
         let tid = rustix::thread::gettid();
         let text =
@@ -5018,6 +5510,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn b3_1_thumb_source_read_holds_permit() {
         // The thumbnail source read must happen under the owned heavy
         // permit: with both permits held, the serving thread must perform

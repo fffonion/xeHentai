@@ -309,24 +309,74 @@ pub fn path_within(root: &Path, candidate: &Path) -> bool {
 /// closed instead of serving the replacement.
 pub type DirIdentity = (u64, u64);
 
-/// Directory FD identity via `fstat`, or `None` when the path cannot be
-/// stated (missing root: the caller treats this as a missing leaf, and the
-/// binding check is skipped).
-pub fn dir_identity(path: &Path) -> Option<DirIdentity> {
-    let file = std::fs::File::open(path).ok()?;
-    let metadata = file.metadata().ok()?;
-    if !metadata.is_dir() {
-        return None;
-    }
+/// A frozen, non-opening observation of one directory path.
+///
+/// `Present` carries the exact identity the path had when it was observed,
+/// `Missing` is a genuine `NotFound`, and `Unavailable` is every other
+/// outcome: an existing non-directory (FIFO, socket, regular file, device), a
+/// permission or probe error, or a platform without the confined Unix
+/// backend. Only `Present` can authorize an open, and that open must still
+/// match the recorded identity. A `Missing`/`Unavailable` observation can
+/// never be promoted to `Present`, not even after a wait or a later
+/// filesystem change inside the same request.
+///
+/// The observation itself is `stat`-based filesystem I/O. It never opens the
+/// path (so a FIFO cannot stall it), but it is still I/O with no universal
+/// latency bound (network filesystems, cold caches, device servers); it is
+/// not a pure function and must not be described as one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DirectoryObservation {
+    Present(DirIdentity),
+    Missing,
+    Unavailable(std::io::ErrorKind),
+}
+
+/// Observe `path` without opening it.
+///
+/// Only a real `NotFound` is `Missing`; an existing non-directory (including a
+/// FIFO, socket or regular file) and every other probe error are
+/// `Unavailable`. On non-Unix targets this is `Unavailable(Unsupported)`
+/// BEFORE any filesystem operation: there is no ambient fallback read.
+pub fn observe_directory(path: &Path) -> DirectoryObservation {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        Some((metadata.dev(), metadata.ino()))
+        match fs::metadata(path) {
+            Ok(metadata) if metadata.is_dir() => {
+                DirectoryObservation::Present((metadata.dev(), metadata.ino()))
+            }
+            Ok(_) => DirectoryObservation::Unavailable(std::io::ErrorKind::NotADirectory),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                DirectoryObservation::Missing
+            }
+            Err(error) => DirectoryObservation::Unavailable(error.kind()),
+        }
     }
     #[cfg(not(unix))]
     {
-        let _ = metadata;
-        None
+        let _ = path;
+        DirectoryObservation::Unavailable(std::io::ErrorKind::Unsupported)
+    }
+}
+
+/// Typed denial for a path that was observed but cannot carry directory
+/// authority for this request. Shared by the confined Unix backend and the
+/// non-Unix `Unsupported` entry so both report the same denial class instead
+/// of a missing leaf.
+fn unavailable_denial(path: &Path, kind: std::io::ErrorKind) -> TaskError {
+    TaskError::UnsafePath {
+        path: path.to_path_buf(),
+        reason: unavailable_reason(kind),
+    }
+}
+
+fn unavailable_reason(kind: std::io::ErrorKind) -> &'static str {
+    use std::io::ErrorKind as Kind;
+    match kind {
+        Kind::NotADirectory => "observed path is not a directory",
+        Kind::PermissionDenied => "observed path is not readable",
+        Kind::Unsupported => "confined gallery opens are unsupported on this platform",
+        _ => "observed path is not an available directory for this request",
     }
 }
 
@@ -337,6 +387,12 @@ pub fn dir_identity(path: &Path) -> Option<DirIdentity> {
 /// Open `root/name` as a regular file confined to the owned gallery root,
 /// validating the OPENED file descriptor (never just the prechecked path),
 /// so a swap between check and open cannot smuggle bytes in.
+///
+/// `snapshot` is the frozen observation captured before any heavy permit.
+/// `Missing` returns `Ok(None)` and `Unavailable` returns a typed denial, both
+/// WITHOUT opening or re-observing the path, so a later filesystem change can
+/// never grant this request authority. `Present` carries the exact expected
+/// identity that the open below re-validates.
 ///
 /// The leaf is opened relative to a pinned root directory FD. A symlink
 /// leaf is denied on the fast path; an inside-root alias is served only
@@ -352,22 +408,46 @@ pub fn dir_identity(path: &Path) -> Option<DirIdentity> {
 /// Returns `Ok(None)` only when the leaf (or the root itself) is genuinely
 /// missing, so the caller can apply the reference ZIP fallback; every
 /// confinement failure is `Err` (denied: no fallback, no bytes).
-/// No production debug hook exists; the `#[cfg(test)]` seam below is the
-/// only deterministic window and is compiled out of production builds.
+/// No production debug hook exists; the `#[cfg(test)]` seams in this module
+/// are the only deterministic windows and are compiled out of production
+/// builds.
 pub fn open_confined_regular(
     root: &Path,
-    snapshot_id: Option<DirIdentity>,
+    snapshot: DirectoryObservation,
+    name: &str,
+    reserved: &[PathBuf],
+) -> Result<Option<std::fs::File>, TaskError> {
+    check_component(name)?;
+    match snapshot {
+        DirectoryObservation::Missing => Ok(None),
+        DirectoryObservation::Unavailable(kind) => Err(unavailable_denial(root, kind)),
+        DirectoryObservation::Present(expected) => {
+            open_confined_present(root, expected, name, reserved)
+        }
+    }
+}
+
+/// The confined open itself. Only reachable from a `Present` observation, so
+/// the expected snapshot identity is mandatory here: there is no public
+/// "no binding" entry point.
+#[cfg(unix)]
+fn open_confined_present(
+    root: &Path,
+    expected: DirIdentity,
     name: &str,
     reserved: &[PathBuf],
 ) -> Result<Option<std::fs::File>, TaskError> {
     use rustix::fs::{Mode, OFlags};
-    check_component(name)?;
     let root_fd = match rustix::fs::open(
         root,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
         Mode::empty(),
     ) {
         Ok(fd) => fd,
+        // The observation said Present and the path is gone now: this is the
+        // ordinary "gallery archived away between observation and open"
+        // demotion, which grants nothing beyond what a Missing observation
+        // grants (the reference ZIP fallback), never a gallery-file read.
         Err(error) if error == rustix::io::Errno::NOENT => return Ok(None),
         Err(error) => {
             return Err(TaskError::Io {
@@ -396,7 +476,7 @@ pub fn open_confined_regular(
     ) {
         Ok(fd) => fd,
         Err(error) if error == rustix::io::Errno::LOOP => {
-            return open_confined_alias(&root_fd, root, snapshot_id, name, reserved);
+            return open_confined_alias(&root_fd, root, expected, name, reserved);
         }
         Err(error) if error == rustix::io::Errno::NOENT => return Ok(None),
         Err(error) => {
@@ -406,16 +486,29 @@ pub fn open_confined_regular(
             });
         }
     };
-    finish_confined_leaf(root_fd, leaf, root, snapshot_id, name, reserved)
+    finish_confined_leaf(root_fd, leaf, root, expected, name, reserved)
+}
+
+/// No confined Unix backend on this platform: deny with the shared
+/// `Unsupported` shape instead of opening or reading anything ambient.
+#[cfg(not(unix))]
+fn open_confined_present(
+    root: &Path,
+    _expected: DirIdentity,
+    _name: &str,
+    _reserved: &[PathBuf],
+) -> Result<Option<std::fs::File>, TaskError> {
+    Err(unavailable_denial(root, std::io::ErrorKind::Unsupported))
 }
 
 /// Symlink-leaf path: the leaf is a link. Follow it, then serve the opened
 /// FD only when its identity matches the contained, non-reserved resolved
 /// target. Any mismatch (including a link swap racing the resolve) denies.
+#[cfg(unix)]
 fn open_confined_alias(
     root_fd: &rustix::fd::OwnedFd,
     root: &Path,
-    snapshot_id: Option<DirIdentity>,
+    expected: DirIdentity,
     name: &str,
     reserved: &[PathBuf],
 ) -> Result<Option<std::fs::File>, TaskError> {
@@ -480,17 +573,18 @@ fn open_confined_alias(
         }
     }
     deny_reserved(&leaf_stat, root.join(name), reserved)?;
-    bind_root(root_fd, &root_stat_of(root_fd)?, root, snapshot_id)?;
+    bind_root(root_fd, &root_stat_of(root_fd)?, root, expected)?;
     Ok(Some(clear_nonblock(leaf, root.join(name))?))
 }
 
 /// Validate the fast-path (non-link) leaf: regular file, off the reserved
 /// set, root still bound; then clear `O_NONBLOCK` and hand over the file.
+#[cfg(unix)]
 fn finish_confined_leaf(
     root_fd: rustix::fd::OwnedFd,
     leaf: rustix::fd::OwnedFd,
     root: &Path,
-    snapshot_id: Option<DirIdentity>,
+    expected: DirIdentity,
     name: &str,
     reserved: &[PathBuf],
 ) -> Result<Option<std::fs::File>, TaskError> {
@@ -509,11 +603,12 @@ fn finish_confined_leaf(
         path: root.to_path_buf(),
         source: std::io::Error::from_raw_os_error(error.raw_os_error()),
     })?;
-    bind_root(&root_fd, &root_stat_of_fd(&root_stat), root, snapshot_id)?;
+    bind_root(&root_fd, &root_stat_of_fd(&root_stat), root, expected)?;
     Ok(Some(clear_nonblock(leaf, root.join(name))?))
 }
 
 /// Deny when the opened leaf IS a reserved persistence file (dev, ino).
+#[cfg(unix)]
 fn deny_reserved(
     leaf_stat: &rustix::fs::Stat,
     path: PathBuf,
@@ -537,18 +632,18 @@ fn deny_reserved(
     Ok(())
 }
 
-/// Bind the pinned root FD to the freshly canonicalized root and, when the
-/// caller has one, to the snapshot-time identity. Any replacement of the
-/// root (or of a parent component) between snapshot and open fails closed.
+/// Bind the pinned root FD to the freshly canonicalized root and to the exact
+/// snapshot-time identity the `Present` observation carried. Any replacement
+/// of the root (or of a parent component) between snapshot and open fails
+/// closed; the identity is mandatory, never optional.
+#[cfg(unix)]
 fn bind_root(
     _root_fd: &rustix::fd::OwnedFd,
     root_stat: &DirIdentity,
     root: &Path,
-    snapshot_id: Option<DirIdentity>,
+    expected: DirIdentity,
 ) -> Result<(), TaskError> {
-    if let Some(snapshot) = snapshot_id
-        && *root_stat != snapshot
-    {
+    if *root_stat != expected {
         return Err(TaskError::UnsafePath {
             path: root.to_path_buf(),
             reason: "gallery root changed since the snapshot",
@@ -574,6 +669,7 @@ fn bind_root(
 
 /// Canonicalize the root for the containment/binding checks. Fail closed:
 /// any canonicalization failure denies instead of serving.
+#[cfg(unix)]
 fn canonical_root(root: &Path) -> Result<PathBuf, TaskError> {
     boundary_path(root).map_err(|_| TaskError::UnsafePath {
         path: root.to_path_buf(),
@@ -581,6 +677,7 @@ fn canonical_root(root: &Path) -> Result<PathBuf, TaskError> {
     })
 }
 
+#[cfg(unix)]
 fn root_stat_of(root_fd: &rustix::fd::OwnedFd) -> Result<DirIdentity, TaskError> {
     let stat = rustix::fs::fstat(root_fd).map_err(|error| TaskError::Io {
         path: PathBuf::from("<gallery root>"),
@@ -589,12 +686,14 @@ fn root_stat_of(root_fd: &rustix::fd::OwnedFd) -> Result<DirIdentity, TaskError>
     Ok(root_stat_of_fd(&stat))
 }
 
+#[cfg(unix)]
 fn root_stat_of_fd(stat: &rustix::fs::Stat) -> DirIdentity {
     (stat.st_dev, stat.st_ino)
 }
 
 /// Clear `O_NONBLOCK` (set only to avoid hangs while opening) so the
 /// returned file has ordinary blocking semantics for the streaming reader.
+#[cfg(unix)]
 fn clear_nonblock(leaf: rustix::fd::OwnedFd, path: PathBuf) -> Result<std::fs::File, TaskError> {
     use rustix::fs::OFlags;
     rustix::fs::fcntl_setfl(&leaf, OFlags::empty()).map_err(|error| TaskError::Io {
@@ -663,6 +762,62 @@ pub(crate) fn run_preopen_seam(root: &Path, name: &str) {
             if fs::rename(root, &backup).is_ok() {
                 #[cfg(unix)]
                 let _ = std::os::unix::fs::symlink(&target, root);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TEST-ONLY one-shot fixture change inside the production snapshot window.
+// ---------------------------------------------------------------------------
+
+/// TEST-ONLY swap performed on the calling thread between the task directory
+/// check (`TaskFiles::task_dir`) and the snapshot's directory observation,
+/// i.e. exactly the window in which a checked gallery directory can be
+/// replaced by a FIFO. Armed once per root path; a no-op unless armed.
+/// Production builds contain no hook.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) enum ObservationSwap {
+    /// Rename the gallery directory aside and put a FIFO at the same path.
+    RootFifo,
+}
+
+#[cfg(test)]
+static OBSERVATION_SEAMS: Mutex<Vec<(String, ObservationSwap)>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) fn arm_observation_swap(root: &Path, swap: ObservationSwap) {
+    OBSERVATION_SEAMS
+        .lock()
+        .unwrap()
+        .push((root.to_string_lossy().into_owned(), swap));
+}
+
+/// Apply the armed fixture change (if any) for this exact root path.
+#[cfg(test)]
+pub(crate) fn run_observation_swap(root: &Path) {
+    let key = root.to_string_lossy().into_owned();
+    let swap = {
+        let mut seams = OBSERVATION_SEAMS.lock().unwrap();
+        seams
+            .iter()
+            .position(|(scope, _)| *scope == key)
+            .map(|index| seams.remove(index).1)
+    };
+    match swap {
+        None => {}
+        Some(ObservationSwap::RootFifo) => {
+            let backup = root.with_extension("obsbak");
+            let _ = fs::remove_dir_all(&backup);
+            if fs::rename(root, &backup).is_ok() {
+                #[cfg(all(unix, not(target_vendor = "apple")))]
+                rustix::fs::mkfifoat(
+                    rustix::fs::CWD,
+                    root,
+                    rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+                )
+                .expect("observation seam FIFO");
             }
         }
     }
