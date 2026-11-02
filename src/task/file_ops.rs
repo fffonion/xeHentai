@@ -167,6 +167,11 @@ impl TaskFiles {
     pub(super) fn task_dir(&self, component: &str) -> Result<PathBuf, TaskError> {
         check_component(component)?;
         let path = self.root.join(component);
+        // The installer-owned update area is not business data: a gallery
+        // title may not name it, live inside it, or cover it as an ancestor
+        // (the `dir="."` install-root case). This is the reserved-root rule,
+        // not a display-name filter, and it runs before any write.
+        ensure_outside_installer_area(&path, &self.private.install_areas())?;
         // Lifetime-bound owned namespace: while a detached container owns
         // this namespace, no new public gallery may resolve here. Rejected
         // before any directory/stage/file write and before symlink checks.
@@ -196,11 +201,15 @@ impl TaskFiles {
     /// symlink targets.
     pub(super) fn child_file(&self, dir: &Path, name: &str) -> Result<PathBuf, TaskError> {
         check_component(name)?;
+        // A direct file write may not land in or above the installer area even
+        // when the caller reached the directory without `task_dir`.
+        ensure_outside_installer_area(dir, &self.private.install_areas())?;
         // The gallery directory itself must not be an owned container: this
         // covers cfg.dir descendants that bypass `task_dir` and keeps every
         // direct file write inside the same lifetime-bound boundary.
         ensure_not_inside_detached(dir)?;
         let path = dir.join(name);
+        ensure_outside_installer_area(&path, &self.private.install_areas())?;
         // The file itself must not land inside an owned container either:
         // a new gallery named exactly like a container resolves here.
         ensure_not_inside_detached(&path)?;
@@ -220,6 +229,30 @@ impl TaskFiles {
             Err(source) => Err(TaskError::Io { path, source }),
         }
     }
+}
+
+/// Refuse a business path that overlaps the installer-owned area.
+///
+/// The comparison uses the authorization boundary path (longest existing
+/// ancestor canonicalised, missing tail kept as names), so an alias through a
+/// symlinked parent is judged by its real target and a dangling component
+/// fails closed. Both directions are denied: anything INSIDE the area, and any
+/// ancestor whose recursive deletion would cover it.
+fn ensure_outside_installer_area(candidate: &Path, areas: &[PathBuf]) -> Result<(), TaskError> {
+    if areas.is_empty() {
+        return Ok(());
+    }
+    let candidate = boundary_path(candidate)?;
+    for area in areas {
+        let area = boundary_path(area)?;
+        if candidate.starts_with(&area) || area.starts_with(&candidate) {
+            return Err(TaskError::UnsafePath {
+                path: candidate,
+                reason: "path overlaps the installer-owned update area",
+            });
+        }
+    }
+    Ok(())
 }
 
 fn check_component(component: &str) -> Result<(), TaskError> {
@@ -557,6 +590,9 @@ pub enum ActivePrivateLog {
 #[derive(Debug)]
 pub struct PrivatePaths {
     spellings: RwLock<Vec<PathBuf>>,
+    /// The installer-owned area(s) of the ACTUAL installation this App runs
+    /// from. Business paths may never overlap them, in either direction.
+    install_areas: RwLock<Vec<PathBuf>>,
     active_log: RwLock<ActivePrivateLog>,
 }
 
@@ -564,10 +600,12 @@ impl PrivatePaths {
     /// Build the cell from a fixed, nonempty spelling set. Only the fixed
     /// App/base constructors below reach this: there is no generic empty-list
     /// production policy.
-    fn from_fixed(mut spellings: Vec<PathBuf>) -> Arc<Self> {
+    fn from_fixed(mut spellings: Vec<PathBuf>, mut areas: Vec<PathBuf>) -> Arc<Self> {
         dedupe_paths(&mut spellings);
+        dedupe_paths(&mut areas);
         Arc::new(Self {
             spellings: RwLock::new(spellings),
+            install_areas: RwLock::new(areas),
             active_log: RwLock::new(ActivePrivateLog::None),
         })
     }
@@ -575,14 +613,17 @@ impl PrivatePaths {
     /// The standalone (non-App) base policy: the fixed persistence names the
     /// reference resolves against its configuration base.
     pub fn for_base(base: &Path) -> Arc<Self> {
-        Self::from_fixed(base_spellings(base))
+        Self::from_fixed(base_spellings(base), base_install_areas(base))
     }
 
     /// The App policy: the same fixed names plus the resolved `log_path` and
     /// the App's real cookie-file location. Built from the actual configuration
     /// inputs, never from an arbitrary caller-supplied list.
     pub fn for_app(base: &Path, filepath: &Path, log_path: &str) -> Arc<Self> {
-        Self::from_fixed(app_spellings(base, filepath, log_path))
+        Self::from_fixed(
+            app_spellings(base, filepath, log_path),
+            app_install_areas(base, filepath),
+        )
     }
 
     /// Replace the live set from the same fixed App inputs. Called before a
@@ -590,11 +631,27 @@ impl PrivatePaths {
     pub fn replace_for_app(&self, base: &Path, filepath: &Path, log_path: &str) {
         let mut spellings = app_spellings(base, filepath, log_path);
         dedupe_paths(&mut spellings);
+        let mut areas = app_install_areas(base, filepath);
+        dedupe_paths(&mut areas);
         let mut current = self
             .spellings
             .write()
             .unwrap_or_else(|error| error.into_inner());
         *current = spellings;
+        let mut current_areas = self
+            .install_areas
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        *current_areas = areas;
+    }
+
+    /// The installer-owned areas of this installation. A business path that
+    /// overlaps any of them is refused before any write or recursive delete.
+    pub fn install_areas(&self) -> Vec<PathBuf> {
+        self.install_areas
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
     }
 
     /// Publish the log file the logger actually holds. Called at App
@@ -637,6 +694,21 @@ fn base_spellings(base: &Path) -> Vec<PathBuf> {
         // `Config::default().log_path` (`eh.log`), resolved against base.
         base.join("eh.log"),
         base.join(crate::core::LEGACY_COOKIE_FILE),
+        // The installer's own area lives under the installation root; when the
+        // configuration base IS that root (the ordinary `dir="."` case) it must
+        // be private persistence, not gallery data.
+        base.join(crate::updater::install::AREA_DIR),
+    ]
+}
+
+fn base_install_areas(base: &Path) -> Vec<PathBuf> {
+    vec![base.join(crate::updater::install::AREA_DIR)]
+}
+
+fn app_install_areas(base: &Path, filepath: &Path) -> Vec<PathBuf> {
+    vec![
+        base.join(crate::updater::install::AREA_DIR),
+        filepath.join(crate::updater::install::AREA_DIR),
     ]
 }
 
@@ -655,6 +727,7 @@ fn app_spellings(base: &Path, filepath: &Path, log_path: &str) -> Vec<PathBuf> {
         base.join(crate::config::LEGACY_CONFIG_FILE),
         log_path,
         filepath.join(crate::core::LEGACY_COOKIE_FILE),
+        filepath.join(crate::updater::install::AREA_DIR),
     ]
 }
 
@@ -2046,14 +2119,19 @@ mod tests {
     fn fixed_policies_are_nonempty_and_start_without_a_held_log() {
         let base = PathBuf::from("/policy-base");
         let base_policy = PrivatePaths::for_base(&base);
-        assert_eq!(base_policy.spellings().len(), 5);
+        // Five user-state names plus the installer-owned area under the base.
+        assert_eq!(base_policy.spellings().len(), 6);
         assert_eq!(base_policy.active_log(), ActivePrivateLog::None);
+        assert_eq!(
+            base_policy.install_areas(),
+            vec![base.join(crate::updater::install::AREA_DIR)]
+        );
 
         let app_policy = PrivatePaths::for_app(&base, Path::new("/policy-app"), "logs/live.log");
-        assert_eq!(app_policy.spellings().len(), 5);
+        assert_eq!(app_policy.spellings().len(), 6);
         assert!(app_policy.spellings().contains(&base.join("logs/live.log")));
         app_policy.replace_for_app(&base, Path::new("/policy-app"), "/absolute/live.log");
-        assert_eq!(app_policy.spellings().len(), 5);
+        assert_eq!(app_policy.spellings().len(), 6);
         assert!(
             app_policy
                 .spellings()

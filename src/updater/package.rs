@@ -40,6 +40,11 @@ pub const PENDING_FILE: &str = crate::r#const::SRC_UPDATE_FILE;
 pub const MAX_INFO_BYTES: usize = 256 * 1024;
 pub const MAX_SIGNATURE_BYTES: usize = 4 * 1024;
 pub const MAX_PAYLOAD_BYTES: usize = 384 * 1024 * 1024;
+/// Bound on ALL payload members (selected, foreign and directory entries),
+/// enforced immediately after the standard ZIP parser and before the walk.
+/// It is the signed entry limit plus a small allowance for the prefix
+/// directory entries a normal archive carries.
+pub const MAX_ARCHIVE_MEMBERS: usize = crate::updater::descriptor::MAX_ENTRIES + 256;
 /// The three fixed members plus their STORE framing only; the envelope cannot
 /// be larger than its parts.
 const MAX_ENVELOPE_BYTES: u64 =
@@ -71,7 +76,43 @@ impl PendingEnvelope {
 }
 
 /// Publish the envelope atomically as `<pending_dir>/src.zip`.
+#[allow(dead_code)]
 pub fn publish(pending_dir: &Path, envelope: &PendingEnvelope) -> Result<PathBuf, UpdateError> {
+    let staged = stage(pending_dir, envelope)?;
+    staged.commit()?;
+    Ok(pending_dir.join(PENDING_FILE))
+}
+
+/// A completely written, synced envelope temp file that has not yet replaced
+/// the published pending candidate.
+///
+/// Splitting staging from the final rename is what lets one owned blocking job
+/// do all the heavy work first and then linearize its single commit against
+/// cancellation: a cancelled job simply drops this value, which removes its
+/// temp file, so the previous pending stays byte-identical.
+pub struct Staged {
+    temp: tempfile::NamedTempFile,
+    target: PathBuf,
+}
+
+impl Staged {
+    /// Atomically replace the published pending envelope with this staged one.
+    pub fn commit(self) -> Result<(), UpdateError> {
+        match self.temp.persist(&self.target) {
+            Ok(_) => Ok(()),
+            Err(error) => Err(UpdateError::io(&self.target, &error.error)),
+        }
+    }
+
+    /// Path of the published envelope this staged file targets.
+    #[allow(dead_code)]
+    pub fn target(&self) -> &Path {
+        &self.target
+    }
+}
+
+/// Write and sync the envelope into `pending_dir` without publishing it.
+pub fn stage(pending_dir: &Path, envelope: &PendingEnvelope) -> Result<Staged, UpdateError> {
     super::install::ensure_private_dir(pending_dir)?;
     let mut bytes = Vec::new();
     {
@@ -103,10 +144,7 @@ pub fn publish(pending_dir: &Path, envelope: &PendingEnvelope) -> Result<PathBuf
     temp.as_file()
         .sync_all()
         .map_err(|error| UpdateError::io(temp.path(), &error))?;
-    match temp.persist(&target) {
-        Ok(_) => Ok(target),
-        Err(error) => Err(UpdateError::io(&target, &error.error)),
-    }
+    Ok(Staged { temp, target })
 }
 
 /// Read and structurally validate a published envelope. The signature and
@@ -199,7 +237,16 @@ pub fn select(
     prefix: &str,
 ) -> Result<Vec<SelectedEntry>, UpdateError> {
     let mut archive = open(payload)?;
-    let mut names: Vec<String> = Vec::with_capacity(archive.len());
+    // Every member, foreign or selected, is bounded BEFORE the walk. The
+    // signed entry limit caps what can be installed, not how much a valid
+    // signed archive may make this reader enumerate.
+    if archive.len() > MAX_ARCHIVE_MEMBERS {
+        return Err(UpdateError::package(format!(
+            "payload archive has {} members; the limit is {MAX_ARCHIVE_MEMBERS}",
+            archive.len()
+        )));
+    }
+    let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for index in 0..archive.len() {
         let file = archive
             .by_index(index)
@@ -224,12 +271,11 @@ pub fn select(
                 "payload member {raw:?} is not an enclosed path"
             )));
         }
-        if names.contains(&raw) {
+        if !names.insert(raw.clone()) {
             return Err(UpdateError::package(format!(
                 "payload repeats member {raw:?}"
             )));
         }
-        names.push(raw);
     }
 
     let mut total = 0u64;

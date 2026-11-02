@@ -144,6 +144,8 @@ pub struct Updater {
     updater_rollback: Value,
     binding: SourceBinding,
     install: install::Installation,
+    /// The one owned blocking publication job of this updater instance.
+    publisher: install::Publisher,
 }
 
 fn registry() -> &'static HostFunctionRegistry {
@@ -577,7 +579,19 @@ impl Updater {
             updater_rollback,
             binding,
             install: install::Installation::new(resource_root),
+            publisher: install::Publisher::new(),
         })
+    }
+
+    /// Attach the publisher owner the supervisor keeps across an abort, so the
+    /// shutdown drain can join the real blocking job.
+    pub fn set_publisher(&mut self, publisher: install::Publisher) {
+        self.publisher = publisher;
+    }
+
+    #[allow(dead_code)]
+    pub fn publisher(&self) -> install::Publisher {
+        self.publisher.clone()
     }
 
     fn pure(
@@ -797,22 +811,40 @@ impl Updater {
         // Entry selection reads the real archive and the envelope is written to
         // disk: both are blocking work, so they run on the blocking pool
         // instead of holding the LocalSet that the download workers share.
+        //
+        // The job is OWNED by the publisher, not by this local future. If the
+        // local updater task is aborted (shutdown), the cancel guard marks the
+        // job cancelled; the job still finishes its staging, sees the
+        // cancellation at the commit boundary and drops its staged temp file,
+        // so the previous pending stays byte-identical. A commit that already
+        // took the gate before the cancellation is a completed operation.
         let prefix = info.archive_prefix.clone();
         let install = self.install.clone();
-        install::ensure_private_dir(&install.area())?;
+        install
+            .verify_private_area()
+            .map_err(|error| UpdateError::install(error.to_string()))?;
         let pending_dir = install
             .pending_path()
             .parent()
             .map(Path::to_path_buf)
             .ok_or_else(|| UpdateError::install("the update area has no pending directory"))?;
-        let published = tokio::task::spawn_blocking(move || -> Result<(), UpdateError> {
-            package::select(&payload, &descriptor, &prefix)?;
-            let envelope = package::PendingEnvelope::new(descriptor_bytes, signature, payload)?;
-            package::publish(&pending_dir, &envelope)?;
-            Ok(())
-        })
-        .await
-        .map_err(|error| UpdateError::install(format!("update download worker: {error}")))?;
+        // One per-install cross-process transaction lock around the final
+        // pending publication. A concurrent owner returns a bounded failure
+        // without touching the shared candidate.
+        let lock = match install::InstallLock::acquire(&install) {
+            Ok(lock) => lock,
+            Err(error) => return self.failure(&error.to_string()),
+        };
+        let publisher = self.publisher.clone();
+        let job_dir = pending_dir.clone();
+        let published = publisher
+            .publish(job_dir, move || {
+                package::select(&payload, &descriptor, &prefix)?;
+                let envelope = package::PendingEnvelope::new(descriptor_bytes, signature, payload)?;
+                package::stage(&pending_dir, &envelope)
+            })
+            .await;
+        drop(lock);
         if let Err(error) = published {
             return self.failure(&error.to_string());
         }
@@ -996,12 +1028,17 @@ fn request_args(url: &str, headers: &[(String, String)]) -> [Value; 2] {
 
 /// What the pre-business-App startup controller did, in terms `main` can log
 /// and act on. `reexec` is present only for a native activation that already
-/// replaced the executable and must now really run it.
+/// replaced the executable and must now really run it. `provisional` is
+/// present while the new release is installed but not yet confirmed by the
+/// REAL App: only the caller that owns that initialization may confirm it.
 pub struct StartupReport {
-    /// True when the activation switched the live release and the caller must
-    /// now really execute the installed image.
     pub events: Vec<LogEvent>,
     pub reexec: Option<PathBuf>,
+    pub provisional: Option<install::Record>,
+    /// The per-install lock, held from the startup read/apply through real App
+    /// confirmation. Dropping it closes this process' descriptor; an inherited
+    /// daemon child keeps the same lock alive through its own descriptor.
+    pub lock: Option<install::InstallLock>,
 }
 
 impl StartupReport {
@@ -1010,6 +1047,8 @@ impl StartupReport {
         Self {
             events,
             reexec: None,
+            provisional: None,
+            lock: None,
         }
     }
     fn failed(detail: impl Into<String>) -> Self {
@@ -1024,20 +1063,99 @@ impl StartupReport {
     }
 }
 
+fn plain_rollback_event(detail: &str, previous_id: &str) -> LogEvent {
+    LogEvent {
+        level: "warning".into(),
+        key: "UPDATE_ROLLBACK".into(),
+        args: vec![detail.to_string(), previous_id.to_string()],
+    }
+}
+
 /// The startup controller, called by `main` BEFORE the business App exists.
 ///
 /// With nothing pending there is no business decision to make, so the trusted
-/// modules are not loaded at all. When a pending envelope (or an interrupted
-/// activation marker) exists, the OLD installation's `rss/updater/updater.rss`
-/// decides apply/stale/rollback, while this function enforces the native
-/// safety: signature, digest, ABI/target, entry list, private preflight,
-/// atomic switch, executable replacement and rollback.
+/// modules and the per-install lock are not loaded at all. When a pending
+/// envelope or a provisional activation exists, the OLD installation's
+/// `rss/updater/updater.rss` decides apply/stale/rollback, while this function
+/// enforces the native safety: signature, digest, ABI/target, entry list,
+/// private preflight, atomic switch, executable replacement and rollback.
+///
+/// The candidate stays PROVISIONAL here: the real new image's
+/// [`confirm_provisional`] runs only after the business App and its required
+/// modules initialized.
 pub fn startup(install_root: &Path) -> StartupReport {
     let installation = install::Installation::new(install_root);
+    // Never trust an existing area with a foreign owner or a shared-writable
+    // mode, before reading, recovery or any write.
+    if let Err(error) = installation.verify_private_area() {
+        return StartupReport::failed(error.to_string());
+    }
     let pending_path = installation.pending_path();
-    let confirm = installation.has_confirm();
-    if !confirm && !pending_path.exists() {
+    let activation_present = installation.has_activation();
+    let pending_present = pending_path.exists();
+    if !activation_present && !pending_present {
         return StartupReport::new("none", Vec::new());
+    }
+
+    // Cross-process serialization. The replacement image of a private native
+    // activation inherits the owned descriptor, so no unlock/reacquire gap
+    // exists across the real exec; the private preflight never reaches here.
+    let lock = match install::InstallLock::adopt_handoff(&installation) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => match install::InstallLock::acquire(&installation) {
+            Ok(lock) => lock,
+            Err(error) => return StartupReport::failed(error.to_string()),
+        },
+        Err(error) => return StartupReport::failed(error.to_string()),
+    };
+
+    if activation_present {
+        let activation = match installation.activation() {
+            Ok(Some(activation)) => activation,
+            Ok(None) => return StartupReport::new("none", Vec::new()),
+            Err(error) => return StartupReport::failed(error.to_string()),
+        };
+        let candidate = activation.candidate.clone();
+        if candidate.native && candidate.build_id == crate::r#const::BUILD_ID {
+            // The replaced image is the one running. That proves the image
+            // entered, NOT that the real App initialized: stay provisional.
+            return StartupReport {
+                events: Vec::new(),
+                reexec: None,
+                provisional: Some(candidate),
+                lock: Some(lock),
+            };
+        }
+        // The provisional candidate never became the running image (or the
+        // process died before confirming a resource switch). Restore the
+        // previous release and say so; never report completion.
+        let detail = format!(
+            "the provisional update {} was not confirmed by the running image",
+            candidate.update_id
+        );
+        return match install::rollback_activation(&installation) {
+            Ok(previous) => {
+                let previous_id = previous
+                    .as_ref()
+                    .map(|record| record.update_id.clone())
+                    .unwrap_or_default();
+                let events = match Updater::load(install_root) {
+                    Ok(mut updater) => updater
+                        .rollback_events(&detail, &previous_id)
+                        .unwrap_or_else(|_| vec![plain_rollback_event(&detail, &previous_id)]),
+                    Err(_) => vec![plain_rollback_event(&detail, &previous_id)],
+                };
+                StartupReport {
+                    events,
+                    reexec: None,
+                    provisional: None,
+                    lock: None,
+                }
+            }
+            Err(error) => StartupReport::failed(format!(
+                "{detail}; restoring the previous release failed: {error}"
+            )),
+        };
     }
 
     let mut updater = match Updater::load(install_root) {
@@ -1048,50 +1166,6 @@ pub fn startup(install_root: &Path) -> StartupReport {
         Ok(records) => records,
         Err(error) => return StartupReport::failed(error.to_string()),
     };
-
-    if confirm {
-        let active = records.active.clone();
-        match active {
-            Some(record) if record.native && record.build_id == crate::r#const::BUILD_ID => {
-                // The replaced image is the one running: activation is real.
-                let _ = installation.clear_confirm();
-                let events = updater
-                    .confirmed_events(&record.update_id)
-                    .unwrap_or_default();
-                return StartupReport::new("confirmed", events);
-            }
-            Some(record) => {
-                // The candidate never became the running image. Restore the
-                // previous release and say so; never report completion.
-                let detail = format!(
-                    "the replaced image did not start; this build reports {}",
-                    crate::r#const::BUILD_ID
-                );
-                match install::rollback_activation(&installation) {
-                    Ok(previous) => {
-                        let previous_id = previous
-                            .as_ref()
-                            .map(|record| record.update_id.clone())
-                            .unwrap_or_default();
-                        let events = updater
-                            .rollback_events(&detail, &previous_id)
-                            .unwrap_or_default();
-                        let _ = installation.discard_pending();
-                        let _ = record;
-                        return StartupReport::new("rolled_back", events);
-                    }
-                    Err(error) => {
-                        return StartupReport::failed(format!(
-                            "{detail}; restoring the previous release failed: {error}"
-                        ));
-                    }
-                }
-            }
-            None => {
-                let _ = installation.clear_confirm();
-            }
-        }
-    }
 
     if !pending_path.exists() {
         return StartupReport::new("none", Vec::new());
@@ -1165,8 +1239,12 @@ pub fn startup(install_root: &Path) -> StartupReport {
             match install::install_candidate(&installation, &candidate, &candidate_id) {
                 Ok(committed) => {
                     let _ = installation.discard_pending();
-                    let mut report = StartupReport::new("applied", decision.events);
-                    let _ = committed.record;
+                    let mut report = StartupReport {
+                        events: Vec::new(),
+                        reexec: None,
+                        provisional: Some(committed.record),
+                        lock: Some(lock),
+                    };
                     if committed.reexec {
                         report.reexec = Some(exe);
                     }
@@ -1183,7 +1261,7 @@ pub fn startup(install_root: &Path) -> StartupReport {
                     let events = if failure.rolled_back {
                         updater
                             .rollback_events(&detail, &previous_id)
-                            .unwrap_or_default()
+                            .unwrap_or_else(|_| vec![plain_rollback_event(&detail, &previous_id)])
                     } else {
                         vec![LogEvent {
                             level: "warning".into(),
@@ -1203,6 +1281,44 @@ pub fn startup(install_root: &Path) -> StartupReport {
             }
         }
         _ => StartupReport::new("none", decision.events),
+    }
+}
+
+/// Publish the provisional identity after the REAL new image initialized.
+///
+/// The required modules are loaded FIRST: a module failure keeps the
+/// activation provisional so the caller can roll back.
+pub fn confirm_provisional(install_root: &Path) -> Result<Vec<LogEvent>, UpdateError> {
+    let installation = install::Installation::new(install_root);
+    let mut updater = Updater::load(install_root)?;
+    let Some(record) = install::confirm_activation(&installation)? else {
+        return Ok(Vec::new());
+    };
+    let mut events = vec![LogEvent {
+        level: "info".into(),
+        key: "UPDATE_APPLIED".into(),
+        args: vec![record.update_id.clone()],
+    }];
+    events.extend(updater.confirmed_events(&record.update_id)?);
+    Ok(events)
+}
+
+/// Restore the previous release after a post-install initialization failure.
+pub fn rollback_provisional(
+    install_root: &Path,
+    detail: &str,
+) -> Result<Vec<LogEvent>, UpdateError> {
+    let installation = install::Installation::new(install_root);
+    let previous = install::rollback_activation(&installation)?;
+    let previous_id = previous
+        .as_ref()
+        .map(|record| record.update_id.clone())
+        .unwrap_or_default();
+    match Updater::load(install_root) {
+        Ok(mut updater) => updater
+            .rollback_events(detail, &previous_id)
+            .or_else(|_| Ok(vec![plain_rollback_event(detail, &previous_id)])),
+        Err(_) => Ok(vec![plain_rollback_event(detail, &previous_id)]),
     }
 }
 

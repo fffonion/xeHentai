@@ -58,7 +58,7 @@ rustix = { version = "1", features = ["fs", "thread"] }
 cap-primitives = "=4.0.3"
 # POSIX daemon startup and the real-PTY lifecycle tests use the mature nix
 # bindings; the product only needs `fork`/`_exit` and standard descriptors.
-nix = { version = "0.31", features = ["process", "signal", "term", "fs"] }
+nix = { version = "0.31", features = ["process", "signal", "term", "fs", "user"] }
 
 # The adopted dependency is the reviewed 4.0.3 source tree in `vendor/`, not a
 # rewritten or fetcher-substituted manifest: `Cargo.toml`, `Cargo.toml.orig`,

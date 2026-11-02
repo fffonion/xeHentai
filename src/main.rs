@@ -110,10 +110,13 @@ where
     for event in &startup.events {
         log_event(&mut logger, locale, event);
     }
+    let provisional = startup.provisional.clone();
+    let startup_lock = startup.lock;
     if let Some(exe) = startup.reexec {
         // The candidate executable is installed and must really run. If the
         // platform cannot replace the image, restore the previous release.
-        let failure = updater::install::reexec(&exe);
+        let failure = updater::install::reexec(&exe, startup_lock.as_ref());
+        drop(startup_lock);
         let installation = updater::install::Installation::new(&install_root);
         match updater::install::rollback_activation(&installation) {
             Ok(previous) => {
@@ -142,6 +145,26 @@ where
     let mut app = match App::new(loaded.config, logger, root, &filepath) {
         Ok(app) => app,
         Err(error) => {
+            // The provisional release is only confirmed AFTER this real
+            // Config/App/session initialization. A failure here restores the
+            // previous release, its record and the untouched session files.
+            if provisional.is_some() {
+                let mut rollback_logger = Logger::new();
+                let _ = rollback_logger.set_logfile(&log_path);
+                let detail = format!("session initialization failed: {error}");
+                match updater::rollback_provisional(&install_root, &detail) {
+                    Ok(events) => {
+                        for event in &events {
+                            log_event(&mut rollback_logger, locale, event);
+                        }
+                    }
+                    Err(rollback) => {
+                        let _ = rollback_logger.error(&format!(
+                            "{detail}; restoring the previous release: {rollback}"
+                        ));
+                    }
+                }
+            }
             eprintln!("xeHentai: session error: {error}");
             return 1;
         }
@@ -174,7 +197,7 @@ where
             }
         }
     }
-    run_application(app, root, &opts, locale)
+    run_application(app, root, &opts, locale, provisional, startup_lock)
 }
 
 /// Resolve `rss/` and `locales/` from the program directory when the release
@@ -191,7 +214,14 @@ pub fn resource_root(root: &Path) -> PathBuf {
 
 /// Run the real application: config update, logging, cookies/login, prompts,
 /// task submission and the supervised task loop with its optional RPC server.
-fn run_application(app: App, root: &Path, opts: &Opts, locale: Locale) -> i32 {
+fn run_application(
+    app: App,
+    root: &Path,
+    opts: &Opts,
+    locale: Locale,
+    provisional: Option<updater::install::Record>,
+    startup_lock: Option<updater::install::InstallLock>,
+) -> i32 {
     let resource = resource_root(root);
     let tokio_runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -204,8 +234,9 @@ fn run_application(app: App, root: &Path, opts: &Opts, locale: Locale) -> i32 {
         }
     };
     let local = tokio::task::LocalSet::new();
-    let code = tokio_runtime
-        .block_on(local.run_until(async move { application(app, &resource, opts, locale).await }));
+    let code = tokio_runtime.block_on(local.run_until(async move {
+        application(app, &resource, opts, locale, provisional, startup_lock).await
+    }));
     // A cancelled prompt leaves the stdin reader blocked in the runtime's
     // blocking pool; the reference also leaves through a bounded exit, so the
     // runtime is not waited on here.
@@ -213,11 +244,64 @@ fn run_application(app: App, root: &Path, opts: &Opts, locale: Locale) -> i32 {
     code
 }
 
-async fn application(mut app: App, resource: &Path, opts: &Opts, locale: Locale) -> i32 {
+async fn application(
+    mut app: App,
+    resource: &Path,
+    opts: &Opts,
+    locale: Locale,
+    provisional: Option<updater::install::Record>,
+    startup_lock: Option<updater::install::InstallLock>,
+) -> i32 {
     if let Err(error) = app.update_config(config_patch(opts)) {
+        if provisional.is_some() {
+            let detail = format!("configuration update failed: {error}");
+            match updater::rollback_provisional(resource, &detail) {
+                Ok(events) => {
+                    for event in &events {
+                        log_event(app.logger_mut(), locale, event);
+                    }
+                }
+                Err(rollback) => {
+                    let _ = app.logger_mut().error(&format!(
+                        "{detail}; restoring the previous release: {rollback}"
+                    ));
+                }
+            }
+        }
         eprintln!("xeHentai: configuration error: {error}");
         return 1;
     }
+    // The provisional update becomes the confirmed active release only here:
+    // the REAL Config/App/session exists and the trusted business modules load
+    // from the installed tree. A failure rolls the previous release back.
+    if provisional.is_some() {
+        match updater::confirm_provisional(resource) {
+            Ok(events) => {
+                for event in &events {
+                    log_event(app.logger_mut(), locale, event);
+                }
+            }
+            Err(error) => {
+                let detail = error.to_string();
+                match updater::rollback_provisional(resource, &detail) {
+                    Ok(events) => {
+                        for event in &events {
+                            log_event(app.logger_mut(), locale, event);
+                        }
+                    }
+                    Err(rollback) => {
+                        let _ = app.logger_mut().error(&format!(
+                            "{detail}; restoring the previous release: {rollback}"
+                        ));
+                    }
+                }
+                return 1;
+            }
+        }
+    }
+    // The startup transaction is complete (or refused); the lock is released
+    // here, not held for the whole process lifetime.
+    drop(startup_lock);
     let label = r#const::version_label();
     let started = i18n::render(locale, "XEH_STARTED", &[&label])
         .unwrap_or_else(|| format!("xeHentai {label} started."));
@@ -302,8 +386,11 @@ async fn run_supervised(
     let (task_loop, handle) = runtime.spawn();
     // The reference `cli.start` starts the updater as a daemon thread before
     // the task loop; this owned background task is retired by the same
-    // supervisor on URL completion or the first signal.
-    let update_task = spawn_update_check(handle.clone(), resource, locale);
+    // supervisor on URL completion or the first signal. Its single owned
+    // blocking publication job lives in `publisher`, which the supervisor
+    // keeps so the graceful drain can join it after an abort.
+    let publisher = updater::install::Publisher::new();
+    let update_task = spawn_update_check(handle.clone(), resource, locale, publisher.clone());
     let rpc_enabled = handle.borrow_app(|app| app.cfg.rpc_port.is_some());
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let rpc = if rpc_enabled {
@@ -380,7 +467,13 @@ async fn run_supervised(
             // interrupt is the reference's bounded `os._exit(0)`: it must not
             // await the task loop or the drain (they can be blocked on native
             // work) and must leave without a Tokio runtime drop.
-            let drain = handle.shutdown();
+            let drain = async {
+                handle.shutdown().await;
+                // Join the real blocking publication job (if any) so the
+                // drain never claims retirement while it is still staging or
+                // committing. The second-signal arm below stays selectable.
+                publisher.retire().await;
+            };
             tokio::pin!(drain);
             tokio::select! {
                 _ = &mut drain => {}
@@ -438,6 +531,7 @@ fn spawn_update_check(
     app: core::AppHandle,
     resource: PathBuf,
     locale: Locale,
+    publisher: updater::install::Publisher,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let mode = app.borrow_app(|app| app.cfg.auto_update.clone());
     if mode == "off" {
@@ -452,6 +546,7 @@ fn spawn_update_check(
                 return;
             }
         };
+        updater.set_publisher(publisher);
         let channel = updater::render_channel(locale, beta);
         app.borrow_app_mut(|app| {
             let _ = app.logger_mut().debug(&channel);
