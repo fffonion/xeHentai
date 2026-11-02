@@ -700,11 +700,12 @@ impl App {
         let base_root = boundary_path(base_dir).unwrap_or_else(|_| normalize(base_dir));
         // Initialized BEFORE any task/session admission, so a task restored or
         // added below already reads under the current policy.
-        let private_paths = crate::task::PrivatePaths::new(Self::private_spellings_for(
-            base_dir,
-            filepath,
-            &cfg.log_path,
-        ));
+        let private_paths = crate::task::PrivatePaths::for_app(base_dir, filepath, &cfg.log_path);
+        // The logger this App was handed may already hold a real log file
+        // (the CLI opens `log_path` before constructing the App). Publish its
+        // actual descriptor identity before any task can read; the getter
+        // failure is recorded as Unobservable so the policy fails closed.
+        private_paths.publish_active_log(Self::active_private_log(&logger));
         let mut app = Self {
             cfg,
             logger,
@@ -839,25 +840,16 @@ impl App {
         &self.base_dir
     }
 
-    /// The exact private persistence spellings this App currently owns.
-    ///
-    /// The log path is resolved the same way the logger reopen resolves it, and
-    /// the cookie file lives next to the configuration file path, exactly as
-    /// `core.py`/`util` read it.
-    fn private_spellings_for(base: &Path, filepath: &Path, log_path: &str) -> Vec<PathBuf> {
-        let log_path = Path::new(log_path);
-        let log_path = if log_path.is_absolute() {
-            log_path.to_path_buf()
-        } else {
-            base.join(log_path)
-        };
-        vec![
-            base.join(SESSION_FILE),
-            base.join(crate::config::CONFIG_FILE),
-            base.join(crate::config::LEGACY_CONFIG_FILE),
-            log_path,
-            filepath.join(LEGACY_COOKIE_FILE),
-        ]
+    /// The identity of the log file the logger actually holds, as understood
+    /// by the bounded private-policy cell. A failed metadata probe is
+    /// `Unobservable` (fail closed), never a fabricated descriptor identity.
+    fn active_private_log(logger: &Logger) -> crate::task::ActivePrivateLog {
+        use crate::task::ActivePrivateLog;
+        match logger.held_file_identity() {
+            Ok(Some(identity)) => ActivePrivateLog::Held(identity),
+            Ok(None) => ActivePrivateLog::None,
+            Err(_) => ActivePrivateLog::Unobservable,
+        }
     }
 
     pub fn filepath(&self) -> &Path {
@@ -1083,12 +1075,15 @@ impl App {
         // written to it, while the captured names of an in-flight read keep
         // protecting the previous spelling. A patch that fails earlier returns
         // above without touching either the cell or the old logger.
-        self.private_paths.replace(Self::private_spellings_for(
-            &self.base_dir,
-            &self.filepath,
-            &self.cfg.log_path,
-        ));
-        if let Err(error) = self.logger.set_logfile(&log_path) {
+        self.private_paths
+            .replace_for_app(&self.base_dir, &self.filepath, &self.cfg.log_path);
+        let reopened = self.logger.set_logfile(&log_path);
+        // Publish the descriptor the logger now holds before any other private
+        // log write. A failed reopen leaves the logger with no file, so the
+        // truthful state is None, never a fabricated identity.
+        self.private_paths
+            .publish_active_log(Self::active_private_log(&self.logger));
+        if let Err(error) = reopened {
             let _ = self.logger.warning(&format!(
                 "cannot open log file {}: {error}",
                 log_path.display()

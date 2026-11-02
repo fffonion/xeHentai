@@ -4674,6 +4674,39 @@ def self_check(suite, oracle, candidate):
         cases = {}
         compare_gallery(cases, oracle, mutated)
         checks.append(("archive-names", not cases.get("gallery.archive.task-wait", True)))
+        # Outcome mutation: an alias answer with the wrong bytes must be caught.
+        mutated = copy.deepcopy(candidate)
+        for entry in mutated["reads"]:
+            if entry.get("case") == "gallery.alias.relative":
+                entry["bytes"] = "mutated"
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(
+            ("alias-bytes", not cases.get("gallery.alias.relative", True)))
+        # Outcome mutation: the pinned outside-referent delta must reject a
+        # candidate that claims to have served the ZIP entry.
+        mutated = copy.deepcopy(candidate)
+        for entry in mutated["reads"]:
+            if entry.get("case") == "delta.fd-outside-referent-denial":
+                entry["status"] = 200
+                entry["bytes"] = "ZIP-OUTSIDE-ENTRY-BYTES"
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(("delta-outcome", not cases.get(
+            "delta.fd-outside-referent-denial", True)))
+        # Poststate mutations: task state and one disk entry must be caught.
+        mutated = copy.deepcopy(candidate)
+        mutated["poststate"]["after"]["tasks"]["task-wait"]["state"] = 99
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(
+            ("poststate-task", not cases.get("gallery.poststate.after", True)))
+        mutated = copy.deepcopy(candidate)
+        mutated["poststate"]["before"]["disk"].append("downloads/extra.jpg")
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(
+            ("poststate-disk", not cases.get("gallery.poststate.before", True)))
     elif suite == "webui":
         mutated = copy.deepcopy(candidate)
         mutated["index_markers"]["has_app"] = False
@@ -5721,6 +5754,73 @@ def compare_rpc_isolated(cases, oracle, candidate):
 RPC_CASE_IDS = [case["id"] for case in rpc_wire_cases()]
 
 
+# ---------------------------------------------------------------------------
+# M5 FD gallery differential: legal internal aliases, the approved
+# outside-referent denial delta and independent full poststates.
+# ---------------------------------------------------------------------------
+
+GALLERY_POSTSTATE_CASES = ["gallery.poststate.before", "gallery.poststate.after"]
+
+# The reference follows the outside literal, sees a genuinely absent referent
+# and serves the matching sibling ZIP entry; the product denies the outside
+# referent before any lookup or fallback. Both sides are pinned independently.
+GALLERY_DELTA_CASES = {
+    "delta.fd-outside-referent-denial": {
+        "oracle": {"status": 200, "mime": "image/jpeg",
+                   "bytes": "ZIP-OUTSIDE-ENTRY-BYTES"},
+        "candidate": {"status": 404, "bytes": None},
+    },
+}
+
+
+def _gallery_dirs(work):
+    """Disk dimension: relative tree plus exact link targets, roots normalized."""
+    prefix = str(work)
+    return [item.replace(prefix, "<ROOT>") for item in _dir_paths(work)]
+
+
+def _gallery_materialize(directory, spec, work):
+    """Create the alias fixtures both sides must share: subdirs, legal links
+    (relative, absolute, absolute-through-a-link, nested, parent-spelling and
+    an outside dangling literal) and a pre-built sibling ZIP with exact bytes."""
+    import os
+    import zipfile
+    root = str(work)
+    for subdir, files in spec.get("subdirs", {}).items():
+        full_dir = os.path.join(directory, subdir)
+        os.makedirs(full_dir, exist_ok=True)
+        for name, content in files.items():
+            with open(os.path.join(full_dir, name), "wb") as handle:
+                handle.write(content.encode("latin-1"))
+    for link in spec.get("symlinks", []):
+        target = link["target"].replace("{root}", root)
+        os.symlink(target, os.path.join(directory, link["name"]))
+    if "zip_entries" in spec:
+        with zipfile.ZipFile(directory + ".zip", "w", zipfile.ZIP_STORED) as archive:
+            for name, content in spec["zip_entries"].items():
+                archive.writestr(name, content.encode("latin-1"))
+
+
+def _gallery_poststate(app, work):
+    """Independent full poststate: task/session/queue/cookie/header/login/disk."""
+    tasks = {}
+    for guid, task in app._all_tasks.items():
+        tasks[guid] = {
+            "state": task.state,
+            "meta": {key: task.meta.get(key) for key in sorted(task.meta)},
+        }
+    return {
+        "tasks": tasks,
+        "session": {"has_login": app.has_login},
+        "queue": list(app.tasks.queue),
+        "cookies": sorted([list(item) for item in app.cookies.items()]),
+        "headers": [[name, value] for name, value in sorted(app.headers.items())],
+        "login": {"has_login": app.has_login,
+                  "cookie_header": app.headers.get("Cookie")},
+        "disk": _gallery_dirs(work),
+    }
+
+
 def oracle_gallery(upstream, request):
     import importlib
     core, task_module, const_module, defaults = _load_upstream(upstream)
@@ -5729,6 +5829,10 @@ def oracle_gallery(upstream, request):
     work.mkdir(parents=True, exist_ok=True)
     app = _rpc_build_app(
         core, task_module, const_module, defaults, work, request["tasks"])
+    for spec in request["tasks"]:
+        _gallery_materialize(
+            app._all_tasks[spec["guid"]].get_fpath(), spec, work)
+    before = _gallery_poststate(app, work)
     reads = []
     for query in request.get("reads", []):
         guid = query["guid"]
@@ -5835,13 +5939,31 @@ def oracle_gallery(upstream, request):
         except Exception as exc:
             archives.append({"guid": guid, "status": "bad_zip",
                              "class": type(exc).__name__})
-    return {"reads": reads, "thumbs": thumbs, "archives": archives}
+    for entry, query in zip(reads, request.get("reads", [])):
+        if query.get("case"):
+            entry["case"] = query["case"]
+    return {"reads": reads, "thumbs": thumbs, "archives": archives,
+            "poststate": {"before": before,
+                          "after": _gallery_poststate(app, work)}}
 
 
 def compare_gallery(cases, oracle, candidate):
     diffs = []
     for old, new in zip(oracle["reads"], candidate["reads"]):
-        key = f"gallery.read.{old['guid']}.{old['fid']}"
+        case_id = old.get("case")
+        if case_id in GALLERY_DELTA_CASES:
+            expected = GALLERY_DELTA_CASES[case_id]
+            old_ok = (old.get("status") == expected["oracle"]["status"]
+                      and old.get("mime") == expected["oracle"]["mime"]
+                      and old.get("bytes") == expected["oracle"]["bytes"])
+            new_ok = (new.get("status") == expected["candidate"]["status"]
+                      and new.get("bytes") == expected["candidate"]["bytes"])
+            cases[case_id] = old_ok and new_ok
+            if not cases[case_id]:
+                diffs.append(f"{case_id}: pinned delta mismatch "
+                             f"oracle={old} candidate={new}")
+            continue
+        key = case_id or f"gallery.read.{old['guid']}.{old['fid']}"
         if old.get("raised") or new.get("status") in (400,):
             # int("nope") paths: both sides refuse without touching disk.
             same = (old.get("raised") == "ValueError") == (new.get("status") == 400)
@@ -5931,6 +6053,38 @@ def compare_gallery(cases, oracle, candidate):
             cases[key] = True
         else:
             cases[key] = True
+    # A gallery read never changes the task/session/queue/cookie/header/login
+    # dimensions (the on-demand archive case legitimately publishes its own
+    # sibling ZIP on disk, which the disk comparison already covers). Check
+    # that independently on each side before comparing the two sides.
+    stable_fields = ("tasks", "session", "queue", "cookies", "headers", "login")
+    unstable = {}
+    for side, output in (("oracle", oracle), ("candidate", candidate)):
+        state = output.get("poststate") or {}
+        before = state.get("before") or {}
+        after = state.get("after") or {}
+        changed = [field for field in stable_fields
+                   if before.get(field) != after.get(field)]
+        unstable[side] = changed
+        if changed:
+            diffs.append(
+                f"gallery.poststate.{side}: a read changed {changed}")
+    unstable_any = any(unstable.values())
+    for phase in ("before", "after"):
+        key = f"gallery.poststate.{phase}"
+        old_state = (oracle.get("poststate") or {}).get(phase)
+        new_state = (candidate.get("poststate") or {}).get(phase)
+        if old_state == new_state and not unstable_any:
+            cases[key] = True
+            continue
+        differing = sorted(
+            field for field in set(old_state or {}) | set(new_state or {})
+            if (old_state or {}).get(field) != (new_state or {}).get(field))
+        diffs.append(
+            f"{key}: poststate differs in {differing}: "
+            + str([(field, (old_state or {}).get(field),
+                    (new_state or {}).get(field)) for field in differing]))
+        cases[key] = False
     return diffs
 
 
@@ -6020,6 +6174,48 @@ def gallery_request():
             "renamed": {},
         },
     ]
+    # Legal internal aliases: the reference and the product must serve the
+    # same exact bytes through every accepted spelling.
+    tasks.append({
+        "guid": "task-alias",
+        "url": "http://e-hentai.org/g/789/abcdef0123/",
+        "state": 10,
+        "meta": {"total": 8, "finished": 0, "title": "probe-alias"},
+        "files": {
+            "1.jpg": png,
+            "5.jpg": "RELATIVE-ALIAS-BYTES",
+            "11.jpg": "NESTED-RESET-BYTES",
+            "13.jpg": "PARENT-SPELLING-BYTES",
+        },
+        "subdirs": {"real": {"8.jpg": "INTERMEDIATE-BYTES"}},
+        "symlinks": [
+            {"name": "6.jpg", "target": "5.jpg"},
+            {"name": "7.jpg", "target": "{root}/downloads/probe-alias/5.jpg"},
+            {"name": "linkdir", "target": "real"},
+            {"name": "9.jpg",
+             "target": "{root}/downloads/probe-alias/linkdir/8.jpg"},
+            {"name": "10.jpg", "target": "{root}/downloads/probe-alias/11.jpg"},
+            {"name": "12.jpg", "target": "{root}/downloads/probe-alias/10.jpg"},
+            {"name": "14.jpg",
+             "target": "{root}/downloads/./probe-alias/13.jpg"},
+        ],
+        "renamed": {"1": "1.jpg", "6": "6.jpg", "7": "7.jpg", "9": "9.jpg",
+                    "12": "12.jpg", "14": "14.jpg"},
+    })
+    # Approved security delta: the literal referent is OUTSIDE the gallery and
+    # does not exist, while the sibling ZIP carries a matching entry.
+    tasks.append({
+        "guid": "task-outside",
+        "url": "http://e-hentai.org/g/790/abcdef0123/",
+        "state": 10,
+        "meta": {"total": 1, "finished": 0, "title": "probe-outside"},
+        "files": {},
+        "symlinks": [
+            {"name": "1.jpg", "target": "{root}/outside/absent.jpg"},
+        ],
+        "renamed": {"1": "1.jpg"},
+        "zip_entries": {"1.jpg": "ZIP-OUTSIDE-ENTRY-BYTES"},
+    })
     return {
         "tasks": tasks,
         "reads": [
@@ -6029,6 +6225,17 @@ def gallery_request():
             {"guid": "missing", "fid": "1"},
             {"guid": "task-zip", "fid": "2"},
             {"guid": "task-zip", "fid": "9"},
+            {"guid": "task-alias", "fid": "6", "case": "gallery.alias.relative"},
+            {"guid": "task-alias", "fid": "7",
+             "case": "gallery.alias.direct-absolute"},
+            {"guid": "task-alias", "fid": "9",
+             "case": "gallery.alias.absolute-intermediate"},
+            {"guid": "task-alias", "fid": "12",
+             "case": "gallery.alias.nested-reset"},
+            {"guid": "task-alias", "fid": "14",
+             "case": "gallery.alias.parent-spelling"},
+            {"guid": "task-outside", "fid": "1",
+             "case": "delta.fd-outside-referent-denial"},
         ],
         "thumbs": [
             {"guid": "task-wait", "fid": "1", "query": "w=4&h=4"},
@@ -6062,6 +6269,14 @@ GALLERY_CASE_IDS = [
     "gallery.archive.task-wait",
     "gallery.archive.task-zip",
     "gallery.archive.missing",
+    "gallery.alias.relative",
+    "gallery.alias.direct-absolute",
+    "gallery.alias.absolute-intermediate",
+    "gallery.alias.nested-reset",
+    "gallery.alias.parent-spelling",
+    "delta.fd-outside-referent-denial",
+    "gallery.poststate.before",
+    "gallery.poststate.after",
 ]
 WEBUI_CASE_IDS = ["webui.pack.files", "webui.pack.index"]
 

@@ -48,11 +48,12 @@ pub struct RenameError {
     pub message: String,
 }
 pub use file_ops::resolve_dir;
+pub use file_ops::{
+    ActivePrivateLog, GalleryGrant, OpenedEntry, PrivatePaths, boundary_path, normalize,
+    path_within,
+};
 #[cfg(test)]
 pub use file_ops::{DirectoryObservation, PrivatePolicy, observe_directory};
-pub use file_ops::{
-    GalleryGrant, OpenedEntry, PrivatePaths, boundary_path, normalize, path_within,
-};
 #[cfg(test)]
 pub(crate) use file_ops::{
     ObservationSwap, PreopenSwap, arm_observation_swap, arm_preopen_swap, run_observation_swap,

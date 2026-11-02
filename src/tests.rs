@@ -8935,6 +8935,142 @@ mod m4 {
             .await;
     }
 
+    /// M5 FD coverage (real M4 producer): a private persistence file hardlinked
+    /// as an ordinary gallery entry must make the REAL archive worker deny with
+    /// no public ZIP and no archive stage left behind; its worker record
+    /// retires and the same App then archives a legitimate task.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn archive_worker_denies_a_private_hardlink_and_then_the_same_app_reuses() {
+        fn archive_kwargs() -> serde_json::Map<String, serde_json::Value> {
+            let mut kwargs = serde_json::Map::new();
+            kwargs.insert("make_archive".to_string(), serde_json::json!(true));
+            kwargs
+        }
+        let root = tempfile::tempdir().unwrap();
+        let downloads = root.path().join("downloads");
+        let mut config = m4_config(root.path(), 1, 1);
+        config.make_archive = true;
+        let mut app = m4_app_guids(root.path(), config, &["guid0001", "guid0002"]);
+        app.cfg.dir = downloads.to_string_lossy().into_owned();
+        std::fs::create_dir_all(&downloads).unwrap();
+
+        // The task is added through the REAL App entry, so it shares the live
+        // private-path cell. The private file is hardlinked as a gallery entry.
+        let (code, denied_guid) = app
+            .add_task("http://e-hentai.org/g/123/abcdef0123/", archive_kwargs())
+            .expect("the real add_task entry");
+        assert_eq!(code, consts::ERR_NO_ERROR);
+        let denied_guid = denied_guid.expect("a real task guid");
+        let private = root.path().join(crate::config::CONFIG_FILE);
+        std::fs::write(&private, b"PRIVATE-CONFIG-BYTES").unwrap();
+        let denied_gallery = {
+            let task = app.task_mut(&denied_guid).unwrap();
+            task.state = consts::TASK_STATE_DOWNLOAD;
+            task.meta
+                .insert("title".into(), serde_json::json!("private-entry"));
+            task.meta.insert("total".into(), serde_json::json!(1));
+            task.meta.insert("finished".into(), serde_json::json!(1));
+            task.img_q = Some(VecDeque::new());
+            task.page_q = Some(VecDeque::new());
+            let gallery = task.get_fpath().unwrap();
+            std::fs::create_dir_all(&gallery).unwrap();
+            gallery
+        };
+        std::fs::hard_link(&private, denied_gallery.join("1.jpg")).unwrap();
+        let denied_zip = denied_gallery.with_extension("zip");
+
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let runtime = Runtime::new(app, Path::new(MANIFEST).to_path_buf());
+                let (run, handle) = runtime.spawn();
+                let deadline = std::time::Instant::now() + Duration::from_secs(15);
+                loop {
+                    let failed = handle.borrow_app(|app| {
+                        app.task(&denied_guid)
+                            .is_some_and(|task| task.state == consts::TASK_STATE_FAILED)
+                    });
+                    if failed {
+                        break;
+                    }
+                    if std::time::Instant::now() > deadline {
+                        panic!("the denied archive never failed: {:?}", handle.trace());
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                assert!(
+                    !denied_zip.exists(),
+                    "a private hardlink must never be published as a public archive"
+                );
+                let stages: Vec<String> = std::fs::read_dir(&downloads)
+                    .unwrap()
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .filter(|name| name.starts_with(".xehentai-archive-"))
+                    .collect();
+                assert!(
+                    stages.is_empty(),
+                    "no stage may survive a denial: {stages:?}"
+                );
+                assert!(
+                    handle.trace().iter().any(|event| {
+                        event.kind == "archive.failed"
+                            && event.detail.to_string().contains("reserved persistence")
+                    }),
+                    "the denial must come from the private-object gate: {:?}",
+                    handle.trace()
+                );
+
+                // Same App, later legitimate archive through the same worker.
+                let (code, legit_guid) = handle.borrow_app_mut(|app| {
+                    let (code, guid) = app
+                        .add_task("http://e-hentai.org/g/456/abcdef0123/", archive_kwargs())
+                        .expect("add a legitimate task");
+                    let guid = guid.expect("a real task guid");
+                    let task = app.task_mut(&guid).unwrap();
+                    task.state = consts::TASK_STATE_DOWNLOAD;
+                    task.meta
+                        .insert("title".into(), serde_json::json!("legit-entry"));
+                    task.meta.insert("total".into(), serde_json::json!(1));
+                    task.meta.insert("finished".into(), serde_json::json!(1));
+                    task.img_q = Some(VecDeque::new());
+                    task.page_q = Some(VecDeque::new());
+                    let gallery = task.get_fpath().unwrap();
+                    std::fs::create_dir_all(&gallery).unwrap();
+                    std::fs::write(gallery.join("1.jpg"), b"LEGIT-IMAGE-BYTES").unwrap();
+                    (code, guid)
+                });
+                assert_eq!(code, consts::ERR_NO_ERROR);
+                let legit_zip = downloads.join("legit-entry.zip");
+                let deadline = std::time::Instant::now() + Duration::from_secs(15);
+                loop {
+                    if legit_zip.exists() {
+                        break;
+                    }
+                    if std::time::Instant::now() > deadline {
+                        panic!(
+                            "the legitimate archive never appeared: {:?}",
+                            handle.trace()
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                assert_eq!(
+                    handle.borrow_app(|app| app.task(&legit_guid).unwrap().state),
+                    consts::TASK_STATE_FINISHED
+                );
+                let file = std::fs::File::open(&legit_zip).unwrap();
+                let mut zip = zip::ZipArchive::new(file).unwrap();
+                let mut entry = zip.by_name("1.jpg").unwrap();
+                let mut bytes = Vec::new();
+                std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
+                assert_eq!(bytes, b"LEGIT-IMAGE-BYTES");
+                handle.shutdown().await;
+                run.await.unwrap();
+            })
+            .await;
+    }
+
     #[tokio::test]
     async fn same_run_and_same_guid_reuse_reject_old_scan_and_file_publication() {
         let root = tempfile::tempdir().unwrap();
@@ -11159,6 +11295,59 @@ fn compat_rpc_app(root: &std::path::Path, inputs: &serde_json::Value) -> crate::
                 std::fs::write(dir.join(name), raw).unwrap();
             }
         }
+        // Differential alias fixtures: real subdirectories, legal symlinks and
+        // a pre-built sibling ZIP with exact bytes. `{root}` is this side's own
+        // work root, so the absolute aliases are legal everywhere.
+        if let Some(subdirs) = task_value
+            .get("subdirs")
+            .and_then(|value| value.as_object())
+        {
+            for (name, files) in subdirs {
+                let full = dir.join(name);
+                std::fs::create_dir_all(&full).unwrap();
+                if let Some(files) = files.as_object() {
+                    for (file, content) in files {
+                        let text = content.as_str().unwrap_or("");
+                        let raw: Vec<u8> = text.chars().map(|ch| u32::from(ch) as u8).collect();
+                        std::fs::write(full.join(file), raw).unwrap();
+                    }
+                }
+            }
+        }
+        #[cfg(unix)]
+        if let Some(links) = task_value
+            .get("symlinks")
+            .and_then(|value| value.as_array())
+        {
+            let side_root = root.to_string_lossy();
+            for link in links {
+                let target = link["target"]
+                    .as_str()
+                    .unwrap_or("")
+                    .replace("{root}", &side_root);
+                let name = link["name"].as_str().unwrap_or("");
+                std::os::unix::fs::symlink(target, dir.join(name)).unwrap();
+            }
+        }
+        if let Some(entries) = task_value
+            .get("zip_entries")
+            .and_then(|value| value.as_object())
+        {
+            use std::io::Write as _;
+            let mut zip_name = dir.file_name().unwrap().to_os_string();
+            zip_name.push(".zip");
+            let file = std::fs::File::create(dir.with_file_name(zip_name)).unwrap();
+            let mut writer = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            for (name, content) in entries {
+                let text = content.as_str().unwrap_or("");
+                let raw: Vec<u8> = text.chars().map(|ch| u32::from(ch) as u8).collect();
+                writer.start_file(name, options).unwrap();
+                writer.write_all(&raw).unwrap();
+            }
+            writer.finish().unwrap();
+        }
         if let Some(renamed) = task_value
             .get("renamed")
             .and_then(|value| value.as_object())
@@ -11516,10 +11705,103 @@ fn compat_rpc(inputs: &serde_json::Value) -> serde_json::Value {
     })
 }
 
+fn compat_gallery_dirs(root: &std::path::Path) -> Vec<String> {
+    const EXCLUDED: [&str; 4] = ["h.json", "eh.log", "webui.gz", "webui-cache.json"];
+    const TOP_EXCLUDED: [&str; 3] = ["home", "cache", "tmp"];
+    fn walk(root: &std::path::Path, dir: &std::path::Path, top: bool, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut paths: Vec<_> = entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .collect();
+        paths.sort();
+        for path in paths {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let rel = path
+                .strip_prefix(root)
+                .map(|part| part.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            if top && TOP_EXCLUDED.contains(&name.as_str()) {
+                continue;
+            }
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() {
+                let target = std::fs::read_link(&path)
+                    .map(|target| target.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                out.push(format!("{rel} -> {target}"));
+            } else if metadata.is_dir() {
+                out.push(format!("{rel}/"));
+                walk(root, &path, false, out);
+            } else if !EXCLUDED.contains(&name.as_str()) {
+                out.push(rel);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, true, &mut out);
+    out.sort();
+    let prefix = root.to_string_lossy().into_owned();
+    out.into_iter()
+        .map(|item| item.replace(&prefix, "<ROOT>"))
+        .collect()
+}
+
+/// Independent full poststate: task/session/queue/cookie/header/login/disk.
+fn compat_gallery_poststate(
+    app: &crate::core::App,
+    root: &std::path::Path,
+    inputs: &serde_json::Value,
+) -> serde_json::Value {
+    let mut tasks = serde_json::Map::new();
+    for spec in inputs["tasks"].as_array().cloned().unwrap_or_default() {
+        let guid = spec["guid"].as_str().unwrap_or("");
+        if let Some(task) = app.task(guid) {
+            tasks.insert(
+                guid.to_string(),
+                serde_json::json!({"state": task.state, "meta": task.meta}),
+            );
+        }
+    }
+    let mut headers: Vec<(String, Option<String>)> = app
+        .headers()
+        .iter()
+        .map(|header| (header.name.clone(), header.value.clone()))
+        .collect();
+    headers.sort_by(|left, right| left.0.cmp(&right.0));
+    let headers: Vec<serde_json::Value> = headers
+        .into_iter()
+        .map(|(name, value)| serde_json::json!([name, value]))
+        .collect();
+    let mut cookies: Vec<(String, String)> = app.cookies().to_vec();
+    cookies.sort_by(|left, right| left.0.cmp(&right.0));
+    let cookies: Vec<serde_json::Value> = cookies
+        .into_iter()
+        .map(|(name, value)| serde_json::json!([name, value]))
+        .collect();
+    serde_json::json!({
+        "tasks": tasks,
+        "session": {"has_login": app.has_login()},
+        "queue": app.queue().iter().cloned().collect::<Vec<String>>(),
+        "cookies": cookies,
+        "headers": headers,
+        "login": {"has_login": app.has_login(), "cookie_header": app.cookie_header()},
+        "disk": compat_gallery_dirs(root),
+    })
+}
+
 fn compat_gallery(inputs: &serde_json::Value) -> serde_json::Value {
     use crate::rpc::{read_archive, read_gallery_file, thumbnail};
     let root = std::path::PathBuf::from(inputs["root"].as_str().expect("root"));
     let app = compat_rpc_app(&root, inputs);
+    let before = compat_gallery_poststate(&app, &root, inputs);
     let mut reads = Vec::new();
     for query in inputs["reads"].as_array().cloned().unwrap_or_default() {
         let guid = query["guid"].as_str().unwrap_or("");
@@ -11618,7 +11900,21 @@ fn compat_gallery(inputs: &serde_json::Value) -> serde_json::Value {
             }
         }
     }
-    serde_json::json!({"reads": reads, "thumbs": thumbs, "archives": archives})
+    for (entry, query) in reads
+        .iter_mut()
+        .zip(inputs["reads"].as_array().cloned().unwrap_or_default())
+    {
+        if let Some(case_id) = query.get("case").and_then(|value| value.as_str()) {
+            entry["case"] = serde_json::Value::String(case_id.to_string());
+        }
+    }
+    let after = compat_gallery_poststate(&app, &root, inputs);
+    serde_json::json!({
+        "reads": reads,
+        "thumbs": thumbs,
+        "archives": archives,
+        "poststate": {"before": before, "after": after},
+    })
 }
 
 fn compat_webui(_inputs: &serde_json::Value) -> serde_json::Value {

@@ -4789,11 +4789,127 @@
       "delta": null
     },
     {
+      "id": "gallery.alias.relative",
+      "source": "xeHentai/rpc.py _get_image_path (os.path.join + open follows a relative link)",
+      "target": "src/task/file_ops.rs GalleryGrant::open_leaf + cap-primitives resolver",
+      "suite": "gallery",
+      "inputs": [
+        "gallery request task-alias (title probe-alias): 5.jpg = RELATIVE-ALIAS-BYTES, 6.jpg is a symlink to the relative literal 5.jpg, renamed {6: 6.jpg}",
+        "read get_image_path(guid=task-alias, fid=6) in both the oracle and the candidate work roots",
+        "observed round-1 and round-2: oracle and candidate both status 200, mime image/jpeg, exact bytes RELATIVE-ALIAS-BYTES"
+      ],
+      "assertions": [
+        "a legal relative alias inside the gallery serves the exact nonempty target bytes on both sides; the poststate is unchanged"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "gallery.alias.direct-absolute",
+      "source": "xeHentai/rpc.py _get_image_path (open follows an absolute link)",
+      "target": "src/task/file_ops.rs GalleryGrant::open_leaf + accepted Linux absolute-prefix resolver",
+      "suite": "gallery",
+      "inputs": [
+        "gallery request task-alias: 7.jpg is a symlink to the direct absolute literal {root}/downloads/probe-alias/5.jpg, renamed {7: 7.jpg}",
+        "read get_image_path(guid=task-alias, fid=7) with {root} replaced by each side's own work root",
+        "observed round-1 and round-2: both sides status 200, mime image/jpeg, exact bytes RELATIVE-ALIAS-BYTES"
+      ],
+      "assertions": [
+        "a direct absolute alias that stays inside the captured gallery serves the exact bytes on both sides"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "gallery.alias.absolute-intermediate",
+      "source": "xeHentai/rpc.py _get_image_path (absolute link traversing an internal symlinked directory)",
+      "target": "src/task/file_ops.rs GalleryGrant::open_leaf + accepted Linux absolute-prefix resolver",
+      "suite": "gallery",
+      "inputs": [
+        "gallery request task-alias: real/8.jpg = INTERMEDIATE-BYTES, linkdir is a symlink to real, 9.jpg is a symlink to {root}/downloads/probe-alias/linkdir/8.jpg",
+        "read get_image_path(guid=task-alias, fid=9)",
+        "observed round-1 and round-2: both sides status 200, mime image/jpeg, exact bytes INTERMEDIATE-BYTES"
+      ],
+      "assertions": [
+        "an absolute alias whose intermediate component is itself an internal symlink serves the exact bytes"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "gallery.alias.nested-reset",
+      "source": "xeHentai/rpc.py _get_image_path (link whose target is another link inside the gallery)",
+      "target": "src/task/file_ops.rs GalleryGrant::open_leaf + accepted Linux absolute-prefix resolver",
+      "suite": "gallery",
+      "inputs": [
+        "gallery request task-alias: 11.jpg = NESTED-RESET-BYTES, 10.jpg is a symlink to {root}/downloads/probe-alias/11.jpg, 12.jpg is a symlink to {root}/downloads/probe-alias/10.jpg",
+        "read get_image_path(guid=task-alias, fid=12)",
+        "observed round-1 and round-2: both sides status 200, mime image/jpeg, exact bytes NESTED-RESET-BYTES"
+      ],
+      "assertions": [
+        "a nested internal link (two hops, absolute spelling) serves the exact bytes after the prefix reset"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "gallery.alias.parent-spelling",
+      "source": "xeHentai/rpc.py _get_image_path (link target with a dot component)",
+      "target": "src/task/file_ops.rs GalleryGrant::open_leaf + accepted Linux absolute-prefix resolver",
+      "suite": "gallery",
+      "inputs": [
+        "gallery request task-alias: 13.jpg = PARENT-SPELLING-BYTES, 14.jpg is a symlink to {root}/downloads/./probe-alias/13.jpg",
+        "read get_image_path(guid=task-alias, fid=14)",
+        "observed round-1 and round-2: both sides status 200, mime image/jpeg, exact bytes PARENT-SPELLING-BYTES"
+      ],
+      "assertions": [
+        "an absolute alias carrying a dot component still resolves to the captured gallery and serves the exact bytes"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "gallery.poststate.before",
+      "source": "xeHentai/core.py + xeHentai/rpc.py observable state before the gallery reads",
+      "target": "src/tests.rs compat_gallery_poststate / src/core/mod.rs read-only accessors",
+      "suite": "gallery",
+      "inputs": [
+        "full state captured after the fixture build and before any read: per-task state+metadata (task-wait, task-zip, task-done, task-alias, task-outside), session has_login, queue order, cookies, headers, login cookie header, and the disk tree with exact link targets normalized to <ROOT>",
+        "observed round-1 and round-2: oracle and candidate structures are equal field by field"
+      ],
+      "assertions": [
+        "the before poststate is compared independently of any read outcome; a changed task state or an extra disk entry is detected by the comparator self-check mutations poststate-task/poststate-disk"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
+      "id": "gallery.poststate.after",
+      "source": "xeHentai/core.py + xeHentai/rpc.py observable state after the gallery reads",
+      "target": "src/tests.rs compat_gallery_poststate / src/core/mod.rs read-only accessors",
+      "suite": "gallery",
+      "inputs": [
+        "full state captured after the reads/thumbs/archive cases: per-task state+metadata, session has_login, queue order, cookies, headers, login cookie header, and the disk tree with exact link targets normalized to <ROOT>",
+        "observed round-1 and round-2: oracle and candidate structures are equal field by field, including the unchanged dimensions"
+      ],
+      "assertions": [
+        "the after poststate is compared independently of the outcomes; task-state and disk mutations are detected by the comparator self-check"
+      ],
+      "status": "implemented",
+      "delta": null
+    },
+    {
       "id": "delta.fd-outside-referent-denial",
       "source": "approved security hardening: M5 FD product read boundary (task-root FD authority)",
       "target": "src/task/file_ops.rs GalleryGrant::open_leaf",
       "suite": "gallery",
-      "inputs": [],
+      "inputs": [
+        "gallery request task-outside (title probe-outside): entry 1.jpg is a symlink to {root}/outside/absent.jpg, a literal outside the gallery whose referent does not exist; the sibling probe-outside.zip carries entry 1.jpg = ZIP-OUTSIDE-ENTRY-BYTES",
+        "read get_image_path(guid=task-outside, fid=1) against the real App/Task fixture under each side's own work root",
+        "observed oracle round-1 and round-2: status 200, mime image/jpeg, bytes ZIP-OUTSIDE-ENTRY-BYTES (reference follow-open reports the outside referent absent and serves the sibling ZIP entry)",
+        "observed candidate round-1 and round-2: status 404, no bytes and no ZIP fallback (the outside literal is denied before any lookup or fallback)",
+        "observed poststate before/after in both rounds: task states/metadata, session has_login, queue order, cookies, headers, login cookie header and the normalized disk tree are unchanged by the denial"
+      ],
       "assertions": [
         "a mapped gallery leaf that links to a literal path outside the gallery is denied before any lookup or fallback, even when the outside referent does not exist",
         "expected outcome: HTTP 404 with an empty body, zero sibling-ZIP fallback, zero outside payload opens",

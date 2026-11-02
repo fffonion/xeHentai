@@ -15,9 +15,9 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use regex::Regex;
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use cap_primitives::fs as capfs;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use cap_primitives::fs::OpenOptionsExt as _;
 
 use super::{FidKey, RenameError, Task, TaskError};
@@ -122,7 +122,7 @@ impl TaskFiles {
     /// spelling under the fixed authorized root. Both directory observations
     /// are taken here, at the snapshot boundary, before any permit or heavy
     /// work.
-    pub fn grant(&self, component: &str, path: &Path) -> GalleryGrant {
+    pub(super) fn grant(&self, component: &str, path: &Path) -> GalleryGrant {
         GalleryGrant::new(
             self.root.clone(),
             OsString::from(component),
@@ -349,8 +349,8 @@ pub type DirIdentity = (u64, u64);
 /// `Present` carries the exact identity the path had when it was observed,
 /// `Missing` is a genuine `NotFound`, and `Unavailable` is every other
 /// outcome: an existing non-directory (FIFO, socket, regular file, device), a
-/// permission or probe error, or a platform without the confined Unix
-/// backend. Only `Present` can authorize an open, and that open must still
+/// permission or probe error, or a target outside the confined Linux backend.
+/// Only `Present` can authorize an open, and that open must still
 /// match the recorded identity. A `Missing`/`Unavailable` observation can
 /// never be promoted to `Present`, not even after a wait or a later
 /// filesystem change inside the same request.
@@ -395,9 +395,9 @@ pub fn observe_directory(path: &Path) -> DirectoryObservation {
 }
 
 /// Typed denial for a path that was observed but cannot carry directory
-/// authority for this request. Shared by the confined Unix backend and the
-/// non-Unix `Unsupported` entry so both report the same denial class instead
-/// of a missing leaf.
+/// authority for this request. Shared by the confined Linux backend and the
+/// non-Linux `Unsupported` surface so both report the same denial class
+/// instead of a missing leaf.
 fn unavailable_denial(path: &Path, kind: std::io::ErrorKind) -> TaskError {
     TaskError::UnsafePath {
         path: path.to_path_buf(),
@@ -455,18 +455,80 @@ fn push_unique_id(ids: &mut Vec<FileId>, id: FileId) {
     }
 }
 
+/// The identities one private spelling protects.
+///
+/// `target` is the object the private consumer actually opens:
+/// `config::load` and `Logger::set_logfile` follow a legal private symlink, so
+/// the target — not the link node — is the private object. `link` keeps the
+/// link node's own identity as an extra (a descriptor can never be a symlink,
+/// so it is never a substitute for the followed target).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PrivateObject {
+    target: FileId,
+    link: Option<FileId>,
+}
+
+impl PrivateObject {
+    fn covers(&self, id: FileId) -> bool {
+        self.target == id || self.link == Some(id)
+    }
+
+    fn ids(&self) -> impl Iterator<Item = FileId> {
+        [Some(self.target), self.link].into_iter().flatten()
+    }
+}
+
+/// Resolve one private spelling to the objects it protects.
+///
+/// Only genuine absence (the spelling itself does not exist) is `Ok(None)`.
+/// A dangling link, a link loop, a permission failure or any other probe error
+/// is an error, so the policy fails closed instead of silently forgetting a
+/// private object.
 #[cfg(unix)]
-fn observe_identity(path: &Path) -> Result<FileId, std::io::ErrorKind> {
+fn observe_identity(path: &Path) -> Result<Option<PrivateObject>, std::io::ErrorKind> {
     use std::os::unix::fs::MetadataExt;
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => Ok((metadata.dev(), metadata.ino())),
+    let link = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.kind()),
+    };
+    let link_id = (link.dev(), link.ino());
+    if !link.file_type().is_symlink() {
+        return Ok(Some(PrivateObject {
+            target: link_id,
+            link: None,
+        }));
+    }
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(Some(PrivateObject {
+            target: (metadata.dev(), metadata.ino()),
+            link: Some(link_id),
+        })),
         Err(error) => Err(error.kind()),
     }
 }
 
 #[cfg(not(unix))]
-fn observe_identity(_path: &Path) -> Result<FileId, std::io::ErrorKind> {
+fn observe_identity(_path: &Path) -> Result<Option<PrivateObject>, std::io::ErrorKind> {
     Err(std::io::ErrorKind::Unsupported)
+}
+
+/// The file the application's logger actually holds open, published into the
+/// bounded App private-policy cell.
+///
+/// The held descriptor keeps receiving log records even after its pathname
+/// moves, so the inode it points at is live private state that no current
+/// spelling has to name. One bounded current value only: no history, no
+/// descriptor registry and no logger lifecycle change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActivePrivateLog {
+    /// No log file is held (nothing to protect).
+    None,
+    /// The identity of the descriptor the logger holds right now.
+    Held(FileId),
+    /// The held file's metadata could not be read. The policy fails closed
+    /// instead of inventing or forgetting an identity.
+    Unobservable,
 }
 
 /// This application's current private persistence spellings, shared by every
@@ -476,45 +538,70 @@ fn observe_identity(_path: &Path) -> Result<FileId, std::io::ErrorKind> {
 /// file, `config.rss`, the legacy `config.py`, the resolved `log_path` and the
 /// legacy cookie file. `set_config` replaces it BEFORE the logger is reopened,
 /// so a name that changes at runtime is protected from the moment it becomes
-/// private, while an older snapshot keeps its own captured names.
+/// private, while an older snapshot keeps its own captured names. The single
+/// [`ActivePrivateLog`] value covers the log file the logger holds open across
+/// such a rename.
 #[derive(Debug)]
 pub struct PrivatePaths {
     spellings: RwLock<Vec<PathBuf>>,
+    active_log: RwLock<ActivePrivateLog>,
 }
 
 impl PrivatePaths {
-    /// Build the live cell from the exact spellings this App owns today.
-    pub fn new(mut spellings: Vec<PathBuf>) -> Arc<Self> {
+    /// Build the cell from a fixed, nonempty spelling set. Only the fixed
+    /// App/base constructors below reach this: there is no generic empty-list
+    /// production policy.
+    fn from_fixed(mut spellings: Vec<PathBuf>) -> Arc<Self> {
         dedupe_paths(&mut spellings);
         Arc::new(Self {
             spellings: RwLock::new(spellings),
+            active_log: RwLock::new(ActivePrivateLog::None),
         })
     }
 
     /// The standalone (non-App) base policy: the fixed persistence names the
-    /// reference resolves against its configuration base. Deliberately
-    /// NONEMPTY — there is no empty production policy and no unchecked empty
-    /// constructor.
+    /// reference resolves against its configuration base.
     pub fn for_base(base: &Path) -> Arc<Self> {
-        Self::new(vec![
-            base.join(crate::core::SESSION_FILE),
-            base.join(crate::config::CONFIG_FILE),
-            base.join(crate::config::LEGACY_CONFIG_FILE),
-            // `Config::default().log_path` (`eh.log`), resolved against base.
-            base.join("eh.log"),
-            base.join(crate::core::LEGACY_COOKIE_FILE),
-        ])
+        Self::from_fixed(base_spellings(base))
     }
 
-    /// Replace the live set. Called before a logger reopen or any other
-    /// private-file creation, and before the corresponding borrow ends.
-    pub fn replace(&self, mut spellings: Vec<PathBuf>) {
+    /// The App policy: the same fixed names plus the resolved `log_path` and
+    /// the App's real cookie-file location. Built from the actual configuration
+    /// inputs, never from an arbitrary caller-supplied list.
+    pub fn for_app(base: &Path, filepath: &Path, log_path: &str) -> Arc<Self> {
+        Self::from_fixed(app_spellings(base, filepath, log_path))
+    }
+
+    /// Replace the live set from the same fixed App inputs. Called before a
+    /// logger reopen or any other private-file creation.
+    pub fn replace_for_app(&self, base: &Path, filepath: &Path, log_path: &str) {
+        let mut spellings = app_spellings(base, filepath, log_path);
         dedupe_paths(&mut spellings);
         let mut current = self
             .spellings
             .write()
             .unwrap_or_else(|error| error.into_inner());
         *current = spellings;
+    }
+
+    /// Publish the log file the logger actually holds. Called at App
+    /// initialization and after every successful reopen, before the first
+    /// private log write; the previous value stays published while the name
+    /// moves and the reopen is still in flight.
+    pub fn publish_active_log(&self, active: ActivePrivateLog) {
+        let mut current = self
+            .active_log
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        *current = active;
+    }
+
+    /// The single bounded current held-log state.
+    pub fn active_log(&self) -> ActivePrivateLog {
+        *self
+            .active_log
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
     }
 
     /// A bounded clone of the current spellings. The lock is released before
@@ -527,14 +614,47 @@ impl PrivatePaths {
     }
 }
 
+/// The five fixed base persistence spellings the reference resolves against
+/// its configuration base.
+fn base_spellings(base: &Path) -> Vec<PathBuf> {
+    vec![
+        base.join(crate::core::SESSION_FILE),
+        base.join(crate::config::CONFIG_FILE),
+        base.join(crate::config::LEGACY_CONFIG_FILE),
+        // `Config::default().log_path` (`eh.log`), resolved against base.
+        base.join("eh.log"),
+        base.join(crate::core::LEGACY_COOKIE_FILE),
+    ]
+}
+
+/// The same fixed names with the actual configured log path and the App's
+/// cookie-file location.
+fn app_spellings(base: &Path, filepath: &Path, log_path: &str) -> Vec<PathBuf> {
+    let log_path = Path::new(log_path);
+    let log_path = if log_path.is_absolute() {
+        log_path.to_path_buf()
+    } else {
+        base.join(log_path)
+    };
+    vec![
+        base.join(crate::core::SESSION_FILE),
+        base.join(crate::config::CONFIG_FILE),
+        base.join(crate::config::LEGACY_CONFIG_FILE),
+        log_path,
+        filepath.join(crate::core::LEGACY_COOKIE_FILE),
+    ]
+}
+
 /// The private-path policy frozen into one read snapshot.
 ///
-/// It keeps three things: the names captured at the snapshot boundary, the
-/// private identities those names had at that moment, and a handle to the
-/// live current names. A gate therefore denies both an OLD private inode that
+/// It keeps four things: the names captured at the snapshot boundary, the
+/// private identities those names had at that moment, the log file the logger
+/// held open at that moment, and a handle to the live current names plus the
+/// currently held log file. A gate therefore denies an OLD private inode that
 /// was hardlinked into the gallery after its private pathname was atomically
-/// replaced (captured identity) and the NEW inode that the captured or current
-/// spelling now names (fresh resolution at the returned descriptor).
+/// replaced (captured identity), the NEW inode that a captured or current
+/// spelling now names (fresh resolution at the returned descriptor), and the
+/// inode the live logger keeps writing even when no spelling names it any more.
 ///
 /// Metadata capture is ordinary filesystem I/O, exactly like the `6a`
 /// directory observations: it is not a pure or latency-free operation. Only a
@@ -544,20 +664,27 @@ impl PrivatePaths {
 pub struct PrivatePolicy {
     captured: Vec<PathBuf>,
     captured_ids: Vec<FileId>,
+    captured_active_log: ActivePrivateLog,
     current: Arc<PrivatePaths>,
     frozen: Option<std::io::ErrorKind>,
 }
 
 impl PrivatePolicy {
-    /// Freeze the current spellings and the identities they have right now.
+    /// Freeze the current spellings, the identities they have right now and
+    /// the log file the logger actually holds.
     pub fn freeze(current: Arc<PrivatePaths>) -> Self {
         let captured = current.spellings();
+        let captured_active_log = current.active_log();
         let mut captured_ids = Vec::new();
         let mut frozen = None;
         for path in &captured {
             match observe_identity(path) {
-                Ok(id) => push_unique_id(&mut captured_ids, id),
-                Err(std::io::ErrorKind::NotFound) => {}
+                Ok(Some(object)) => {
+                    for id in object.ids() {
+                        push_unique_id(&mut captured_ids, id);
+                    }
+                }
+                Ok(None) => {}
                 Err(kind) => {
                     if frozen.is_none() {
                         frozen = Some(kind);
@@ -568,6 +695,7 @@ impl PrivatePolicy {
         Self {
             captured,
             captured_ids,
+            captured_active_log,
             current,
             frozen,
         }
@@ -576,14 +704,29 @@ impl PrivatePolicy {
     /// Deny a descriptor identity that is private persistence.
     ///
     /// Runs at every returned-FD gate, after the descriptor is open and before
-    /// any payload byte is read. The current-name clone happens under a short
-    /// lock that is released BEFORE the fresh metadata probes.
+    /// any payload byte is read. The current-name/held-file clone happens under
+    /// a short lock that is released BEFORE the fresh metadata probes.
     pub fn deny(&self, id: FileId, path: &Path) -> Result<(), TaskError> {
         if self.frozen.is_some() {
             return Err(TaskError::UnsafePath {
                 path: path.to_path_buf(),
                 reason: "private persistence identities could not be observed",
             });
+        }
+        match self.captured_active_log {
+            ActivePrivateLog::Unobservable => {
+                return Err(TaskError::UnsafePath {
+                    path: path.to_path_buf(),
+                    reason: "the held log file could not be identified",
+                });
+            }
+            ActivePrivateLog::Held(held) if held == id => {
+                return Err(TaskError::UnsafePath {
+                    path: path.to_path_buf(),
+                    reason: "target is the live log file",
+                });
+            }
+            _ => {}
         }
         if self.captured_ids.contains(&id) {
             return Err(TaskError::UnsafePath {
@@ -596,14 +739,13 @@ impl PrivatePolicy {
         dedupe_paths(&mut names);
         for name in &names {
             match observe_identity(name) {
-                Ok(found) if found == id => {
+                Ok(Some(found)) if found.covers(id) => {
                     return Err(TaskError::UnsafePath {
                         path: path.to_path_buf(),
                         reason: "target is reserved persistence",
                     });
                 }
                 Ok(_) => {}
-                Err(std::io::ErrorKind::NotFound) => {}
                 Err(_) => {
                     return Err(TaskError::UnsafePath {
                         path: path.to_path_buf(),
@@ -612,11 +754,21 @@ impl PrivatePolicy {
                 }
             }
         }
-        Ok(())
+        match self.current.active_log() {
+            ActivePrivateLog::Held(held) if held == id => Err(TaskError::UnsafePath {
+                path: path.to_path_buf(),
+                reason: "target is the live log file",
+            }),
+            ActivePrivateLog::Unobservable => Err(TaskError::UnsafePath {
+                path: path.to_path_buf(),
+                reason: "the held log file could not be identified",
+            }),
+            ActivePrivateLog::None | ActivePrivateLog::Held(_) => Ok(()),
+        }
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[derive(Clone, Debug)]
 /// Frozen read authority for exactly one gallery.
 ///
@@ -633,9 +785,12 @@ pub struct GalleryGrant {
     private: PrivatePolicy,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl GalleryGrant {
-    pub fn new(
+    /// Sealed to the owning task module: a grant is only minted by
+    /// [`TaskFiles::grant`] from the fixed authorized root, the validated
+    /// single gallery component and the frozen observations.
+    pub(super) fn new(
         root: PathBuf,
         gallery: OsString,
         root_obs: DirectoryObservation,
@@ -846,7 +1001,7 @@ impl GalleryGrant {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 /// The captured descriptors behind one [`GalleryGrant`].
 struct Rooted {
     parent: File,
@@ -854,7 +1009,7 @@ struct Rooted {
     gallery_spelling: PathBuf,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 /// A captured gallery directory for descriptor-relative enumeration.
 pub struct CapturedGalleryDir {
     dir: File,
@@ -862,14 +1017,14 @@ pub struct CapturedGalleryDir {
     private: PrivatePolicy,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 /// What one archive entry descriptor turned out to be.
 pub enum OpenedEntry {
     Directory,
     File(File),
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl CapturedGalleryDir {
     /// Entry names as raw `OsString` bytes, sorted bytewise. `.`/`..` are
     /// filtered by the resolver.
@@ -969,7 +1124,7 @@ fn check_leaf(leaf: &OsStr) -> Result<(), TaskError> {
 /// Read-only, non-blocking open options for every payload descriptor. O_NONBLOCK
 /// only exists to keep a FIFO from stalling the open; it is cleared from the
 /// returned descriptor after the regular-file and private-identity verdicts.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn leaf_options() -> capfs::OpenOptions {
     let mut options = capfs::OpenOptions::new();
     options
@@ -978,15 +1133,8 @@ fn leaf_options() -> capfs::OpenOptions {
     options
 }
 
-#[cfg(not(unix))]
-fn leaf_options() -> capfs::OpenOptions {
-    let mut options = capfs::OpenOptions::new();
-    options.read(true);
-    options
-}
-
 /// Identity and regularity of an opened descriptor, taken from that descriptor.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn descriptor_verdict(file: &File, path: &Path) -> Result<(FileId, bool), TaskError> {
     use std::os::unix::fs::MetadataExt;
     let metadata = file.metadata().map_err(|source| TaskError::Io {
@@ -1000,12 +1148,7 @@ fn descriptor_verdict(file: &File, path: &Path) -> Result<(FileId, bool), TaskEr
     ))
 }
 
-#[cfg(not(unix))]
-fn descriptor_verdict(_file: &File, path: &Path) -> Result<(FileId, bool), TaskError> {
-    Err(unavailable_denial(path, std::io::ErrorKind::Unsupported))
-}
-
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn descriptor_identity(file: &File, path: &Path) -> Result<FileId, TaskError> {
     use std::os::unix::fs::MetadataExt;
     let metadata = file.metadata().map_err(|source| TaskError::Io {
@@ -1015,14 +1158,9 @@ fn descriptor_identity(file: &File, path: &Path) -> Result<FileId, TaskError> {
     Ok((metadata.dev(), metadata.ino()))
 }
 
-#[cfg(not(unix))]
-fn descriptor_identity(_file: &File, path: &Path) -> Result<FileId, TaskError> {
-    Err(unavailable_denial(path, std::io::ErrorKind::Unsupported))
-}
-
 /// Clear `O_NONBLOCK` (set only to avoid hangs while opening) so the
 /// returned file has ordinary blocking semantics for the streaming reader.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn clear_nonblock(file: File, path: &Path) -> Result<File, TaskError> {
     rustix::fs::fcntl_setfl(&file, rustix::fs::OFlags::empty()).map_err(|error| TaskError::Io {
         path: path.to_path_buf(),
@@ -1031,12 +1169,7 @@ fn clear_nonblock(file: File, path: &Path) -> Result<File, TaskError> {
     Ok(file)
 }
 
-#[cfg(not(unix))]
-fn clear_nonblock(file: File, _path: &Path) -> Result<File, TaskError> {
-    Ok(file)
-}
-
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 /// Diagnosis for a denied gallery leaf. The variant is a label; the contract is
 /// "denied, no bytes, no fallback".
 fn leaf_denial_reason(error: &std::io::Error) -> &'static str {
@@ -1057,7 +1190,7 @@ fn leaf_denial_reason(error: &std::io::Error) -> &'static str {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn root_denial_reason(error: &std::io::Error) -> &'static str {
     match error.raw_os_error() {
         Some(code) if code == rustix_errno(rustix::io::Errno::LOOP) => {
@@ -1067,7 +1200,7 @@ fn root_denial_reason(error: &std::io::Error) -> &'static str {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn capture_denial_reason(error: &std::io::Error) -> &'static str {
     match error.raw_os_error() {
         Some(code) if code == rustix_errno(rustix::io::Errno::NOTDIR) => {
@@ -1078,24 +1211,20 @@ fn capture_denial_reason(error: &std::io::Error) -> &'static str {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn rustix_errno(errno: rustix::io::Errno) -> i32 {
     errno.raw_os_error()
 }
 
-#[cfg(not(unix))]
-fn rustix_errno(_errno: u32) -> i32 {
-    0
-}
-
 // ---------------------------------------------------------------------------
-// Non-Unix surface: every payload read is an explicit `Unsupported` denial
+// Non-Linux surface: every payload read is an explicit `Unsupported` denial
 // BEFORE any ambient open. There is no portable fallback, no ambient re-open
 // and no forged cross-platform PASS; the full non-Linux functional port stays
-// an M8 item.
+// an M8 item. Unix targets other than Linux take this surface too, because the
+// accepted resolver's absolute-prefix entry is Linux-only.
 // ---------------------------------------------------------------------------
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct GalleryGrant {
@@ -1106,9 +1235,9 @@ pub struct GalleryGrant {
     private: PrivatePolicy,
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 impl GalleryGrant {
-    pub fn new(
+    pub(super) fn new(
         root: PathBuf,
         gallery: OsString,
         root_obs: DirectoryObservation,
@@ -1161,7 +1290,7 @@ impl GalleryGrant {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 #[allow(dead_code)]
 pub struct CapturedGalleryDir {
     dir: File,
@@ -1169,14 +1298,14 @@ pub struct CapturedGalleryDir {
     private: PrivatePolicy,
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 #[allow(dead_code)]
 pub enum OpenedEntry {
     Directory,
     File(File),
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 impl CapturedGalleryDir {
     pub fn names(&self) -> Result<Vec<OsString>, TaskError> {
         Err(unavailable_denial(
@@ -1860,4 +1989,60 @@ fn python_splitext_path(path: &Path) -> (PathBuf, OsString) {
     let text = path.to_string_lossy();
     let (base, ext) = python_splitext(&text);
     (PathBuf::from(base), OsString::from(ext))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An `Unavailable` observation must deny every entry point instead of
+    /// opening, enumerating or granting the sibling archive. The grant can only
+    /// be built from this module, because its mint is sealed to the task owner.
+    #[test]
+    fn unavailable_observations_deny_every_entry_point() {
+        let root = PathBuf::from("/definitely/absent-download-root");
+        let grant = GalleryGrant::new(
+            root.clone(),
+            OsString::from("gallery-title"),
+            DirectoryObservation::Unavailable(std::io::ErrorKind::Unsupported),
+            DirectoryObservation::Unavailable(std::io::ErrorKind::Unsupported),
+            PrivatePolicy::freeze(PrivatePaths::for_base(&root)),
+        );
+        let error = grant
+            .open_leaf(OsStr::new("1.jpg"))
+            .expect_err("an Unavailable observation must not open anything");
+        assert!(
+            matches!(error, TaskError::UnsafePath { .. }),
+            "an Unavailable observation must be a typed denial, got {error:?}"
+        );
+        assert!(
+            grant.open_sibling_archive().is_err(),
+            "an Unavailable root observation must not grant the sibling archive"
+        );
+        assert!(
+            grant.capture_gallery_dir().is_err(),
+            "an Unavailable gallery observation must not enumerate anything"
+        );
+    }
+
+    /// The only production policy constructors are the fixed, NONEMPTY
+    /// App/base sets; there is no generic empty-list creation or replacement.
+    #[test]
+    fn fixed_policies_are_nonempty_and_start_without_a_held_log() {
+        let base = PathBuf::from("/policy-base");
+        let base_policy = PrivatePaths::for_base(&base);
+        assert_eq!(base_policy.spellings().len(), 5);
+        assert_eq!(base_policy.active_log(), ActivePrivateLog::None);
+
+        let app_policy = PrivatePaths::for_app(&base, Path::new("/policy-app"), "logs/live.log");
+        assert_eq!(app_policy.spellings().len(), 5);
+        assert!(app_policy.spellings().contains(&base.join("logs/live.log")));
+        app_policy.replace_for_app(&base, Path::new("/policy-app"), "/absolute/live.log");
+        assert_eq!(app_policy.spellings().len(), 5);
+        assert!(
+            app_policy
+                .spellings()
+                .contains(&PathBuf::from("/absolute/live.log"))
+        );
+    }
 }

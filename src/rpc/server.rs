@@ -4012,13 +4012,11 @@ mod tests {
     /// `Unavailable` arm is platform independent. Pin that class here on
     /// Linux: `Unavailable` never becomes `Ok(None)`, never opens, and never
     /// falls back to the sibling archive, while only a real `NotFound` is
-    /// `Missing`.
+    /// `Missing`. The `Unavailable` grant itself is constructed in its owning
+    /// module (`task::file_ops`), where the sealed mint lives.
     #[test]
     fn m5_unavailable_observation_denies_without_fallback() {
-        use crate::task::{
-            DirectoryObservation, GalleryGrant, PrivatePaths, PrivatePolicy, TaskError,
-            observe_directory,
-        };
+        use crate::task::{DirectoryObservation, observe_directory};
 
         let mut app = test_app();
         let png = png_bytes(8, 8);
@@ -4037,31 +4035,6 @@ mod tests {
             DirectoryObservation::Unavailable(std::io::ErrorKind::NotADirectory)
         );
 
-        // The non-Unix entry point denies, without falling back to the ZIP:
-        // an `Unavailable` observation must never open, enumerate or grant the
-        // sibling archive.
-        let denied = GalleryGrant::new(
-            app.base_dir().join("downloads"),
-            std::ffi::OsString::from("gallery-title"),
-            DirectoryObservation::Unavailable(std::io::ErrorKind::Unsupported),
-            DirectoryObservation::Unavailable(std::io::ErrorKind::Unsupported),
-            PrivatePolicy::freeze(PrivatePaths::for_base(app.base_dir())),
-        );
-        let error = denied
-            .open_leaf(std::ffi::OsStr::new("1.jpg"))
-            .expect_err("Unsupported observation must not open anything");
-        assert!(
-            matches!(error, TaskError::UnsafePath { .. }),
-            "Unsupported observation must be a typed denial, got {error:?}"
-        );
-        assert!(
-            denied.open_sibling_archive().is_err(),
-            "an Unsupported root observation must not grant the sibling archive"
-        );
-        assert!(
-            denied.capture_gallery_dir().is_err(),
-            "an Unsupported gallery observation must not enumerate anything"
-        );
         // Control: the real Present snapshot is untouched.
         assert!(matches!(
             probe_gallery_file(&snap),
@@ -7033,6 +7006,7 @@ mod tests {
     /// can only contain the OLD spelling. Serving the mapped image afterwards
     /// would read private persistence bytes, and the ZIP fallback must not be
     /// used as a second chance.
+    #[cfg(target_os = "linux")]
     #[test]
     fn m5_fd_live_log_path_is_denied() {
         let mut app = test_app();
@@ -7114,12 +7088,265 @@ mod tests {
         assert_eq!(body, other_png);
     }
 
+    /// M5 FD R1 P1: a private persistence spelling that is a legal symlink to
+    /// an ordinary gallery file must protect the object the private consumer
+    /// actually opens, not only the link inode.
+    ///
+    /// The real App log path becomes a symlink to the mapped gallery image and
+    /// the real logger appends its private record through it, so that gallery
+    /// entry now carries private log bytes. A snapshot that freezes only the
+    /// link inode (while `config::load`/`Logger::set_logfile` follow the link)
+    /// serves those bytes, and the archive producer copies them into a public
+    /// ZIP. Neither may happen; an unrelated gallery image must keep serving.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn m5_fd_private_log_symlink_target_is_denied() {
+        let mut app = test_app();
+        let png = png_bytes(16, 16);
+        let (guid, gallery) = fd_add_task(&mut app, "private-symlink-gallery", 3);
+        let mapped = gallery.join("1.jpg");
+        std::fs::write(&mapped, &png).expect("mapped image");
+        let other_png = png_noise_bytes(24, 24);
+        let (other, other_gallery) = fd_add_task(&mut app, "private-symlink-other", 3);
+        std::fs::write(other_gallery.join("1.jpg"), &other_png).expect("other image");
+        let private = app.base_dir().join("eh.log");
+        std::os::unix::fs::symlink(&mapped, &private).expect("private log symlink");
+
+        // The real same-App configuration path reopens the logger on that
+        // spelling; the opened descriptor follows the link into the gallery.
+        let mut patch = JsonMap::new();
+        patch.insert("log_path".to_string(), Value::String("eh.log".to_string()));
+        app.update_config(patch)
+            .expect("the real App log_path update must accept the spelling");
+        app.logger_mut()
+            .warning("PRIVATE-LOG-SECRET")
+            .expect("the live logger must write through the private spelling");
+        let on_disk = std::fs::read(&mapped).expect("mapped bytes");
+        assert!(
+            on_disk
+                .windows("PRIVATE-LOG-SECRET".len())
+                .any(|window| window == b"PRIVATE-LOG-SECRET"),
+            "premise: the private logger wrote its record into the gallery file"
+        );
+
+        // The loose read must deny the referent the private consumer holds.
+        match fd_status(&app, &guid, "1") {
+            Err(status) => assert_eq!(status, 404),
+            Ok(bytes) => panic!(
+                "a gallery file that is the live private log referent served {} bytes",
+                bytes.len()
+            ),
+        }
+        // The archive route must not copy the referent into a public ZIP.
+        match read_archive(&app, &guid) {
+            Err(fail) => assert_eq!(fail.status(), 404),
+            Ok(bytes) => panic!(
+                "a private log referent entered a {} byte public archive",
+                bytes.len()
+            ),
+        }
+        assert!(
+            !gallery.with_extension("zip").exists(),
+            "a denied private archive must not publish the public sibling"
+        );
+
+        // A healthy, unrelated gallery keeps serving its exact bytes.
+        let media = media_action(&format!(
+            "/img/{}/{other}/1",
+            hash_link(None, &format!("{other}/1"))
+        ));
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let runtime = crate::core::Runtime::new(app, manifest.to_path_buf());
+        let handle = runtime.handle();
+        let permits = Arc::new(tokio::sync::Semaphore::new(super::super::MAX_HEAVY_WORKERS));
+        let (status, body) = block_on(async {
+            let response = run_media(handle, permits, media).await;
+            (response.status, response_body(response))
+        });
+        assert_eq!(status, 200, "an unrelated gallery image must still serve");
+        assert_eq!(body, other_png);
+    }
+
+    /// M5 FD R1 P1 (directly related live object): an open logger keeps
+    /// writing the inode it holds (A) after its private path spelling is
+    /// retargeted to a healthy gallery file (B).
+    ///
+    /// A fresh snapshot of the current spellings only protects B. The held log
+    /// file is still live private state — the logger appends to it after the
+    /// retarget — so a gallery entry hardlinked from A must keep being denied.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn m5_fd_live_logger_retarget_keeps_held_file_denied() {
+        let png = png_bytes(16, 16);
+        let mut app = test_app();
+        let (guid, gallery) = fd_add_task(&mut app, "retarget-gallery", 3);
+        // The real App log path opens a real log file (A).
+        let mut patch = JsonMap::new();
+        patch.insert(
+            "log_path".to_string(),
+            Value::String("live.log".to_string()),
+        );
+        app.update_config(patch).expect("the real set_config path");
+        app.logger_mut().warning("LIVE-LOG-A").expect("log record");
+        let private = app.base_dir().join("live.log");
+        assert!(private.is_file(), "premise: the logger opened its log file");
+
+        // A is now reachable through the gallery as an ordinary entry.
+        let held = gallery.join("1.jpg");
+        std::fs::hard_link(&private, &held).expect("hardlink of the held log");
+        fd_map(&mut app, &guid, 1, "1.jpg");
+        // B is the healthy gallery file the private spelling moves onto.
+        let bext = gallery.join("2.jpg");
+        std::fs::write(&bext, &png).expect("fresh referent");
+        fd_map(&mut app, &guid, 2, "2.jpg");
+        // Retarget the private spelling: the name stops addressing A while the
+        // open logger keeps writing A through its held descriptor.
+        std::fs::remove_file(&private).expect("unlink the held log name");
+        std::os::unix::fs::symlink(&bext, &private).expect("retarget the private spelling");
+        app.logger_mut()
+            .warning("LIVE-LOG-A-AFTER-RETARGET")
+            .expect("the live logger must keep writing its held file");
+        let held_bytes = std::fs::read(&held).expect("held bytes");
+        assert!(
+            held_bytes
+                .windows("LIVE-LOG-A-AFTER-RETARGET".len())
+                .any(|window| window == b"LIVE-LOG-A-AFTER-RETARGET"),
+            "premise: the logger is still writing the held inode after the retarget"
+        );
+
+        // A is private state even though no current spelling names it.
+        match fd_status(&app, &guid, "1") {
+            Err(status) => assert_eq!(status, 404),
+            Ok(bytes) => panic!(
+                "the live logger's held file served {} bytes after its name moved",
+                bytes.len()
+            ),
+        }
+        // B is the current referent of the private spelling and must deny too.
+        assert_eq!(fd_status(&app, &guid, "2"), Err(404));
+        match read_archive(&app, &guid) {
+            Err(fail) => assert_eq!(fail.status(), 404),
+            Ok(bytes) => panic!(
+                "the live logger's held file entered a {} byte public archive",
+                bytes.len()
+            ),
+        }
+        assert!(
+            !gallery.with_extension("zip").exists(),
+            "a denied archive must not publish the public sibling"
+        );
+
+        // A fresh unrelated gallery image still serves.
+        let mut app = app;
+        let (other, other_gallery) = fd_add_task(&mut app, "retarget-other", 3);
+        std::fs::write(other_gallery.join("1.jpg"), &png).expect("other image");
+        assert_eq!(fd_status(&app, &other, "1").expect("unrelated image"), png);
+    }
+
+    /// M5 FD coverage: the App publishes the log file it was handed at
+    /// initialization, so a gallery entry hardlinked from that exact file is
+    /// denied even though no configured private spelling names it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn m5_fd_app_init_publishes_the_handed_logger_file() {
+        let root = tempfile::tempdir().expect("root");
+        let base = root.keep();
+        let config = crate::config::Config::default();
+        let mut logger = crate::util::logger::Logger::with_output(Box::new(Vec::new()), false);
+        let handed = base.join("handed.log");
+        logger.set_logfile(&handed).expect("startup log open");
+        logger
+            .warning("HANDED-LOG-SECRET")
+            .expect("startup log write");
+        let mut app = App::new(config, logger, &base, &base).expect("app");
+        let (guid, gallery) = fd_add_task(&mut app, "handed-log-gallery", 3);
+        std::fs::hard_link(&handed, gallery.join("1.jpg")).expect("hardlink");
+        fd_map(&mut app, &guid, 1, "1.jpg");
+        assert_eq!(
+            fd_status(&app, &guid, "1"),
+            Err(404),
+            "the App must publish the log file it was handed"
+        );
+    }
+
+    /// M5 FD coverage: an atomic replacement of a private spelling AFTER the
+    /// snapshot. The old captured inode stays hardlinked in the gallery and the
+    /// new inode is hardlinked separately, so both must deny while a fresh
+    /// unrelated image still serves. The same holds when the spelling is a
+    /// legal symlink: the captured old referent and the fresh new referent both
+    /// deny.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn m5_fd_same_app_atomic_private_replacement_denies_old_and_new() {
+        use crate::rpc::{OpenOutcome, probe_gallery_file, snapshot_gallery_file};
+        let mut app = test_app();
+        let (guid, gallery) = fd_add_task(&mut app, "atomic-gallery", 4);
+        let private = app.base_dir().join(crate::core::SESSION_FILE);
+        std::fs::write(&private, b"OLD-PRIVATE-BYTES").expect("old private");
+        std::fs::hard_link(&private, gallery.join("1.jpg")).expect("old link");
+        fd_map(&mut app, &guid, 1, "1.jpg");
+        std::fs::write(gallery.join("3.jpg"), b"ORDINARY-IMAGE").expect("ordinary");
+        fd_map(&mut app, &guid, 3, "3.jpg");
+
+        // Snapshot BEFORE the replacement: it captures the old inode.
+        let old_snap = snapshot_gallery_file(&app, &guid, "1").expect("old snap");
+        // Atomic replacement of the same spelling by a NEW inode.
+        let replacement = app.base_dir().join("session.replacement");
+        std::fs::write(&replacement, b"NEW-PRIVATE-BYTES").expect("new private");
+        std::fs::rename(&replacement, &private).expect("atomic replace");
+        std::fs::hard_link(&private, gallery.join("2.jpg")).expect("new link");
+        fd_map(&mut app, &guid, 2, "2.jpg");
+
+        // Old captured inode: denied by the frozen snapshot.
+        assert!(
+            matches!(probe_gallery_file(&old_snap), Ok(OpenOutcome::Denied)),
+            "the old private inode must stay denied after the replacement"
+        );
+        // New inode via the current spelling: denied by a fresh snapshot.
+        let new_snap = snapshot_gallery_file(&app, &guid, "2").expect("new snap");
+        assert!(
+            matches!(probe_gallery_file(&new_snap), Ok(OpenOutcome::Denied)),
+            "the new private inode must be denied through the current spelling"
+        );
+        // Fresh unrelated image positive.
+        let fresh = snapshot_gallery_file(&app, &guid, "3").expect("fresh snap");
+        match probe_gallery_file(&fresh) {
+            Ok(OpenOutcome::File(mut opened)) => {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                opened.file.read_to_end(&mut bytes).expect("read ordinary");
+                assert_eq!(bytes, b"ORDINARY-IMAGE");
+            }
+            _ => panic!("a fresh unrelated image must still serve"),
+        }
+
+        // Same check when the private spelling is a legal symlink.
+        let link_private = app.base_dir().join(crate::config::LEGACY_CONFIG_FILE);
+        let referent_old = gallery.join("4.jpg");
+        std::fs::write(&referent_old, b"OLD-REFERENT-BYTES").expect("old referent");
+        std::os::unix::fs::symlink(&referent_old, &link_private).expect("private link");
+        fd_map(&mut app, &guid, 4, "4.jpg");
+        let link_snap = snapshot_gallery_file(&app, &guid, "4").expect("link snap");
+        let referent_new = gallery.join("5.jpg");
+        std::fs::write(&referent_new, b"NEW-REFERENT-BYTES").expect("new referent");
+        std::fs::remove_file(&link_private).expect("unlink spelling");
+        std::os::unix::fs::symlink(&referent_new, &link_private).expect("retarget spelling");
+        fd_map(&mut app, &guid, 5, "5.jpg");
+        assert!(
+            matches!(probe_gallery_file(&link_snap), Ok(OpenOutcome::Denied)),
+            "the captured old symlink referent must stay denied"
+        );
+        let referent_snap = snapshot_gallery_file(&app, &guid, "5").expect("referent snap");
+        assert!(
+            matches!(probe_gallery_file(&referent_snap), Ok(OpenOutcome::Denied)),
+            "the fresh symlink referent must be denied"
+        );
+    }
+
     /// M5 FD tracer B: a mapped leaf that is a link to a literal path OUTSIDE
     /// the gallery, whose target does not exist, must be denied before any
     /// lookup or fallback — even when the sibling archive has a matching entry.
-    ///
-    /// A canonicalize-first alias proof classifies the follow-open `ENOENT` of
-    /// the outside literal as a missing payload and serves the ZIP entry.
+    #[cfg(target_os = "linux")]
     #[test]
     fn m5_fd_outside_dangling_alias_denies_without_zip_fallback() {
         use crate::rpc::{OpenOutcome, probe_gallery_file, snapshot_gallery_file};

@@ -72,6 +72,33 @@ impl Logger {
         self.logf = None;
     }
 
+    /// The `(device, inode)` identity of the log file this logger actually
+    /// holds open, or `None` when no log file is open.
+    ///
+    /// The descriptor is only borrowed for its metadata: ownership, output
+    /// format and lifetime stay exactly as before. A metadata failure is
+    /// reported instead of smoothed over, so the caller can fail closed rather
+    /// than invent or forget a private identity.
+    #[cfg(unix)]
+    pub(crate) fn held_file_identity(&self) -> std::io::Result<Option<(u64, u64)>> {
+        use std::os::unix::fs::MetadataExt;
+        match &self.logf {
+            None => Ok(None),
+            Some(file) => {
+                let metadata = file.metadata()?;
+                Ok(Some((metadata.dev(), metadata.ino())))
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn held_file_identity(&self) -> std::io::Result<Option<(u64, u64)>> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "the held log file identity is only available on unix targets",
+        ))
+    }
+
     fn enabled(&self, level: i64) -> bool {
         match level {
             VERBOSE => self.level < 1,
@@ -284,5 +311,38 @@ mod tests {
              \u{1b}[33mWARN - [23:04:05] warn\n\u{1b}[0m\
              INFO - [23:04:05] neutral\n"
         );
+    }
+
+    /// The getter reports the descriptor the logger actually holds, not the
+    /// current path spelling: after the private name is retargeted the logger
+    /// keeps appending to the original file.
+    #[cfg(unix)]
+    #[test]
+    fn held_file_identity_tracks_the_open_descriptor_not_the_spelling() {
+        use std::os::unix::fs::MetadataExt;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("live.log");
+        let (mut logger, _sink) = logger();
+        logger.set_logfile(&path).unwrap();
+        let held = logger
+            .held_file_identity()
+            .unwrap()
+            .expect("an open logger must report its held file");
+        let metadata = std::fs::metadata(&path).unwrap();
+        assert_eq!(held, (metadata.dev(), metadata.ino()));
+
+        let other = root.path().join("other.log");
+        std::fs::write(&other, b"OTHER").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&other, &path).unwrap();
+        assert_eq!(
+            logger.held_file_identity().unwrap(),
+            Some(held),
+            "the held descriptor, not the new spelling, is the private object"
+        );
+        logger.log_at(fixed(), "INFO", "after retarget").unwrap();
+        assert_eq!(std::fs::read(&other).unwrap(), b"OTHER");
+        logger.cleanup();
+        assert_eq!(logger.held_file_identity().unwrap(), None);
     }
 }
