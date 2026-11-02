@@ -4018,8 +4018,10 @@ def run_native(suite, root, target_dir):
     evidence = []
     for index, argv in enumerate(NATIVE_COMMANDS[suite], start=1):
         log_path = root / f"native-{index}.log"
-        result = run_command(
-            _cargo_target_argv(argv, target_dir), REPO, env, log_path)
+        # The recorded argv is the ACTUAL launched argv (explicit
+        # --target-dir included), not the map template.
+        launched = _cargo_target_argv(argv, target_dir)
+        result = run_command(launched, REPO, env, log_path)
         if result.returncode != 0:
             raise CompatError(f"native tests failed for {suite}: {' '.join(argv)}")
         _, summary = parse_test_results(result.stdout)
@@ -4029,7 +4031,7 @@ def run_native(suite, root, target_dir):
             raise CompatError(f"native tests failed for {suite}: {summary}")
         evidence.append(
             {
-                "argv": argv,
+                "argv": launched,
                 "exit": result.returncode,
                 "summary": summary,
                 "stdout": result.stdout,
