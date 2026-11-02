@@ -5181,6 +5181,63 @@ def self_check(suite, oracle, candidate, native_runs=None):
                             ("m-%s-%02d-both-rm-%s" % (
                                 _section, _index, _field),
                              not cases.get(_rowkey, True)))
+        # FD e85 strict-string truthy variants: candidate decode message
+        # single-side and both-sides-identical success mime must be
+        # nonempty str. Each asserts the row's own case False AND the
+        # intended nonempty-str type error, never another payload diff.
+        _truthy_str_values = (("int1", 1), ("bool", True),
+                              ("list", [1]), ("dict", {"x": 1}))
+        _thumbs_inventory = (_matrix_inventory.get("thumbs") or [])
+        _oracle_thumbs = oracle.get("thumbs") or []
+        _candidate_thumbs = candidate.get("thumbs") or []
+        _thumbs_width = max(len(_oracle_thumbs), len(_candidate_thumbs))
+        for _tindex in range(_thumbs_width):
+            _inv_row = (_thumbs_inventory[_tindex]
+                        if _tindex < len(_thumbs_inventory) else None)
+            if not isinstance(_inv_row, dict):
+                continue
+            _trowkey = _matrix_row_case("thumbs", _inv_row)
+            if (_tindex < len(_candidate_thumbs)
+                    and isinstance(_candidate_thumbs[_tindex], dict)
+                    and isinstance(
+                        _candidate_thumbs[_tindex].get("message"), str)):
+                for _tkind, _tval in _truthy_str_values:
+                    _mut = copy.deepcopy(candidate)
+                    _mut["thumbs"][_tindex]["message"] = _tval
+                    _tcases = {}
+                    _tdiffs = compare_gallery(_tcases, oracle, _mut)
+                    checks.append(
+                        ("m-thumbs-%02d-c-ty-message-truthy-%s"
+                         % (_tindex, _tkind),
+                         ((not _tcases.get(_trowkey, True))
+                          and any(_trowkey in _d
+                                  and "message" in _d
+                                  and "must be a nonempty str" in _d
+                                  for _d in _tdiffs))))
+            if (_tindex < len(_oracle_thumbs)
+                    and _tindex < len(_candidate_thumbs)
+                    and isinstance(_oracle_thumbs[_tindex], dict)
+                    and isinstance(_candidate_thumbs[_tindex], dict)
+                    and isinstance(
+                        _oracle_thumbs[_tindex].get("mime"), str)
+                    and isinstance(
+                        _candidate_thumbs[_tindex].get("mime"), str)):
+                for _tkind, _tval in _truthy_str_values:
+                    _mo = copy.deepcopy(oracle)
+                    _mc = copy.deepcopy(candidate)
+                    _mo["thumbs"][_tindex]["mime"] = _tval
+                    _mc["thumbs"][_tindex]["mime"] = _tval
+                    _tcases = {}
+                    _tdiffs = compare_gallery(
+                        _tcases, _mo, _mc)
+                    checks.append(
+                        ("m-thumbs-%02d-both-ty-mime-truthy-%s"
+                         % (_tindex, _tkind),
+                         ((not _tcases.get(_trowkey, True))
+                          and any(_trowkey in _d
+                                  and "mime" in _d
+                                  and "must be a nonempty str" in _d
+                                  for _d in _tdiffs))))
         # Explicit specified wrong-literal / forbidden-combination controls.
         mutated = copy.deepcopy(candidate)
         mutated["thumbs"][4]["status"] = 404
@@ -7437,7 +7494,8 @@ def compare_gallery(cases, oracle, candidate, request=None):
                 diffs.append(f"{key}: {side} class must be str")
                 type_ok = False
                 break
-            if "message" in entry and not entry.get("message"):
+            if "message" in entry and (not _is_str(entry.get("message"))
+                                        or not entry.get("message")):
                 diffs.append(f"{key}: {side} message must be a "
                              f"nonempty str")
                 type_ok = False
@@ -7446,7 +7504,8 @@ def compare_gallery(cases, oracle, candidate, request=None):
                 diffs.append(f"{key}: {side} status must be int (not bool)")
                 type_ok = False
                 break
-            if "mime" in entry and not entry.get("mime"):
+            if "mime" in entry and (not _is_str(entry.get("mime"))
+                                    or not entry.get("mime")):
                 diffs.append(f"{key}: {side} mime must be a nonempty str")
                 type_ok = False
                 break
