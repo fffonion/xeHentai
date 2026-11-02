@@ -4293,7 +4293,7 @@ def compare_files(cases, oracle, candidate):
     return diffs
 
 
-def self_check(suite, oracle, candidate):
+def self_check(suite, oracle, candidate, native_runs=None):
     """Mutate the candidate and require the same comparison helpers to fail."""
     checks = []
     if suite == "config":
@@ -4881,6 +4881,127 @@ def self_check(suite, oracle, candidate):
         cases = {}
         compare_gallery(cases, oracle, mutated)
         checks.append(("schema-bool-status", not cases.get("gallery.read.task-wait.1", True)))
+        # Fix-A durable controls: exact per-case class/discriminator and
+        # nested Task shape rules. Each mutates the isolated rule only
+        # (both phases on both sides for poststate shape, so the unrelated
+        # before/after stability check cannot satisfy the control).
+        mutated_oracle = copy.deepcopy(oracle)
+        mutated_oracle["thumbs"][3]["class"] = "RuntimeError"
+        cases = {}
+        compare_gallery(cases, mutated_oracle, candidate)
+        checks.append(("thumb-bad-query-class",
+                       not cases.get("gallery.thumb.task-wait.1.bad-query", True)))
+        mutated_oracle = copy.deepcopy(oracle)
+        mutated_oracle["thumbs"][5]["class"] = "RuntimeError"
+        cases = {}
+        compare_gallery(cases, mutated_oracle, candidate)
+        checks.append(("thumb-decode-class",
+                       not cases.get("gallery.thumb.task-wait.5.decode", True)))
+        mutated_oracle = copy.deepcopy(oracle)
+        mutated_candidate = copy.deepcopy(candidate)
+        mutated_oracle["reads"][3] = {"guid": "missing", "fid": "1", "raised": "ValueError"}
+        mutated_candidate["reads"][3] = {"guid": "missing", "fid": "1", "status": 400}
+        cases = {}
+        compare_gallery(cases, mutated_oracle, mutated_candidate)
+        checks.append(("read-missing-identity",
+                       not cases.get("gallery.read.missing.1", True)))
+        mutated_oracle = copy.deepcopy(oracle)
+        mutated_oracle["reads"][5]["zip_error"] = "OSError"
+        cases = {}
+        compare_gallery(cases, mutated_oracle, candidate)
+        checks.append(("read-zip-class",
+                       not cases.get("gallery.read.task-zip.9", True)))
+        mutated_oracle = copy.deepcopy(oracle)
+        mutated_candidate = copy.deepcopy(candidate)
+        for doc in (mutated_oracle, mutated_candidate):
+            doc["poststate"]["after"]["disk"].append(
+                {"path": "fault", "type": "error",
+                 "error": "permission denied", "stage": "read_dir"})
+        cases = {}
+        compare_gallery(cases, mutated_oracle, mutated_candidate)
+        checks.append(("poststate-observer-error",
+                       not cases.get("gallery.poststate.after", True)))
+        mutated_oracle = copy.deepcopy(oracle)
+        mutated_candidate = copy.deepcopy(candidate)
+        for doc in (mutated_oracle, mutated_candidate):
+            for phase in ("before", "after"):
+                doc["poststate"][phase]["tasks"][0][1]["img_q"] = {}
+        cases = {}
+        compare_gallery(cases, mutated_oracle, mutated_candidate)
+        checks.append(("poststate-task-img-q-shape",
+                       not cases.get("gallery.poststate.before", True)))
+        mutated_oracle = copy.deepcopy(oracle)
+        mutated_candidate = copy.deepcopy(candidate)
+        for doc in (mutated_oracle, mutated_candidate):
+            for phase in ("before", "after"):
+                doc["poststate"][phase]["tasks"][0][1]["config"] = {}
+        cases = {}
+        compare_gallery(cases, mutated_oracle, mutated_candidate)
+        checks.append(("poststate-task-config-shape",
+                       not cases.get("gallery.poststate.before", True)))
+        mutated_oracle = copy.deepcopy(oracle)
+        mutated_candidate = copy.deepcopy(candidate)
+        for doc in (mutated_oracle, mutated_candidate):
+            for phase in ("before", "after"):
+                doc["poststate"][phase]["tasks"][0][1].pop("gid", None)
+                doc["poststate"][phase]["tasks"][0][1].pop("sethash", None)
+        cases = {}
+        compare_gallery(cases, mutated_oracle, mutated_candidate)
+        checks.append(("poststate-task-gid-shape",
+                       not cases.get("gallery.poststate.before", True)))
+        # Gallery native/final durable controls: the SAME production
+        # validator used by the publication path must reject empty,
+        # partial, unexpected-name, duplicate, non-ok, missing/extra
+        # native and final inventories. Positive control first: the real
+        # received runs plus real merged cases must validate clean.
+        if native_runs is not None:
+            positive_cases = {}
+            compare_gallery(positive_cases, oracle, candidate, gallery_request())
+            merge_native_cases("gallery", native_runs, positive_cases)
+            positive_view = dict(positive_cases)
+            checks.append(
+                ("native-final-exact",
+                 not validate_gallery_native_final(native_runs, positive_view)))
+            checks.append(
+                ("native-empty",
+                 bool(validate_gallery_native_final([], dict(positive_cases)))))
+            partial_runs = [dict(run, results=dict(run["results"]))
+                            for run in native_runs[:-1]]
+            checks.append(
+                ("native-partial",
+                 bool(validate_gallery_native_final(partial_runs, dict(positive_cases)))))
+            unexpected_runs = [dict(run, results=dict(run["results"]))
+                               for run in native_runs]
+            unexpected_runs[0]["results"]["bogus::unexpected_test"] = "ok"
+            checks.append(
+                ("native-unexpected-name",
+                 bool(validate_gallery_native_final(unexpected_runs, dict(positive_cases)))))
+            duplicate_runs = ([dict(run, results=dict(run["results"])) for run in native_runs]
+                              + [dict(native_runs[0], results=dict(native_runs[0]["results"]))])
+            checks.append(
+                ("native-duplicate",
+                 bool(validate_gallery_native_final(duplicate_runs, dict(positive_cases)))))
+            failed_runs = [dict(run, results=dict(run["results"]),
+                                summary=dict(run.get("summary") or {}))
+                           for run in native_runs]
+            first_name = next(iter(failed_runs[0]["results"]))
+            failed_runs[0]["results"][first_name] = "FAILED"
+            failed_runs[0]["summary"] = dict(failed_runs[0]["summary"])
+            failed_runs[0]["summary"]["failed"] = 1
+            failed_runs[0]["summary"]["status"] = "FAILED"
+            checks.append(
+                ("native-non-ok",
+                 bool(validate_gallery_native_final(failed_runs, dict(positive_cases)))))
+            missing_final = dict(positive_cases)
+            missing_final.pop(sorted(missing_final)[0])
+            checks.append(
+                ("native-final-missing",
+                 bool(validate_gallery_native_final(native_runs, missing_final))))
+            extra_final = dict(positive_cases)
+            extra_final["bogus.extra.case"] = True
+            checks.append(
+                ("native-final-extra",
+                 bool(validate_gallery_native_final(native_runs, extra_final))))
     elif suite == "webui":
         mutated = copy.deepcopy(candidate)
         mutated["index_markers"]["has_app"] = False
@@ -4907,6 +5028,114 @@ def merge_native_cases(suite, native_runs, cases):
                     cases.setdefault(case_id, True)
                 else:
                     cases[case_id] = False
+
+
+# Gallery native inventory: the `gallery_` cargo filter also selects one
+# traversal test whose semantic case is already covered by the sibling
+# symlink test, so it is a required passing supplementary test carrying no
+# new semantic case IDs (mapped to []), not an ignored or extra name.
+GALLERY_SUPPLEMENTARY_NATIVE = {
+    "rpc::server::tests::gallery_names_reject_traversal": [],
+}
+
+
+def gallery_expected_native_names():
+    """Exact native test-name set the current gallery commands select."""
+    return set(NATIVE_CASE_MAP["gallery"]) | set(GALLERY_SUPPLEMENTARY_NATIVE)
+
+
+def gallery_expected_native_cases():
+    """Exact native semantic-case set derived from the authoritative map."""
+    expected = set()
+    for name in gallery_expected_native_names():
+        expected.update(NATIVE_CASE_MAP["gallery"].get(
+            name, GALLERY_SUPPLEMENTARY_NATIVE.get(name, [])))
+    return expected
+
+
+def gallery_expected_final_cases():
+    """Exact final union: comparative inventory plus native semantics."""
+    return set(GALLERY_CASE_IDS) | gallery_expected_native_cases()
+
+
+def validate_gallery_native_final(native_runs, cases):
+    """Exact native-name/status inventory and final union for gallery.
+
+    Publication path (run_suite) and durable negatives call this same
+    validator: exact received test-name set, each required ok status, no
+    zero/missing/extra/duplicate, exact derived native semantic set, exact
+    final union with GALLERY_CASE_IDS, strict bool. Returns diff strings;
+    empty means valid. Marks missing/extra final keys False on `cases`.
+    """
+    diffs = []
+    if not native_runs:
+        diffs.append("gallery native: no native runs received")
+        for key in gallery_expected_final_cases():
+            cases[key] = False
+        return diffs
+    received_status = {}
+    duplicates = set()
+    for run in native_runs:
+        results = run.get("results") or {}
+        if not results:
+            diffs.append(
+                f"gallery native: empty test set in run {run.get('argv')}")
+        for test_name, status in results.items():
+            if test_name in received_status:
+                duplicates.add(test_name)
+            received_status[test_name] = status
+        summary = run.get("summary") or {}
+        if (summary.get("status") != "ok" or summary.get("failed", 1) != 0
+                or not summary.get("passed")):
+            diffs.append(
+                f"gallery native run not green: {run.get('argv')} {summary}")
+        if summary.get("ignored", 0) != 0:
+            diffs.append(
+                f"gallery native run has ignored tests: {run.get('argv')} {summary}")
+    expected_names = gallery_expected_native_names()
+    missing_names = sorted(expected_names - set(received_status))
+    extra_names = sorted(set(received_status) - expected_names)
+    if missing_names:
+        diffs.append(f"gallery native names missing: {missing_names}")
+    if extra_names:
+        diffs.append(f"gallery native names extra: {extra_names}")
+    if duplicates:
+        diffs.append(
+            f"gallery native names duplicate across runs: {sorted(duplicates)}")
+    for name in sorted(expected_names):
+        if name in received_status and received_status[name] != "ok":
+            diffs.append(
+                f"gallery native {name} status must be ok, got {received_status[name]!r}")
+    derived_semantic = set()
+    for name in received_status:
+        if name in NATIVE_CASE_MAP["gallery"]:
+            derived_semantic.update(NATIVE_CASE_MAP["gallery"][name])
+        elif name in GALLERY_SUPPLEMENTARY_NATIVE:
+            derived_semantic.update(GALLERY_SUPPLEMENTARY_NATIVE[name])
+        else:
+            diffs.append(
+                f"gallery native {name}: no map or supplementary entry")
+    expected_semantic = gallery_expected_native_cases()
+    if derived_semantic != expected_semantic:
+        diffs.append(
+            f"gallery native semantic cases differ: missing="
+            f"{sorted(expected_semantic - derived_semantic)} extra="
+            f"{sorted(derived_semantic - expected_semantic)}")
+    expected_final = gallery_expected_final_cases()
+    missing_final = sorted(expected_final - set(cases.keys()))
+    extra_final = sorted(set(cases.keys()) - expected_final)
+    if missing_final:
+        diffs.append(f"gallery final cases missing: {missing_final}")
+        for key in missing_final:
+            cases[key] = False
+    if extra_final:
+        diffs.append(f"gallery final cases extra: {extra_final}")
+        for key in extra_final:
+            cases[key] = False
+    for key in sorted(expected_final):
+        if cases.get(key) is not True:
+            diffs.append(f"gallery final {key}: must be strictly True")
+    return diffs
 
 
 # Declared per-method IDs aggregate the granular wire cases (each one is a
@@ -6463,6 +6692,86 @@ def compare_gallery(cases, oracle, candidate, request=None):
                         diffs.append(f"gallery.poststate.{phase}.{side}.tasks[{index}].{guid}: {field} must be a list")
                         cases[f"gallery.poststate.{phase}"] = False
                         return diffs
+                # Gallery Task nested shape: initialized gid/sethash presence
+                # and types, queue null-or-string-list, full 14-key config
+                # contract, map/list tuple shapes. Both-sides removal or
+                # emptying ({} / missing) must fail, never None==None success.
+                # Raw extra config/meta keys are retained: presence of every
+                # base key is required, extras still compare via phase equality.
+                for ident_field in ("gid", "sethash"):
+                    if ident_field not in record:
+                        diffs.append(f"gallery.poststate.{phase}.{side}.tasks[{index}].{guid}: missing initialized field {ident_field}")
+                        cases[f"gallery.poststate.{phase}"] = False
+                        return diffs
+                    if not _is_str(record.get(ident_field)):
+                        diffs.append(f"gallery.poststate.{phase}.{side}.tasks[{index}].{guid}: {ident_field} must be str")
+                        cases[f"gallery.poststate.{phase}"] = False
+                        return diffs
+                for queue_field in ("img_q", "page_q"):
+                    queue_val = record.get(queue_field)
+                    if queue_val is not None and (
+                            not isinstance(queue_val, list)
+                            or any(not _is_str(item) for item in queue_val)):
+                        diffs.append(f"gallery.poststate.{phase}.{side}.tasks[{index}].{guid}: {queue_field} must be null or a string list")
+                        cases[f"gallery.poststate.{phase}"] = False
+                        return diffs
+                config_val = record.get("config")
+                for base_field in TASK_BASE_KEYS:
+                    if base_field not in config_val:
+                        diffs.append(f"gallery.poststate.{phase}.{side}.tasks[{index}].{guid}: config missing required field {base_field}")
+                        cases[f"gallery.poststate.{phase}"] = False
+                        return diffs
+                for bool_field in ("download_ori", "jpn_title", "rename_ori", "proxy_image", "proxy_image_only", "make_archive", "delete_task_files"):
+                    if not _is_strict_bool(config_val.get(bool_field)):
+                        diffs.append(f"gallery.poststate.{phase}.{side}.tasks[{index}].{guid}: config.{bool_field} must be bool")
+                        cases[f"gallery.poststate.{phase}"] = False
+                        return diffs
+                for int_field in ("scan_thread_cnt", "download_thread_cnt", "download_timeout", "low_speed_threshold"):
+                    if not _is_strict_int(config_val.get(int_field)):
+                        diffs.append(f"gallery.poststate.{phase}.{side}.tasks[{index}].{guid}: config.{int_field} must be int (not bool)")
+                        cases[f"gallery.poststate.{phase}"] = False
+                        return diffs
+                if not _is_str(config_val.get("dir")):
+                    diffs.append(f"gallery.poststate.{phase}.{side}.tasks[{index}].{guid}: config.dir must be str")
+                    cases[f"gallery.poststate.{phase}"] = False
+                    return diffs
+                range_val = config_val.get("download_range")
+                if range_val is not None and (
+                        not isinstance(range_val, list)
+                        or any(not isinstance(pair, list) or len(pair) != 2
+                               or not _is_strict_int(pair[0])
+                               or not _is_strict_int(pair[1])
+                               for pair in range_val)):
+                    diffs.append(f"gallery.poststate.{phase}.{side}.tasks[{index}].{guid}: config.download_range must be null or [[int, int], ...]")
+                    cases[f"gallery.poststate.{phase}"] = False
+                    return diffs
+                if not isinstance(config_val.get("ignored_errors"), list):
+                    diffs.append(f"gallery.poststate.{phase}.{side}.tasks[{index}].{guid}: config.ignored_errors must be a list")
+                    cases[f"gallery.poststate.{phase}"] = False
+                    return diffs
+                for entry in record.get("reload"):
+                    if (not isinstance(entry, list) or len(entry) != 2
+                            or not isinstance(entry[1], list)
+                            or len(entry[1]) != 2):
+                        diffs.append(f"gallery.poststate.{phase}.{side}.tasks[{index}].{guid}: reload entries must be [key, [a, b]]")
+                        cases[f"gallery.poststate.{phase}"] = False
+                        return diffs
+                for entry in record.get("duplicate"):
+                    if (not isinstance(entry, list) or len(entry) != 2
+                            or not isinstance(entry[1], list)):
+                        diffs.append(f"gallery.poststate.{phase}.{side}.tasks[{index}].{guid}: duplicate entries must be [key, [...]]")
+                        cases[f"gallery.poststate.{phase}"] = False
+                        return diffs
+                for entry in record.get("renamed"):
+                    if (not isinstance(entry, list) or len(entry) != 2
+                            or not _is_str(entry[1])):
+                        diffs.append(f"gallery.poststate.{phase}.{side}.tasks[{index}].{guid}: renamed entries must be [key, name]")
+                        cases[f"gallery.poststate.{phase}"] = False
+                        return diffs
+                if any(not _is_str(item) for item in record.get("flist")):
+                    diffs.append(f"gallery.poststate.{phase}.{side}.tasks[{index}].{guid}: flist must be a string list")
+                    cases[f"gallery.poststate.{phase}"] = False
+                    return diffs
             for field in ("session", "login"):
                 if not isinstance(state.get(field), dict):
                     diffs.append(f"gallery.poststate.{phase}.{side}.{field}: must be an object")
@@ -6577,17 +6886,68 @@ def compare_gallery(cases, oracle, candidate, request=None):
                              f"oracle={old} candidate={new}")
             continue
         key = case_id or f"gallery.read.{old['guid']}.{old['fid']}"
-        if old.get("raised") or new.get("status") in (400,):
-            # int("nope") paths: both sides refuse without touching disk.
-            # Preserve ONLY the exact registered ValueError/400 delta: an
-            # unexpected oracle exception or a non-400 candidate on a positive
-            # must fail. The old boolean equate (False==False True) hid that.
-            same = (old.get("raised") == "ValueError") and (new.get("status") == 400)
-            if not same:
+        _read_pair = (old.get("guid"), old.get("fid"))
+        if _read_pair == ("task-wait", "nope"):
+            # Approved refusal delta ONLY on this identity: int("nope")
+            # raises ValueError in the reference without touching disk; the
+            # candidate answers a typed 400. Exact per-side shape required.
+            oracle_ok = (old.get("raised") == "ValueError"
+                         and "status" not in old
+                         and "bytes" not in old and "mime" not in old
+                         and "zip_error" not in old)
+            candidate_ok = (_is_strict_int(new.get("status"))
+                            and new.get("status") == 400
+                            and "raised" not in new
+                            and "bytes" not in new and "mime" not in new
+                            and "zip_error" not in new)
+            if oracle_ok and candidate_ok:
+                cases[key] = True
+            else:
                 diffs.append(f"{key}: refusal mismatch {old} != {new}")
                 cases[key] = False
-            else:
+            continue
+        if _read_pair == ("missing", "1"):
+            # Unknown-gallery 404: both sides typed 404 with no refusal or
+            # payload fields. A ValueError/400 row here is a wrong identity
+            # for the approved task-wait/nope delta and must fail.
+            oracle_ok = (old.get("status") == 404
+                         and _is_strict_int(old.get("status"))
+                         and "raised" not in old and "zip_error" not in old
+                         and "bytes" not in old and "mime" not in old)
+            candidate_ok = (new.get("status") == 404
+                            and _is_strict_int(new.get("status"))
+                            and "raised" not in new and "zip_error" not in new
+                            and "bytes" not in new and "mime" not in new)
+            if oracle_ok and candidate_ok:
                 cases[key] = True
+            else:
+                diffs.append(f"{key}: missing-404 mismatch {old} != {new}")
+                cases[key] = False
+            continue
+        if _read_pair == ("task-zip", "9"):
+            # Pinned ZIP-entry refusal: the oracle records the real sieve
+            # diagnostic class KeyError with typed 404; the candidate
+            # answers typed 404. Any other class or shape must fail.
+            oracle_ok = (old.get("status") == 404
+                         and _is_strict_int(old.get("status"))
+                         and old.get("zip_error") == "KeyError"
+                         and "raised" not in old
+                         and "bytes" not in old and "mime" not in old)
+            candidate_ok = (new.get("status") == 404
+                            and _is_strict_int(new.get("status"))
+                            and "raised" not in new and "zip_error" not in new
+                            and "bytes" not in new and "mime" not in new)
+            if oracle_ok and candidate_ok:
+                cases[key] = True
+            else:
+                diffs.append(f"{key}: zip-404 mismatch {old} != {new}")
+                cases[key] = False
+            continue
+        if old.get("raised") or new.get("status") in (400,):
+            # A refusal-shaped row outside the approved task-wait/nope
+            # identity is never valid, even when both sides agree.
+            diffs.append(f"{key}: unexpected refusal shape {old} != {new}")
+            cases[key] = False
             continue
         if old.get("status") != new.get("status"):
             diffs.append(f"{key}: status {old} != {new}")
@@ -6647,8 +7007,11 @@ def compare_gallery(cases, oracle, candidate, request=None):
         if old.get("query", "") == "w":
             # `dict(q.split("="))` in the reference raises ValueError on a
             # bare token and the connection aborts; the candidate answers a
-            # typed 400. Both refuse to serve pixels.
-            ok = old.get("outcome") == "raised" and new.get("outcome") == "bad_query"
+            # typed 400. Both refuse to serve pixels. The oracle diagnostic
+            # class is pinned: any other exception class must fail.
+            ok = (old.get("outcome") == "raised"
+                  and old.get("class") == "ValueError"
+                  and new.get("outcome") == "bad_query")
             cases[key] = ok
             if not ok:
                 diffs.append(f"{key}: bad-query mismatch {old} != {new}")
@@ -6700,16 +7063,21 @@ def compare_gallery(cases, oracle, candidate, request=None):
                     break
             if cases.get(f"gallery.thumb.{old['guid']}.{old['fid']}.passthrough") is False:
                 continue
-        # Preserve ONLY the exact registered decode delta: both sides refuse
-        # (oracle raised, candidate decode_error) on the invalid image. A
-        # valid oracle thumbnail that becomes a native decode failure must fail.
-        if old.get("outcome") == "raised" and new.get("outcome") == "decode_error":
-            slug = "decode"
-        elif old.get("outcome") == "raised" or new.get("outcome") == "decode_error":
+        # Preserve ONLY the exact registered decode delta on the invalid
+        # image: the oracle raises UnidentifiedImageError (PIL cannot decode
+        # ASCII-DATA-2) and the candidate answers a typed decode_error; both
+        # sides refuse to serve pixels. Any other oracle exception class, or
+        # a valid oracle thumbnail that becomes a decode failure, must fail.
+        if old.get("outcome") == "raised" or new.get("outcome") == "decode_error":
             slug = "decode"
             key = f"gallery.thumb.{old['guid']}.{old['fid']}.{slug}"
-            diffs.append(f"{key}: decode mismatch {old} != {new}")
-            cases[key] = False
+            if (old.get("outcome") == "raised"
+                    and old.get("class") == "UnidentifiedImageError"
+                    and new.get("outcome") == "decode_error"):
+                cases[key] = True
+            else:
+                diffs.append(f"{key}: decode mismatch {old} != {new}")
+                cases[key] = False
             continue
         key = f"gallery.thumb.{old['guid']}.{old['fid']}.{slug}"
         if old.get("outcome") == "not_found" or new.get("outcome") == "not_found":
@@ -6717,15 +7085,6 @@ def compare_gallery(cases, oracle, candidate, request=None):
             cases[key] = old.get("outcome") == new.get("outcome")
             if not cases[key]:
                 diffs.append(f"{key}: not-found mismatch")
-            continue
-        if old.get("outcome") == "raised" and new.get("outcome") == "decode_error":
-            # PIL raises on undecodable input where the candidate answers a
-            # typed decode failure; both sides refuse to serve pixels.
-            cases[key] = True
-            continue
-        if old.get("outcome") == "raised" or new.get("outcome") == "decode_error":
-            diffs.append(f"{key}: decode mismatch {old} != {new}")
-            cases[key] = False
             continue
         for field in ("mime", "width", "height"):
             if old.get(field) != new.get(field):
@@ -6843,6 +7202,20 @@ def compare_gallery(cases, oracle, candidate, request=None):
         key = f"gallery.poststate.{phase}"
         old_state = (oracle.get("poststate") or {}).get(phase)
         new_state = (candidate.get("poststate") or {}).get(phase)
+        # Filesystem-observer error rows are fatal even when both sides are
+        # identical: a probe failure is diagnostic data, never a pass. Both
+        # phases are checked on both sides before any equality comparison.
+        observer_error = False
+        for side_name, state in (("oracle", old_state), ("candidate", new_state)):
+            disk = state.get("disk") if isinstance(state, dict) else None
+            if isinstance(disk, list) and any(
+                    isinstance(entry, dict) and entry.get("type") == "error"
+                    for entry in disk):
+                diffs.append(f"{key}: {side_name} disk carries an observer error row")
+                observer_error = True
+        if observer_error:
+            cases[key] = False
+            continue
         if old_state == new_state and not unstable_any:
             cases[key] = True
             continue
@@ -7061,6 +7434,7 @@ def run_suite(suite, output_root, upstream, target_dir):
 
     i18n_messages, i18n_codes = build_i18n_messages(upstream)
     rounds = []
+    last_native = None
     for round_number in (1, 2):
         root = suite_root / f"round-{round_number}"
         root.mkdir()
@@ -7474,6 +7848,13 @@ def run_suite(suite, output_root, upstream, target_dir):
             results, summary = require_native(run, suite)
             ready_native.append({"results": results, "summary": summary, "argv": run["argv"]})
         merge_native_cases(suite, ready_native, cases)
+        if suite == "gallery":
+            # Exact native/final publication inventory on the existing
+            # gallery path: exact received test names/statuses, exact
+            # derived semantic set, exact final union with GALLERY_CASE_IDS.
+            # Gallery-only; other suites are untouched.
+            diffs.extend(validate_gallery_native_final(ready_native, cases))
+            last_native = ready_native
         if suite == "rpc":
             apply_rpc_aggregates(cases)
         if suite == "webui":
@@ -7510,6 +7891,7 @@ def run_suite(suite, output_root, upstream, target_dir):
         suite,
         oracle if suite != "worker" else None,
         candidate if suite != "worker" else None,
+        last_native,
     )
     write_json(suite_root / "self-check.json", {"suite": suite, "checks": checks})
     return {"suite": suite, "rounds": rounds, "self_check": checks}

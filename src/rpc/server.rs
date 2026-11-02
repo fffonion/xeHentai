@@ -4219,8 +4219,14 @@ mod tests {
         println!("m5-child: fd rejection loop completed without leak");
     }
 
-    #[test]
-    fn rejected_gallery_requests_do_not_leak_descriptors() {
+    /// Owned bounded driver for the FD child: spawn current_exe `--exact`
+    /// [`M5_CHILD_FD_TEST`] `--ignored --nocapture --test-threads=1` with an
+    /// explicit injection override (`Some("5")` opens 5 extra descriptors in
+    /// the child, `None` removes any ambient injection). Holds parent noise
+    /// FDs (a separate process, so they must not pollute child counts),
+    /// enforces the 60s deadline with kill, then waits/reaps FIRST before
+    /// reading the exclusive outputs on EVERY path (failure or timeout).
+    fn run_fd_child(inject: Option<&str>) -> (std::process::ExitStatus, String, String, bool) {
         // Parent-noise control: hold extra FDs open in the PARENT while the
         // child measures. The child is a separate process, so these must not
         // pollute its before/after counts.
@@ -4239,7 +4245,8 @@ mod tests {
                 .open(path)
                 .expect("exclusive child stream file")
         };
-        let mut child = std::process::Command::new(std::env::current_exe().expect("current_exe"))
+        let mut command = std::process::Command::new(std::env::current_exe().expect("current_exe"));
+        command
             .arg("--exact")
             .arg(M5_CHILD_FD_TEST)
             .arg("--ignored")
@@ -4247,9 +4254,16 @@ mod tests {
             .arg("--test-threads=1")
             .stdin(std::process::Stdio::null())
             .stdout(exclusive(&out_path))
-            .stderr(exclusive(&err_path))
-            .spawn()
-            .expect("spawn bounded FD child");
+            .stderr(exclusive(&err_path));
+        match inject {
+            Some(count) => {
+                command.env("XE_M5_FD_LEAK_INJECT", count);
+            }
+            None => {
+                command.env_remove("XE_M5_FD_LEAK_INJECT");
+            }
+        }
+        let mut child = command.spawn().expect("spawn bounded FD child");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let mut finished = None;
         while std::time::Instant::now() < deadline {
@@ -4267,6 +4281,13 @@ mod tests {
         let status = child.wait().expect("reap bounded FD child");
         let out = std::fs::read_to_string(&out_path).unwrap_or_default();
         let err = std::fs::read_to_string(&err_path).unwrap_or_default();
+        (status, out, err, timed_out)
+    }
+
+    #[test]
+    fn rejected_gallery_requests_do_not_leak_descriptors() {
+        // Normal path: ambient injection explicitly removed.
+        let (status, out, err, timed_out) = run_fd_child(None);
         let report = || {
             format!(
                 "child status={status:?} timed_out={timed_out}\n--- child stdout ---\n{out}\n--- child stderr ---\n{err}"
@@ -4300,14 +4321,47 @@ mod tests {
         );
     }
 
-    /// Threshold control: a 5-FD own leak exceeds the `+4` bound, so the
-    /// isolated child measurement would fail closed. Proves the bound is
-    /// tight without claiming historical attribution.
+    /// Sensitivity control: the SAME isolated child with an intentional
+    /// 5-FD own leak (`XE_M5_FD_LEAK_INJECT=5`) must fail closed with real
+    /// before/after FD diagnostics. This exercises the real `+4` bound
+    /// (own leak grows after-before beyond it); the former constant-only
+    /// threshold assertion is replaced, not kept alongside.
     #[test]
-    #[allow(clippy::assertions_on_constants)]
-    fn fd_leak_threshold_would_catch_five() {
-        assert!(19 + 5 > 19 + 4, "19->24 (leak 5) must exceed the +4 bound");
-        assert!(19 + 4 <= 19 + 4, "bound allows up to +4 noise");
+    fn fd_leak_injected_five_fails_closed_with_diagnostics() {
+        let (status, out, err, timed_out) = run_fd_child(Some("5"));
+        let report = || {
+            format!(
+                "child status={status:?} timed_out={timed_out}\n--- child stdout ---\n{out}\n--- child stderr ---\n{err}"
+            )
+        };
+        assert!(
+            !timed_out,
+            "injected FD child timed out and was killed: {}",
+            report()
+        );
+        // Real nonzero failure: the bound caught the own leak.
+        assert!(
+            !status.success(),
+            "injected-5 child must fail closed: {}",
+            report()
+        );
+        let result_line = out
+            .lines()
+            .find(|line| line.trim_start().starts_with("test result:"))
+            .unwrap_or("");
+        assert!(
+            result_line.contains("1 failed"),
+            "expected exactly one failed child test, got {result_line:?}: {}",
+            report()
+        );
+        // Real FD diagnostics are retained, including the injection marker.
+        assert!(
+            out.contains("m5-child-fd before=")
+                && out.contains("inject=5")
+                && out.contains("after_targets="),
+            "injected child must report real before/after FD counts/targets: {}",
+            report()
+        );
     }
 
     // --- B3 RED: owned IO, confined targets, bounded buffering ----------------
