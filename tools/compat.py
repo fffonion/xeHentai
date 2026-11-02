@@ -1025,10 +1025,31 @@ def log(message):
     print(message, flush=True)
 
 
+def _validate_cases_document(document):
+    """Reject a malformed feature inventory before any case map is built."""
+    if not isinstance(document, dict):
+        raise CompatError("cases file must be a JSON object")
+    cases = document.get("cases")
+    if not isinstance(cases, list):
+        raise CompatError("cases file must contain a 'cases' array")
+    seen = set()
+    for index, row in enumerate(cases):
+        if not isinstance(row, dict):
+            raise CompatError(f"cases[{index}] must be a JSON object")
+        case_id = row.get("id")
+        if not isinstance(case_id, str) or not case_id:
+            raise CompatError(f"cases[{index}].id must be a non-empty string")
+        if case_id in seen:
+            raise CompatError(f"duplicate case id: {case_id}")
+        seen.add(case_id)
+
+
 def load_cases():
     if not CASES_FILE.is_file():
         raise CompatError(f"missing {CASES_FILE}")
-    return json.loads(CASES_FILE.read_text(encoding="utf-8"))
+    document = json.loads(CASES_FILE.read_text(encoding="utf-8"))
+    _validate_cases_document(document)
+    return document
 
 
 def compare(expected, actual, path="root"):
@@ -8488,6 +8509,9 @@ def suite_command(args):
     output = Path(args.output).resolve()
     if output.exists():
         raise CompatError(f"evidence output already exists: {output}")
+    # Public-entry preflight: a malformed or duplicate-bearing inventory is
+    # rejected before an evidence root or any case map is created.
+    cases_doc = load_cases()
     output.mkdir(parents=True)
     target_dir = os.environ.get("CARGO_TARGET_DIR")
     if not target_dir:
@@ -8504,7 +8528,6 @@ def suite_command(args):
         if args.suite == "all"
         else [args.suite]
     )
-    cases_doc = load_cases()
     implemented = {
         case["id"] for case in cases_doc["cases"] if case["status"] in ("implemented", "delta")
     }

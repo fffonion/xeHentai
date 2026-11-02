@@ -3793,24 +3793,26 @@
     },
     {
       "id": "rpc.method.unknown",
-      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract; xeHentai/rpc.py unit contract",
       "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
       "suite": "rpc",
       "inputs": [],
       "assertions": [
-        "rpc.method.unknown matches the reference transcript"
+        "rpc.method.unknown matches the reference transcript",
+        "rpc.method.unknown passes the focused native test"
       ],
       "status": "implemented",
       "delta": null
     },
     {
       "id": "rpc.method.private",
-      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract; xeHentai/rpc.py unit contract",
       "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
       "suite": "rpc",
       "inputs": [],
       "assertions": [
-        "rpc.method.private matches the reference transcript"
+        "rpc.method.private matches the reference transcript",
+        "rpc.method.private passes the focused native test"
       ],
       "status": "implemented",
       "delta": null
@@ -3961,12 +3963,13 @@
     },
     {
       "id": "rpc.auth.missing",
-      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract; xeHentai/rpc.py unit contract",
       "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
       "suite": "rpc",
       "inputs": [],
       "assertions": [
-        "rpc.auth.missing matches the reference transcript"
+        "rpc.auth.missing matches the reference transcript",
+        "rpc.auth.missing passes the focused native test"
       ],
       "status": "implemented",
       "delta": null
@@ -3997,12 +4000,13 @@
     },
     {
       "id": "rpc.auth.exact",
-      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract; xeHentai/rpc.py unit contract",
       "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
       "suite": "rpc",
       "inputs": [],
       "assertions": [
-        "rpc.auth.exact matches the reference transcript"
+        "rpc.auth.exact matches the reference transcript",
+        "rpc.auth.exact passes the focused native test"
       ],
       "status": "implemented",
       "delta": null
@@ -4021,24 +4025,26 @@
     },
     {
       "id": "rpc.http.options",
-      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract; xeHentai/rpc.py unit contract",
       "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
       "suite": "rpc",
       "inputs": [],
       "assertions": [
-        "rpc.http.options matches the reference transcript"
+        "rpc.http.options matches the reference transcript",
+        "rpc.http.options passes the focused native test"
       ],
       "status": "implemented",
       "delta": null
     },
     {
       "id": "rpc.http.unknown-get",
-      "source": "xeHentai/rpc.py do_POST/do_GET wire contract",
+      "source": "xeHentai/rpc.py do_POST/do_GET wire contract; xeHentai/rpc.py unit contract",
       "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
       "suite": "rpc",
       "inputs": [],
       "assertions": [
-        "rpc.http.unknown-get matches the reference transcript"
+        "rpc.http.unknown-get matches the reference transcript",
+        "rpc.http.unknown-get passes the focused native test"
       ],
       "status": "implemented",
       "delta": null
@@ -4296,30 +4302,6 @@
       "delta": null
     },
     {
-      "id": "rpc.http.options",
-      "source": "xeHentai/rpc.py unit contract",
-      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
-      "suite": "rpc",
-      "inputs": [],
-      "assertions": [
-        "rpc.http.options passes the focused native test"
-      ],
-      "status": "implemented",
-      "delta": null
-    },
-    {
-      "id": "rpc.http.unknown-get",
-      "source": "xeHentai/rpc.py unit contract",
-      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
-      "suite": "rpc",
-      "inputs": [],
-      "assertions": [
-        "rpc.http.unknown-get passes the focused native test"
-      ],
-      "status": "implemented",
-      "delta": null
-    },
-    {
       "id": "rpc.sign.pending",
       "source": "xeHentai/rpc.py unit contract",
       "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
@@ -4327,54 +4309,6 @@
       "inputs": [],
       "assertions": [
         "rpc.sign.pending passes the focused native test"
-      ],
-      "status": "implemented",
-      "delta": null
-    },
-    {
-      "id": "rpc.method.unknown",
-      "source": "xeHentai/rpc.py unit contract",
-      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
-      "suite": "rpc",
-      "inputs": [],
-      "assertions": [
-        "rpc.method.unknown passes the focused native test"
-      ],
-      "status": "implemented",
-      "delta": null
-    },
-    {
-      "id": "rpc.method.private",
-      "source": "xeHentai/rpc.py unit contract",
-      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
-      "suite": "rpc",
-      "inputs": [],
-      "assertions": [
-        "rpc.method.private passes the focused native test"
-      ],
-      "status": "implemented",
-      "delta": null
-    },
-    {
-      "id": "rpc.auth.missing",
-      "source": "xeHentai/rpc.py unit contract",
-      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
-      "suite": "rpc",
-      "inputs": [],
-      "assertions": [
-        "rpc.auth.missing passes the focused native test"
-      ],
-      "status": "implemented",
-      "delta": null
-    },
-    {
-      "id": "rpc.auth.exact",
-      "source": "xeHentai/rpc.py unit contract",
-      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
-      "suite": "rpc",
-      "inputs": [],
-      "assertions": [
-        "rpc.auth.exact passes the focused native test"
       ],
       "status": "implemented",
       "delta": null
