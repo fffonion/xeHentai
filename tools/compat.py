@@ -875,6 +875,7 @@ NATIVE_COMMANDS = {
         ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::snake_"],
         ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::accept_loop"],
         ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::media_"],
+        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::unknown_method_is_404_and_unauthorized_is_403"],
     ],
     "gallery": [
         ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::gallery_"],
@@ -5507,7 +5508,60 @@ def detect_zero_tests(output):
     return bool(re.search(r"test result: ok\. 0 passed", output))
 
 
+# The six inventory rows consolidated from a wire row and a focused-native
+# row. Each row's published boolean claims BOTH legs passed in the same
+# round, so every name NATIVE_CASE_MAP maps to these IDs is required.
+RPC_MERGED_NATIVE_CASE_IDS = (
+    "rpc.method.unknown",
+    "rpc.method.private",
+    "rpc.auth.missing",
+    "rpc.auth.exact",
+    "rpc.http.options",
+    "rpc.http.unknown-get",
+)
+
+
+def rpc_merged_required_native_names():
+    """Map each merged RPC case ID to its catalogued native test names."""
+    required = {case_id: [] for case_id in RPC_MERGED_NATIVE_CASE_IDS}
+    for test_name, case_ids in NATIVE_CASE_MAP["rpc"].items():
+        for case_id in case_ids:
+            if case_id in required:
+                required[case_id].append(test_name)
+    return required
+
+
+def validate_rpc_merged_native_proof(native_runs, cases):
+    """Require every mapped native name to be ``ok`` in this same round.
+
+    A missing or non-ok name marks the merged row False and returns a
+    diagnostic diff naming both the case and the test. It never sets a
+    row True, so a failed wire leg cannot be resurrected by a passing
+    native leg.
+    """
+    observed = {}
+    for run in native_runs:
+        observed.update(run.get("results") or {})
+    diffs = []
+    for case_id, test_names in rpc_merged_required_native_names().items():
+        for test_name in test_names:
+            status = observed.get(test_name)
+            if status == "ok":
+                continue
+            cases[case_id] = False
+            diffs.append(
+                f"rpc native proof {case_id}: {test_name} is "
+                f"{status if status is not None else 'missing'} in this round")
+    return diffs
+
+
 def merge_native_cases(suite, native_runs, cases):
+    """Merge observed native statuses and return extra validation diffs.
+
+    Non-RPC suites keep their existing merge semantics and return no extra
+    diffs. The RPC six-ID guard runs only after the usual merge, on the
+    same round's native results.
+    """
     for run in native_runs:
         results = run["results"]
         for test_name, status in results.items():
@@ -5516,6 +5570,9 @@ def merge_native_cases(suite, native_runs, cases):
                     cases.setdefault(case_id, True)
                 else:
                     cases[case_id] = False
+    if suite != "rpc":
+        return []
+    return validate_rpc_merged_native_proof(native_runs, cases)
 
 
 # Gallery native inventory: the `gallery_` cargo filter also selects one
@@ -8404,7 +8461,7 @@ def run_suite(suite, output_root, upstream, target_dir):
             results, summary = require_native(run, suite)
             ready_native.append({"results": results, "summary": summary, "argv": run["argv"],
                                  "stdout": run["stdout"]})
-        merge_native_cases(suite, ready_native, cases)
+        diffs.extend(merge_native_cases(suite, ready_native, cases))
         if suite == "gallery":
             # Exact native/final publication inventory on the existing
             # gallery path: exact received test names/statuses, exact

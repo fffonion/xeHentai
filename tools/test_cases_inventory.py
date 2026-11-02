@@ -239,6 +239,97 @@ def _load_document(document):
         shutil.rmtree(root, ignore_errors=True)
 
 
+KNOWN_RPC_NATIVE = (
+    "rpc::server::tests::unknown_method_is_404_and_unauthorized_is_403")
+
+
+def _rpc_required_native_names():
+    """Every NATIVE_CASE_MAP rpc name that proves one of the six merged IDs."""
+    required = {case_id: [] for case_id in DUPLICATE_IDS}
+    for test_name, case_ids in compat.NATIVE_CASE_MAP["rpc"].items():
+        for case_id in case_ids:
+            if case_id in required:
+                required[case_id].append(test_name)
+    return required
+
+
+def _rpc_status_fixture(*, omit=(), non_ok=()):
+    """One round of native-observed status data, not a Cargo/HTTP payload."""
+    names = {
+        test_name
+        for names in _rpc_required_native_names().values()
+        for test_name in names
+    }
+    results = {test_name: "ok" for test_name in names if test_name not in omit}
+    for test_name in non_ok:
+        assert test_name in results, test_name
+        results[test_name] = "FAILED"
+    return results
+
+
+def test_rpc_six_merged_ids_require_same_round_mapped_native():
+    """A wire-True merged row must fail when its mapped native is absent."""
+    cases = {case_id: True for case_id in DUPLICATE_IDS}
+    diffs = compat.merge_native_cases(
+        "rpc", [{"results": _rpc_status_fixture(omit=(KNOWN_RPC_NATIVE,))}],
+        cases)
+    assert cases["rpc.auth.missing"] is False, cases
+    assert isinstance(diffs, list), diffs
+    assert any(KNOWN_RPC_NATIVE in diff and "rpc.auth.missing" in diff
+               for diff in diffs), diffs
+    # The known name also proves rpc.method.unknown; absence must fail both.
+    assert cases["rpc.method.unknown"] is False, cases
+
+    cases = {case_id: True for case_id in DUPLICATE_IDS}
+    diffs = compat.merge_native_cases(
+        "rpc",
+        [{"results": _rpc_status_fixture(
+            non_ok=("rpc::tests::auth_requires_exact_literal_token",))}],
+        cases)
+    assert isinstance(diffs, list), diffs
+    assert cases["rpc.auth.exact"] is False, cases
+    assert any("rpc.auth.exact" in diff
+               and "auth_requires_exact_literal_token" in diff
+               for diff in diffs), diffs
+
+
+def test_rpc_six_merged_ids_pass_only_when_all_mapped_native_ok():
+    cases = {case_id: True for case_id in DUPLICATE_IDS}
+    diffs = compat.merge_native_cases(
+        "rpc", [{"results": _rpc_status_fixture()}], cases)
+    assert diffs == [], diffs
+    assert all(cases[case_id] is True for case_id in DUPLICATE_IDS), cases
+
+    # A wire leg that already failed is never resurrected by the native leg.
+    cases = {case_id: True for case_id in DUPLICATE_IDS}
+    cases["rpc.auth.missing"] = False
+    diffs = compat.merge_native_cases(
+        "rpc", [{"results": _rpc_status_fixture()}], cases)
+    assert diffs == [], diffs
+    assert cases["rpc.auth.missing"] is False, cases
+    assert cases["rpc.method.unknown"] is True, cases
+
+    # Non-RPC merge semantics are unchanged: no extra diffs, mapped row true.
+    first_name = sorted(compat.NATIVE_CASE_MAP["download"])[0]
+    first_case = compat.NATIVE_CASE_MAP["download"][first_name][0]
+    cases = {}
+    diffs = compat.merge_native_cases(
+        "download", [{"results": {first_name: "ok"}}], cases)
+    assert diffs == [], diffs
+    assert cases[first_case] is True, cases
+
+
+def test_rpc_native_filters_select_every_required_mapped_name():
+    filters = [argv[-1] for argv in compat.NATIVE_COMMANDS["rpc"]]
+    required = _rpc_required_native_names()
+    for case_id in DUPLICATE_IDS:
+        assert required[case_id], case_id
+        for test_name in required[case_id]:
+            assert any(filter_text in test_name for filter_text in filters), (
+                case_id, test_name)
+    assert filters.count(KNOWN_RPC_NATIVE) == 1, filters
+
+
 TESTS = [
     test_current_catalog_ids_are_unique_and_strict,
     test_six_merged_ids_keep_both_original_legs,
@@ -252,6 +343,9 @@ TESTS = [
     test_empty_id_is_rejected,
     test_non_string_id_is_rejected,
     test_distinct_inventory_loads_without_changes,
+    test_rpc_six_merged_ids_require_same_round_mapped_native,
+    test_rpc_six_merged_ids_pass_only_when_all_mapped_native_ok,
+    test_rpc_native_filters_select_every_required_mapped_name,
 ]
 
 
