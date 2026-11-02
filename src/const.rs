@@ -12,6 +12,29 @@ pub const VERSION: &str = "2.023";
 pub const VERSION_DISPLAY: &str = "2.023-rss";
 pub const SCRIPT_NAME: &str = "xeHentai";
 
+/// Native package contract revisions this binary understands (plan §9.2.5).
+/// They are the explicit application/script contract numbers, not a computed
+/// schema fingerprint; a package built for different numbers is rejected.
+pub const HOST_ABI: i64 = 1;
+pub const SCRIPT_ABI: i64 = 1;
+
+/// Build target triple, compiled in by `build.rs` for native package checks.
+pub const TARGET: &str = env!("XEH_TARGET");
+/// Compiled release/update identifier (`XEH_BUILD_ID`, `dev` when unset).
+pub const BUILD_ID: &str = env!("XEH_BUILD_ID");
+
+/// The version label the running image reports. An ordinary unpublished build
+/// prints exactly [`VERSION_DISPLAY`]; a build compiled with a release/update
+/// identifier reports it in the same label, which is how two real native
+/// builds stay distinguishable without any runtime override.
+pub fn version_label() -> String {
+    if BUILD_ID == "dev" {
+        VERSION_DISPLAY.to_string()
+    } else {
+        format!("{VERSION_DISPLAY}+{BUILD_ID}")
+    }
+}
+
 pub const DUMMY_FILENAME: &str = "-dummy-";
 pub const RENAME_TMPDIR: &str = "-xeh-conflict-";
 pub const STATIC_CACHE_FILE: &str = "webui.gz";

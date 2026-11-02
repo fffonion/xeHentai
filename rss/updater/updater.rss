@@ -4,12 +4,13 @@ use http;
 // Update check decision and log selection (`updater/updater.py:21-63`).
 //
 // This module owns the mode decision (off/check/download), the same-update-id
-// comparison, what gets logged for each outcome, and the buffered commits
-// request. The Rust owner supplies the typed binding/request plan from
-// `github.rss`, the transport policy, the owned background task and the logger
-// sink. No download, pending file, package or apply decision exists in this
-// scope: a `download` run reports the explicit unsupported stage instead of
-// claiming a completed update.
+// comparison, what gets logged for each outcome, the buffered commits request,
+// and the start-time apply/stale/rollback decisions. The Rust owner supplies
+// the typed binding/request plan from `github.rss`, the transport policy, the
+// package primitives and the logger sink, and enforces the signature, digest,
+// ABI, path, platform and rollback safety whatever these decisions ask for.
+// A `download` decision selects the signed package download; ONLY the native
+// installer publishes pending, and only the next start applies it.
 
 struct LogEvent {
     level: string,
@@ -28,7 +29,18 @@ struct FetchResult {
     body: string,
 }
 
+struct RawFetch {
+    status: int,
+    url: string,
+    body: bytes,
+}
+
 struct CheckDecision {
+    outcome: string,
+    events: [LogEvent],
+}
+
+struct StartupDecision {
     outcome: string,
     events: [LogEvent],
 }
@@ -76,6 +88,26 @@ pub fn upd_fetch(url: string, headers: [[string]]) -> FetchResult {
     result
 }
 
+/// The binary half of the transport: a detached signature or a whole payload
+/// archive is not text, so it is returned as the SDK's own bytes value instead
+/// of being forced through UTF-8. Same request policy as the check.
+pub fn upd_fetch_bytes(url: string, headers: [[string]]) -> RawFetch {
+    let mut request = http::request::new("GET", url);
+    for index in 0..headers.length {
+        let pair = &headers[index];
+        http::request::set_header(&mut request, pair[0], pair[1]);
+    }
+    let response = http::client::request(request);
+    let final_url = http::response::url(&response);
+    let body = http::response::body(&response);
+    let result = {
+        status: http::response::status(&response),
+        url: final_url,
+        body: body,
+    };
+    result
+}
+
 fn event(level: string, key: string, args: [string]) -> LogEvent {
     let entry = {
         level: level,
@@ -115,11 +147,11 @@ pub fn upd_decide(
         events = available_events(ts, message, update_id);
         events[events.length] = event("info", "UPDATE_DOWNLOAD_MANUALLY", []);
     } else if mode == "download" {
-        // The check half is complete; the package/download/apply half is the
-        // following scope and must not be reported as a completed update.
-        outcome = "download_unsupported";
+        // Download mode selects the package download; the native owner then
+        // performs the signed fetch and publishes ONE pending envelope. The
+        // current process keeps running the version it started with.
+        outcome = "download";
         events = available_events(ts, message, update_id);
-        events[events.length] = event("warning", "UPDATE_DOWNLOAD_UNSUPPORTED", ["this build implements the update check only; no package was downloaded"]);
     } else {
         outcome = "invalid";
     }
@@ -137,6 +169,70 @@ pub fn upd_failure(detail: string) -> CheckDecision {
     events[events.length] = event("warning", "UPDATE_FAILED", [detail]);
     let decision = {
         outcome: "failed",
+        events: events,
+    };
+    decision
+}
+
+/// The pending envelope was published: it takes effect on the next start.
+pub fn upd_pending_written(update_id: string) -> CheckDecision {
+    let mut events: [LogEvent] = [];
+    events[events.length] = event("info", "UPDATE_COMPLETE", []);
+    events[events.length] = event("debug", "UPDATE_PENDING_ID", [update_id]);
+    let decision = {
+        outcome: "pending",
+        events: events,
+    };
+    decision
+}
+
+/// Start-time decision. `applied_update_id` is the id recorded for the running
+/// installation and `candidate_update_id` the validated pending package; a
+/// request that is already applied is stale and is dropped instead of being
+/// applied twice. The native owner still enforces every signature, digest,
+/// ABI, path and platform check whatever this decides, and only it decides
+/// that the switch itself succeeded.
+pub fn upd_startup(
+    pending_present: bool,
+    applied_update_id: string,
+    candidate_update_id: string
+) -> StartupDecision {
+    let mut outcome = "none";
+    let mut events: [LogEvent] = [];
+    if pending_present {
+        if applied_update_id.length > 0 && applied_update_id == candidate_update_id {
+            outcome = "stale";
+        } else {
+            outcome = "apply";
+            events[events.length] = event("info", "UPDATE_APPLIED", [candidate_update_id]);
+        }
+    }
+    let decision = {
+        outcome: outcome,
+        events: events,
+    };
+    decision
+}
+
+/// The running image reported the new compiled identity after re-execution:
+/// the activation is confirmed, so the marker is retired.
+pub fn upd_confirmed(update_id: string) -> StartupDecision {
+    let mut events: [LogEvent] = [];
+    events[events.length] = event("info", "UPDATE_CONFIRMED", [update_id]);
+    let decision = {
+        outcome: "confirmed",
+        events: events,
+    };
+    decision
+}
+
+/// Activation failed: the previous release and the user's own state are what
+/// remains, and the log says so instead of reporting a completed update.
+pub fn upd_rollback(detail: string, previous_update_id: string) -> StartupDecision {
+    let mut events: [LogEvent] = [];
+    events[events.length] = event("warning", "UPDATE_ROLLBACK", [detail, previous_update_id]);
+    let decision = {
+        outcome: "rolled_back",
         events: events,
     };
     decision

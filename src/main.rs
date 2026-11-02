@@ -39,6 +39,15 @@ fn main() {
 
 /// Startup with the process' own arguments.
 pub fn run(root: &Path) -> i32 {
+    // Installer-private candidate preflight. This is not a public switch: it is
+    // reached only by the installer's own child process, before configuration
+    // or the business App exists, and it loads the candidate resources against
+    // a private temporary state directory.
+    if let Some((candidate_root, state)) =
+        updater::install::preflight_request(&std::env::args_os().collect::<Vec<_>>())
+    {
+        return updater::run_preflight(&candidate_root, &state);
+    }
     run_with_args(root, std::env::args_os())
 }
 
@@ -71,13 +80,65 @@ where
             return 2;
         }
     };
-    let logger = Logger::new();
+    let mut logger = Logger::new();
+    logger.set_verbosity(loaded.config.log_verbose);
     // FILEPATH in the reference is the application directory; the legacy
     // cookie file lives next to the program, not in the working directory.
     let filepath = std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| root.to_path_buf());
+    // The trusted startup controller runs here: before the business App, its
+    // session and its modules exist. It decides (through the OLD release's
+    // rss/updater modules) whether a pending candidate is applied, and the
+    // native owner enforces the signature, digest, ABI, path, preflight,
+    // replacement and rollback rules. An ordinary start with nothing pending
+    // loads no updater module at all.
+    let install_root = resource_root(root);
+    // The CLI patch (`-l`, `--verbose`, `--auto-update`) is applied by
+    // `update_config` after the business App exists, so the activation lines
+    // use the configured log path. They are ordinary log lines, not package
+    // resources.
+    let log_path = config::resolve_log_path(root, &loaded.config.log_path);
+    if let Err(error) = logger.set_logfile(&log_path) {
+        eprintln!(
+            "xeHentai: cannot open log file {}: {error}",
+            log_path.display()
+        );
+    }
+    let startup = updater::startup(&install_root);
+    for event in &startup.events {
+        log_event(&mut logger, locale, event);
+    }
+    if let Some(exe) = startup.reexec {
+        // The candidate executable is installed and must really run. If the
+        // platform cannot replace the image, restore the previous release.
+        let failure = updater::install::reexec(&exe);
+        let installation = updater::install::Installation::new(&install_root);
+        match updater::install::rollback_activation(&installation) {
+            Ok(previous) => {
+                let previous_id = previous.map(|record| record.update_id).unwrap_or_default();
+                logger
+                    .warning(
+                        &i18n::render(
+                            locale,
+                            "UPDATE_ROLLBACK",
+                            &[&failure.to_string(), &previous_id],
+                        )
+                        .unwrap_or_else(|| failure.to_string()),
+                    )
+                    .ok();
+            }
+            Err(error) => {
+                logger
+                    .error(&format!(
+                        "{failure}; restoring the previous release: {error}"
+                    ))
+                    .ok();
+            }
+        }
+        return 1;
+    }
     let mut app = match App::new(loaded.config, logger, root, &filepath) {
         Ok(app) => app,
         Err(error) => {
@@ -157,8 +218,9 @@ async fn application(mut app: App, resource: &Path, opts: &Opts, locale: Locale)
         eprintln!("xeHentai: configuration error: {error}");
         return 1;
     }
-    let started = i18n::render(locale, "XEH_STARTED", &[r#const::VERSION_DISPLAY])
-        .unwrap_or_else(|| format!("xeHentai {} started.", r#const::VERSION_DISPLAY));
+    let label = r#const::version_label();
+    let started = i18n::render(locale, "XEH_STARTED", &[&label])
+        .unwrap_or_else(|| format!("xeHentai {label} started."));
     let _ = app.logger_mut().info(&started);
     if let Some(cookie) = &opts.cookie {
         app.set_cookie(cookie);
@@ -394,12 +456,13 @@ fn spawn_update_check(
         app.borrow_app_mut(|app| {
             let _ = app.logger_mut().debug(&channel);
         });
-        // This build carries no applied update id yet; the package loader in
-        // the following scope supplies the applied id on a later startup.
-        let applied_update_id = None;
+        // The applied id comes from the installer's own active record, so a
+        // re-requested identical package is recognised; it is never guessed
+        // from the version string or from files.
+        let applied_update_id = updater::install::Installation::new(&resource).applied_update_id();
         let user_agent = format!("xeHentai/{}", r#const::VERSION_DISPLAY);
         match updater
-            .check(&mode, beta, applied_update_id, &user_agent)
+            .check(&mode, beta, applied_update_id.as_deref(), &user_agent)
             .await
         {
             Ok(report) => {
@@ -413,16 +476,22 @@ fn spawn_update_check(
 }
 
 fn log_update_event(app: &core::AppHandle, locale: Locale, event: &updater::LogEvent) {
-    let message = updater::render_event(locale, event);
     app.borrow_app_mut(|app| {
-        let logger = app.logger_mut();
-        let _ = match event.level.as_str() {
-            "debug" => logger.debug(&message),
-            "warning" => logger.warning(&message),
-            "error" => logger.error(&message),
-            _ => logger.info(&message),
-        };
+        log_event(app.logger_mut(), locale, event);
     });
+}
+
+/// Render and write one RSS-selected event through the existing logger. Used by
+/// the App-owned background task and by the pre-App startup controller, which
+/// has a logger but no App yet.
+fn log_event(logger: &mut Logger, locale: Locale, event: &updater::LogEvent) {
+    let message = updater::render_event(locale, event);
+    let _ = match event.level.as_str() {
+        "debug" => logger.debug(&message),
+        "warning" => logger.warning(&message),
+        "error" => logger.error(&message),
+        _ => logger.info(&message),
+    };
 }
 
 fn log_update_failure(app: &core::AppHandle, locale: Locale, detail: &str) {

@@ -13781,6 +13781,9 @@ mod m6 {
 /// M7: the real binary update check. The business decision lives in
 /// `rss/updater/*`; these tests drive the production entry and observe actual
 /// loopback HTTP transcripts, logs and process lifetime.
+// POSIX signals and real child processes: the M7 binary cases run on Unix
+// only, exactly like the platform they verify.
+#[cfg(unix)]
 mod m7 {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -14325,24 +14328,49 @@ mod m7 {
         assert!(!log(root.path()).contains("Update available"));
     }
 
+    /// `download` is no longer a check-only stub: it asks the source once,
+    /// then requests the signed descriptor and its detached signature and
+    /// refuses to publish a pending envelope when they are not a valid signed
+    /// package. The complete download -> pending -> next-start path is proved
+    /// by the `m7p` cases; this case keeps the binary-level refusal.
     #[test]
-    fn m7_binary_download_mode_checks_then_reports_unsupported_stage() {
+    fn m7_binary_download_mode_requires_a_signed_package() {
         let root = tempfile::tempdir().expect("root");
         let server = Server::start(200, COMMITS);
         prepare_binding(root.path(), &server.origin(), None);
-        let mut child = spawn(root.path(), &["-l", "eh.log", "--auto-update", "download"]);
+        let mut child = spawn(
+            root.path(),
+            &["-l", "eh.log", "-vv", "--auto-update", "download"],
+        );
         assert!(
-            wait_log(root.path(), "does not download or install packages"),
-            "the unsupported download stage was not reported: {}",
+            wait_log(root.path(), "Failure when updating program"),
+            "an unsigned package was not refused: {}",
             log(root.path())
         );
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(stop(&mut child), 0);
+        let requests = server.requests();
+        let targets: Vec<&str> = requests
+            .iter()
+            .map(|request| request.target.as_str())
+            .collect();
         assert_eq!(
-            server.requests().len(),
-            1,
-            "download must not fetch a package: {:?}",
-            server.requests()
+            targets,
+            vec![
+                "/repos/fffonion/xeHentai/commits?sha=rss",
+                "/fffonion/xeHentai/releases/download/rss-a1b2c3d4e5f60718293a4b5c6d7e8f9012345678/xeHentai-rss.zip.manifest.json",
+                "/fffonion/xeHentai/releases/download/rss-a1b2c3d4e5f60718293a4b5c6d7e8f9012345678/xeHentai-rss.zip.sig"
+            ],
+            "unexpected requests"
+        );
+        assert!(
+            !root
+                .path()
+                .join(".xehentai-update")
+                .join("pending")
+                .join("src.zip")
+                .exists(),
+            "an unverified package must not become pending"
         );
         let log = log(root.path());
         assert!(log.contains("Update available"), "{log}");
@@ -14631,3 +14659,8 @@ mod m7 {
         }));
     }
 }
+
+// M7 remaining scope: signed package, pending and next-start activation.
+// POSIX signals and real child processes, so Unix only.
+#[cfg(unix)]
+mod m7p;

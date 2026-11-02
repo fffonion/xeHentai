@@ -37,6 +37,14 @@ percent-encoding = "2"
 image = "0.25"
 md5 = "0.7"
 tempfile = "3"
+# Native update packages: standard integrity/authenticity primitives and the
+# OS-level self replacement. `sha2` and `ed25519-dalek` are the mature crates
+# the reference authorization names; `self-replace` is the reviewed cross
+# platform replace helper (see `src/updater/install.rs`).
+sha2 = "0.10"
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "pkcs8", "pem"] }
+hex = "0.4"
+self-replace = "1.5"
 
 # The confined gallery/archive opens are a Unix backend: `rustix::fs` is only
 # compiled on Unix targets, and `src/task/file_ops.rs` keeps the whole backend

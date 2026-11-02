@@ -11,11 +11,16 @@
 //!   drives the buffered `http::client::request`; and
 //! * converts the named script results into typed values.
 //!
+//! The download/apply stages are the native installation primitives in
+//! [`package`] (the pending envelope) and [`install`] (activation, rollback and
+//! re-execution); [`descriptor`] holds the signed package contract. The RSS
+//! modules still pick the channel, the update id and whether to download,
+//! apply or drop a pending candidate, and the native side enforces the
+//! signature, digest, ABI, path, platform and rollback safety whatever a
+//! script asks for.
+//!
 //! The owned background task, cancellation and logger sink belong to the
-//! existing `main`/`run_supervised` owner (see `src/main.rs`). This scope is
-//! the CHECK path only: no download, pending file, package or apply decision
-//! exists here, so a `download` run is reported as an explicit unsupported
-//! stage rather than a completed update.
+//! existing `main`/`run_supervised` owner (see `src/main.rs`).
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -24,6 +29,13 @@ use vm::{
     BuiltinFunction, CapabilityProfile, CompileSourceFileOptions, HostFunctionRegistry, HttpConfig,
     HttpHostExt, SourceFlavor, Value, Vm, VmStatus, compile_source_with_flavor_and_options,
 };
+
+pub mod descriptor;
+pub mod error;
+pub mod install;
+pub mod package;
+
+pub use error::UpdateError;
 
 pub const GITHUB_RSS: &str = "rss/updater/github.rss";
 pub const UPDATER_RSS: &str = "rss/updater/updater.rss";
@@ -41,53 +53,20 @@ const HTTP_HOST_IMPORTS: &[&str] = &[
 
 const BUILTIN_CALLS: &[&str] = &["json::decode", "bytes::to_utf8", "string_replace_literal"];
 
-#[derive(Debug)]
-pub enum UpdateError {
-    Io {
-        path: PathBuf,
-        message: String,
-    },
-    Compile {
-        script: &'static str,
-        message: String,
-    },
-    Bind {
-        script: &'static str,
-        message: String,
-    },
-    Runtime {
-        script: &'static str,
-        message: String,
-    },
-    Shape {
-        what: &'static str,
-        message: String,
-    },
-    Binding(String),
-}
-
-impl std::fmt::Display for UpdateError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io { path, message } => write!(f, "{}: {message}", path.display()),
-            Self::Compile { script, message } => write!(f, "{script} compile error: {message}"),
-            Self::Bind { script, message } => write!(f, "{script} host binding error: {message}"),
-            Self::Runtime { script, message } => write!(f, "{script} runtime error: {message}"),
-            Self::Shape { what, message } => write!(f, "{what} shape error: {message}"),
-            Self::Binding(message) => write!(f, "update source binding error: {message}"),
-        }
-    }
-}
-
-impl std::error::Error for UpdateError {}
-
 /// Named update metadata (`xeHentai/updater/__init__.py` `UpdateInfo`).
+///
+/// The four reference fields keep their names; the three transport fields are
+/// the native package sidecars the RSS business module derives from the same
+/// selected commit (one fixed convention, never a provider API).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpdateInfo {
     pub update_id: String,
     pub download_link: String,
     pub ts: String,
     pub message: String,
+    pub descriptor_link: String,
+    pub signature_link: String,
+    pub archive_prefix: String,
 }
 
 /// One typed log action selected by `rss/updater/updater.rss`; the App logger
@@ -111,7 +90,10 @@ pub struct CheckReport {
 }
 
 /// Typed view of `SourceBinding` in `rss/updater/github.rss`. The binding is
-/// also the trusted HTTP allowlist: one exact scheme/host/port.
+/// also the trusted HTTP allowlist: the exact API and package origins, nothing
+/// else. `verification_key` is the detached-signature public key (PEM); it is
+/// `None` in the production binding until the release stage binds it, and a
+/// missing key always rejects a package.
 #[derive(Clone, Debug)]
 pub struct SourceBinding {
     pub api_origin: String,
@@ -119,6 +101,7 @@ pub struct SourceBinding {
     pub stable_channel: String,
     pub beta_channel: Option<String>,
     pub package_download_origin: String,
+    pub verification_key: Option<String>,
 }
 
 struct Plan {
@@ -148,12 +131,19 @@ pub struct Updater {
     github: Vm,
     github_plan: Value,
     github_parse: Value,
+    github_prefix: Value,
     updater: Vm,
     updater_fetch: Value,
+    updater_fetch_bytes: Value,
     updater_mode: Value,
     updater_decide: Value,
     updater_failure: Value,
+    updater_pending: Value,
+    updater_startup: Value,
+    updater_confirmed: Value,
+    updater_rollback: Value,
     binding: SourceBinding,
+    install: install::Installation,
 }
 
 fn registry() -> &'static HostFunctionRegistry {
@@ -317,6 +307,13 @@ fn binding_value(binding: &SourceBinding) -> Value {
             None => Value::Null,
         },
     ));
+    entries.push((
+        Value::string("verification_key"),
+        match &binding.verification_key {
+            Some(key) => Value::string(key.clone()),
+            None => Value::Null,
+        },
+    ));
     Value::map(entries)
 }
 
@@ -329,6 +326,7 @@ fn decode_binding(value: &Value) -> Result<SourceBinding, UpdateError> {
         stable_channel: text_of(map, "stable_channel", what)?,
         beta_channel: optional_text(map, "beta_channel", what)?,
         package_download_origin: text_of(map, "package_download_origin", what)?,
+        verification_key: optional_text(map, "verification_key", what)?,
     })
 }
 
@@ -392,6 +390,9 @@ fn decode_commit(value: &Value) -> Result<ParsedCommit, UpdateError> {
             download_link: text_of(map, "download_link", what)?,
             ts: text_of(map, "ts", what)?,
             message: text_of(map, "message", what)?,
+            descriptor_link: text_of(map, "descriptor_link", what)?,
+            signature_link: text_of(map, "signature_link", what)?,
+            archive_prefix: text_of(map, "archive_prefix", what)?,
         })
     } else {
         None
@@ -433,7 +434,14 @@ fn decode_decision(value: &Value) -> Result<Decision, UpdateError> {
 /// Exact scheme/host/port from one binding origin. A private/loopback address
 /// is admitted only when the origin itself is a loopback IP, i.e. an explicitly
 /// configured owned fixture binding; production ships public HTTPS origins.
-fn http_origin(origin: &str, what: &'static str) -> Result<(HttpConfig, String, u16), UpdateError> {
+struct Origin {
+    scheme: String,
+    host: String,
+    port: u16,
+    loopback: bool,
+}
+
+fn http_origin(origin: &str, what: &'static str) -> Result<Origin, UpdateError> {
     let url = url::Url::parse(origin).map_err(|error| {
         UpdateError::Binding(format!("{what} origin {origin:?} is not a URL: {error}"))
     })?;
@@ -464,17 +472,41 @@ fn http_origin(origin: &str, what: &'static str) -> Result<(HttpConfig, String, 
         .parse::<std::net::IpAddr>()
         .map(|ip| ip.is_loopback())
         .unwrap_or(false);
-    Ok((
-        HttpConfig {
-            allowed_schemes: vec![scheme],
-            allowed_hosts: vec![host.clone()],
-            allowed_ports: vec![port],
-            allow_private_ips: loopback,
-            ..HttpConfig::default()
-        },
+    Ok(Origin {
+        scheme,
         host,
         port,
-    ))
+        loopback,
+    })
+}
+
+/// The transport policy: exactly the two explicitly bound origins (API and
+/// package download), no gallery cookies. The response bound is the one
+/// setting that has to grow for a real native package: a payload archive with
+/// the executable plus resources. Nothing else is relaxed.
+fn http_policy(binding: &SourceBinding) -> Result<HttpConfig, UpdateError> {
+    let api = http_origin(&binding.api_origin, "api")?;
+    let package = http_origin(&binding.package_download_origin, "package download")?;
+    let mut config = HttpConfig {
+        allowed_schemes: Vec::new(),
+        allowed_hosts: Vec::new(),
+        allowed_ports: Vec::new(),
+        allow_private_ips: api.loopback || package.loopback,
+        max_response_body_bytes: package::MAX_PAYLOAD_BYTES + 1024 * 1024,
+        ..HttpConfig::default()
+    };
+    for origin in [api, package] {
+        if !config.allowed_schemes.contains(&origin.scheme) {
+            config.allowed_schemes.push(origin.scheme);
+        }
+        if !config.allowed_hosts.contains(&origin.host) {
+            config.allowed_hosts.push(origin.host);
+        }
+        if !config.allowed_ports.contains(&origin.port) {
+            config.allowed_ports.push(origin.port);
+        }
+    }
+    Ok(config)
 }
 
 impl Updater {
@@ -487,6 +519,7 @@ impl Updater {
         let github_binding = callable(&github, GITHUB_RSS, "gh_binding")?;
         let github_plan = callable(&github, GITHUB_RSS, "gh_plan")?;
         let github_parse = callable(&github, GITHUB_RSS, "gh_parse")?;
+        let github_prefix = callable(&github, GITHUB_RSS, "gh_prefix")?;
         let binding = decode_binding(
             &github
                 .invoke_callable(github_binding.clone(), &[])
@@ -496,11 +529,17 @@ impl Updater {
                 })?,
         )?;
 
-        let (http, _, _) = http_origin(&binding.api_origin, "api")?;
-        let _ = http_origin(&binding.package_download_origin, "package download")?;
+        let http = http_policy(&binding)?;
         if binding.beta_channel.as_deref().is_some_and(str::is_empty) {
             return Err(UpdateError::Binding(
                 "beta channel must be absent or non-empty".into(),
+            ));
+        }
+        if let Some(key) = &binding.verification_key
+            && key.trim().is_empty()
+        {
+            return Err(UpdateError::Binding(
+                "verification key must be absent or a PEM public key".into(),
             ));
         }
 
@@ -512,20 +551,32 @@ impl Updater {
                 message: format!("HTTP policy: {error}"),
             })?;
         let updater_fetch = callable(&updater, UPDATER_RSS, "upd_fetch")?;
+        let updater_fetch_bytes = callable(&updater, UPDATER_RSS, "upd_fetch_bytes")?;
         let updater_decide = callable(&updater, UPDATER_RSS, "upd_decide")?;
         let updater_failure = callable(&updater, UPDATER_RSS, "upd_failure")?;
         let updater_mode = callable(&updater, UPDATER_RSS, "upd_mode")?;
+        let updater_pending = callable(&updater, UPDATER_RSS, "upd_pending_written")?;
+        let updater_startup = callable(&updater, UPDATER_RSS, "upd_startup")?;
+        let updater_confirmed = callable(&updater, UPDATER_RSS, "upd_confirmed")?;
+        let updater_rollback = callable(&updater, UPDATER_RSS, "upd_rollback")?;
 
         Ok(Self {
             github,
             github_plan,
             github_parse,
+            github_prefix,
             updater,
             updater_fetch,
+            updater_fetch_bytes,
             updater_mode,
             updater_decide,
             updater_failure,
+            updater_pending,
+            updater_startup,
+            updater_confirmed,
+            updater_rollback,
             binding,
+            install: install::Installation::new(resource_root),
         })
     }
 
@@ -679,11 +730,195 @@ impl Updater {
                 })?
         };
         let decision = decode_decision(&decide_value)?;
+        if decision.outcome == "download" {
+            // The RSS decision selected a real package download; the current
+            // process keeps running this build while the fetch happens. The
+            // availability event precedes the publication event.
+            let mut report = self.download(&info, &plan.headers).await?;
+            let mut events = decision.events;
+            events.extend(report.events);
+            report.events = events;
+            return Ok(report);
+        }
         Ok(CheckReport {
             outcome: decision.outcome,
             update: Some(info),
             events: decision.events,
         })
+    }
+
+    /// Fetch the trusted signed descriptor, its detached signature and the
+    /// payload archive, verify all three, and publish ONE pending envelope.
+    ///
+    /// Nothing here changes the live installation: the running App, its task
+    /// and its reported identity stay on the version that started. A rejection
+    /// leaves any previous valid pending byte-identical.
+    async fn download(
+        &mut self,
+        info: &UpdateInfo,
+        headers: &[(String, String)],
+    ) -> Result<CheckReport, UpdateError> {
+        let descriptor_fetch = self.fetch_text(&info.descriptor_link, headers).await?;
+        if descriptor_fetch.status != 200 {
+            return self.failure(&format!(
+                "descriptor request returned HTTP {}",
+                descriptor_fetch.status
+            ));
+        }
+        let descriptor_bytes = descriptor_fetch.body.into_bytes();
+        let (signature_status, signature) = self.fetch_bytes(&info.signature_link, headers).await?;
+        if signature_status != 200 {
+            return self.failure(&format!(
+                "signature request returned HTTP {signature_status}"
+            ));
+        }
+        let descriptor = match descriptor::verify(
+            &descriptor_bytes,
+            &signature,
+            self.binding.verification_key.as_deref(),
+            &info.update_id,
+        ) {
+            Ok(descriptor) => descriptor,
+            Err(error) => return self.failure(&error.to_string()),
+        };
+
+        let (payload_status, payload) = self.fetch_bytes(&info.download_link, headers).await?;
+        if payload_status != 200 {
+            return self.failure(&format!("payload request returned HTTP {payload_status}"));
+        }
+        let digest = descriptor::sha256_hex(&payload);
+        if digest != descriptor.archive_sha256 {
+            return self.failure(&format!(
+                "payload digest {digest} does not match the signed {}",
+                descriptor.archive_sha256
+            ));
+        }
+
+        // Entry selection reads the real archive and the envelope is written to
+        // disk: both are blocking work, so they run on the blocking pool
+        // instead of holding the LocalSet that the download workers share.
+        let prefix = info.archive_prefix.clone();
+        let install = self.install.clone();
+        install::ensure_private_dir(&install.area())?;
+        let pending_dir = install
+            .pending_path()
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| UpdateError::install("the update area has no pending directory"))?;
+        let published = tokio::task::spawn_blocking(move || -> Result<(), UpdateError> {
+            package::select(&payload, &descriptor, &prefix)?;
+            let envelope = package::PendingEnvelope::new(descriptor_bytes, signature, payload)?;
+            package::publish(&pending_dir, &envelope)?;
+            Ok(())
+        })
+        .await
+        .map_err(|error| UpdateError::install(format!("update download worker: {error}")))?;
+        if let Err(error) = published {
+            return self.failure(&error.to_string());
+        }
+
+        let callable = self.updater_pending.clone();
+        let value = self.pure(
+            UPDATER_RSS,
+            &callable,
+            &[Value::string(info.update_id.clone())],
+        )?;
+        let decision = decode_decision(&value)?;
+        Ok(CheckReport {
+            outcome: decision.outcome,
+            update: Some(info.clone()),
+            events: decision.events,
+        })
+    }
+
+    async fn fetch_text(
+        &mut self,
+        url: &str,
+        headers: &[(String, String)],
+    ) -> Result<Fetched, UpdateError> {
+        let callable = self.updater_fetch.clone();
+        let value = self
+            .call_waiting(UPDATER_RSS, &callable, &request_args(url, headers))
+            .await?;
+        decode_fetched(&value)
+    }
+
+    async fn fetch_bytes(
+        &mut self,
+        url: &str,
+        headers: &[(String, String)],
+    ) -> Result<(i64, Vec<u8>), UpdateError> {
+        let callable = self.updater_fetch_bytes.clone();
+        let value = self
+            .call_waiting(UPDATER_RSS, &callable, &request_args(url, headers))
+            .await?;
+        let what = "raw fetch";
+        let map = map_of(&value, what)?;
+        let status = int_of(map, "status", what)?;
+        match field(map, "body") {
+            Some(Value::Bytes(body)) => Ok((status, (**body).clone())),
+            Some(other) => Err(UpdateError::Shape {
+                what,
+                message: format!("body is not bytes: {other:?}"),
+            }),
+            None => Err(UpdateError::Shape {
+                what,
+                message: "missing field body".into(),
+            }),
+        }
+    }
+
+    fn startup_decision(
+        &mut self,
+        pending_present: bool,
+        applied_update_id: &str,
+        candidate_update_id: &str,
+    ) -> Result<Decision, UpdateError> {
+        let callable = self.updater_startup.clone();
+        let value = self.pure(
+            UPDATER_RSS,
+            &callable,
+            &[
+                Value::Bool(pending_present),
+                Value::string(applied_update_id),
+                Value::string(candidate_update_id),
+            ],
+        )?;
+        decode_decision(&value)
+    }
+
+    fn confirmed_events(&mut self, update_id: &str) -> Result<Vec<LogEvent>, UpdateError> {
+        let callable = self.updater_confirmed.clone();
+        let value = self.pure(UPDATER_RSS, &callable, &[Value::string(update_id)])?;
+        Ok(decode_decision(&value)?.events)
+    }
+
+    fn rollback_events(
+        &mut self,
+        detail: &str,
+        previous_update_id: &str,
+    ) -> Result<Vec<LogEvent>, UpdateError> {
+        let callable = self.updater_rollback.clone();
+        let value = self.pure(
+            UPDATER_RSS,
+            &callable,
+            &[Value::string(detail), Value::string(previous_update_id)],
+        )?;
+        Ok(decode_decision(&value)?.events)
+    }
+
+    /// The payload archive prefix for one update id, derived by the trusted
+    /// business module (`gh_prefix`), never by the native installer.
+    fn prefix_for(&mut self, update_id: &str) -> Result<String, UpdateError> {
+        let callable = self.github_prefix.clone();
+        let value = self.pure(GITHUB_RSS, &callable, &[Value::string(update_id)])?;
+        match value {
+            Value::String(text) => Ok((*text).clone()),
+            other => Err(UpdateError::Shape {
+                what: "archive prefix",
+                message: format!("not a string: {other:?}"),
+            }),
+        }
     }
 
     /// Drive one script call that may wait on the buffered HTTP host operation.
@@ -740,6 +975,275 @@ fn read_script(root: &Path, relative: &'static str) -> Result<String, UpdateErro
         path,
         message: error.to_string(),
     })
+}
+
+fn request_args(url: &str, headers: &[(String, String)]) -> [Value; 2] {
+    [
+        Value::string(url),
+        Value::array(
+            headers
+                .iter()
+                .map(|(name, value)| {
+                    Value::array(vec![
+                        Value::string(name.clone()),
+                        Value::string(value.clone()),
+                    ])
+                })
+                .collect(),
+        ),
+    ]
+}
+
+/// What the pre-business-App startup controller did, in terms `main` can log
+/// and act on. `reexec` is present only for a native activation that already
+/// replaced the executable and must now really run it.
+pub struct StartupReport {
+    /// True when the activation switched the live release and the caller must
+    /// now really execute the installed image.
+    pub events: Vec<LogEvent>,
+    pub reexec: Option<PathBuf>,
+}
+
+impl StartupReport {
+    fn new(outcome: &str, events: Vec<LogEvent>) -> Self {
+        let _ = outcome;
+        Self {
+            events,
+            reexec: None,
+        }
+    }
+    fn failed(detail: impl Into<String>) -> Self {
+        Self::new(
+            "failed",
+            vec![LogEvent {
+                level: "warning".into(),
+                key: "UPDATE_FAILED".into(),
+                args: vec![detail.into()],
+            }],
+        )
+    }
+}
+
+/// The startup controller, called by `main` BEFORE the business App exists.
+///
+/// With nothing pending there is no business decision to make, so the trusted
+/// modules are not loaded at all. When a pending envelope (or an interrupted
+/// activation marker) exists, the OLD installation's `rss/updater/updater.rss`
+/// decides apply/stale/rollback, while this function enforces the native
+/// safety: signature, digest, ABI/target, entry list, private preflight,
+/// atomic switch, executable replacement and rollback.
+pub fn startup(install_root: &Path) -> StartupReport {
+    let installation = install::Installation::new(install_root);
+    let pending_path = installation.pending_path();
+    let confirm = installation.has_confirm();
+    if !confirm && !pending_path.exists() {
+        return StartupReport::new("none", Vec::new());
+    }
+
+    let mut updater = match Updater::load(install_root) {
+        Ok(updater) => updater,
+        Err(error) => return StartupReport::failed(error.to_string()),
+    };
+    let records = match installation.records() {
+        Ok(records) => records,
+        Err(error) => return StartupReport::failed(error.to_string()),
+    };
+
+    if confirm {
+        let active = records.active.clone();
+        match active {
+            Some(record) if record.native && record.build_id == crate::r#const::BUILD_ID => {
+                // The replaced image is the one running: activation is real.
+                let _ = installation.clear_confirm();
+                let events = updater
+                    .confirmed_events(&record.update_id)
+                    .unwrap_or_default();
+                return StartupReport::new("confirmed", events);
+            }
+            Some(record) => {
+                // The candidate never became the running image. Restore the
+                // previous release and say so; never report completion.
+                let detail = format!(
+                    "the replaced image did not start; this build reports {}",
+                    crate::r#const::BUILD_ID
+                );
+                match install::rollback_activation(&installation) {
+                    Ok(previous) => {
+                        let previous_id = previous
+                            .as_ref()
+                            .map(|record| record.update_id.clone())
+                            .unwrap_or_default();
+                        let events = updater
+                            .rollback_events(&detail, &previous_id)
+                            .unwrap_or_default();
+                        let _ = installation.discard_pending();
+                        let _ = record;
+                        return StartupReport::new("rolled_back", events);
+                    }
+                    Err(error) => {
+                        return StartupReport::failed(format!(
+                            "{detail}; restoring the previous release failed: {error}"
+                        ));
+                    }
+                }
+            }
+            None => {
+                let _ = installation.clear_confirm();
+            }
+        }
+    }
+
+    if !pending_path.exists() {
+        return StartupReport::new("none", Vec::new());
+    }
+
+    let envelope = match package::read(&pending_path) {
+        Ok(envelope) => envelope,
+        Err(error) => {
+            let _ = installation.discard_pending();
+            return StartupReport::failed(error.to_string());
+        }
+    };
+    let descriptor = match descriptor::authenticate(
+        &envelope.info,
+        &envelope.sig,
+        updater.binding.verification_key.as_deref(),
+    ) {
+        Ok(descriptor) => descriptor,
+        Err(error) => {
+            let _ = installation.discard_pending();
+            return StartupReport::failed(error.to_string());
+        }
+    };
+    if let Err(error) = descriptor::validate(&descriptor, &descriptor.update_id) {
+        let _ = installation.discard_pending();
+        return StartupReport::failed(error.to_string());
+    }
+    let digest = descriptor::sha256_hex(&envelope.payload);
+    if digest != descriptor.archive_sha256 {
+        let _ = installation.discard_pending();
+        return StartupReport::failed(format!(
+            "pending payload digest {digest} does not match the signed {}",
+            descriptor.archive_sha256
+        ));
+    }
+
+    let applied = records
+        .active
+        .as_ref()
+        .map(|record| record.update_id.clone())
+        .unwrap_or_default();
+    let decision = match updater.startup_decision(true, &applied, &descriptor.update_id) {
+        Ok(decision) => decision,
+        Err(error) => return StartupReport::failed(error.to_string()),
+    };
+    match decision.outcome.as_str() {
+        "stale" => {
+            // Already applied; a re-downloaded identical candidate is dropped.
+            let _ = installation.discard_pending();
+            StartupReport::new("stale", decision.events)
+        }
+        "apply" => {
+            let prefix = match updater.prefix_for(&descriptor.update_id) {
+                Ok(prefix) => prefix,
+                Err(error) => return StartupReport::failed(error.to_string()),
+            };
+            let candidate = install::Candidate {
+                descriptor,
+                payload: envelope.payload,
+                prefix,
+            };
+            let exe = match std::env::current_exe() {
+                Ok(exe) => exe,
+                Err(error) => {
+                    return StartupReport::failed(format!(
+                        "the running executable path is unavailable: {error}"
+                    ));
+                }
+            };
+            let candidate_id = candidate.descriptor.update_id.clone();
+            match install::install_candidate(&installation, &candidate, &candidate_id) {
+                Ok(committed) => {
+                    let _ = installation.discard_pending();
+                    let mut report = StartupReport::new("applied", decision.events);
+                    let _ = committed.record;
+                    if committed.reexec {
+                        report.reexec = Some(exe);
+                    }
+                    report
+                }
+                Err(failure) => {
+                    let _ = installation.discard_pending();
+                    let previous_id = records
+                        .active
+                        .as_ref()
+                        .map(|record| record.update_id.clone())
+                        .unwrap_or_default();
+                    let detail = failure.error.to_string();
+                    let events = if failure.rolled_back {
+                        updater
+                            .rollback_events(&detail, &previous_id)
+                            .unwrap_or_default()
+                    } else {
+                        vec![LogEvent {
+                            level: "warning".into(),
+                            key: "UPDATE_FAILED".into(),
+                            args: vec![detail.clone()],
+                        }]
+                    };
+                    StartupReport::new(
+                        if failure.rolled_back {
+                            "rolled_back"
+                        } else {
+                            "failed"
+                        },
+                        events,
+                    )
+                }
+            }
+        }
+        _ => StartupReport::new("none", decision.events),
+    }
+}
+
+/// Run the installer-private candidate preflight: the real executable and real
+/// module loading against private state, no user configuration/session, no
+/// network. Prints the marker `main`'s caller looks for.
+pub fn run_preflight(candidate_root: &Path, state: &Path) -> i32 {
+    let loaded = match crate::config::Config::load(state) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            eprintln!("xeHentai: preflight configuration: {error}");
+            return 1;
+        }
+    };
+    let logger = crate::util::logger::Logger::new();
+    let app = match crate::core::App::new(loaded.config, logger, state, candidate_root) {
+        Ok(app) => app,
+        Err(error) => {
+            eprintln!("xeHentai: preflight app: {error}");
+            return 1;
+        }
+    };
+    if let Err(error) = crate::filters::Filters::load(candidate_root) {
+        eprintln!("xeHentai: preflight filters: {error}");
+        return 1;
+    }
+    if let Err(error) = crate::rpc::RpcDispatcher::load(candidate_root) {
+        eprintln!("xeHentai: preflight rpc: {error}");
+        return 1;
+    }
+    if let Err(error) = Updater::load(candidate_root) {
+        eprintln!("xeHentai: preflight updater: {error}");
+        return 1;
+    }
+    let _ = app.base_dir();
+    println!(
+        "{} {}",
+        install::PREFLIGHT_MARKER,
+        crate::r#const::version_label()
+    );
+    0
 }
 
 /// Convenience for the logging owner: render one RSS-selected event through

@@ -886,7 +886,7 @@ where
         Ok(matches) if matches.get_flag("version") => Ok(Parsed::Version(format!(
             "{} v{}\n",
             consts::SCRIPT_NAME,
-            consts::VERSION_DISPLAY
+            consts::version_label()
         ))),
         Ok(matches) => Ok(Parsed::Opts(project(&matches, defaults))),
         Err(error) => match error.kind() {

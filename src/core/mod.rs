@@ -1066,12 +1066,7 @@ impl App {
             .unwrap_or_else(|| error.to_string());
             let _ = self.logger.error(&message);
         }
-        let log_path = Path::new(&self.cfg.log_path);
-        let log_path = if log_path.is_absolute() {
-            log_path.to_path_buf()
-        } else {
-            self.base_dir.join(log_path)
-        };
+        let log_path = crate::config::resolve_log_path(&self.base_dir, &self.cfg.log_path);
         // Update the live private-path cell BEFORE the logger is reopened:
         // the new name becomes private state before the first byte can be
         // written to it, while the captured names of an in-flight read keep

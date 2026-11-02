@@ -18,6 +18,18 @@ use vm::{
 
 pub const CONFIG_FILE: &str = "config.rss";
 pub const LEGACY_CONFIG_FILE: &str = "config.py";
+
+/// Resolve the configured log path against the configuration base exactly once.
+/// Both the App's logger reopen and the pre-App startup controller use this, so
+/// an activation logged before the business App exists lands in the same file.
+pub fn resolve_log_path(base: &Path, log_path: &str) -> PathBuf {
+    let log_path = Path::new(log_path);
+    if log_path.is_absolute() {
+        log_path.to_path_buf()
+    } else {
+        base.join(log_path)
+    }
+}
 pub const MAX_IMPORT_BYTES: usize = 1024 * 1024;
 
 static STAGE_COUNTER: AtomicU64 = AtomicU64::new(0);

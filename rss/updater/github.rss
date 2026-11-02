@@ -17,9 +17,11 @@ use json;
 //
 // Migration note (plan §9.2.4/§9.2.5): the stable channel is the native `rss`
 // branch, not the Python `master` archive. `download_link` is the native
-// bundle location derived from `package_download_origin`; the actual release
-// asset names are bound at M8, so this check-scope link is informational and
-// is never fetched here.
+// package location derived from `package_download_origin`; the signed
+// descriptor and its detached signature are the two adjacent sidecars named
+// here (one fixed convention), and `archive_prefix` is the source prefix the
+// signed entry list is matched against inside the payload. Production asset
+// publication itself stays at M8.
 
 struct SourceBinding {
     api_origin: string,
@@ -27,6 +29,11 @@ struct SourceBinding {
     stable_channel: string,
     beta_channel: string?,
     package_download_origin: string,
+    // Detached-signature verification key (PEM). Production stays unbound
+    // (null) until the release stage binds the real key; a controlled local
+    // install binds an explicit synthetic test key. A package can never be
+    // trusted while this is null.
+    verification_key: string?,
 }
 
 struct RequestPlan {
@@ -63,6 +70,13 @@ struct CommitInfo {
     ts: string,
     message: string,
     download_link: string,
+    // Adjacent transport sidecars for the native package: the signed
+    // descriptor and its detached signature. One fixed convention, derived
+    // here in the business module.
+    descriptor_link: string,
+    signature_link: string,
+    // Install-relative source prefix inside the payload archive.
+    archive_prefix: string,
     exception: string?,
 }
 
@@ -81,7 +95,15 @@ pub fn gh_binding() -> SourceBinding {
         stable_channel: "rss",
         beta_channel: null,
         package_download_origin: "https://github.com",
+        verification_key: null,
     }
+}
+
+/// The payload archive's source prefix for one selected update id. The native
+/// payload keeps the reference archive shape (`xeHentai-<id>/...`); only the
+/// members the signed descriptor lists inside that prefix are installed.
+pub fn gh_prefix(update_id: string) -> string {
+    "xeHentai-" + update_id + "/"
 }
 
 /// Build the commits query for the requested channel. `beta` comes from the
@@ -130,6 +152,9 @@ pub fn gh_parse(binding: SourceBinding, status: int, body: string) -> CommitInfo
     let mut ts = "";
     let mut message = "";
     let mut download_link = "";
+    let mut descriptor_link = "";
+    let mut signature_link = "";
+    let mut archive_prefix = "";
     let mut exception: string? = null;
     if status != 200 {
         outcome = "http_error";
@@ -147,6 +172,9 @@ pub fn gh_parse(binding: SourceBinding, status: int, body: string) -> CommitInfo
         message = string_replace_literal(cleaned, "\n", " ");
         let release_base = binding.package_download_origin + "/" + binding.repo + "/releases/download/rss-";
         download_link = release_base + update_id + "/xeHentai-rss.zip";
+        descriptor_link = "" + download_link + ".manifest.json";
+        signature_link = "" + download_link + ".sig";
+        archive_prefix = gh_prefix("" + update_id);
     }
     let info = {
         outcome: outcome,
@@ -154,6 +182,9 @@ pub fn gh_parse(binding: SourceBinding, status: int, body: string) -> CommitInfo
         ts: ts,
         message: message,
         download_link: download_link,
+        descriptor_link: descriptor_link,
+        signature_link: signature_link,
+        archive_prefix: archive_prefix,
         exception: exception,
     };
     info
