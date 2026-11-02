@@ -13128,6 +13128,7 @@ mod m6 {
 
     // MARK: - no URL: resident until interrupted, then the reference cleanup
 
+    #[cfg(unix)]
     #[test]
     fn m6_binary_without_urls_stays_resident_until_sigterm() {
         let root = tempfile::tempdir().expect("root");
@@ -13176,6 +13177,7 @@ mod m6 {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn m6_binary_second_interrupt_is_a_bounded_exit() {
         let root = tempfile::tempdir().expect("root");
@@ -13207,8 +13209,161 @@ mod m6 {
         }
     }
 
+    /// Test-only child entry point for the supervisor regression below. It runs
+    /// the SAME production `run_with_args`/`run_supervised` startup as the real
+    /// binary and injects the existing deterministic slow stage-open hook so a
+    /// blocking filesystem open stays owned across the first shutdown. Inert in
+    /// ordinary test runs (the parent sets the environment).
+    #[cfg(unix)]
+    #[ignore = "spawned by m6_supervisor_second_interrupt_forces_exit_while_blocking_work_is_held"]
+    #[test]
+    fn m6_supervisor_held_work_child_process() {
+        let Ok(root) = std::env::var("XEH_M6_SUPERVISOR_ROOT") else {
+            return;
+        };
+        let proxy = std::env::var("XEH_M6_SUPERVISOR_PROXY").expect("child proxy");
+        let held_path = std::path::PathBuf::from(
+            std::env::var("XEH_M6_SUPERVISOR_HELD").expect("child held marker"),
+        );
+        let finished_path = std::path::PathBuf::from(
+            std::env::var("XEH_M6_SUPERVISOR_FINISHED").expect("child finished marker"),
+        );
+        let crate::core::SlowOpenHandle {
+            started,
+            finished,
+            release,
+        } = crate::core::arm_slow_open();
+        crate::core::set_io_fault(Some(crate::core::IoFault::SlowOpen));
+        std::thread::spawn(move || {
+            if started.recv_timeout(Duration::from_secs(90)).is_ok() {
+                let _ = std::fs::write(held_path, b"blocking stage open started\n");
+            }
+        });
+        std::thread::spawn(move || {
+            if finished.recv_timeout(Duration::from_secs(90)).is_ok() {
+                let _ = std::fs::write(finished_path, b"blocking stage open finished\n");
+            }
+        });
+        // The release sender stays owned by this process; the parent never
+        // releases the held work, so a bounded exit must kill it in flight.
+        let _release = release;
+        let argv = [
+            "xeHentai",
+            "-p",
+            proxy.as_str(),
+            "-d",
+            "sup",
+            "--auto-update",
+            "off",
+            "http://e-hentai.org/g/1/aaaa",
+        ];
+        let code = crate::run_with_args(Path::new(&root), argv);
+        // The fixed supervisor leaves through `process::exit(0)` on the second
+        // signal; reaching this line means it drained the held work instead.
+        eprintln!("supervisor child returned {code} without the second interrupt");
+        std::process::exit(3);
+    }
+
+    /// Blocker B regression: the first SIGINT starts a graceful drain that is
+    /// held by a real blocking stage open, and the second SIGINT must force a
+    /// bounded process exit without releasing that work. The old d8 supervisor
+    /// awaited the task loop (and therefore the held open) on the second signal.
+    #[cfg(unix)]
+    #[test]
+    fn m6_supervisor_second_interrupt_forces_exit_while_blocking_work_is_held() {
+        let root = tempfile::tempdir().expect("root");
+        let gallery = Gallery::start(4);
+        copy_tree(&Path::new(MANIFEST).join("rss"), &root.path().join("rss"));
+        for name in ["home", "tmp", "cache"] {
+            std::fs::create_dir_all(root.path().join(name)).unwrap();
+        }
+        let held_marker = root.path().join("held.marker");
+        let finished_marker = root.path().join("finished.marker");
+        let log_path = root.path().join("eh.log");
+        let child_output = root.path().join("child.out");
+        let sink = std::fs::File::create(&child_output).expect("child output");
+        let child = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "tests::m6::m6_supervisor_held_work_child_process",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .current_dir(root.path())
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", root.path().join("home"))
+            .env("TMPDIR", root.path().join("tmp"))
+            .env("XDG_CACHE_HOME", root.path().join("cache"))
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
+            .env("XEH_M6_SUPERVISOR_ROOT", root.path())
+            .env("XEH_M6_SUPERVISOR_PROXY", gallery.proxy())
+            .env("XEH_M6_SUPERVISOR_HELD", &held_marker)
+            .env("XEH_M6_SUPERVISOR_FINISHED", &finished_marker)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(sink.try_clone().unwrap()))
+            .stderr(Stdio::from(sink))
+            .spawn()
+            .expect("spawn supervisor child");
+        // Only this test's own child is ever signalled or reaped.
+        struct Reap(Child);
+        impl Drop for Reap {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = Reap(child);
+        let output = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
+        assert!(
+            wait_for(Duration::from_secs(90), || held_marker.is_file()),
+            "the child never reached the held blocking stage open; log: {:?}\noutput: {}",
+            output(&log_path),
+            output(&child_output)
+        );
+        assert!(
+            child.0.try_wait().expect("try_wait").is_none(),
+            "the child exited before any signal: {}",
+            output(&child_output)
+        );
+        let pid = nix::unistd::Pid::from_raw(child.0.id() as i32);
+        nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGINT).expect("first SIGINT");
+        assert!(
+            wait_for(Duration::from_secs(20), || {
+                std::fs::read_to_string(&log_path)
+                    .map(|log| log.contains("cleaning up..."))
+                    .unwrap_or(false)
+            }),
+            "the first signal never started the graceful drain; log: {:?}",
+            output(&log_path)
+        );
+        // The first shutdown is genuinely pending on the owned blocking open.
+        std::thread::sleep(Duration::from_millis(1200));
+        assert!(
+            child.0.try_wait().expect("try_wait").is_none(),
+            "the first signal drained although the blocking stage open is still held"
+        );
+        nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGINT).expect("second SIGINT");
+        let status = wait_exit(&mut child.0, Duration::from_secs(5)).unwrap_or_else(|| {
+            panic!(
+                "the second interrupt waited for the held blocking work instead of exiting; \
+                 log: {:?}\noutput: {}",
+                output(&log_path),
+                output(&child_output)
+            )
+        });
+        assert_eq!(status.code(), Some(0), "{}", output(&child_output));
+        assert!(
+            !finished_marker.exists(),
+            "the held blocking open finished before the process exited"
+        );
+    }
+
     // MARK: - prompt flow through a real PTY
 
+    #[cfg(unix)]
     struct Pty {
         child: Child,
         master: std::fs::File,
@@ -13216,6 +13371,7 @@ mod m6 {
         transcript: Arc<Mutex<String>>,
     }
 
+    #[cfg(unix)]
     fn spawn_pty(root: &Path, args: &[&str]) -> Pty {
         let pty = nix::pty::openpty(None, None).expect("openpty");
         let master = std::fs::File::from(pty.master);
@@ -13260,6 +13416,7 @@ mod m6 {
         }
     }
 
+    #[cfg(unix)]
     impl Pty {
         fn answer(&mut self, text: &str) {
             self.master.write_all(text.as_bytes()).expect("write pty");
@@ -13290,6 +13447,7 @@ mod m6 {
         }
     }
 
+    #[cfg(unix)]
     impl Drop for Pty {
         fn drop(&mut self) {
             if self.child.try_wait().ok().flatten().is_none() {
@@ -13299,6 +13457,7 @@ mod m6 {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn m6_pty_prompts_in_reference_order_and_answers_drive_the_download() {
         let root = tempfile::tempdir().expect("root");
@@ -13350,6 +13509,7 @@ mod m6 {
         assert!(!gallery.paths().is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn m6_pty_bad_range_retries_then_applies_the_range() {
         let root = tempfile::tempdir().expect("root");
@@ -13383,6 +13543,7 @@ mod m6 {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn m6_pty_ctrl_c_at_the_login_prompt_cleans_up_and_exits_zero() {
         let root = tempfile::tempdir().expect("root");
@@ -13413,6 +13574,7 @@ mod m6 {
 
     // MARK: - POSIX daemon
 
+    #[cfg(unix)]
     #[test]
     fn m6_daemon_forks_once_and_the_child_runs_the_real_app() {
         let root = tempfile::tempdir().expect("root");
@@ -13468,9 +13630,88 @@ mod m6 {
         assert!(log.contains("application task loop finished"), "{log}");
     }
 
+    /// Blocker A regression: a valid login restored from `h.json` or supplied
+    /// with `-c` must skip the login question and still reach every download
+    /// prompt, because active `-i` needs the filters module in both routes.
+    #[cfg(unix)]
+    #[test]
+    fn m6_pty_logged_in_session_and_cookie_skip_the_login_prompt() {
+        for route in ["session", "cookie"] {
+            let root = tempfile::tempdir().expect("root");
+            let gallery = Gallery::start(4);
+            let cookie = "ipb_member_id=42; ipb_pass_hash=cafebabe";
+            if route == "session" {
+                std::fs::write(
+                    root.path().join("h.json"),
+                    serde_json::json!({
+                        "tasks": {},
+                        "cookies": {"ipb_member_id": "42", "ipb_pass_hash": "cafebabe"}
+                    })
+                    .to_string(),
+                )
+                .expect("session fixture");
+            }
+            let mut args = vec!["-i"];
+            if route == "cookie" {
+                args.extend(["-c", cookie]);
+            }
+            args.extend(["--auto-update", "off"]);
+            let mut pty = spawn_pty(root.path(), &args);
+            // No login answer: the valid login must skip that question.
+            pty.answer("http://e-hentai.org/g/1/aaaa\n");
+            pty.answer("n\n");
+            pty.answer(&format!("{}\n", gallery.proxy()));
+            pty.answer("logged-in\n");
+            pty.answer("n\n");
+            pty.answer("n\n");
+            pty.answer("n\n");
+            pty.answer("\n");
+            let (status, output) = pty.finish(Duration::from_secs(60));
+            let status = status.unwrap_or_else(|| panic!("{route}: logged-in run must exit"));
+            assert_eq!(status.code(), Some(0), "{route}: {output}");
+            assert!(
+                !output.contains("login to exhentai (y/n)? "),
+                "{route}: a valid login must skip the login question: {output}"
+            );
+            let order = [
+                "URL (seperate with ,)> ",
+                "Download original (y/n, default:n)? > ",
+                "Proxy (optional) > ",
+                "Download to (default: ",
+                "press enter or enter new > ",
+                "Rename to original name (y/n, default:n)? > ",
+                "Make archive (y/n, default:n)? > ",
+                "Use Japanese title (y/n, default:y)? > ",
+                "Download range, press enter to download all > ",
+            ];
+            let mut cursor = 0;
+            for prompt in order {
+                let found = output[cursor..].find(prompt).unwrap_or_else(|| {
+                    panic!("{route}: prompt {prompt:?} missing from {output:?}")
+                });
+                cursor += found + prompt.len();
+            }
+            let files = image_files(&root.path().join("logged-in"));
+            assert_eq!(
+                files.len(),
+                4,
+                "{route}: files: {files:?}\noutput: {output}"
+            );
+            assert!(!gallery.paths().is_empty(), "{route}: no fixture traffic");
+            let session: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(root.path().join("h.json")).unwrap())
+                    .expect("session JSON");
+            assert_eq!(
+                session["cookies"]["ipb_member_id"], "42",
+                "{route}: the login cookies must survive the run"
+            );
+        }
+    }
+
     /// The M6 startup now owns the RPC start too: a configured `rpc_port` must
     /// serve the real dispatcher from the same supervised run, and a signal must
     /// retire it through the shared shutdown path.
+    #[cfg(unix)]
     #[test]
     fn m6_binary_with_rpc_serves_get_info_and_stops_on_signal() {
         let root = tempfile::tempdir().expect("root");

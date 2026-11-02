@@ -348,7 +348,7 @@ async fn readline(
     stdin: &mut BufReader<Stdin>,
     prompt_text: &str,
     default: Option<&str>,
-    interrupt: &mut tokio::signal::unix::Signal,
+    interrupt: &mut crate::SignalStream,
 ) -> Result<String, PromptError> {
     write_prompt(prompt_text).map_err(PromptError::Io)?;
     let mut buffer = String::new();
@@ -384,7 +384,7 @@ pub async fn interactive(
     app: &mut App,
     app_filters: &mut crate::filters::Filters,
     locale: Locale,
-    interrupt: &mut tokio::signal::unix::Signal,
+    interrupt: &mut crate::SignalStream,
 ) -> Result<Option<InteractiveResult>, PromptError> {
     let interrupt_shared = interrupt;
     // One buffered reader for the whole prompt sequence: a scripted writer may

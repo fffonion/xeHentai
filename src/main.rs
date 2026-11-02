@@ -163,9 +163,12 @@ async fn application(mut app: App, resource: &Path, opts: &Opts, locale: Locale)
         app.set_cookie(cookie);
     }
     let mut urls = opts.urls.clone();
+    let active_interactive = opts.interactive && !opts.daemon;
     let needs_login = opts.username.is_some() && opts.key.is_some() && !app.has_login();
-    let asks_login = opts.interactive && !opts.daemon && !app.has_login();
-    let mut filters = if needs_login || asks_login {
+    // An active interactive run always needs the filters module (the login
+    // prompt uses it when logged out, and the download prompts need it even
+    // when a valid cookie was restored); credential login needs it too.
+    let mut filters = if needs_login || active_interactive {
         match filters::Filters::load(resource) {
             Ok(filters) => Some(filters),
             Err(error) => {
@@ -183,7 +186,7 @@ async fn application(mut app: App, resource: &Path, opts: &Opts, locale: Locale)
             let _ = app.logger_mut().error(&error.to_string());
         }
     }
-    if opts.interactive && !opts.daemon {
+    if active_interactive {
         let Some(active) = filters.as_mut() else {
             eprintln!("xeHentai: filter error: interactive login needs the filters module");
             return 1;
@@ -249,14 +252,13 @@ async fn run_supervised(runtime: core::Runtime, urls: Vec<String>, locale: Local
             return 1;
         }
     };
-    let mut terminate =
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(signals) => signals,
-            Err(error) => {
-                eprintln!("xeHentai: cannot listen for termination: {error}");
-                return 1;
-            }
-        };
+    let mut terminate = match terminate_stream() {
+        Ok(signals) => signals,
+        Err(error) => {
+            eprintln!("xeHentai: cannot listen for termination: {error}");
+            return 1;
+        }
+    };
     tokio::pin!(task_loop);
     tokio::pin!(rpc_future);
     let has_urls = !urls.is_empty();
@@ -271,7 +273,7 @@ async fn run_supervised(runtime: core::Runtime, urls: Vec<String>, locale: Local
             }
             _ = &mut task_loop => break Stop::LoopFinished,
             _ = interrupt.recv() => break Stop::Signal,
-            _ = terminate.recv() => break Stop::Signal,
+            _ = terminate_signal(terminate.as_mut()) => break Stop::Signal,
             _ = tick.tick(), if has_urls => {
                 // Reference `main`: with URLs, leave as soon as no submitted
                 // task is still in [WAITING, FINISHED) -- failures included.
@@ -299,19 +301,15 @@ async fn run_supervised(runtime: core::Runtime, urls: Vec<String>, locale: Local
             });
             // First interrupt: real graceful stop through the AppHandle owner
             // (cancel every worker, drain, flush the session). A second
-            // interrupt is the reference's bounded `os._exit(0)`.
+            // interrupt is the reference's bounded `os._exit(0)`: it must not
+            // await the task loop or the drain (they can be blocked on native
+            // work) and must leave without a Tokio runtime drop.
             let drain = handle.shutdown();
             tokio::pin!(drain);
             tokio::select! {
                 _ = &mut drain => {}
-                _ = interrupt.recv() => {
-                    let _ = task_loop.await;
-                    return 0;
-                }
-                _ = terminate.recv() => {
-                    let _ = task_loop.await;
-                    return 0;
-                }
+                _ = interrupt.recv() => std::process::exit(0),
+                _ = terminate_signal(terminate.as_mut()) => std::process::exit(0),
             }
             let _ = task_loop.await;
             if rpc_enabled {
@@ -357,8 +355,45 @@ fn has_active_task(app: &App) -> bool {
     })
 }
 
-fn signal_stream() -> std::io::Result<tokio::signal::unix::Signal> {
-    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+/// The interrupt stream behind `interactive()` and the supervisor: the Unix
+/// SIGINT stream on Unix and the native Ctrl-C listener on Windows (the daemon
+/// remains Unix-only).
+#[cfg(unix)]
+type SignalStream = tokio::signal::unix::Signal;
+#[cfg(windows)]
+type SignalStream = tokio::signal::windows::CtrlC;
+
+fn signal_stream() -> std::io::Result<SignalStream> {
+    #[cfg(unix)]
+    {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+    }
+    #[cfg(windows)]
+    {
+        tokio::signal::windows::ctrl_c()
+    }
+}
+
+/// SIGTERM equivalent for the supervisor. There is no terminate stream outside
+/// Unix, so only the interrupt stream is wired there.
+fn terminate_stream() -> std::io::Result<Option<SignalStream>> {
+    #[cfg(unix)]
+    {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map(Some)
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(None)
+    }
+}
+
+/// Wait for the terminate stream; stay pending forever when the platform has
+/// none. Both stream kinds expose the same `recv() -> Option<()>`.
+async fn terminate_signal(signals: Option<&mut SignalStream>) -> Option<()> {
+    match signals {
+        Some(signals) => signals.recv().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Project the parsed command line onto the reference `update_config(**vars)`

@@ -428,9 +428,11 @@ async fn create_stage_file(
         #[cfg(test)]
         if let Some(channels) = &slow {
             let _ = channels.started.send(());
+            // Long enough for the supervisor regression to observe a pending
+            // drain; every existing test releases the open explicitly.
             let _ = channels
                 .release
-                .recv_timeout(std::time::Duration::from_secs(5));
+                .recv_timeout(std::time::Duration::from_secs(60));
         }
         let outcome = (|| -> std::io::Result<std::fs::File> {
             let file = std::fs::OpenOptions::new()
