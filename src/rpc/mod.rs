@@ -2285,19 +2285,15 @@ fn origin_nonce() -> u64 {
 }
 
 /// M5 minimal startup hook: run the task loop and the owned RPC server on
-/// one `LocalSet` until either finishes. Full CLI/signal/daemon lifecycle
-/// remains M6; this hook only proves the production wiring (config-gated
-/// bind with real errors, shared App, owned drain on shutdown).
+/// RPC-only startup owner kept for the M5 entry-point contract: it runs the
+/// same supervised real pipeline as the CLI (`crate::run_supervised`), with no
+/// submitted URLs, so it stays resident until the server ends or the process
+/// is interrupted.
 pub fn run_with_rpc(app: crate::core::App, root: &Path) -> i32 {
     // Release resources (`rss/`, `locales/`) resolve from the program
     // directory when it ships them, else from the working directory. Never
     // from a build-time absolute path, so binaries stay cwd-independent.
-    let exe_root = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_path_buf));
-    let resource_root = exe_root
-        .filter(|dir| dir.join("rss").is_dir())
-        .unwrap_or_else(|| root.to_path_buf());
+    let resource_root = crate::resource_root(root);
     let tokio_runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -2310,13 +2306,11 @@ pub fn run_with_rpc(app: crate::core::App, root: &Path) -> i32 {
     };
     let local = tokio::task::LocalSet::new();
     let runtime = crate::core::Runtime::new(app, resource_root);
-    tokio_runtime.block_on(local.run_until(async move {
-        // spawn_local must happen inside the LocalSet that owns the runtime.
-        let (task_loop, handle) = runtime.spawn();
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let rpc = handle.serve_rpc(shutdown_rx, PRODUCTION_STATIC_ORIGIN.to_string());
-        supervise(task_loop, rpc, shutdown_tx, &handle).await
-    }))
+    tokio_runtime.block_on(local.run_until(crate::run_supervised(
+        runtime,
+        Vec::new(),
+        crate::i18n::Locale::EnUs,
+    )))
 }
 
 /// Own both children of the M5 startup hook. Whichever future finishes first,
@@ -2326,6 +2320,7 @@ pub fn run_with_rpc(app: crate::core::App, root: &Path) -> i32 {
 /// and the task loop cancelled through the existing `AppHandle::shutdown`
 /// owner path before its cleanup is joined. A completed task loop already
 /// closed admission through `Runtime::cleanup`.
+#[cfg(test)]
 async fn supervise<F>(
     mut task_loop: tokio::task::JoinHandle<()>,
     rpc: F,

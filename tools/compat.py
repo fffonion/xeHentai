@@ -203,10 +203,274 @@ I18N_ERROR_CODES = [
 
 LOCALE_TAGS = [("en_us", "en_us"), ("zh_CN", "zh_hans"), ("zh_TW", "zh_hant")]
 
+# --- CLI suite -----------------------------------------------------------------
+# The reference `parse_opt` namespace and the production `cli` parser are
+# compared over the same real argv vectors. `CLI_ARGV_CASES` mirrors the raw
+# observations of the frozen 43fc reference (m6-cli-oracle/observations.json);
+# the case catalog ids are covered only when every mapped vector matches.
+CLI_OVERRIDES_FIXTURE = """daemon = True
+dir = "rel_dl"
+log_path = "rel_eh.log"
+auto_update = "off"
+log_verbose = 4
+proxy = ["socks5://127.0.0.1:1080", "http://127.0.0.1:3128"]
+proxy_image = False
+proxy_image_only = True
+rpc_interface = "127.0.0.1"
+rpc_port = 6888
+rpc_secret = "sekrit"
+download_thread_cnt = 9
+download_timeout = 33
+low_speed_threshold = 77
+download_ori = True
+jpn_title = False
+rename_ori = True
+make_archive = True
+delete_task_files = True
+update_beta_channel = True
+rpc_open_browser = False
+download_range = [[1, 5], [8, 8]]
+ignored_errors = [1012, 1009]
+"""
+
+CLI_ARGV_CASES = [
+    ("defaults", []),
+    (
+        "alias.short",
+        [
+            "-u", "user1", "-k", "pass1", "-c", "ipb_member_id=111; ipb_pass_hash=aaa",
+            "-i", "-d", "dl_x", "-o", "-j", "True", "-r", "0", "-p", "socks5://127.0.0.1:1080",
+            "--proxy-image-only", "--rpc-interface", "0.0.0.0", "--rpc-port", "7000",
+            "--rpc-secret", "s3", "--rpc-open-browser", "False", "--delete-task-files", "1",
+            "-a", "0", "--download-range", "1-2,4", "-t", "3", "--timeout", "44",
+            "--low-speed-threshold", "55", "-f", "--auto-update", "check",
+            "--update-beta-channel", "0", "-l", "rel.log", "-vv", "urlA", "urlB",
+        ],
+    ),
+    (
+        "alias.long",
+        [
+            "--username", "user1", "--key", "pass1", "--cookie", "ipb_member_id=111; ipb_pass_hash=aaa",
+            "--interactive", "--dir", "dl_x", "--download-ori", "--jpn-title", "True",
+            "--rename-ori", "0", "--proxy", "socks5://127.0.0.1:1080", "--proxy-image-only",
+            "--rpc-interface", "0.0.0.0", "--rpc-port", "7000", "--rpc-secret", "s3",
+            "--rpc-open-browser", "False", "--delete-task-files", "1", "--archive", "0",
+            "--download-range", "1-2,4", "--thread", "3", "--timeout", "44",
+            "--low-speed-threshold", "55", "--force", "--auto-update", "check",
+            "--update-beta-channel", "0", "--logpath", "rel.log", "--verbose", "--verbose",
+            "urlA", "urlB",
+        ],
+    ),
+    ("bool.jpn.False", ["-j", "False"]),
+    ("bool.jpn.0", ["-j", "0"]),
+    ("bool.jpn.empty", ["-j", ""]),
+    ("bool.jpn.True", ["-j", "True"]),
+    ("bool.jpn.bare", ["-j"]),
+    (
+        "bool.others",
+        ["-r", "0", "-a", "False", "--delete-task-files", "0", "--rpc-open-browser", "False",
+         "--update-beta-channel", "False"],
+    ),
+    ("proxy_image.only", ["--proxy-image-only"]),
+    ("proxy_image.mutex", ["--proxy-image", "--proxy-image-only"]),
+    (
+        "proxy.append.empty_default",
+        ["-p", "socks5://127.0.0.1:1080", "-p", "http://127.0.0.1:3128"],
+    ),
+    ("proxy.append.file_default", ["-p", "http://127.0.0.1:9999"]),
+    ("proxy.append.file_default_repeat", ["-p", "a1", "-p", "a2"]),
+    ("verbose.count.absent", ["-vvv"]),
+    ("verbose.count.overrides", ["-v"]),
+    ("force.once", ["-f"]),
+    ("force.repeated", ["-f", "-f"]),
+    ("range.single", ["--download-range", "3"]),
+    ("range.closed", ["--download-range", "1-5"]),
+    ("range.cn_comma", ["--download-range", "1-2，5，8-9"]),
+    ("range.whitespace", ["--download-range", " 1 , 4 "]),
+    ("range.inner_space", ["--download-range", "1 - 2"]),
+    ("range.unsorted", ["--download-range", "5,1-3,2"]),
+    ("range.reversed", ["--download-range", "9-3"]),
+    ("range.zero", ["--download-range", "0"]),
+    ("range.overlap", ["--download-range", "1-5,3-8"]),
+    ("range.invalid_text", ["--download-range", "abc"]),
+    ("range.empty_token", ["--download-range", "1,,2"]),
+    ("range.trailing_dash", ["--download-range", "1-"]),
+    ("range.negative", ["--download-range", "-1"]),
+    ("range.double_dash", ["--download-range", "1-2-3"]),
+    ("range.empty_string", ["--download-range", ""]),
+    ("auto_update.check", ["--auto-update", "check"]),
+    ("auto_update.download", ["--auto-update", "download"]),
+    ("auto_update.invalid", ["--auto-update", "nope"]),
+    ("urls.multiple", ["u1", "u2"]),
+    ("urls.dashdash", ["--", "--not-a-flag", "-x"]),
+    ("urls.dashdash_after_flag", ["-u", "bob", "--", "--weird"]),
+    ("urls.unknown_long", ["--nope"]),
+    ("urls.missing_value", ["-u"]),
+    ("dir.explicit_relative", ["-d", "rel_out"]),
+    ("logpath.explicit_relative", ["-l", "rel_eh.log"]),
+    ("cookie.semicolon", ["-c", "a=1; b=2=3; secure; HttpOnly; nw=1"]),
+    ("thread.int", ["-t", "7"]),
+    ("timeout.invalid", ["--timeout", "x"]),
+    ("rpc_port.invalid", ["--rpc-port", "abc"]),
+    ("interactive.daemon_coexist", ["-i", "--daemon"]),
+    ("help.short", ["-h"]),
+    ("help.long", ["--help"]),
+    ("version", ["--version"]),
+]
+
+CLI_RANGE_TOKENS = [
+    "3", "1-5", "1-2，5，8-9", " 1 , 4 ", "5,1-3,2", "9-3", "0", "1-5,3-8",
+    "1 - 2", "abc", "1,,2", "1-", "-1", "1-2-3", "", "   ", "001-003",
+    "١-٢", "１-２",
+]
+
+# catalog id -> the argv vectors (and range table) that must all match
+CLI_CASE_MAP = {
+    "cli.username": ["alias.short", "alias.long"],
+    "cli.key": ["alias.short", "alias.long"],
+    "cli.cookie": ["alias.short", "cookie.semicolon"],
+    "cli.interactive": ["alias.short", "interactive.daemon_coexist"],
+    "cli.daemon": ["defaults", "interactive.daemon_coexist"],
+    "cli.dir": ["defaults", "dir.explicit_relative"],
+    "cli.download_ori": ["alias.short", "defaults"],
+    "cli.jpn_title": ["bool.jpn.False", "bool.jpn.0", "bool.jpn.empty", "bool.jpn.True"],
+    "cli.rename_ori": ["bool.others", "alias.short"],
+    "cli.proxy": ["proxy.append.empty_default", "proxy.append.file_default",
+                  "proxy.append.file_default_repeat"],
+    "cli.proxy_image": ["defaults", "proxy_image.mutex"],
+    "cli.proxy_image_only": ["proxy_image.only", "proxy_image.mutex"],
+    "cli.rpc_interface": ["defaults", "alias.short"],
+    "cli.rpc_port": ["alias.short", "rpc_port.invalid"],
+    "cli.rpc_secret": ["alias.short"],
+    "cli.rpc_open_browser": ["bool.others", "alias.short"],
+    "cli.delete_task_files": ["bool.others", "alias.short"],
+    "cli.archive": ["bool.others", "alias.short"],
+    "cli.download_range": ["defaults", "range.single", "range.closed", "range.cn_comma", "range.whitespace",
+                           "range.inner_space", "range.unsorted", "range.reversed", "range.zero",
+                           "range.overlap", "range.invalid_text", "range.empty_token",
+                           "range.trailing_dash", "range.negative", "range.double_dash",
+                           "range.empty_string", "range.table"],
+    "cli.thread": ["thread.int", "alias.short"],
+    "cli.timeout": ["timeout.invalid", "alias.short"],
+    "cli.low_speed_threshold": ["alias.short"],
+    "cli.force": ["force.once", "force.repeated", "defaults"],
+    "cli.auto_update": ["auto_update.check", "auto_update.download", "auto_update.invalid"],
+    "cli.update_beta_channel": ["bool.others", "alias.short"],
+    "cli.logpath": ["defaults", "logpath.explicit_relative"],
+    "cli.verbose": ["verbose.count.absent", "verbose.count.overrides"],
+    "cli.help": ["help.short", "help.long"],
+    "cli.version": ["version"],
+    "cli.urls": ["urls.multiple", "urls.dashdash", "urls.dashdash_after_flag",
+                 "urls.unknown_long", "urls.missing_value"],
+}
+
+CLI_CASE_IDS = {
+    "cli.username", "cli.key", "cli.cookie", "cli.interactive", "cli.daemon", "cli.dir",
+    "cli.download_ori", "cli.jpn_title", "cli.rename_ori", "cli.proxy", "cli.proxy_image",
+    "cli.proxy_image_only", "cli.rpc_interface", "cli.rpc_port", "cli.rpc_secret",
+    "cli.rpc_open_browser", "cli.delete_task_files", "cli.archive", "cli.download_range",
+    "cli.thread", "cli.timeout", "cli.low_speed_threshold", "cli.force", "cli.auto_update",
+    "cli.update_beta_channel", "cli.logpath", "cli.verbose", "cli.help", "cli.version",
+    "cli.urls",
+}
+
+CLI_NAMESPACE_FIELDS = [
+    "auto_update", "cookie", "daemon", "delete_task_files", "dir", "download_ori",
+    "download_range", "download_thread_cnt", "download_timeout", "ignored_errors",
+    "interactive", "jpn_title", "key", "log_path", "low_speed_threshold", "make_archive",
+    "proxy", "proxy_image", "proxy_image_only", "rename_ori", "rpc_interface",
+    "rpc_open_browser", "rpc_port", "rpc_secret", "update_beta_channel", "urls", "username",
+    "verbose",
+]
+
+# One reference `parse_opt()` call per vector, in its own process: argparse
+# exits the interpreter on usage errors, so the driver must not be shared.
+CLI_ORACLE_DRIVER = r"""
+import json, sys
+case_root, upstream, argv_json = sys.argv[1], sys.argv[2], sys.argv[3]
+sys.path.insert(0, upstream)
+sys.path.insert(0, case_root)
+sys.argv = json.loads(argv_json)
+from xeHentai import cli
+namespace = cli.parse_opt()
+sys.stdout.write("\n<<<XEH_NAMESPACE>>>" + json.dumps(vars(namespace), sort_keys=True))
+"""
+
+CLI_RANGE_DRIVER = r"""
+import json, sys
+case_root, upstream = sys.argv[1], sys.argv[2]
+sys.path.insert(0, upstream)
+sys.path.insert(0, case_root)
+import argparse
+from xeHentai import cli
+rows = []
+for token in json.loads(open(sys.argv[3]).read()):
+    try:
+        rows.append({"token": token, "ok": True, "value": cli._parse_range(token)})
+    except argparse.ArgumentTypeError as error:
+        rows.append({"token": token, "ok": False, "error_class": "ArgumentTypeError",
+                     "message": str(error)})
+sys.stdout.write("\n<<<XEH_RANGE>>>" + json.dumps(rows))
+"""
+
 PLACEHOLDER = re.compile(r"%\(default\)[sd]|%\.[0-9]f|%[sd]|\{\}")
 
 # Cargo test names that prove cases which have no Python oracle.
 NATIVE_CASE_MAP = {
+    # The M6 native proofs: parser unit tests and the real production-binary
+    # lifecycle tests. IDs are only marked from a test that actually passed.
+    "cli": {
+        "cli::tests::cli_defaults_match_the_reference_namespace": [
+            "cli.dir", "cli.logpath", "cli.auto_update", "cli.proxy",
+            "cli.proxy_image", "cli.rpc_interface", "cli.rpc_port", "cli.rpc_secret",
+            "cli.rpc_open_browser", "cli.thread", "cli.timeout",
+            "cli.low_speed_threshold", "cli.verbose", "cli.download_ori",
+            "cli.jpn_title", "cli.rename_ori", "cli.archive", "cli.delete_task_files",
+            "cli.update_beta_channel", "cli.urls", "cli.username", "cli.key",
+            "cli.cookie", "cli.interactive", "cli.daemon",
+        ],
+        "cli::tests::cli_config_overrides_become_the_defaults": ["cli.dir", "cli.logpath"],
+        "cli::tests::cli_short_and_long_aliases_project_identically": [
+            "cli.username", "cli.key", "cli.cookie", "cli.jpn_title", "cli.rename_ori",
+            "cli.archive", "cli.delete_task_files", "cli.download_range", "cli.force",
+            "cli.verbose", "cli.proxy", "cli.urls",
+        ],
+        "cli::tests::cli_bool_options_use_the_reference_truthiness": ["cli.jpn_title"],
+        "cli::tests::cli_force_discards_the_file_list_and_repeats": ["cli.force"],
+        "cli::tests::cli_proxy_appends_to_the_configured_list": ["cli.proxy"],
+        "cli::tests::cli_verbose_counts_on_top_of_the_configured_level": ["cli.verbose"],
+        "cli::tests::cli_range_grammar_matches_the_reference": ["cli.download_range"],
+        "cli::tests::cli_range_errors_reach_the_exit_status": ["cli.download_range"],
+        "cli::tests::cli_urls_accept_double_dash_and_ordering": ["cli.urls"],
+        "cli::tests::cli_value_constraints_are_exit_errors": [
+            "cli.proxy_image", "cli.proxy_image_only", "cli.auto_update", "cli.timeout",
+            "cli.rpc_port",
+        ],
+        "cli::tests::cli_interactive_and_daemon_coexist_at_parse_level": [
+            "cli.interactive", "cli.daemon",
+        ],
+        "cli::tests::cli_help_and_version_are_reported_separately": ["cli.help", "cli.version"],
+        "tests::m6::m6_binary_reports_version_help_and_usage_errors": [
+            "cli.help", "cli.version", "cli.urls", "cli.download_range", "cli.jpn_title",
+        ],
+        "tests::m6::m6_binary_downloads_urls_then_exits_zero": [
+            "main.honest-exit", "cli.dir", "cli.proxy", "cli.auto_update",
+        ],
+        "tests::m6::m6_binary_without_urls_stays_resident_until_sigterm": ["main.honest-exit"],
+        "tests::m6::m6_binary_second_interrupt_is_a_bounded_exit": ["main.honest-exit"],
+        "tests::m6::m6_daemon_forks_once_and_the_child_runs_the_real_app": [
+            "cli.daemon", "main.honest-exit",
+        ],
+        "tests::m6::m6_pty_prompts_in_reference_order_and_answers_drive_the_download": [
+            "cli.interactive",
+        ],
+        "tests::m6::m6_pty_bad_range_retries_then_applies_the_range": [
+            "cli.interactive", "cli.download_range",
+        ],
+        "tests::m6::m6_pty_ctrl_c_at_the_login_prompt_cleans_up_and_exits_zero": [
+            "cli.interactive",
+        ],
+    },
     "download": {
         "tests::m4::pipeline_scans_pages_downloads_real_files_and_finishes": [
             "m4.pipeline.local",
@@ -798,6 +1062,10 @@ NATIVE_COMMANDS = {
         ["cargo", "test", "--bin", "xeHentai", "tests::"],
         ["cargo", "test", "--bin", "xeHentai", "r#const::tests"],
     ],
+    "cli": [
+        ["cargo", "test", "--bin", "xeHentai", "cli::tests"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m6::"],
+    ],
     "util": [["cargo", "test", "--bin", "xeHentai", "util::"]],
     "i18n": [["cargo", "test", "--bin", "xeHentai", "i18n::tests"]],
     "worker": [["cargo", "test", "--bin", "xeHentai", "worker::tests"]],
@@ -1303,6 +1571,8 @@ def oracle_main(args):
         result = oracle_gallery(upstream, request)
     elif args.oracle == "webui":
         result = oracle_webui(upstream, request)
+    elif args.oracle == "cli":
+        result = oracle_cli(upstream, request)
     else:
         raise CompatError(f"unknown oracle suite {args.oracle}")
     output.write_text(
@@ -4033,6 +4303,152 @@ def write_json(path, value):
     )
 
 
+def _cli_env(root):
+    env = clean_env(root)
+    env["PYTHONWARNINGS"] = "ignore::SyntaxWarning"
+    env["PYTHONPYCACHEPREFIX"] = str(root / "pycache")
+    return env
+
+
+def oracle_cli(upstream, request):
+    """Run the frozen reference `parse_opt` / `_parse_range` for real.
+
+    Each argv vector gets its own interpreter: argparse terminates the process
+    on usage errors and on help/version, which is exactly the observable the
+    comparison needs.
+    """
+    root = Path(request["root"])
+    cwd = Path(request["cwd"])
+    env = _cli_env(cwd)
+    cases = []
+    for case in request["cases"]:
+        argv = ["xeH"] + list(case["argv"])
+        result = run_command(
+            [sys.executable, "-c", CLI_ORACLE_DRIVER, str(cwd), str(upstream), json.dumps(argv)],
+            cwd,
+            env,
+            root / f"oracle-{case['key']}.log",
+        )
+        entry = {
+            "key": case["key"],
+            "exit": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+        marker = "<<<XEH_NAMESPACE>>>"
+        if marker in result.stdout:
+            entry["namespace"] = json.loads(result.stdout.split(marker, 1)[1])
+        cases.append(entry)
+    tokens_path = root / "range-tokens.json"
+    tokens_path.write_text(json.dumps(request["range_tokens"]), encoding="utf-8")
+    ranged = run_command(
+        [sys.executable, "-c", CLI_RANGE_DRIVER, str(cwd), str(upstream), str(tokens_path)],
+        cwd,
+        env,
+        root / "oracle-range.log",
+    )
+    marker = "<<<XEH_RANGE>>>"
+    if marker not in ranged.stdout:
+        raise CompatError(f"range oracle failed: {ranged.stderr.strip()}")
+    return {
+        "root": str(cwd),
+        "cases": cases,
+        "range": json.loads(ranged.stdout.split(marker, 1)[1]),
+    }
+
+
+def _cli_norm(value, root):
+    text = str(root)
+    if isinstance(value, str):
+        return value.replace(text, "<ROOT>")
+    if isinstance(value, list):
+        return [_cli_norm(item, root) for item in value]
+    if isinstance(value, dict):
+        return {key: _cli_norm(item, root) for key, item in value.items()}
+    return value
+
+
+def _cli_case_keys(value):
+    return sorted(value) if isinstance(value, dict) else None
+
+
+def compare_cli(cases, oracle, candidate):
+    """Compare the reference namespace against the production parser.
+
+    Every argv vector is compared field by field; help/version are compared on
+    their required markers (the plan allows the presented text to differ for a
+    Rust/RSS implementation, not the set of options or the exit status).
+    """
+    diffs = []
+    flags = {}
+    oracle_root = oracle.get("root")
+    candidate_root = candidate.get("root")
+    oracle_cases = {entry["key"]: entry for entry in oracle.get("cases", [])}
+    candidate_cases = {entry["key"]: entry for entry in candidate.get("cases", [])}
+    for key, argv in CLI_ARGV_CASES:
+        expected = oracle_cases.get(key)
+        actual = candidate_cases.get(key)
+        if expected is None or actual is None:
+            diffs.append(f"cli.{key}: missing observation")
+            flags[key] = False
+            continue
+        section = []
+        if expected["exit"] != actual["exit"]:
+            section.append(
+                f"cli.{key}.exit: {expected['exit']} != {actual['exit']}"
+            )
+        if expected["exit"] == 0 and "namespace" in expected:
+            if "namespace" not in actual:
+                section.append(f"cli.{key}: candidate produced no namespace")
+            else:
+                left = _cli_norm(expected["namespace"], oracle_root)
+                right = _cli_norm(actual["namespace"], candidate_root)
+                if _cli_case_keys(left) != _cli_case_keys(right):
+                    section.append(
+                        f"cli.{key}.keys: {_cli_case_keys(left)} != {_cli_case_keys(right)}"
+                    )
+                for field in CLI_NAMESPACE_FIELDS:
+                    if field in left or field in right:
+                        section.extend(
+                            compare(
+                                left.get(field, "<absent>"),
+                                right.get(field, "<absent>"),
+                                f"cli.{key}.{field}",
+                            )
+                        )
+        elif expected["exit"] == 2:
+            if expected["stdout"]:
+                section.append(f"cli.{key}: reference wrote stdout on a usage error")
+            if actual.get("stdout"):
+                section.append(f"cli.{key}: candidate wrote stdout on a usage error")
+            if not actual.get("usage_error"):
+                section.append(f"cli.{key}: candidate did not report a usage error")
+        elif expected["exit"] == 0 and "help" in key:
+            text = actual.get("text") or ""
+            for flag in (
+                "--username", "--key", "--cookie", "--interactive", "--daemon", "--dir",
+                "--download-ori", "--jpn-title", "--rename-ori", "--proxy",
+                "--proxy-image", "--proxy-image-only", "--rpc-interface", "--rpc-port",
+                "--rpc-secret", "--rpc-open-browser", "--delete-task-files", "--archive",
+                "--download-range", "--thread", "--timeout", "--low-speed-threshold",
+                "--force", "--auto-update", "--update-beta-channel", "--logpath",
+                "--verbose", "--help", "--version",
+            ):
+                if flag not in text:
+                    section.append(f"cli.{key}: candidate help is missing {flag}")
+        elif expected["exit"] == 0 and "version" in key:
+            text = (actual.get("text") or "").strip()
+            if not text.startswith("xeHentai v2.023"):
+                section.append(f"cli.{key}: candidate version {text!r}")
+        diffs.extend(section)
+        flags[key] = not section
+    range_diffs = compare(oracle.get("range"), candidate.get("range"), "cli.range.table")
+    diffs.extend(range_diffs)
+    flags["range.table"] = not range_diffs
+    _mark_cases(cases, CLI_CASE_MAP, flags)
+    return diffs
+
+
 def run_oracle(oracle, request, root, upstream, log_path, locale=None, cwd=None):
     request_path = root / f"oracle-request-{oracle}-{locale or 'default'}.json"
     output_path = root / f"oracle-{oracle}-{locale or 'default'}.json"
@@ -4440,6 +4856,56 @@ def self_check(suite, oracle, candidate, native_runs=None):
         cases = {}
         compare_config(cases, oracle, mutated)
         checks.append(("field-type", not cases["config.import.overrides"]))
+    elif suite == "cli":
+        mutated = copy.deepcopy(candidate)
+        for entry in mutated["cases"]:
+            if entry["key"] == "bool.jpn.0":
+                entry["namespace"]["jpn_title"] = False
+        cases = {}
+        compare_cli(cases, oracle, mutated)
+        checks.append(("bool-truthiness", not cases["cli.jpn_title"]))
+        mutated = copy.deepcopy(candidate)
+        for entry in mutated["cases"]:
+            if entry["key"] == "force.once":
+                entry["namespace"]["ignored_errors"] = None
+        cases = {}
+        compare_cli(cases, oracle, mutated)
+        checks.append(("force-default", not cases["cli.force"]))
+        mutated = copy.deepcopy(candidate)
+        for entry in mutated["cases"]:
+            if entry["key"] == "defaults":
+                # The reference namespace default is None even when the file
+                # configures a range; inheriting it must be rejected.
+                entry["namespace"]["download_range"] = [[1, 5]]
+        cases = {}
+        compare_cli(cases, oracle, mutated)
+        checks.append(("range-cli-default", not cases["cli.download_range"]))
+        mutated = copy.deepcopy(candidate)
+        for entry in mutated["cases"]:
+            if entry["key"] == "range.reversed":
+                entry["namespace"]["download_range"] = [[3, 9]]
+        cases = {}
+        compare_cli(cases, oracle, mutated)
+        checks.append(("range-reversed", not cases["cli.download_range"]))
+        mutated = copy.deepcopy(candidate)
+        mutated["range"][12]["ok"] = True
+        cases = {}
+        compare_cli(cases, oracle, mutated)
+        checks.append(("range-token", not cases["cli.download_range"]))
+        mutated = copy.deepcopy(candidate)
+        for entry in mutated["cases"]:
+            if entry["key"] == "help.short":
+                entry["text"] = "help without options"
+        cases = {}
+        compare_cli(cases, oracle, mutated)
+        checks.append(("help-markers", not cases["cli.help"]))
+        mutated = copy.deepcopy(candidate)
+        for entry in mutated["cases"]:
+            if entry["key"] == "urls.dashdash":
+                entry["namespace"]["urls"] = ["--not-a-flag"]
+        cases = {}
+        compare_cli(cases, oracle, mutated)
+        checks.append(("urls-order", not cases["cli.urls"]))
     elif suite == "util":
         mutated = copy.deepcopy(candidate)
         mutated["human_size"][2] = "1001 B"
@@ -8098,6 +8564,46 @@ def run_suite(suite, output_root, upstream, target_dir):
             )
             cases = {}
             diffs = compare_i18n(cases, oracle, candidate, i18n_messages, i18n_codes)
+        elif suite == "cli":
+            oracle_root = root / "oracle-work"
+            candidate_root = root / "candidate-work"
+            oracle_root.mkdir()
+            candidate_root.mkdir()
+            # Round 1 has no legacy config (built-in defaults), round 2 has the
+            # reference overrides fixture; both sides see identical text.
+            if round_number == 2:
+                (oracle_root / "config.py").write_text(
+                    CLI_OVERRIDES_FIXTURE, encoding="utf-8"
+                )
+                (candidate_root / "config.py").write_text(
+                    CLI_OVERRIDES_FIXTURE, encoding="utf-8"
+                )
+            oracle = run_oracle(
+                "cli",
+                {
+                    "root": str(oracle_root),
+                    "cwd": str(oracle_root),
+                    "cases": [{"key": key, "argv": argv} for key, argv in CLI_ARGV_CASES],
+                    "range_tokens": CLI_RANGE_TOKENS,
+                },
+                root,
+                upstream,
+                root / "oracle-cli.log",
+                cwd=oracle_root,
+            )
+            candidate = run_probe(
+                "cli",
+                {
+                    "root": str(candidate_root),
+                    "cases": [{"key": key, "argv": argv} for key, argv in CLI_ARGV_CASES],
+                    "range_tokens": CLI_RANGE_TOKENS,
+                },
+                root,
+                target_dir,
+                root / "probe.log",
+            )
+            cases = {}
+            diffs = compare_cli(cases, oracle, candidate)
         elif suite in ("task-api", "files"):
             oracle_root = root / "oracle-work"
             candidate_root = root / "candidate-work"
@@ -8575,7 +9081,7 @@ def suite_command(args):
         raise CompatError(f"invalid upstream tree: {upstream_path}")
 
     suites = (
-        ["config", "util", "i18n", "worker", "rpc", "gallery", "webui", "task-api", "session", "files", "site", "proxy", "transport", "monitor", "download", "concurrency"]
+        ["config", "util", "i18n", "worker", "rpc", "gallery", "webui", "task-api", "session", "files", "site", "proxy", "transport", "monitor", "download", "concurrency", "cli"]
         if args.suite == "all"
         else [args.suite]
     )
@@ -8636,6 +9142,7 @@ def main(argv=None):
             "monitor",
             "download",
             "concurrency",
+            "cli",
             "all",
         ],
     )
@@ -8661,6 +9168,7 @@ def main(argv=None):
             "rpc",
             "gallery",
             "webui",
+            "cli",
         ],
     )
     parser.add_argument("--locale")

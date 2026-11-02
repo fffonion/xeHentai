@@ -915,7 +915,12 @@ impl Task {
         let mut range_index = 0usize;
         let mut fid = 1;
         while fid <= total {
-            if let Some(ranges) = &self.config.download_range {
+            // Reference truthiness: an empty list (the interactive "download
+            // everything" answer) is no range at all, not a range that matches
+            // nothing.
+            if let Some(ranges) = &self.config.download_range
+                && !ranges.is_empty()
+            {
                 let mut found = false;
                 for [start, end] in ranges.iter().skip(range_index) {
                     if fid > *end {

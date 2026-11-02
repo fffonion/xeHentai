@@ -970,12 +970,14 @@
     },
     {
       "id": "main.honest-exit",
-      "source": "plan M0 honest report",
+      "source": "plan M6 (cli.py start/main exit contract)",
       "target": "src/main.rs / src/tests.rs",
       "suite": "config",
       "inputs": [],
       "assertions": [
-        "foundation build reports downloading not implemented"
+        "URL mode exits 0 once no submitted task is in [WAITING, FINISHED)",
+        "no-URL mode stays resident until a signal",
+        "a first SIGINT/SIGTERM drains through the real AppHandle; a second one is a bounded exit"
       ],
       "status": "implemented",
       "delta": null
@@ -1695,9 +1697,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1707,9 +1709,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1719,9 +1721,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1731,9 +1733,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1743,9 +1745,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1755,9 +1757,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1767,9 +1769,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1779,9 +1781,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1791,9 +1793,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1803,9 +1805,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1815,9 +1817,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1827,9 +1829,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1839,9 +1841,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1851,9 +1853,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1863,9 +1865,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1875,9 +1877,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1887,9 +1889,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1899,9 +1901,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1911,9 +1913,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1923,9 +1925,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1935,9 +1937,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1947,9 +1949,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1959,9 +1961,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1971,9 +1973,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1983,9 +1985,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -1995,9 +1997,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -2007,9 +2009,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -2019,9 +2021,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -2031,9 +2033,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {
@@ -2043,9 +2045,9 @@
       "suite": "cli",
       "inputs": [],
       "assertions": [
-        "arguments, aliases, defaults and bool semantics compared"
+        "arguments, aliases, defaults and bool semantics compared against the frozen reference parse_opt; the real production binary proves the observable path"
       ],
-      "status": "unimplemented",
+      "status": "implemented",
       "delta": null
     },
     {

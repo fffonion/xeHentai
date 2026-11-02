@@ -37,6 +37,28 @@ impl Locale {
     }
 }
 
+/// Reference locale detection: the environment's preferred locale tag with any
+/// codeset/modifier removed (`zh_CN.UTF-8` / `zh_CN.utf8@mod` -> `zh_cn`).
+/// Unknown or missing values fall back to English, like `i18n` itself.
+pub fn detect_locale() -> Locale {
+    for name in ["LC_ALL", "LC_MESSAGES", "LANG"] {
+        let Ok(value) = std::env::var(name) else {
+            continue;
+        };
+        let value = value.trim();
+        if value.is_empty() || value == "C" || value == "POSIX" {
+            continue;
+        }
+        let tag = value
+            .split(['.', '@'])
+            .next()
+            .unwrap_or(value)
+            .replace('-', "_");
+        return Locale::from_tag(&tag);
+    }
+    Locale::EnUs
+}
+
 pub fn available_locales() -> Vec<String> {
     crate::_rust_i18n_available_locales()
         .into_iter()

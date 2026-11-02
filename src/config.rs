@@ -96,7 +96,11 @@ pub enum Origin {
 #[derive(Clone, Debug)]
 pub struct Loaded {
     pub config: Config,
+    // Provenance of the loaded configuration. Kept for callers/tests that
+    // inspect where the values came from; the startup no longer prints it.
+    #[allow(dead_code)]
     pub origin: Origin,
+    #[allow(dead_code)]
     pub path: PathBuf,
 }
 

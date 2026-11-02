@@ -47,10 +47,10 @@ NATIVE_SOURCE = "xeHentai/rpc.py unit contract"
 RPC_TARGET = "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss"
 EXPECTED_UNIQUE_ROWS = 377
 EXPECTED_RPC_UNIQUE = 106
-EXPECTED_IMPLEMENTED = 327
+EXPECTED_IMPLEMENTED = 357
 EXPECTED_DELTA = 14
-EXPECTED_UNIMPLEMENTED = 36
-CLI_UNIMPLEMENTED = 30
+EXPECTED_UNIMPLEMENTED = 6
+CLI_IMPLEMENTED = 30
 UPDATE_UNIMPLEMENTED = 6
 
 
@@ -155,17 +155,28 @@ def test_six_merged_ids_keep_both_original_legs():
         assert row["assertions"] == expected, row["assertions"]
 
 
-def test_unimplemented_cli_and_update_rows_unchanged():
-    """CLI 30 and update 6 stay unimplemented with null delta."""
+def test_implemented_cli_rows_and_unimplemented_update_rows():
+    """The CLI 30 are implemented and verified; update 6 stay unimplemented.
+
+    M6 replaced the foundation exit with the real CLI + download lifecycle, so
+    the CLI rows now carry the compared assertion. The updater rows stay
+    unimplemented until M7 integrates a real updater (never a placeholder).
+    """
     document = compat.load_cases()
-    for suite, expected in (("cli", CLI_UNIMPLEMENTED),
-                            ("update", UPDATE_UNIMPLEMENTED)):
+    for suite, expected in (("update", UPDATE_UNIMPLEMENTED),):
         rows = [row for row in document["cases"] if row["suite"] == suite]
         assert len(rows) == expected, (suite, len(rows))
         assert len({row["id"] for row in rows}) == expected, suite
         for row in rows:
             assert row["status"] == "unimplemented", row
             assert row["delta"] is None, row
+    cli_rows = [row for row in document["cases"] if row["suite"] == "cli"]
+    assert len(cli_rows) == CLI_IMPLEMENTED, len(cli_rows)
+    assert len({row["id"] for row in cli_rows}) == CLI_IMPLEMENTED
+    for row in cli_rows:
+        assert row["status"] == "implemented", row
+        assert row["delta"] is None, row
+        assert row["assertions"] and "reference parse_opt" in row["assertions"][0], row
     statuses = {}
     for row in document["cases"]:
         statuses[row["status"]] = statuses.get(row["status"], 0) + 1
@@ -333,7 +344,7 @@ def test_rpc_native_filters_select_every_required_mapped_name():
 TESTS = [
     test_current_catalog_ids_are_unique_and_strict,
     test_six_merged_ids_keep_both_original_legs,
-    test_unimplemented_cli_and_update_rows_unchanged,
+    test_implemented_cli_rows_and_unimplemented_update_rows,
     test_duplicate_id_is_rejected_before_any_case_map,
     test_missing_cases_collection_is_rejected,
     test_non_list_cases_collection_is_rejected,

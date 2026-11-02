@@ -132,14 +132,23 @@ fn broken_rss_never_falls_back_to_python() {
 #[test]
 fn entry_point_initializes_configuration_and_log() {
     let root = tempfile::tempdir().expect("root");
-    assert_eq!(crate::run(root.path()), 2);
+    // An unusable URL still exercises the real startup: configuration, log,
+    // session restore, a submitted task and the URL-mode exit.
+    let argv = [
+        "xeHentai",
+        "-d",
+        "dl",
+        "-l",
+        "eh.log",
+        "--auto-update",
+        "off",
+        "not-a-url",
+    ];
+    assert_eq!(crate::run_with_args(root.path(), argv), 0);
     assert!(root.path().join(CONFIG_FILE).is_file());
     let log = fs::read_to_string(root.path().join("eh.log")).expect("log file");
-    assert!(
-        log.contains("configuration loaded from built-in defaults"),
-        "{log}"
-    );
-    assert!(log.contains("file "), "{log}");
+    assert!(log.contains("xeHentai 2.023-rss started."), "{log}");
+    assert!(log.contains("application task loop finished"), "{log}");
 }
 
 #[test]
@@ -150,11 +159,22 @@ fn entry_point_imports_legacy_python_once() {
         "dir = \"from-python\"\nlog_verbose = 2\n",
     )
     .unwrap();
-    assert_eq!(crate::run(root.path()), 2);
+    let argv = [
+        "xeHentai",
+        "-d",
+        "dl",
+        "-l",
+        "eh.log",
+        "--auto-update",
+        "off",
+        "not-a-url",
+    ];
+    assert_eq!(crate::run_with_args(root.path(), argv), 0);
     let rss = fs::read_to_string(root.path().join(CONFIG_FILE)).unwrap();
     assert!(rss.contains("from-python"));
+    // The log file is opened by the config update, after the first import.
     let log = fs::read_to_string(root.path().join("eh.log")).unwrap();
-    assert!(log.contains("config.py (imported once)"), "{log}");
+    assert!(log.contains("started."), "{log}");
 }
 
 #[test]
@@ -398,6 +418,7 @@ fn compat_probe() {
         "rpc" => compat_rpc(&request["inputs"]),
         "gallery" => compat_gallery(&request["inputs"]),
         "webui" => compat_webui(&request["inputs"]),
+        "cli" => compat_cli(&request["inputs"]),
         other => panic!("unknown probe suite {other}"),
     };
     let output = std::env::var("XEH_COMPAT_OUTPUT").expect("probe output");
@@ -406,6 +427,103 @@ fn compat_probe() {
         serde_json::to_string_pretty(&result).expect("probe JSON"),
     )
     .expect("write probe output");
+}
+
+/// M6 CLI projection: the reference `argparse.Namespace` shape, produced by the
+/// production parser (`crate::cli::parse_from`), not by a second parser.
+fn cli_projection(opts: &crate::cli::Opts) -> serde_json::Value {
+    serde_json::json!({
+        "username": opts.username,
+        "key": opts.key,
+        "cookie": opts.cookie,
+        "interactive": opts.interactive,
+        "daemon": opts.daemon,
+        "urls": opts.urls,
+        "dir": opts.dir,
+        "download_ori": opts.download_ori,
+        "jpn_title": opts.jpn_title,
+        "rename_ori": opts.rename_ori,
+        "proxy": opts.proxy,
+        "proxy_image": opts.proxy_image,
+        "proxy_image_only": opts.proxy_image_only,
+        "rpc_interface": opts.rpc_interface,
+        "rpc_port": opts.rpc_port,
+        "rpc_secret": opts.rpc_secret,
+        "rpc_open_browser": opts.rpc_open_browser,
+        "delete_task_files": opts.delete_task_files,
+        "make_archive": opts.make_archive,
+        "download_range": opts.download_range,
+        "download_thread_cnt": opts.download_thread_cnt,
+        "download_timeout": opts.download_timeout,
+        "low_speed_threshold": opts.low_speed_threshold,
+        "ignored_errors": opts.ignored_errors,
+        "auto_update": opts.auto_update,
+        "update_beta_channel": opts.update_beta_channel,
+        "log_path": opts.log_path,
+        "verbose": opts.verbose,
+    })
+}
+
+fn compat_cli(inputs: &serde_json::Value) -> serde_json::Value {
+    let root = std::path::PathBuf::from(inputs["root"].as_str().unwrap());
+    let loaded = crate::config::Config::load(&root).expect("cli probe config");
+    // The reference computes its `-d`/`-l` defaults with `os.path.abspath`,
+    // which is relative to the process working directory. This probe runs as
+    // the only test in its process (`--exact`), so it reproduces that by
+    // working in the case root, exactly like the reference subprocess does.
+    let previous = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&root).expect("probe cwd");
+    let mut cases = Vec::new();
+    for case in inputs["cases"].as_array().expect("cases") {
+        let key = case["key"].as_str().expect("key").to_string();
+        let argv: Vec<String> = case["argv"]
+            .as_array()
+            .expect("argv")
+            .iter()
+            .map(|value| value.as_str().expect("argv string").to_string())
+            .collect();
+        let mut full = vec!["xeH".to_string()];
+        full.extend(argv);
+        let entry = match crate::cli::parse_from(full, &loaded.config, crate::i18n::Locale::EnUs) {
+            Ok(crate::cli::Parsed::Opts(opts)) => {
+                serde_json::json!({"key": key, "exit": 0, "namespace": cli_projection(&opts)})
+            }
+            Ok(crate::cli::Parsed::Help(text)) | Ok(crate::cli::Parsed::Version(text)) => {
+                serde_json::json!({"key": key, "exit": 0, "text": text})
+            }
+            Err(error) => serde_json::json!({
+                "key": key,
+                "exit": 2,
+                "usage_error": true,
+                "stdout": "",
+                "stderr": error.message,
+            }),
+        };
+        cases.push(entry);
+    }
+    let mut range = Vec::new();
+    for token in inputs["range_tokens"].as_array().expect("range tokens") {
+        let token = token.as_str().expect("token");
+        match crate::cli::parse_range(token, crate::i18n::Locale::EnUs) {
+            Ok(value) => range.push(serde_json::json!({
+                "token": token,
+                "ok": true,
+                "value": value,
+            })),
+            Err(message) => range.push(serde_json::json!({
+                "token": token,
+                "ok": false,
+                "error_class": "ArgumentTypeError",
+                "message": message,
+            })),
+        }
+    }
+    std::env::set_current_dir(&previous).expect("restore cwd");
+    serde_json::json!({
+        "root": root.to_string_lossy(),
+        "cases": cases,
+        "range": range,
+    })
 }
 
 fn compat_monitor_app(scenario: &serde_json::Value) -> crate::core::App {
@@ -3139,13 +3257,32 @@ fn entry_point_skips_an_unsafe_session_task() {
     inject_task(&mut document, &guid, "unsafe01", "../outside");
     fs::write(&path, serde_json::to_string(&document).unwrap()).unwrap();
     assert_eq!(
-        crate::run(root.path()),
-        2,
-        "a rejected task must not exit 1"
+        crate::run_with_args(
+            root.path(),
+            [
+                "xeHentai",
+                "-d",
+                "downloads",
+                "-l",
+                "eh.log",
+                "--auto-update",
+                "off",
+                "not-a-url",
+            ],
+        ),
+        0,
+        "a rejected task must not fail the run"
+    );
+    // The unsafe task is rejected before any I/O: it is never re-published,
+    // and the run exits normally rather than failing on the other task.
+    let session: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(root.path().join("h.json")).unwrap()).unwrap();
+    assert!(
+        !session.to_string().contains("unsafe01"),
+        "the rejected task survived: {session}"
     );
     let log = fs::read_to_string(root.path().join("eh.log")).expect("log file");
-    assert!(log.contains("skipping task unsafe01"), "{log}");
-    assert!(log.contains("load 1 tasks from saved session"), "{log}");
+    assert!(log.contains("started."), "{log}");
 }
 
 #[test]
@@ -12469,4 +12606,930 @@ fn compat_webui(_inputs: &serde_json::Value) -> serde_json::Value {
             "has_auth_host": index_text.contains("host="),
         },
     })
+}
+
+/// M6: the real production executable, its CLI surface, prompt flow, download
+/// auto-exit/residency, signals and the POSIX daemon lifecycle.
+///
+/// Every test here spawns the built `xeHentai` binary as a child process with
+/// an isolated cwd/HOME/TMPDIR; nothing runs the parser or the App in-process.
+mod m6 {
+    use std::collections::BTreeMap;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command, Stdio};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    const MANIFEST: &str = env!("CARGO_MANIFEST_DIR");
+
+    // MARK: - production binary
+
+    /// The real binary next to the test harness, rebuilt when the sources are
+    /// newer than it. `cargo test` builds the bin target in *test* mode, so the
+    /// plain executable is produced here once per test binary run.
+    fn binary() -> PathBuf {
+        static BINARY: OnceLock<PathBuf> = OnceLock::new();
+        BINARY
+            .get_or_init(|| {
+                let test_exe = std::env::current_exe().expect("test executable");
+                let debug = test_exe
+                    .parent()
+                    .and_then(Path::parent)
+                    .expect("target/debug")
+                    .to_path_buf();
+                let binary = debug.join("xeHentai");
+                if !fresh(&binary) {
+                    let output = Command::new(env!("CARGO"))
+                        .args(["build", "--bin", "xeHentai", "--jobs", "2"])
+                        .current_dir(MANIFEST)
+                        .output()
+                        .expect("run cargo build");
+                    assert!(
+                        output.status.success(),
+                        "cargo build failed: {}\n{}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                assert!(binary.is_file(), "missing {}", binary.display());
+                binary
+            })
+            .clone()
+    }
+
+    fn fresh(binary: &Path) -> bool {
+        let Ok(metadata) = std::fs::metadata(binary) else {
+            return false;
+        };
+        let Ok(built) = metadata.modified() else {
+            return false;
+        };
+        let mut newest = built;
+        let mut stack = vec![Path::new(MANIFEST).join("src")];
+        stack.push(Path::new(MANIFEST).to_path_buf());
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let relevant = path.extension().and_then(|value| value.to_str()) == Some("rs")
+                    || path.file_name().and_then(|value| value.to_str()) == Some("Cargo.toml");
+                if relevant && let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
+                    newest = newest.max(modified);
+                }
+            }
+        }
+        built >= newest
+    }
+
+    struct Outcome {
+        code: i32,
+        stdout: String,
+        stderr: String,
+    }
+
+    fn base_command(root: &Path) -> Command {
+        let mut command = Command::new(binary());
+        command
+            .current_dir(root)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", root.join("home"))
+            .env("TMPDIR", root.join("tmp"))
+            .env("XDG_CACHE_HOME", root.join("cache"))
+            .env("LANG", "C")
+            .env("LC_ALL", "C");
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        std::fs::create_dir_all(root.join("tmp")).unwrap();
+        std::fs::create_dir_all(root.join("cache")).unwrap();
+        // The release ships `rss/` next to the program or in the working
+        // directory; the test root is the working directory, so publish the
+        // real business modules there instead of reaching into the build tree.
+        let rss = root.join("rss");
+        if !rss.is_dir() {
+            copy_tree(&Path::new(MANIFEST).join("rss"), &rss);
+        }
+        command
+    }
+
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap().flatten() {
+            let path = entry.path();
+            let target = to.join(entry.file_name());
+            if path.is_dir() {
+                copy_tree(&path, &target);
+            } else {
+                std::fs::copy(&path, &target).unwrap();
+            }
+        }
+    }
+
+    fn run(root: &Path, args: &[&str]) -> Outcome {
+        let output = base_command(root)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("spawn the production binary");
+        Outcome {
+            code: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }
+    }
+
+    fn wait_exit(child: &mut Child, timeout: Duration) -> Option<std::process::ExitStatus> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(status) = child.try_wait().expect("try_wait") {
+                return Some(status);
+            }
+            if Instant::now() > deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn wait_for<F: FnMut() -> bool>(timeout: Duration, mut check: F) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if check() {
+                return true;
+            }
+            if Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn image_files(root: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|ext| matches!(ext, "jpg" | "jpeg" | "png"))
+                {
+                    out.push(path);
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    // MARK: - local gallery fixture
+
+    /// A real TCP gallery/proxy server: it answers the absolute-form requests
+    /// an HTTP proxy receives for `http://e-hentai.org/...` and keeps every
+    /// requested path, so tests observe actual traffic instead of guessed
+    /// state.
+    struct Gallery {
+        port: u16,
+        paths: Arc<Mutex<Vec<String>>>,
+        stop: Arc<AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Gallery {
+        fn start(count: usize) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture");
+            listener.set_nonblocking(true).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let paths = Arc::new(Mutex::new(Vec::new()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let seen = Arc::clone(&paths);
+            let stopping = Arc::clone(&stop);
+            let bind = listener;
+            let images = images(count);
+            let handle = std::thread::spawn(move || {
+                while !stopping.load(Ordering::SeqCst) {
+                    match bind.accept() {
+                        Ok((socket, _)) => {
+                            socket.set_nonblocking(false).unwrap();
+                            serve(socket, &seen, &images);
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(_) => return,
+                    }
+                }
+            });
+            Gallery {
+                port,
+                paths,
+                stop,
+                handle: Some(handle),
+            }
+        }
+
+        fn proxy(&self) -> String {
+            format!("http://127.0.0.1:{}", self.port)
+        }
+
+        fn paths(&self) -> Vec<String> {
+            self.paths.lock().unwrap().clone()
+        }
+    }
+
+    impl Drop for Gallery {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            let _ = TcpStream::connect(("127.0.0.1", self.port));
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    /// A 40-hex image hash that is distinct in its first ten characters: the
+    /// reference keys `reload_map` by that prefix, so hashes differing only at
+    /// the end would be treated as duplicate images.
+    fn hash(index: usize) -> String {
+        format!("{:010x}{:030x}", 0xabc000 + index, 0)
+    }
+
+    fn images(count: usize) -> BTreeMap<String, Vec<u8>> {
+        let mut images = BTreeMap::new();
+        for index in 0..count {
+            let bytes: Vec<u8> = (0..2048u32)
+                .map(|value| ((value + index as u32) % 251) as u8)
+                .collect();
+            images.insert(hash(index), bytes);
+        }
+        images
+    }
+
+    fn metadata_body(count: usize) -> String {
+        format!(
+            "=\"gj\">日本語タイトル</h1>=\"gn\">English title</h1>\
+             Length:</td><td class=\"gdt2\">{count} pages</td>\
+             Showing 1 - 20 of {count} images"
+        )
+    }
+
+    fn page_body(count: usize) -> String {
+        let mut body = String::new();
+        for index in 0..count {
+            // Each page carries a distinct 10-hex page hash; the reference
+            // de-duplicates pages by that id, so a repeated prefix would turn
+            // every later image into a copy of the first one.
+            body.push_str(&format!(
+                "<a href=\"http://e-hentai.org/s/{:010x}/{}-{}\"><div title=\"Page {}\"",
+                0xabc000 + index,
+                700000 + index,
+                index + 1,
+                index + 1
+            ));
+        }
+        body
+    }
+
+    fn image_page_body(index: usize, images: &BTreeMap<String, Vec<u8>>) -> String {
+        let key = hash(index);
+        let size = images.get(&key).map(Vec::len).unwrap_or(0);
+        format!(
+            "<img src=\"http://img.test/{key}-{size}-200-0-jpg/keystamp=abc\" style=\"max-width:100%\">\
+             </a></div><div>unique-{index}.jpg :: 100x200 :: 2 KB</di>\
+             return nl('{}-{index}')",
+            700000 + index
+        )
+    }
+
+    fn respond(socket: &mut TcpStream, status: &str, mime: &str, body: &[u8]) {
+        let mut response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(body);
+        let _ = socket.write_all(&response);
+        let _ = socket.flush();
+        let _ = socket.shutdown(std::net::Shutdown::Both);
+    }
+
+    fn serve(
+        mut socket: TcpStream,
+        seen: &Arc<Mutex<Vec<String>>>,
+        images: &BTreeMap<String, Vec<u8>>,
+    ) {
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 1024];
+        while !buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+            match socket.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+                Err(_) => return,
+            }
+            if buffer.len() > 64 * 1024 {
+                break;
+            }
+        }
+        let head = String::from_utf8_lossy(&buffer).into_owned();
+        let target = head
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or("")
+            .to_string();
+        seen.lock().unwrap().push(target.clone());
+        // An HTTP proxy receives the absolute form; keep only the path part.
+        let path = match target.find("://") {
+            Some(index) => match target[index + 3..].find('/') {
+                Some(slash) => target[index + 3 + slash..].to_string(),
+                None => "/".to_string(),
+            },
+            None => target.clone(),
+        };
+        let count = images.len();
+        if path.contains("/g/") && path.contains("?p=") {
+            respond(
+                &mut socket,
+                "200 OK",
+                "text/html; charset=utf-8",
+                page_body(count).as_bytes(),
+            );
+        } else if path.contains("/g/") {
+            let mut body = metadata_body(count);
+            body.push_str(&page_body(count));
+            respond(
+                &mut socket,
+                "200 OK",
+                "text/html; charset=utf-8",
+                body.as_bytes(),
+            );
+        } else if let Some(rest) = path.strip_prefix("/s/") {
+            // `/s/<hash10>/<page>-<index>`
+            let index = rest
+                .rsplit('-')
+                .next()
+                .and_then(|value| value.trim_end_matches('/').parse::<usize>().ok())
+                .unwrap_or(1);
+            let body = image_page_body(index.saturating_sub(1), images);
+            respond(
+                &mut socket,
+                "200 OK",
+                "text/html; charset=utf-8",
+                body.as_bytes(),
+            );
+        } else if let Some(key) = images
+            .keys()
+            .find(|key| path.contains(key.as_str()))
+            .cloned()
+        {
+            let bytes = images.get(&key).cloned().unwrap_or_default();
+            respond(&mut socket, "200 OK", "image/jpeg", &bytes);
+        } else {
+            respond(&mut socket, "404 Not Found", "text/plain", b"missing");
+        }
+    }
+
+    // MARK: - CLI surface
+
+    #[test]
+    fn m6_binary_reports_version_help_and_usage_errors() {
+        let root = tempfile::tempdir().expect("root");
+        let version = run(root.path(), &["--version"]);
+        assert_eq!(version.code, 0, "{}", version.stderr);
+        assert_eq!(version.stdout.trim(), "xeHentai v2.023-rss");
+        assert!(version.stderr.is_empty());
+
+        let help = run(root.path(), &["--help"]);
+        assert_eq!(help.code, 0);
+        for flag in [
+            "-u, --username",
+            "-k, --key",
+            "-c, --cookie",
+            "-i, --interactive",
+            "--daemon",
+            "-d, --dir",
+            "-o, --download-ori",
+            "-j, --jpn-title",
+            "-r, --rename-ori",
+            "-p, --proxy",
+            "--proxy-image",
+            "--proxy-image-only",
+            "--rpc-interface",
+            "--rpc-port",
+            "--rpc-secret",
+            "--rpc-open-browser",
+            "--delete-task-files",
+            "-a, --archive",
+            "--download-range",
+            "-t, --thread",
+            "--timeout",
+            "--low-speed-threshold",
+            "-f, --force",
+            "--auto-update",
+            "--update-beta-channel",
+            "-l, --logpath",
+            "-v, --verbose",
+            "-h, --help",
+            "--version",
+        ] {
+            assert!(help.stdout.contains(flag), "help is missing {flag}");
+        }
+        assert!(help.stdout.contains("xeHentai Downloader NG"));
+
+        let unknown = run(root.path(), &["--nope"]);
+        assert_eq!(unknown.code, 2);
+        assert!(unknown.stdout.is_empty());
+        assert!(unknown.stderr.contains("--nope"), "{}", unknown.stderr);
+
+        let bare = run(root.path(), &["-j"]);
+        assert_eq!(bare.code, 2);
+        let mutex = run(root.path(), &["--proxy-image", "--proxy-image-only"]);
+        assert_eq!(mutex.code, 2);
+        let range = run(root.path(), &["--download-range", "1 - 2"]);
+        assert_eq!(range.code, 2);
+        assert!(
+            range.stderr.contains("'1 - 2' is not a range format"),
+            "{}",
+            range.stderr
+        );
+    }
+
+    // MARK: - URL mode: real download, then the reference auto-exit
+
+    #[test]
+    fn m6_binary_downloads_urls_then_exits_zero() {
+        let root = tempfile::tempdir().expect("root");
+        let gallery = Gallery::start(4);
+        let outcome = run(
+            root.path(),
+            &[
+                "-p",
+                &gallery.proxy(),
+                "-d",
+                "dl",
+                "--auto-update",
+                "off",
+                "http://e-hentai.org/g/1/aaaa",
+            ],
+        );
+        assert_eq!(
+            outcome.code, 0,
+            "stdout={}\nstderr={}",
+            outcome.stdout, outcome.stderr
+        );
+        let files = image_files(&root.path().join("dl"));
+        assert_eq!(files.len(), 4, "files: {files:?}");
+        let paths = gallery.paths();
+        assert!(
+            paths
+                .iter()
+                .any(|path| path.contains("e-hentai.org/g/1/aaaa") && !path.contains("?p=")),
+            "metadata request missing: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|path| path.contains("/s/")),
+            "image pages not requested: {paths:?}"
+        );
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|path| path.contains("img.test"))
+                .count(),
+            4,
+            "image requests: {paths:?}"
+        );
+        let log = std::fs::read_to_string(root.path().join("eh.log")).expect("log file");
+        assert!(log.contains("xeHentai 2.023-rss started."), "{log}");
+        assert!(log.contains("application task loop finished"), "{log}");
+        // `save_tasks` defaults to false, so the reference session holds only
+        // the cookies; this is the exact shape the frozen reference writes.
+        let session: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(root.path().join("h.json")).unwrap())
+                .expect("session JSON");
+        assert_eq!(
+            session,
+            serde_json::json!({"tasks": {}, "cookies": {"nw": "1"}})
+        );
+    }
+
+    // MARK: - no URL: resident until interrupted, then the reference cleanup
+
+    #[test]
+    fn m6_binary_without_urls_stays_resident_until_sigterm() {
+        let root = tempfile::tempdir().expect("root");
+        let mut child = base_command(root.path())
+            .args(["--auto-update", "off"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn");
+        let log_path = root.path().join("eh.log");
+        // Real barrier: the startup log line proves the app is running.
+        let started = wait_for(Duration::from_secs(20), || {
+            std::fs::read_to_string(&log_path)
+                .map(|log| log.contains("xeHentai 2.023-rss started."))
+                .unwrap_or(false)
+        });
+        assert!(started, "the binary never logged its startup line");
+        assert!(
+            child.try_wait().expect("try_wait").is_none(),
+            "without URLs the process must stay resident"
+        );
+        // The reference `cli.start --auto-update off` run is resident with no
+        // network activity; nothing is configured here that could reach one.
+        std::thread::sleep(Duration::from_millis(1200));
+        assert!(
+            child.try_wait().expect("try_wait").is_none(),
+            "a resident run must not exit on its own"
+        );
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(child.id() as i32),
+            nix::sys::signal::Signal::SIGTERM,
+        )
+        .expect("SIGTERM");
+        let status = wait_exit(&mut child, Duration::from_secs(30)).expect("terminated");
+        assert_eq!(status.code(), Some(0));
+        let log = std::fs::read_to_string(&log_path).unwrap();
+        assert!(log.contains("cleaning up..."), "{log}");
+        assert!(log.contains("application task loop finished"), "{log}");
+        let session: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(root.path().join("h.json")).unwrap())
+                .expect("session JSON");
+        assert_eq!(
+            session,
+            serde_json::json!({"tasks": {}, "cookies": {"nw": "1"}})
+        );
+    }
+
+    #[test]
+    fn m6_binary_second_interrupt_is_a_bounded_exit() {
+        let root = tempfile::tempdir().expect("root");
+        let mut child = base_command(root.path())
+            .args(["--auto-update", "off"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn");
+        let log_path = root.path().join("eh.log");
+        assert!(
+            wait_for(Duration::from_secs(20), || std::fs::read_to_string(
+                &log_path
+            )
+            .map(|log| log.contains("started."))
+            .unwrap_or(false)),
+            "startup line never appeared"
+        );
+        let pid = nix::unistd::Pid::from_raw(child.id() as i32);
+        nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGINT).expect("first SIGINT");
+        std::thread::sleep(Duration::from_millis(2));
+        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGINT);
+        let status = wait_exit(&mut child, Duration::from_secs(30))
+            .expect("the second interrupt must not hang the process");
+        assert_eq!(status.code(), Some(0));
+        if child.try_wait().expect("try_wait").is_none() {
+            let _ = child.kill();
+        }
+    }
+
+    // MARK: - prompt flow through a real PTY
+
+    struct Pty {
+        child: Child,
+        master: std::fs::File,
+        reader: Option<std::thread::JoinHandle<String>>,
+        transcript: Arc<Mutex<String>>,
+    }
+
+    fn spawn_pty(root: &Path, args: &[&str]) -> Pty {
+        let pty = nix::pty::openpty(None, None).expect("openpty");
+        let master = std::fs::File::from(pty.master);
+        let slave = std::fs::File::from(pty.slave);
+        let stdin = slave.try_clone().expect("slave clone");
+        let stdout = slave.try_clone().expect("slave clone");
+        let stderr = slave.try_clone().expect("slave clone");
+        let child = base_command(root)
+            .args(args)
+            .stdin(Stdio::from(stdin))
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
+            .spawn()
+            .expect("spawn in pty");
+        drop(slave);
+        let transcript = Arc::new(Mutex::new(String::new()));
+        let sink = Arc::clone(&transcript);
+        let mut reader_master = master.try_clone().expect("master clone");
+        let reader = std::thread::spawn(move || {
+            let mut collected = String::new();
+            let mut chunk = [0u8; 512];
+            loop {
+                match reader_master.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        collected.push_str(&String::from_utf8_lossy(&chunk[..read]));
+                        sink.lock()
+                            .unwrap()
+                            .push_str(&String::from_utf8_lossy(&chunk[..read]));
+                    }
+                    // EIO once every slave descriptor is closed.
+                    Err(_) => break,
+                }
+            }
+            collected
+        });
+        Pty {
+            child,
+            master,
+            reader: Some(reader),
+            transcript,
+        }
+    }
+
+    impl Pty {
+        fn answer(&mut self, text: &str) {
+            self.master.write_all(text.as_bytes()).expect("write pty");
+            self.master.flush().expect("flush pty");
+        }
+
+        fn output(&self) -> String {
+            self.transcript.lock().unwrap().clone()
+        }
+
+        fn finish(mut self, timeout: Duration) -> (Option<std::process::ExitStatus>, String) {
+            let mut status = wait_exit(&mut self.child, timeout);
+            if status.is_none() {
+                // Bound the test: a stuck prompt is reported, never waited on.
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(self.child.id() as i32),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+                status = wait_exit(&mut self.child, Duration::from_secs(10));
+            }
+            drop(self.master.try_clone());
+            let output = self
+                .reader
+                .take()
+                .map(|handle| handle.join().unwrap_or_default())
+                .unwrap_or_default();
+            (status, output)
+        }
+    }
+
+    impl Drop for Pty {
+        fn drop(&mut self) {
+            if self.child.try_wait().ok().flatten().is_none() {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
+        }
+    }
+
+    #[test]
+    fn m6_pty_prompts_in_reference_order_and_answers_drive_the_download() {
+        let root = tempfile::tempdir().expect("root");
+        let gallery = Gallery::start(4);
+        let mut pty = spawn_pty(root.path(), &["-i", "--auto-update", "off"]);
+        // login n, URL, original n, proxy = fixture, dir "pti", rename n,
+        // archive n, jpn n, range empty.
+        pty.answer("n\n");
+        pty.answer("http://e-hentai.org/g/1/aaaa\n");
+        pty.answer("n\n");
+        pty.answer(&format!("{}\n", gallery.proxy()));
+        pty.answer("pti\n");
+        pty.answer("n\n");
+        pty.answer("n\n");
+        pty.answer("n\n");
+        pty.answer("\n");
+        let (status, output) = pty.finish(Duration::from_secs(60));
+        let status = status.expect("interactive run must exit");
+        assert_eq!(status.code(), Some(0), "{output}");
+        let order = [
+            "login to exhentai (y/n)? > ",
+            "URL (seperate with ,)> ",
+            "Download original (y/n, default:n)? > ",
+            "Proxy (optional) > ",
+            "Download to (default: ",
+            "press enter or enter new > ",
+            "Rename to original name (y/n, default:n)? > ",
+            "Make archive (y/n, default:n)? > ",
+            "Use Japanese title (y/n, default:y)? > ",
+            "Download range, press enter to download all > ",
+        ];
+        let mut cursor = 0;
+        for prompt in order {
+            let found = output[cursor..]
+                .find(prompt)
+                .unwrap_or_else(|| panic!("prompt {prompt:?} missing from {output:?}"));
+            cursor += found + prompt.len();
+        }
+        // The answers, not the file defaults, decided the directory and the
+        // proxy; the English title was chosen by `n`.
+        let files = image_files(&root.path().join("pti"));
+        assert_eq!(files.len(), 4, "files: {files:?}\noutput: {output}");
+        assert!(
+            files
+                .iter()
+                .all(|path| path.to_string_lossy().contains("English title")),
+            "{files:?}"
+        );
+        assert!(!gallery.paths().is_empty());
+    }
+
+    #[test]
+    fn m6_pty_bad_range_retries_then_applies_the_range() {
+        let root = tempfile::tempdir().expect("root");
+        let gallery = Gallery::start(4);
+        let mut pty = spawn_pty(root.path(), &["-i", "--auto-update", "off"]);
+        pty.answer("n\n");
+        pty.answer("http://e-hentai.org/g/1/aaaa\n");
+        pty.answer("n\n");
+        pty.answer(&format!("{}\n", gallery.proxy()));
+        pty.answer("pti2\n");
+        pty.answer("n\n");
+        pty.answer("n\n");
+        pty.answer("y\n");
+        pty.answer("abc\n");
+        pty.answer("2-3\n");
+        let (status, output) = pty.finish(Duration::from_secs(60));
+        let status = status.expect("interactive run must exit");
+        assert_eq!(status.code(), Some(0), "{output}");
+        assert!(
+            output.contains("'abc' is not a range format, expecting '1-2' or '3'"),
+            "{output}"
+        );
+        // The prompt was shown again after the error.
+        let range_prompt = "Download range, press enter to download all > ";
+        assert_eq!(output.matches(range_prompt).count(), 2, "{output}");
+        let files = image_files(&root.path().join("pti2"));
+        assert_eq!(
+            files.len(),
+            2,
+            "range 2-3 must limit the download: {files:?}\noutput: {output}"
+        );
+    }
+
+    #[test]
+    fn m6_pty_ctrl_c_at_the_login_prompt_cleans_up_and_exits_zero() {
+        let root = tempfile::tempdir().expect("root");
+        let mut pty = spawn_pty(root.path(), &["-i", "--auto-update", "off"]);
+        assert!(
+            wait_for(Duration::from_secs(20), || pty
+                .output()
+                .contains("login to exhentai (y/n)? > ")),
+            "login prompt missing: {}",
+            pty.output()
+        );
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pty.child.id() as i32),
+            nix::sys::signal::Signal::SIGINT,
+        )
+        .expect("SIGINT");
+        let (status, output) = pty.finish(Duration::from_secs(30));
+        let status = status.expect("cancelled prompt must exit");
+        assert_eq!(status.code(), Some(0), "{output}");
+        let log = std::fs::read_to_string(root.path().join("eh.log")).unwrap();
+        assert!(log.contains("started."), "{log}");
+        assert!(log.contains("cleaning up..."), "{log}");
+        let session: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(root.path().join("h.json")).unwrap())
+                .expect("session JSON");
+        assert_eq!(session["cookies"]["nw"], "1");
+    }
+
+    // MARK: - POSIX daemon
+
+    #[test]
+    fn m6_daemon_forks_once_and_the_child_runs_the_real_app() {
+        let root = tempfile::tempdir().expect("root");
+        let gallery = Gallery::start(4);
+        let outcome = run(
+            root.path(),
+            &[
+                "--daemon",
+                "-p",
+                &gallery.proxy(),
+                "-d",
+                "dmn",
+                "--auto-update",
+                "off",
+                "http://e-hentai.org/g/1/aaaa",
+            ],
+        );
+        assert_eq!(outcome.code, 0, "stderr={}", outcome.stderr);
+        let pid_line = outcome
+            .stdout
+            .lines()
+            .find(|line| line.contains("daemon start at PID "))
+            .unwrap_or_else(|| panic!("no daemon PID line: {}", outcome.stdout));
+        let pid: i32 = pid_line
+            .rsplit(' ')
+            .next()
+            .and_then(|value| value.trim().parse().ok())
+            .expect("numeric PID");
+        assert!(pid > 0);
+        // The child is the one that does the work: wait for it to finish on its
+        // own, observing the downloaded tree and its own log lines.
+        let finished = wait_for(Duration::from_secs(90), || {
+            image_files(&root.path().join("dmn")).len() == 4
+        });
+        assert!(finished, "the daemon child did not complete the download");
+        // URL mode leaves on its own; only the test's own daemon PID is
+        // observed, and it is killed only if that exit never happens.
+        let exited = wait_for(Duration::from_secs(60), || {
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err()
+        });
+        if !exited {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        assert!(
+            exited,
+            "the daemon child did not exit after its URLs finished"
+        );
+        let log = std::fs::read_to_string(root.path().join("eh.log")).unwrap();
+        assert!(log.contains("started."), "{log}");
+        assert!(log.contains("application task loop finished"), "{log}");
+    }
+
+    /// The M6 startup now owns the RPC start too: a configured `rpc_port` must
+    /// serve the real dispatcher from the same supervised run, and a signal must
+    /// retire it through the shared shutdown path.
+    #[test]
+    fn m6_binary_with_rpc_serves_get_info_and_stops_on_signal() {
+        let root = tempfile::tempdir().expect("root");
+        let probe = TcpListener::bind(("127.0.0.1", 0)).expect("free port");
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        std::fs::write(
+            root.path().join("config.py"),
+            format!(
+                "rpc_interface = \"127.0.0.1\"\nrpc_port = {port}\nrpc_open_browser = False\nauto_update = \"off\"\n"
+            ),
+        )
+        .unwrap();
+        let mut child = base_command(root.path())
+            .args(["-d", "dl", "-l", "eh.log"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn");
+        // Real readiness barrier: the listener accepts a TCP connection.
+        let connected = wait_for(Duration::from_secs(30), || {
+            std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
+        });
+        assert!(connected, "the RPC server never started listening");
+        let body = br#"{"method":"xeH.getInfo","id":"m6","params":[[],{}]}"#;
+        let request = format!(
+            "POST /jsonrpc HTTP/1.0\r\nHost: x\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        stream.write_all(body).unwrap();
+        let mut response = Vec::new();
+        let _ = stream.read_to_end(&mut response);
+        let response = String::from_utf8_lossy(&response).into_owned();
+        assert!(
+            response.starts_with("HTTP/1.") && response.contains("200"),
+            "unexpected RPC response: {response}"
+        );
+        assert!(response.contains("\"m6\""), "{response}");
+        assert!(response.contains("\"version\""), "{response}");
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(child.id() as i32),
+            nix::sys::signal::Signal::SIGINT,
+        )
+        .expect("SIGINT");
+        let status = wait_exit(&mut child, Duration::from_secs(60)).expect("stopped");
+        assert_eq!(status.code(), Some(0));
+        let log = std::fs::read_to_string(root.path().join("eh.log")).unwrap();
+        assert!(log.contains("started."), "{log}");
+        assert!(log.contains("cleaning up..."), "{log}");
+        // The shared session writer ran under the same supervisor as the server.
+        let session: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(root.path().join("h.json")).unwrap())
+                .expect("session JSON");
+        assert_eq!(session["cookies"]["nw"], "1");
+    }
 }

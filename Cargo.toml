@@ -11,10 +11,11 @@ name = "xeHentai"
 path = "src/main.rs"
 
 [dependencies]
+clap = { version = "4.6", default-features = false, features = ["std", "help", "usage", "error-context", "suggestions", "string"] }
 pd-vm = { git = "https://github.com/rustscript-lang/rustscript.git", rev = "cdb0b798d631cd7ffab6dfed3fe4b69381ed3340", default-features = false, features = ["runtime"] }
 regex = "1"
 rust-i18n = "4"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "io-util", "time", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "io-util", "io-std", "signal", "time", "fs"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -47,6 +48,9 @@ tempfile = "3"
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs", "thread"] }
 cap-primitives = "=4.0.3"
+# POSIX daemon startup and the real-PTY lifecycle tests use the mature nix
+# bindings; the product only needs `fork`/`_exit` and standard descriptors.
+nix = { version = "0.31", features = ["process", "signal", "term", "fs"] }
 
 # The adopted dependency is the reviewed 4.0.3 source tree in `vendor/`, not a
 # rewritten or fetcher-substituted manifest: `Cargo.toml`, `Cargo.toml.orig`,

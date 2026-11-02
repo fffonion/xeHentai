@@ -1,12 +1,15 @@
-//! Application entry point.
+//! Application entry point: the reference `xeH.py` + `xeHentai/cli.py`
+//! `start()`/`main()` startup.
 //!
-//! This build implements the configuration, logging, task, session and file
-//! foundation. It loads the configuration through the real RSS path, restores
-//! the real session objects, and then reports honestly that downloading is not
-//! implemented yet.
+//! Order (reference `start`/`main`):
+//!   load configuration -> parse the command line -> build the app ->
+//!   optional POSIX daemon fork -> apply CLI config -> log start -> cookie and
+//!   login -> interactive prompts -> submit URLs -> run the real task loop and
+//!   optional RPC server -> stop on URL completion, signals or RPC end.
 
 rust_i18n::i18n!("locales", fallback = "en_us");
 
+mod cli;
 mod config;
 mod r#const;
 mod core;
@@ -18,9 +21,14 @@ mod task;
 mod util;
 mod worker;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use serde_json::{Map, Value, json};
+
+use cli::{Opts, Parsed};
 use config::Config;
+use core::App;
+use i18n::Locale;
 use util::logger::Logger;
 
 fn main() {
@@ -28,12 +36,18 @@ fn main() {
     std::process::exit(run(&root));
 }
 
-/// Run configuration/session initialization and return the process exit code.
-///
-/// Exit codes: 0 reserved for a complete run, 1 for configuration/log/session
-/// setup errors, 2 because this foundation build does not implement
-/// downloading.
+/// Startup with the process' own arguments.
 pub fn run(root: &Path) -> i32 {
+    run_with_args(root, std::env::args_os())
+}
+
+/// Startup with an explicit argv (`argv[0]` is the program name).
+pub fn run_with_args<I, T>(root: &Path, argv: I) -> i32
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let locale = i18n::detect_locale();
     let loaded = match Config::load(root) {
         Ok(loaded) => loaded,
         Err(error) => {
@@ -41,63 +55,401 @@ pub fn run(root: &Path) -> i32 {
             return 1;
         }
     };
-
-    let mut logger = Logger::new();
-    logger.set_verbosity(loaded.config.log_verbose);
-    let log_path = Path::new(&loaded.config.log_path);
-    let log_path = if log_path.is_absolute() {
-        log_path.to_path_buf()
-    } else {
-        root.join(log_path)
+    // The reference parses the command line before constructing the app; help,
+    // version and usage errors therefore never touch the download pipeline.
+    let opts = match cli::parse_from(argv, &loaded.config, locale) {
+        Ok(Parsed::Help(text)) | Ok(Parsed::Version(text)) => {
+            print!("{text}");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            return 0;
+        }
+        Ok(Parsed::Opts(opts)) => opts,
+        Err(error) => {
+            eprint!("{error}");
+            return 2;
+        }
     };
-    if let Err(error) = logger.set_logfile(&log_path) {
-        eprintln!(
-            "xeHentai: cannot open log file {}: {error}",
-            log_path.display()
-        );
-        return 1;
-    }
-    let origin = match loaded.origin {
-        config::Origin::Rss => "config.rss",
-        config::Origin::ImportedPython => "config.py (imported once)",
-        config::Origin::Defaults => "built-in defaults",
-    };
-    let message = format!(
-        "xeHentai {} configuration loaded from {origin}; file {}",
-        r#const::VERSION_DISPLAY,
-        loaded.path.display()
-    );
-    if let Err(error) = logger.info(&message) {
-        eprintln!(
-            "xeHentai: cannot write log file {}: {error}",
-            log_path.display()
-        );
-        return 1;
-    }
+    let logger = Logger::new();
     // FILEPATH in the reference is the application directory; the legacy
     // cookie file lives next to the program, not in the working directory.
     let filepath = std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| root.to_path_buf());
-    let mut app = match core::App::new(loaded.config, logger, root, &filepath) {
+    let mut app = match App::new(loaded.config, logger, root, &filepath) {
         Ok(app) => app,
         Err(error) => {
             eprintln!("xeHentai: session error: {error}");
             return 1;
         }
     };
-    // M5 minimal startup hook: with `rpc_port` configured, serve the real
-    // RPC gallery alongside the task loop. Full CLI/signal/daemon lifecycle
-    // remains M6; this hook blocks until the process is stopped.
-    if app.cfg.rpc_port.is_some() {
-        return rpc::run_with_rpc(app, root);
+    // The daemon fork must happen once, before any Tokio runtime or worker
+    // thread exists; the child then owns the whole real startup.
+    if opts.daemon {
+        if opts.interactive {
+            let message = i18n::render(locale, "XEH_OPT_IGNORING_I", &[])
+                .unwrap_or_else(|| "ignoring -i option in daemon mode".to_string());
+            let _ = app.logger_mut().warning(&message);
+        }
+        match daemon_fork() {
+            Daemon::Parent(child) => {
+                let message = i18n::render(locale, "XEH_DAEMON_START", &[&child.to_string()])
+                    .unwrap_or_else(|| format!("daemon start at PID {child}"));
+                let _ = app.logger_mut().info(&message);
+                return 0;
+            }
+            Daemon::Child => {}
+            Daemon::Unsupported(name) => {
+                let message = i18n::render(locale, "XEH_PLATFORM_NO_DAEMON", &[name])
+                    .unwrap_or_else(|| format!("daemon mode is not supported on platform: {name}"));
+                let _ = app.logger_mut().error(&message);
+                return 0;
+            }
+            Daemon::Failed(error) => {
+                eprintln!("xeHentai: cannot fork daemon: {error}");
+                return 1;
+            }
+        }
     }
-    eprintln!(
-        "xeHentai: this build implements the configuration, task, session and file foundation; downloading is not implemented"
+    run_application(app, root, &opts, locale)
+}
+
+/// Resolve `rss/` and `locales/` from the program directory when the release
+/// ships them next to the executable, else from the working directory. Never
+/// from a build-time absolute path, so binaries stay cwd-independent.
+pub fn resource_root(root: &Path) -> PathBuf {
+    let exe_root = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf));
+    exe_root
+        .filter(|dir| dir.join("rss").is_dir())
+        .unwrap_or_else(|| root.to_path_buf())
+}
+
+/// Run the real application: config update, logging, cookies/login, prompts,
+/// task submission and the supervised task loop with its optional RPC server.
+fn run_application(app: App, root: &Path, opts: &Opts, locale: Locale) -> i32 {
+    let resource = resource_root(root);
+    let tokio_runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("xeHentai: cannot start runtime: {error}");
+            return 1;
+        }
+    };
+    let local = tokio::task::LocalSet::new();
+    let code = tokio_runtime
+        .block_on(local.run_until(async move { application(app, &resource, opts, locale).await }));
+    // A cancelled prompt leaves the stdin reader blocked in the runtime's
+    // blocking pool; the reference also leaves through a bounded exit, so the
+    // runtime is not waited on here.
+    tokio_runtime.shutdown_background();
+    code
+}
+
+async fn application(mut app: App, resource: &Path, opts: &Opts, locale: Locale) -> i32 {
+    if let Err(error) = app.update_config(config_patch(opts)) {
+        eprintln!("xeHentai: configuration error: {error}");
+        return 1;
+    }
+    let started = i18n::render(locale, "XEH_STARTED", &[r#const::VERSION_DISPLAY])
+        .unwrap_or_else(|| format!("xeHentai {} started.", r#const::VERSION_DISPLAY));
+    let _ = app.logger_mut().info(&started);
+    if let Some(cookie) = &opts.cookie {
+        app.set_cookie(cookie);
+    }
+    let mut urls = opts.urls.clone();
+    let needs_login = opts.username.is_some() && opts.key.is_some() && !app.has_login();
+    let asks_login = opts.interactive && !opts.daemon && !app.has_login();
+    let mut filters = if needs_login || asks_login {
+        match filters::Filters::load(resource) {
+            Ok(filters) => Some(filters),
+            Err(error) => {
+                eprintln!("xeHentai: filter error: {error}");
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
+    if needs_login && let Some(active) = filters.as_mut() {
+        let username = opts.username.clone().unwrap_or_default();
+        let key = opts.key.clone().unwrap_or_default();
+        if let Err(error) = app.login_exhentai(active, &username, &key).await {
+            let _ = app.logger_mut().error(&error.to_string());
+        }
+    }
+    if opts.interactive && !opts.daemon {
+        let Some(active) = filters.as_mut() else {
+            eprintln!("xeHentai: filter error: interactive login needs the filters module");
+            return 1;
+        };
+        let mut interrupt = match signal_stream() {
+            Ok(signals) => signals,
+            Err(error) => {
+                eprintln!("xeHentai: cannot listen for interrupts: {error}");
+                return 1;
+            }
+        };
+        match cli::interactive(&mut app, active, locale, &mut interrupt).await {
+            Ok(Some(result)) => {
+                urls = result.urls.clone();
+                if let Err(error) = app.update_config(result.patch()) {
+                    eprintln!("xeHentai: configuration error: {error}");
+                    return 1;
+                }
+            }
+            Ok(None) => {}
+            Err(cli::PromptError::Interrupted) => {
+                let message = i18n::render(locale, "XEH_CLEANUP", &[])
+                    .unwrap_or_else(|| "cleaning up...".to_string());
+                let _ = app.logger_mut().info(&message);
+                let _ = app.save_session();
+                app.logger_mut().cleanup();
+                return 0;
+            }
+            Err(cli::PromptError::Io(error)) => {
+                eprintln!("xeHentai: cannot read input: {error}");
+                return 1;
+            }
+        }
+    }
+    for url in &urls {
+        let _ = app.add_task(url, Map::new());
+    }
+    let runtime = core::Runtime::new(app, resource.to_path_buf());
+    run_supervised(runtime, urls, locale).await
+}
+
+/// The supervised real run: task loop, optional RPC server, URL-completion
+/// auto-exit and the reference signal lifecycle.
+async fn run_supervised(runtime: core::Runtime, urls: Vec<String>, locale: Locale) -> i32 {
+    let (task_loop, handle) = runtime.spawn();
+    let rpc_enabled = handle.borrow_app(|app| app.cfg.rpc_port.is_some());
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let rpc = if rpc_enabled {
+        Some(handle.serve_rpc(shutdown_rx, rpc::PRODUCTION_STATIC_ORIGIN.to_string()))
+    } else {
+        None
+    };
+    let rpc_future = async move {
+        match rpc {
+            Some(future) => Some(future.await),
+            None => std::future::pending::<Option<Result<(), rpc::ServerError>>>().await,
+        }
+    };
+    let mut interrupt = match signal_stream() {
+        Ok(signals) => signals,
+        Err(error) => {
+            eprintln!("xeHentai: cannot listen for interrupts: {error}");
+            return 1;
+        }
+    };
+    let mut terminate =
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(signals) => signals,
+            Err(error) => {
+                eprintln!("xeHentai: cannot listen for termination: {error}");
+                return 1;
+            }
+        };
+    tokio::pin!(task_loop);
+    tokio::pin!(rpc_future);
+    let has_urls = !urls.is_empty();
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut rpc_result = None;
+    let stopped = loop {
+        tokio::select! {
+            result = &mut rpc_future => {
+                rpc_result = result;
+                break Stop::RpcDone;
+            }
+            _ = &mut task_loop => break Stop::LoopFinished,
+            _ = interrupt.recv() => break Stop::Signal,
+            _ = terminate.recv() => break Stop::Signal,
+            _ = tick.tick(), if has_urls => {
+                // Reference `main`: with URLs, leave as soon as no submitted
+                // task is still in [WAITING, FINISHED) -- failures included.
+                if !handle.borrow_app(has_active_task) {
+                    break Stop::AutoExit;
+                }
+            }
+        }
+    };
+    let _ = shutdown_tx.send(true);
+    match stopped {
+        Stop::AutoExit => {
+            handle.borrow_app_mut(|app| app.request_exit(r#const::XEH_STATE_SOFT_EXIT));
+            let _ = task_loop.await;
+            if rpc_enabled {
+                let _ = rpc_future.await;
+            }
+            0
+        }
+        Stop::Signal => {
+            let message = i18n::render(locale, "XEH_CLEANUP", &[])
+                .unwrap_or_else(|| "cleaning up...".to_string());
+            handle.borrow_app_mut(|app| {
+                let _ = app.logger_mut().info(&message);
+            });
+            // First interrupt: real graceful stop through the AppHandle owner
+            // (cancel every worker, drain, flush the session). A second
+            // interrupt is the reference's bounded `os._exit(0)`.
+            let drain = handle.shutdown();
+            tokio::pin!(drain);
+            tokio::select! {
+                _ = &mut drain => {}
+                _ = interrupt.recv() => {
+                    let _ = task_loop.await;
+                    return 0;
+                }
+                _ = terminate.recv() => {
+                    let _ = task_loop.await;
+                    return 0;
+                }
+            }
+            let _ = task_loop.await;
+            if rpc_enabled {
+                let _ = rpc_future.await;
+            }
+            0
+        }
+        Stop::LoopFinished => {
+            if rpc_enabled {
+                let _ = rpc_future.await;
+            }
+            0
+        }
+        Stop::RpcDone => {
+            // A bind/serve error still retires the task loop through its
+            // existing owner path before returning the real status.
+            let _ = handle.shutdown().await;
+            let _ = task_loop.await;
+            match rpc_result {
+                Some(Ok(())) => 0,
+                Some(Err(error)) => {
+                    eprintln!("xeHentai: RPC server error: {error}");
+                    1
+                }
+                None => 0,
+            }
+        }
+    }
+}
+
+enum Stop {
+    AutoExit,
+    Signal,
+    LoopFinished,
+    RpcDone,
+}
+
+fn has_active_task(app: &App) -> bool {
+    app.all_task_guids().iter().any(|guid| {
+        app.task(guid).is_some_and(|task| {
+            r#const::TASK_STATE_WAITING <= task.state && task.state < r#const::TASK_STATE_FINISHED
+        })
+    })
+}
+
+fn signal_stream() -> std::io::Result<tokio::signal::unix::Signal> {
+    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+}
+
+/// Project the parsed command line onto the reference `update_config(**vars)`
+/// keys. `ignored_errors` is only sent when `-f` was given (the reference
+/// skips a `None` value) and `download_range` is always sent, because the
+/// reference namespace default is `None` even when the file configures one.
+fn config_patch(opts: &Opts) -> Map<String, Value> {
+    let mut patch = Map::new();
+    patch.insert("daemon".into(), json!(opts.daemon));
+    patch.insert("dir".into(), json!(opts.dir));
+    patch.insert("download_ori".into(), json!(opts.download_ori));
+    patch.insert("jpn_title".into(), json!(opts.jpn_title));
+    patch.insert("rename_ori".into(), json!(opts.rename_ori));
+    patch.insert("proxy".into(), json!(opts.proxy));
+    patch.insert("proxy_image".into(), json!(opts.proxy_image));
+    patch.insert("proxy_image_only".into(), json!(opts.proxy_image_only));
+    patch.insert("rpc_interface".into(), json!(opts.rpc_interface));
+    patch.insert("rpc_port".into(), json!(opts.rpc_port));
+    patch.insert("rpc_secret".into(), json!(opts.rpc_secret));
+    patch.insert("rpc_open_browser".into(), json!(opts.rpc_open_browser));
+    patch.insert("make_archive".into(), json!(opts.make_archive));
+    patch.insert(
+        "download_range".into(),
+        match &opts.download_range {
+            Some(ranges) => json!(ranges),
+            None => Value::Null,
+        },
     );
-    app.logger_mut().cleanup();
-    2
+    patch.insert(
+        "download_thread_cnt".into(),
+        json!(opts.download_thread_cnt),
+    );
+    patch.insert("download_timeout".into(), json!(opts.download_timeout));
+    patch.insert(
+        "low_speed_threshold".into(),
+        json!(opts.low_speed_threshold),
+    );
+    if let Some(ignored) = &opts.ignored_errors {
+        patch.insert("ignored_errors".into(), json!(ignored));
+    }
+    patch.insert("log_path".into(), json!(opts.log_path));
+    patch.insert("log_verbose".into(), json!(opts.verbose));
+    patch.insert("delete_task_files".into(), json!(opts.delete_task_files));
+    patch.insert("auto_update".into(), json!(opts.auto_update));
+    patch.insert(
+        "update_beta_channel".into(),
+        json!(opts.update_beta_channel),
+    );
+    patch
+}
+
+// MARK: - POSIX daemon
+
+enum Daemon {
+    Parent(i32),
+    Child,
+    // Only the non-Unix `daemon_fork` constructs this; the POSIX path reports
+    // the localized "not supported" message through `Failed` instead.
+    #[allow(dead_code)]
+    Unsupported(&'static str),
+    Failed(String),
+}
+
+#[cfg(unix)]
+fn daemon_fork() -> Daemon {
+    use nix::unistd::{ForkResult, fork};
+    match unsafe { fork() } {
+        Ok(ForkResult::Parent { child }) => Daemon::Parent(child.as_raw()),
+        Ok(ForkResult::Child) => {
+            // Reference child: close stdin, send stdout/stderr to /dev/null.
+            let child = (|| -> std::io::Result<()> {
+                let devnull = std::fs::OpenOptions::new().write(true).open("/dev/null")?;
+                let to_io =
+                    |error: nix::errno::Errno| std::io::Error::from_raw_os_error(error as i32);
+                nix::unistd::dup2_stdout(&devnull).map_err(to_io)?;
+                nix::unistd::dup2_stderr(&devnull).map_err(to_io)?;
+                let _ = nix::unistd::close(0);
+                Ok(())
+            })();
+            match child {
+                Ok(()) => Daemon::Child,
+                Err(error) => Daemon::Failed(error.to_string()),
+            }
+        }
+        Err(error) => Daemon::Failed(error.to_string()),
+    }
+}
+
+#[cfg(not(unix))]
+fn daemon_fork() -> Daemon {
+    Daemon::Unsupported(std::env::consts::OS)
 }
 
 #[cfg(test)]
