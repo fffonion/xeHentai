@@ -101,14 +101,16 @@ pub fn upd_decide(
     ts: string,
     message: string
 ) -> CheckDecision {
-    let mut outcome = "off";
+    let mut outcome = "invalid";
     let mut events: [LogEvent] = [];
-    if mode == "off" {
-        outcome = "off";
-    } else if applied_update_id.length > 0 && applied_update_id == update_id {
+    if applied_update_id.length > 0 && applied_update_id == update_id {
         outcome = "up_to_date";
         events[events.length] = event("debug", "UPDATE_NO_UPDATE", []);
-    } else if mode == "check" {
+    } else if mode == "check" || mode == "off" {
+        // `off` is reached only by a DIRECT legacy `check_update` call: the CLI
+        // caller suppresses the whole module for `off`, so a direct check still
+        // asks the source and prints the manual-download hint (oracle
+        // u2_off_stable_diff), exactly like `check`.
         outcome = "available";
         events = available_events(ts, message, update_id);
         events[events.length] = event("info", "UPDATE_DOWNLOAD_MANUALLY", []);

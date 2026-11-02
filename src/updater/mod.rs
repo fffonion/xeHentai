@@ -568,6 +568,12 @@ impl Updater {
     /// the only input to the same-id decision. A `download` mode returns the
     /// explicit unsupported-stage outcome after the check; it never fetches a
     /// package or reports a completed update.
+    ///
+    /// `off` is NOT short-circuited here: only the CLI caller
+    /// (`main::spawn_update_check`) suppresses the module for `off`, while a
+    /// direct legacy `check_update(off)` still performs the one commits request
+    /// and selects the manual-download hint (oracle `u2_off_stable_diff`). The
+    /// RSS decision therefore treats `off` like `check`.
     pub async fn check(
         &mut self,
         mode: &str,
@@ -575,13 +581,6 @@ impl Updater {
         applied_update_id: Option<&str>,
         user_agent: &str,
     ) -> Result<CheckReport, UpdateError> {
-        if mode == "off" {
-            return Ok(CheckReport {
-                outcome: "off".into(),
-                update: None,
-                events: Vec::new(),
-            });
-        }
         let mode_value = {
             let callable = self.updater_mode.clone();
             self.updater

@@ -13786,7 +13786,7 @@ mod m7 {
     use std::net::{TcpListener, TcpStream};
     use std::path::Path;
     use std::process::{Child, Stdio};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
 
@@ -13823,12 +13823,14 @@ mod m7 {
     }
 
     /// A real loopback HTTP server. It records every request head and answers
-    /// immediately, or holds the response until `release` and records whether
-    /// the client closed the connection first.
+    /// immediately, or sends a real response head plus a PARTIAL body and holds
+    /// the remainder until `release`/stop, recording how many body bytes went
+    /// out and whether the client closed the connection first.
     pub(super) struct Server {
         pub port: u16,
         requests: Arc<Mutex<Vec<Request>>>,
-        closed: Arc<AtomicBool>,
+        partial: Arc<AtomicUsize>,
+        eof: Arc<AtomicBool>,
         release: Arc<(Mutex<bool>, Condvar)>,
         stop: Arc<AtomicBool>,
         handle: Option<std::thread::JoinHandle<()>>,
@@ -13852,11 +13854,13 @@ mod m7 {
             listener.set_nonblocking(true).unwrap();
             let port = listener.local_addr().unwrap().port();
             let requests = Arc::new(Mutex::new(Vec::new()));
-            let closed = Arc::new(AtomicBool::new(false));
+            let partial = Arc::new(AtomicUsize::new(0));
+            let eof = Arc::new(AtomicBool::new(false));
             let release = Arc::new((Mutex::new(false), Condvar::new()));
             let stop = Arc::new(AtomicBool::new(false));
             let seen = Arc::clone(&requests);
-            let client_closed = Arc::clone(&closed);
+            let flushed = Arc::clone(&partial);
+            let peer_eof = Arc::clone(&eof);
             let gate = Arc::clone(&release);
             let stopping = Arc::clone(&stop);
             let handle = std::thread::spawn(move || {
@@ -13869,7 +13873,9 @@ mod m7 {
                                 record(&mut socket, &seen);
                                 drop(socket);
                             } else if hold {
-                                serve_held(socket, &seen, &client_closed, &gate, body);
+                                serve_held(
+                                    socket, &seen, &flushed, &peer_eof, &gate, &stopping, body,
+                                );
                             } else {
                                 serve(socket, &seen, status, body);
                             }
@@ -13884,7 +13890,8 @@ mod m7 {
             Server {
                 port,
                 requests,
-                closed,
+                partial,
+                eof,
                 release,
                 stop,
                 handle: Some(handle),
@@ -13899,8 +13906,14 @@ mod m7 {
             self.requests.lock().unwrap().clone()
         }
 
-        pub fn client_closed(&self) -> bool {
-            self.closed.load(Ordering::SeqCst)
+        /// Body bytes of the held response that are actually on the wire.
+        pub fn partial_flushed(&self) -> usize {
+            self.partial.load(Ordering::SeqCst)
+        }
+
+        /// The client closed the connection while the body was incomplete.
+        pub fn peer_eof(&self) -> bool {
+            self.eof.load(Ordering::SeqCst)
         }
 
         pub fn release(&self) {
@@ -13912,8 +13925,9 @@ mod m7 {
 
     impl Drop for Server {
         fn drop(&mut self) {
-            self.release();
+            // Stop first: the held loop must return without completing the body.
             self.stop.store(true, Ordering::SeqCst);
+            self.release();
             let _ = TcpStream::connect(("127.0.0.1", self.port));
             if let Some(handle) = self.handle.take() {
                 let _ = handle.join();
@@ -13985,29 +13999,52 @@ mod m7 {
         }
     }
 
+    /// Send a real `200` head whose Content-Length covers the WHOLE JSON body,
+    /// flush only a prefix of that body, then hold the remainder. A client that
+    /// cancels must close the connection while the body is still incomplete;
+    /// only an explicit `release()` completes it.
     fn serve_held(
         mut socket: TcpStream,
         seen: &Arc<Mutex<Vec<Request>>>,
-        closed: &Arc<AtomicBool>,
+        partial: &Arc<AtomicUsize>,
+        eof: &Arc<AtomicBool>,
         gate: &Arc<(Mutex<bool>, Condvar)>,
+        stop: &Arc<AtomicBool>,
         body: &str,
     ) {
         if !record(&mut socket, seen) {
             return;
         }
+        let mut split = body.len() / 2;
+        while split > 0 && !body.is_char_boundary(split) {
+            split -= 1;
+        }
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            &body[..split]
+        );
+        if socket.write_all(response.as_bytes()).is_err() || socket.flush().is_err() {
+            return;
+        }
+        partial.store(split, Ordering::SeqCst);
         socket
             .set_read_timeout(Some(Duration::from_millis(20)))
             .unwrap();
         let (lock, cond) = &**gate;
         loop {
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
             if *lock.lock().unwrap() {
-                write_response(&mut socket, 200, body);
+                let _ = socket.write_all(&body.as_bytes()[split..]);
+                let _ = socket.flush();
                 return;
             }
             let mut chunk = [0u8; 256];
             match socket.read(&mut chunk) {
                 Ok(0) => {
-                    closed.store(true, Ordering::SeqCst);
+                    eof.store(true, Ordering::SeqCst);
                     return;
                 }
                 Ok(_) => {}
@@ -14312,6 +14349,10 @@ mod m7 {
         assert!(!log.contains("Update is complete"), "{log}");
     }
 
+    /// Overlap: the gallery task reaches its real terminal success state and the
+    /// process exits naturally at URL completion while the update response body
+    /// is still INCOMPLETE and never released; retirement of the owned update
+    /// task then closes the request (real peer EOF).
     #[test]
     fn m7_binary_slow_check_does_not_block_gallery_work() {
         let root = tempfile::tempdir().expect("root");
@@ -14332,29 +14373,91 @@ mod m7 {
                 "http://e-hentai.org/g/1/aaaa",
             ],
         );
+        // Real barrier: the fixture already put the head and a PARTIAL body on
+        // the wire before we assert anything about the gallery task.
         assert!(
-            m6::wait_for(Duration::from_secs(20), || !update.requests().is_empty()),
-            "the check never reached the held source"
+            m6::wait_for(Duration::from_secs(20), || update.partial_flushed() > 0),
+            "the held update fixture never flushed a partial response body"
         );
-        // Real barrier: the gallery download completes while the update
-        // response is still held open.
+        assert!(
+            !update.peer_eof(),
+            "the update request was closed before any cancellation"
+        );
+        // The gallery task's actual production terminal state: the INFO log
+        // emitted by `rename_and_finish` when the task is set FINISHED, plus its
+        // downloaded artifacts — not merely "files exist".
         assert!(
             m6::wait_for(Duration::from_secs(30), || {
-                m6::image_files(&root.path().join("dl")).len() == 4
+                let log = log(root.path());
+                log.contains("download finished")
+                    && m6::image_files(&root.path().join("dl")).len() == 4
             }),
-            "gallery work was blocked by the held check"
+            "the gallery task never finished while the check was held; log:\n{}",
+            log(root.path())
+        );
+        let finished_log = log(root.path());
+        assert_eq!(
+            finished_log.matches(" download finished").count(),
+            1,
+            "{finished_log}"
+        );
+        assert!(!finished_log.contains(" error:"), "{finished_log}");
+        assert!(
+            !finished_log.contains("remaining these files undownloaded"),
+            "{finished_log}"
         );
         assert!(
             child.try_wait().expect("try_wait").is_none(),
-            "the process must not exit while the update response is held"
+            "the process must not exit while the update body is still held"
         );
-        update.release();
+        // Both really overlap: the finished task left the update body gated.
+        assert!(
+            update.partial_flushed() > 0 && update.partial_flushed() < COMMITS.len(),
+            "the update body was not still incomplete when the gallery finished"
+        );
+        assert!(
+            !update.peer_eof(),
+            "the update request must stay open while the gallery task ends"
+        );
+        assert_eq!(update.requests().len(), 1, "one held commits request");
+        // Normal URL-completion auto-exit with the body STILL gated: the exit
+        // path retires the owned update task, which closes the connection.
         let status =
             m6::wait_exit(&mut child, Duration::from_secs(30)).expect("URL completion exit");
         assert_eq!(status.code(), Some(0));
+        assert!(
+            update.partial_flushed() < COMMITS.len(),
+            "the fixture body must never be released to make the app exit"
+        );
+        assert!(
+            update.peer_eof(),
+            "retiring the owned update task must close the held request"
+        );
+        let finished_log = log(root.path());
+        assert!(
+            finished_log.contains(" download finished"),
+            "{finished_log}"
+        );
+        assert!(
+            !finished_log.contains("Failure when updating"),
+            "{finished_log}"
+        );
+        assert!(!finished_log.contains("Update available"), "{finished_log}");
         assert!(gallery.paths().iter().any(|path| path.contains("/s/")));
+        println!(
+            "V1 overlap: body_bytes={} partial_flushed={} released={} peer_eof={} exit={:?} finished_records={}",
+            COMMITS.len(),
+            update.partial_flushed(),
+            update.partial_flushed() >= COMMITS.len(),
+            update.peer_eof(),
+            status.code(),
+            finished_log.matches(" download finished").count()
+        );
     }
 
+    /// First signal while the response body is INCOMPLETE: the owned check task
+    /// is cancelled, the request closes at the peer, and the incomplete body is
+    /// never completed afterwards.
     #[test]
     fn m7_binary_first_signal_cancels_the_held_check_and_closes_the_request() {
         let root = tempfile::tempdir().expect("root");
@@ -14362,17 +14465,34 @@ mod m7 {
         prepare_binding(root.path(), &update.origin(), None);
         let mut child = spawn(root.path(), &["-l", "eh.log", "--auto-update", "check"]);
         assert!(
-            m6::wait_for(Duration::from_secs(20), || !update.requests().is_empty()),
-            "the check never reached the held source"
+            m6::wait_for(Duration::from_secs(20), || update.partial_flushed() > 0),
+            "the held fixture never flushed a partial response body"
         );
-        assert_eq!(stop(&mut child), 0);
         assert!(
-            m6::wait_for(Duration::from_secs(10), || update.client_closed()),
+            !update.peer_eof(),
+            "the update request was closed before the signal"
+        );
+        let code = stop(&mut child);
+        assert_eq!(code, 0);
+        assert!(
+            m6::wait_for(Duration::from_secs(10), || update.peer_eof()),
             "the cancelled update request kept its connection open"
+        );
+        assert!(
+            update.partial_flushed() < COMMITS.len(),
+            "cancellation completed the body instead of aborting it"
         );
         let log = log(root.path());
         assert!(log.contains("cleaning up..."), "{log}");
         assert!(!log.contains("Update available"), "{log}");
+        println!(
+            "V1 cancel: body_bytes={} partial_flushed={} released={} peer_eof={} exit={:?}",
+            COMMITS.len(),
+            update.partial_flushed(),
+            update.partial_flushed() >= COMMITS.len(),
+            update.peer_eof(),
+            code
+        );
     }
 
     #[test]
@@ -14427,6 +14547,86 @@ mod m7 {
             assert_eq!(
                 requests[2].target,
                 "/repos/fffonion/xeHentai/commits?sha=rss-choice"
+            );
+        }));
+    }
+
+    /// B1: a DIRECT `check("off")` is not the CLI gate. The legacy
+    /// `check_update(off)` still asks the source once, compares the common
+    /// update id, and prints the manual-download hint; only the CLI caller
+    /// suppresses the module. Oracle: u2_off_stable_diff.
+    #[test]
+    fn m7_module_direct_off_check_requests_and_hints_manually() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async {
+            let root = tempfile::tempdir().expect("root");
+            let server = Server::start(200, COMMITS);
+            prepare_binding(root.path(), &server.origin(), None);
+            let mut updater = crate::updater::Updater::load(root.path()).expect("load");
+            let report = updater
+                .check("off", false, None, "xeHentai/test")
+                .await
+                .expect("direct off check");
+            let requests = server.requests();
+            assert_eq!(
+                requests.len(),
+                1,
+                "a direct off check must query the source once: {requests:?}"
+            );
+            assert_eq!(
+                requests[0].target,
+                "/repos/fffonion/xeHentai/commits?sha=rss"
+            );
+            assert_eq!(requests[0].method, "GET");
+            assert_eq!(requests[0].header("cookie"), None);
+            assert_eq!(requests[0].header("authorization"), None);
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| !request.target.contains("archive")
+                        && !request.target.ends_with(".zip")),
+                "a direct off check must not fetch an archive: {requests:?}"
+            );
+            assert_eq!(report.outcome, "available");
+            let info = report.update.clone().expect("typed update info");
+            assert_eq!(info.update_id, UPDATE_ID);
+            assert_eq!(info.ts, "2026-10-31T12:34:56Z");
+            assert_eq!(info.message, "first entry  with CRLF  third line");
+            assert!(info.download_link.ends_with("/xeHentai-rss.zip"));
+            let keys: Vec<&str> = report
+                .events
+                .iter()
+                .map(|event| event.key.as_str())
+                .collect();
+            assert_eq!(keys, vec!["UPDATE_AVAILABLE", "UPDATE_DOWNLOAD_MANUALLY"]);
+            assert_eq!(
+                report.events[0].args,
+                vec![
+                    "2026-10-31T12:34:56Z".to_string(),
+                    "first entry  with CRLF  third line".to_string(),
+                    UPDATE_ID.to_string(),
+                ]
+            );
+
+            // The common same-id comparison still applies under `off`: no
+            // availability or manual-hint log, but the source is queried again.
+            let same = updater
+                .check("off", false, Some(UPDATE_ID), "xeHentai/test")
+                .await
+                .expect("same-id off check");
+            assert_eq!(same.outcome, "up_to_date");
+            let keys: Vec<&str> = same.events.iter().map(|event| event.key.as_str()).collect();
+            assert_eq!(keys, vec!["UPDATE_NO_UPDATE"]);
+            assert!(same.update.is_some());
+            let requests = server.requests();
+            assert_eq!(requests.len(), 2, "same-id off still queries: {requests:?}");
+            assert_eq!(
+                requests[1].target,
+                "/repos/fffonion/xeHentai/commits?sha=rss"
             );
         }));
     }
