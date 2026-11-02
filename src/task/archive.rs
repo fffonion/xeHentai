@@ -842,6 +842,7 @@ mod tests {
 
     struct RestoreMode(PathBuf);
 
+    #[cfg(unix)]
     impl Drop for RestoreMode {
         fn drop(&mut self) {
             use std::os::unix::fs::PermissionsExt;
@@ -849,11 +850,17 @@ mod tests {
         }
     }
 
+    #[cfg(not(unix))]
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            let _ = &self.0;
+        }
+    }
+
     /// Explicit discard reports the real unlink outcome instead of claiming
     /// success when the filesystem still holds an error.
     #[test]
     fn discard_prepared_reports_real_removal_outcome() {
-        use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().expect("root");
         let snapshot = snapshot(root.path());
         let stage = staged(prepare_archive_snapshot(&snapshot, false).expect("prepare"));
@@ -864,19 +871,23 @@ mod tests {
         );
         assert!(!stage_path.exists());
 
-        let stage = staged(prepare_archive_snapshot(&snapshot, false).expect("prepare"));
-        let stage_path = stage.stage.clone();
-        let _restore = RestoreMode(stage_path.parent().expect("parent").to_path_buf());
-        fs::set_permissions(
-            stage_path.parent().expect("parent"),
-            fs::Permissions::from_mode(0o555),
-        )
-        .expect("read-only parent");
-        let result = discard_prepared(PreparedArchive::Staged(stage));
-        assert!(
-            result.is_err(),
-            "a failed unlink must be reported, not claimed as removal"
-        );
-        assert!(stage_path.exists(), "the file remains when unlink failed");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let stage = staged(prepare_archive_snapshot(&snapshot, false).expect("prepare"));
+            let stage_path = stage.stage.clone();
+            let _restore = RestoreMode(stage_path.parent().expect("parent").to_path_buf());
+            fs::set_permissions(
+                stage_path.parent().expect("parent"),
+                fs::Permissions::from_mode(0o555),
+            )
+            .expect("read-only parent");
+            let result = discard_prepared(PreparedArchive::Staged(stage));
+            assert!(
+                result.is_err(),
+                "a failed unlink must be reported, not claimed as removal"
+            );
+            assert!(stage_path.exists(), "the file remains when unlink failed");
+        }
     }
 }

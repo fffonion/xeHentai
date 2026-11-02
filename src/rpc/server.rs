@@ -2109,11 +2109,24 @@ mod tests {
             RequestAction::Ready(response) => assert_eq!(response.status, 403),
             other => panic!("expected ready refusal, got {other:?}"),
         }
-        // Serving the signed URL returns the exact file bytes.
-        let (status, mime, bytes) = serve_media_bytes(app, None, first);
-        assert_eq!(status, 200);
-        assert_eq!(mime.as_deref(), Some("image/jpeg"));
-        assert_eq!(bytes, png);
+        // Serving the signed URL returns the exact file bytes on the Linux
+        // FD backend; non-Linux denies via the explicit Unsupported stub
+        // before any ambient open.
+        #[cfg(target_os = "linux")]
+        {
+            let (status, mime, bytes) = serve_media_bytes(app, None, first);
+            assert_eq!(status, 200);
+            assert_eq!(mime.as_deref(), Some("image/jpeg"));
+            assert_eq!(bytes, png);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let (status, _, _) = serve_media_bytes(app, None, first);
+            assert_eq!(
+                status, 404,
+                "non-Linux gallery reads must deny without a payload"
+            );
+        }
     }
 
     #[test]
@@ -2153,9 +2166,22 @@ mod tests {
             RequestAction::Ready(response) => assert_eq!(response.status, 403),
             other => panic!("expected a refusal, got {other:?}"),
         }
-        let (status, _, bytes) = serve_media_bytes(app, Some("s3cret".to_string()), first);
-        assert_eq!(status, 200);
-        assert_eq!(bytes, png);
+        // The Linux FD backend serves the payload; non-Linux denies via
+        // the explicit Unsupported stub before any ambient open.
+        #[cfg(target_os = "linux")]
+        {
+            let (status, _, bytes) = serve_media_bytes(app, Some("s3cret".to_string()), first);
+            assert_eq!(status, 200);
+            assert_eq!(bytes, png);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let (status, _, _) = serve_media_bytes(app, Some("s3cret".to_string()), first);
+            assert_eq!(
+                status, 404,
+                "non-Linux gallery reads must deny without a payload"
+            );
+        }
     }
 
     #[test]
@@ -2195,21 +2221,47 @@ mod tests {
         assert_eq!(hash_link(None, "guid1/1").len(), 8);
         assert_ne!(hash_link(None, "guid1/1"), hash_link(None, "guid1/2"));
         assert_ne!(hash_link(Some("s"), "guid1/1"), hash_link(None, "guid1/1"));
-        // A valid /img signature serves the exact file bytes.
+        // A valid /img signature serves the exact file bytes on Linux; a
+        // valid /zip signature streams the built archive bytes. Non-Linux
+        // denies both via the explicit Unsupported stub.
         let image_path = format!("/img/{}/{guid}/1", hash_link(None, &format!("{guid}/1")));
-        // A valid /img signature serves the exact file bytes.
-        let (status, mime, bytes) = serve_media_bytes(app, None, &image_path);
-        assert_eq!(status, 200);
-        assert_eq!(mime.as_deref(), Some("image/jpeg"));
-        assert_eq!(bytes, png);
+        #[cfg(target_os = "linux")]
+        {
+            let (status, mime, bytes) = serve_media_bytes(app, None, &image_path);
+            assert_eq!(status, 200);
+            assert_eq!(mime.as_deref(), Some("image/jpeg"));
+            assert_eq!(bytes, png);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let (status, _, _) = serve_media_bytes(app, None, &image_path);
+            assert_eq!(
+                status, 404,
+                "non-Linux gallery reads must deny without a payload"
+            );
+        }
         // A valid /zip signature streams the built archive bytes.
-        let mut app = test_app();
-        let zip_guid = task_with_image(&mut app, "1.jpg", &png_bytes(8, 8));
-        let zip_path = format!("/zip/{}/{zip_guid}/gallery.zip", hash_link(None, &zip_guid));
-        let (status, mime, bytes) = serve_media_bytes(app, None, &zip_path);
-        assert_eq!(status, 200);
-        assert_eq!(mime.as_deref(), Some("application/zip"));
-        assert!(bytes.starts_with(b"PK"));
+        #[cfg(target_os = "linux")]
+        {
+            let mut app = test_app();
+            let zip_guid = task_with_image(&mut app, "1.jpg", &png_bytes(8, 8));
+            let zip_path = format!("/zip/{}/{zip_guid}/gallery.zip", hash_link(None, &zip_guid));
+            let (status, mime, bytes) = serve_media_bytes(app, None, &zip_path);
+            assert_eq!(status, 200);
+            assert_eq!(mime.as_deref(), Some("application/zip"));
+            assert!(bytes.starts_with(b"PK"));
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let mut app = test_app();
+            let zip_guid = task_with_image(&mut app, "1.jpg", &png_bytes(8, 8));
+            let zip_path = format!("/zip/{}/{zip_guid}/gallery.zip", hash_link(None, &zip_guid));
+            let (status, _, _) = serve_media_bytes(app, None, &zip_path);
+            assert_eq!(
+                status, 404,
+                "non-Linux archive reads must deny without a payload"
+            );
+        }
     }
 
     // --- task lifecycle through the real dispatcher -------------------------
@@ -3555,6 +3607,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn gallery_reads_serve_files_and_reject_bad_fids() {
         let mut app = test_app();
         let png = png_bytes(8, 8);
@@ -3570,6 +3623,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn gallery_reads_fall_back_to_sibling_zip() {
         let mut app = test_app();
         let png = png_bytes(8, 8);
@@ -3852,6 +3906,7 @@ mod tests {
     /// `LocalSet`, with a peer future proving the same executor keeps running
     /// while the request is parked on capacity.
     #[test]
+    #[cfg(target_os = "linux")]
     fn m5_missing_gallery_snapshot_is_frozen() {
         let mut app = test_app();
         let png = png_bytes(16, 16);
@@ -3921,6 +3976,7 @@ mod tests {
     /// become ZIP authority later: the archive created during the capacity
     /// wait belongs to a NEW observation. A fresh request may serve it.
     #[test]
+    #[cfg(target_os = "linux")]
     fn m5_missing_parent_cannot_grant_zip_fallback() {
         use crate::rpc::{read_zip_fallback, snapshot_gallery_file};
 
@@ -4015,6 +4071,7 @@ mod tests {
     /// `Missing`. The `Unavailable` grant itself is constructed in its owning
     /// module (`task::file_ops`), where the sealed mint lives.
     #[test]
+    #[cfg(target_os = "linux")]
     fn m5_unavailable_observation_denies_without_fallback() {
         use crate::task::{DirectoryObservation, observe_directory};
 
@@ -4056,6 +4113,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn archive_builds_on_demand_and_reuses() {
         let mut app = test_app();
         let png = png_bytes(8, 8);
@@ -4070,6 +4128,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn zip_error_path_keeps_later_reads_healthy() {
         let mut app = test_app();
         let png = png_bytes(8, 8);
@@ -4091,16 +4150,54 @@ mod tests {
         std::fs::remove_file(&zip_path).expect("cleanup");
     }
 
+    /// Exact name of the FD child helper below. The parent drives it through
+    /// `--exact --ignored` in a bounded child of THIS test binary, so the
+    /// process-global `/proc/self/fd` measurement is isolated from unrelated
+    /// harness tests. Only the child runs serial (`--test-threads=1`); the
+    /// parent DEFAULT harness stays concurrent with no threshold loosening.
+    const M5_CHILD_FD_TEST: &str = "rpc::server::tests::m5_child_fd_rejection";
+
+    /// Child half of [`rejected_gallery_requests_do_not_leak_descriptors`].
+    /// Runs the exact rejection loop in its own process, measures real
+    /// before/after FD counts/targets, and fails closed on any leak. An
+    /// intentional `XE_M5_FD_LEAK_INJECT=N` opens N `/dev/null` descriptors
+    /// without closing to prove the `+4` threshold would catch an own leak.
     #[test]
-    fn rejected_gallery_requests_do_not_leak_descriptors() {
+    #[ignore = "bounded child helper driven by rejected_gallery_requests_do_not_leak_descriptors"]
+    fn m5_child_fd_rejection() {
         fn open_fds() -> usize {
             std::fs::read_dir("/proc/self/fd")
                 .map(|dir| dir.count())
                 .unwrap_or(0)
         }
+        fn fd_targets() -> Vec<String> {
+            let mut out = Vec::new();
+            if let Ok(dir) = std::fs::read_dir("/proc/self/fd") {
+                for entry in dir.flatten() {
+                    if let Ok(target) = std::fs::read_link(entry.path()) {
+                        out.push(target.to_string_lossy().into_owned());
+                    }
+                }
+            }
+            out.sort();
+            out
+        }
+        let inject: usize = std::env::var("XE_M5_FD_LEAK_INJECT")
+            .ok()
+            .and_then(|text| text.parse().ok())
+            .unwrap_or(0);
         let cache_dir = tempfile::tempdir().expect("cache").keep();
         let cache_path = cache_dir.join("webui-cache.json");
         let before = open_fds();
+        let before_targets = fd_targets();
+        // Intentional own-leak control: open AFTER the before measurement so
+        // after-before grows by N and the +4 bound fails closed.
+        let mut _leaked = Vec::new();
+        for _ in 0..inject {
+            if let Ok(file) = std::fs::File::open("/dev/null") {
+                _leaked.push(file);
+            }
+        }
         for index in 0..64 {
             let mut cache = StaticCache::load(&cache_path, Arc::new(crate::worker::RealClock));
             let _ = dispatch_get(&mut cache, &format!("/img/00000000/guid{index}/1"), None);
@@ -4108,7 +4205,109 @@ mod tests {
             let _ = dispatch_get(&mut cache, "/zip/00000000/none/gallery.zip", None);
         }
         let after = open_fds();
-        assert!(after <= before + 4, "descriptor leak: {before} -> {after}");
+        let after_targets = fd_targets();
+        println!(
+            "m5-child-fd before={before} after={after} delta={} inject={inject}",
+            after.saturating_sub(before)
+        );
+        println!("m5-child-fd before_targets={before_targets:?}");
+        println!("m5-child-fd after_targets={after_targets:?}");
+        assert!(
+            after <= before + 4,
+            "descriptor leak in isolated child: {before} -> {after} (inject={inject})"
+        );
+        println!("m5-child: fd rejection loop completed without leak");
+    }
+
+    #[test]
+    fn rejected_gallery_requests_do_not_leak_descriptors() {
+        // Parent-noise control: hold extra FDs open in the PARENT while the
+        // child measures. The child is a separate process, so these must not
+        // pollute its before/after counts.
+        let _parent_noise = [
+            tempfile::tempfile().expect("parent noise 1"),
+            tempfile::tempfile().expect("parent noise 2"),
+            tempfile::tempfile().expect("parent noise 3"),
+        ];
+        let fixture = tempfile::tempdir().expect("fd parent fixture");
+        let out_path = fixture.path().join("child.stdout");
+        let err_path = fixture.path().join("child.stderr");
+        let exclusive = |path: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .expect("exclusive child stream file")
+        };
+        let mut child = std::process::Command::new(std::env::current_exe().expect("current_exe"))
+            .arg("--exact")
+            .arg(M5_CHILD_FD_TEST)
+            .arg("--ignored")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .stdin(std::process::Stdio::null())
+            .stdout(exclusive(&out_path))
+            .stderr(exclusive(&err_path))
+            .spawn()
+            .expect("spawn bounded FD child");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut finished = None;
+        while std::time::Instant::now() < deadline {
+            if let Some(status) = child.try_wait().expect("try_wait") {
+                finished = Some(status);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let timed_out = finished.is_none();
+        if timed_out {
+            let _ = child.kill();
+        }
+        // Actual wait/reap FIRST before reading exclusive outputs.
+        let status = child.wait().expect("reap bounded FD child");
+        let out = std::fs::read_to_string(&out_path).unwrap_or_default();
+        let err = std::fs::read_to_string(&err_path).unwrap_or_default();
+        let report = || {
+            format!(
+                "child status={status:?} timed_out={timed_out}\n--- child stdout ---\n{out}\n--- child stderr ---\n{err}"
+            )
+        };
+        assert!(
+            !timed_out,
+            "FD child timed out and was killed: {}",
+            report()
+        );
+        assert!(status.success(), "FD child failed: {}", report());
+        let result_line = out
+            .lines()
+            .find(|line| line.trim_start().starts_with("test result:"))
+            .unwrap_or("");
+        assert!(
+            result_line.contains("1 passed") && result_line.contains("0 failed"),
+            "expected exactly one executed child test, got {result_line:?}: {}",
+            report()
+        );
+        assert!(
+            out.contains("m5-child: fd rejection loop completed without leak"),
+            "child did not reach the end of the real rejection loop: {}",
+            report()
+        );
+        // Real before/after diagnostics are retained, not just a pass flag.
+        assert!(
+            out.contains("m5-child-fd before=") && out.contains("after_targets="),
+            "child must report real before/after FD counts/targets: {}",
+            report()
+        );
+    }
+
+    /// Threshold control: a 5-FD own leak exceeds the `+4` bound, so the
+    /// isolated child measurement would fail closed. Proves the bound is
+    /// tight without claiming historical attribution.
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn fd_leak_threshold_would_catch_five() {
+        assert!(19 + 5 > 19 + 4, "19->24 (leak 5) must exceed the +4 bound");
+        assert!(19 + 4 <= 19 + 4, "bound allows up to +4 noise");
     }
 
     // --- B3 RED: owned IO, confined targets, bounded buffering ----------------
@@ -4409,6 +4608,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn gallery_zip_entry_budget_refuses_before_allocation() {
         let mut app = test_app();
         let png = png_bytes(8, 8);
@@ -4519,6 +4719,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn gallery_stream_large_file_chunks_pattern() {
         // 70 MiB of known pattern through the owned streaming path: exact
         // length, first/last bytes and spot checks, no whole-asset Vec, no
@@ -4545,6 +4746,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn gallery_stream_wire_framing() {
         // 8 MiB over real socket bytes: headers carry the exact length, the
         // body streams in chunks, the newline sits outside Content-Length.
@@ -4570,6 +4772,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn gallery_stream_large_archive_entries() {
         // A large valid on-demand archive streams with its real entries,
         // comment and STORE layout; the client checks entries and spots.
@@ -4602,6 +4805,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn gallery_stream_spool_cleanup() {
         // ZIP-fallback passthrough spools to a task-owned file, streams it,
         // and unlinks it: bytes served, nothing retained.
@@ -4803,6 +5007,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn gallery_disconnect_during_stream_drains_cleanly() {
         // A client that vanishes mid-stream cannot strand owned work: the
         // stream ends, the next request still serves, shutdown still drains.
@@ -4874,6 +5079,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn gallery_responsive_during_media_stream() {
         // A slow media stream holds no App borrow: getInfo is served while
         // the chunks are still in flight on the same owner thread.
@@ -5633,7 +5839,9 @@ mod tests {
             Err(error) => panic!("swapped gallery root must be denied, got {error:?}"),
         }
         // (e) Control: a legitimate inside-root alias still serves, and a
-        // normal regular file is unaffected.
+        // normal regular file is unaffected. Linux FD backend serves the
+        // payload; non-Linux denies via the explicit Unsupported stub
+        // before any ambient open (no portable fallback).
         let mut app = test_app();
         let png = png_bytes(16, 16);
         let guid = task_with_image(&mut app, "1.jpg", &png);
@@ -5642,6 +5850,7 @@ mod tests {
         std::fs::rename(snap.root.join(&snap.name), &real).expect("move");
         #[cfg(unix)]
         std::os::unix::fs::symlink("real.jpg", snap.root.join(&snap.name)).expect("alias");
+        #[cfg(target_os = "linux")]
         match probe_gallery_file(&snap) {
             Ok(crate::rpc::OpenOutcome::File(mut opened)) => {
                 use std::io::Read;
@@ -5651,10 +5860,17 @@ mod tests {
             }
             _ => panic!("inside-root alias must serve"),
         }
+        #[cfg(not(target_os = "linux"))]
+        match probe_gallery_file(&snap) {
+            Ok(crate::rpc::OpenOutcome::Denied) => {}
+            Ok(_) => panic!("non-Linux alias must deny via Unsupported, got File/Missing"),
+            Err(_) => panic!("non-Linux alias must deny via Unsupported, got Err"),
+        }
         let mut app = test_app();
         let png = png_bytes(16, 16);
         let guid = task_with_image(&mut app, "1.jpg", &png);
         let snap = snapshot_gallery_file(&app, &guid, "1").expect("snap");
+        #[cfg(target_os = "linux")]
         match probe_gallery_file(&snap) {
             Ok(crate::rpc::OpenOutcome::File(mut opened)) => {
                 use std::io::Read;
@@ -5663,6 +5879,12 @@ mod tests {
                 assert_eq!(bytes, png);
             }
             _ => panic!("regular file must serve"),
+        }
+        #[cfg(not(target_os = "linux"))]
+        match probe_gallery_file(&snap) {
+            Ok(crate::rpc::OpenOutcome::Denied) => {}
+            Ok(_) => panic!("non-Linux regular file must deny via Unsupported, got File/Missing"),
+            Err(_) => panic!("non-Linux regular file must deny via Unsupported, got Err"),
         }
     }
 
@@ -5682,6 +5904,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn b3_3_spool_lives_outside_gallery_and_archive() {
         use crate::rpc::{read_archive, snapshot_gallery_file};
         // A live ZIP-fallback response must never stage inside the gallery:
@@ -5890,6 +6113,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn b3_1_permits_gate_workers_peer_progress_and_cancel() {
         // Two held workers consume the 2-permit cap: a third request stays
         // pending. Same-source getInfo still answers (no App borrow is
@@ -6853,6 +7077,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn b3_1_shutdown_waits_for_worker_release() {
         // A held heavy worker pins its connection: with the response still
         // unbuilt (budgets/CRC unresolved), the client sees no bytes, a

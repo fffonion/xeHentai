@@ -11353,10 +11353,15 @@ fn compat_rpc_app(root: &std::path::Path, inputs: &serde_json::Value) -> crate::
             .and_then(|value| value.as_object())
         {
             for (fid, name) in renamed {
-                task.renamed_map.insert(
-                    FidKey::Text(fid.clone()),
-                    name.as_str().unwrap_or("").to_string(),
-                );
+                // Match the reference/Python oracle: numeric fids are Int
+                // keys (JSON numbers), not Text. Preserve Text only for
+                // genuinely non-numeric fids.
+                let key = fid
+                    .parse::<i64>()
+                    .map(FidKey::Int)
+                    .unwrap_or_else(|_| FidKey::Text(fid.clone()));
+                task.renamed_map
+                    .insert(key, name.as_str().unwrap_or("").to_string());
             }
         }
         if let Some(state) = task_value.get("state").and_then(|value| value.as_i64()) {
@@ -11705,29 +11710,87 @@ fn compat_rpc(inputs: &serde_json::Value) -> serde_json::Value {
     })
 }
 
+/// Test-only production error collection for readdir items: the SAME code
+/// walk uses for genuine kernel errors. Injected iterator errors (not actual
+/// kernel EIO) exercise it without a flaky filesystem.
+#[cfg(test)]
+fn record_readdir_item_results(
+    parent_rel: &str,
+    iter: impl Iterator<Item = Result<std::path::PathBuf, std::io::Error>>,
+    out: &mut Vec<serde_json::Value>,
+) -> Vec<std::path::PathBuf> {
+    let mut indexed: Vec<(usize, Result<std::path::PathBuf, std::io::Error>)> = Vec::new();
+    for (index, entry) in iter.enumerate() {
+        match entry {
+            Ok(path) => indexed.push((index, Ok(path))),
+            Err(error) => {
+                out.push(serde_json::json!({"path": format!("{parent_rel}/#{}", index), "type": "error", "error": error.kind().to_string(), "stage": "readdir"}));
+            }
+        }
+    }
+    let mut paths: Vec<std::path::PathBuf> = indexed
+        .into_iter()
+        .filter_map(|(_, result)| result.ok())
+        .collect();
+    paths.sort();
+    paths
+}
+
 fn compat_gallery_dirs(root: &std::path::Path) -> Vec<serde_json::Value> {
     const TOP_FILE_EXCLUDED: [&str; 4] = ["h.json", "eh.log", "webui.gz", "webui-cache.json"];
     const TOP_DIR_EXCLUDED: [&str; 3] = ["home", "cache", "tmp"];
-    fn map_target(root: &std::path::Path, target: &std::path::Path) -> String {
-        let root_str = root.to_string_lossy().into_owned();
-        let target_str = target.to_string_lossy().into_owned().replace('\\', "/");
-        if target_str == root_str.replace('\\', "/") {
-            return "<ROOT>".to_string();
+    /// Build a transport-relative path with `/` separators, preserving
+    /// literal backslashes inside Unix components. Non-Unicode components
+    /// are an explicit failed observation, never lossy conversion.
+    fn rel_string(root: &std::path::Path, path: &std::path::Path) -> Result<String, String> {
+        let rest = path
+            .strip_prefix(root)
+            .map_err(|_| "not-under-root".to_string())?;
+        let mut parts = Vec::new();
+        for component in rest.components() {
+            match component {
+                std::path::Component::Normal(os) => {
+                    parts.push(
+                        os.to_str()
+                            .ok_or_else(|| "non-utf8-component".to_string())?
+                            .to_string(),
+                    );
+                }
+                std::path::Component::CurDir => parts.push(".".to_string()),
+                std::path::Component::ParentDir => parts.push("..".to_string()),
+                _ => return Err("unexpected-root-in-rel".to_string()),
+            }
         }
-        let prefix = format!("{}/", root_str.replace('\\', "/"));
+        Ok(parts.join("/"))
+    }
+    fn file_name_string(path: &std::path::Path) -> Result<String, String> {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.to_string())
+            .ok_or_else(|| "non-utf8-filename".to_string())
+    }
+    fn map_target(root: &std::path::Path, target: &std::path::Path) -> Result<String, String> {
+        // Preserve literal backslashes, `.`, `..`, relative/external tails.
+        // Only a leading absolute FixtureROOT with a true component boundary
+        // maps to `<ROOT>`; non-boundary substrings stay literal.
+        let root_str = root.to_str().ok_or_else(|| "non-utf8-root".to_string())?;
+        let target_str = target
+            .to_str()
+            .ok_or_else(|| "non-utf8-target".to_string())?;
+        if target_str == root_str {
+            return Ok("<ROOT>".to_string());
+        }
+        let prefix = format!("{root_str}/");
         if target_str.starts_with(&prefix) {
-            return format!("<ROOT>/{}", &target_str[prefix.len()..]);
+            return Ok(format!("<ROOT>{}", &target_str[root_str.len()..]));
         }
-        target_str
+        Ok(target_str.to_string())
     }
     fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<serde_json::Value>) {
         let entries = match std::fs::read_dir(dir) {
             Ok(entries) => entries,
             Err(error) => {
-                let rel = dir
-                    .strip_prefix(root)
-                    .map(|part| part.to_string_lossy().replace('\\', "/"))
-                    .unwrap_or_default();
+                let rel = rel_string(root, dir).unwrap_or_else(|_| "<non-utf8-dir>".to_string());
                 let path = if rel.is_empty() {
                     "./".to_string()
                 } else {
@@ -11737,19 +11800,31 @@ fn compat_gallery_dirs(root: &std::path::Path) -> Vec<serde_json::Value> {
                 return;
             }
         };
-        let mut paths: Vec<_> = entries
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .collect();
-        paths.sort();
+        // Record per-item readdir errors with parent rel path and index;
+        // never silently drop via filter_map. No leaf identity is fabricated.
+        let parent_rel = rel_string(root, dir).unwrap_or_else(|_| "<non-utf8-dir>".to_string());
+        let paths = record_readdir_item_results(
+            parent_rel.as_str(),
+            entries.map(|entry| entry.map(|entry| entry.path())),
+            out,
+        );
         for path in paths {
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let rel = path
-                .strip_prefix(root)
-                .map(|part| part.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_default();
+            let name = match file_name_string(&path) {
+                Ok(name) => name,
+                Err(error) => {
+                    let rel =
+                        rel_string(root, &path).unwrap_or_else(|_| "<non-utf8-path>".to_string());
+                    out.push(serde_json::json!({"path": rel, "type": "error", "error": error}));
+                    continue;
+                }
+            };
+            let rel = match rel_string(root, &path) {
+                Ok(rel) => rel,
+                Err(error) => {
+                    out.push(serde_json::json!({"path": "<non-utf8-path>", "type": "error", "error": error}));
+                    continue;
+                }
+            };
             // Exact top-level transport artifacts only; nested same basenames observed.
             if !rel.contains('/') && TOP_DIR_EXCLUDED.contains(&rel.as_str()) {
                 continue;
@@ -11765,15 +11840,25 @@ fn compat_gallery_dirs(root: &std::path::Path) -> Vec<serde_json::Value> {
                 }
             };
             if metadata.file_type().is_symlink() {
-                let target = std::fs::read_link(&path).map(|target| map_target(root, &target)).unwrap_or_else(|error| {
-                    out.push(serde_json::json!({"path": rel, "type": "error", "error": error.kind().to_string()}));
-                    String::new()
-                });
-                // If read_link failed we already pushed an error; skip the link entry.
-                if target.is_empty() && !path.exists() {
-                    // read_link error case already recorded; do not add a link entry.
-                    continue;
-                }
+                // Raw link target via read_link (never a Path constructor that
+                // collapses literal `.` text); component-boundary mapping only.
+                // read_link/metadata/read failures are explicit failed
+                // observations, never disappearance. An observer error fails
+                // comparison even when both sides report the same error.
+                let raw_target = match std::fs::read_link(&path) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        out.push(serde_json::json!({"path": rel, "type": "error", "error": error.kind().to_string()}));
+                        continue;
+                    }
+                };
+                let target = match map_target(root, &raw_target) {
+                    Ok(mapped) => mapped,
+                    Err(error) => {
+                        out.push(serde_json::json!({"path": rel, "type": "error", "error": error}));
+                        continue;
+                    }
+                };
                 out.push(serde_json::json!({"path": rel, "type": "link", "target": target}));
             } else if metadata.is_dir() {
                 out.push(serde_json::json!({"path": format!("{rel}/"), "type": "dir"}));
@@ -11882,24 +11967,43 @@ fn gallery_disk_observes_nested_content_and_errors() {
         .iter()
         .find(|entry| entry["path"].as_str().unwrap_or("") == "downloads/link.jpg")
         .expect("link entry");
-    assert_eq!(
-        link_entry["type"].as_str().unwrap_or(""),
-        "link",
-        "link must be typed, got: {link_entry:?}"
-    );
-    assert_eq!(
-        link_entry["target"].as_str().unwrap_or(""),
-        evil_target,
-        "non-boundary ROOT substring must stay literal, got: {link_entry:?}"
-    );
-    assert!(
-        !link_entry["target"]
-            .as_str()
-            .unwrap_or("")
-            .contains("<ROOT>-evil"),
-        "must not map a non-boundary prefix, got: {link_entry:?}"
-    );
-    // Probe errors must be observable, not an empty inventory.
+    #[cfg(unix)]
+    {
+        assert_eq!(
+            link_entry["type"].as_str().unwrap_or(""),
+            "link",
+            "link must be typed, got: {link_entry:?}"
+        );
+        assert_eq!(
+            link_entry["target"].as_str().unwrap_or(""),
+            evil_target,
+            "non-boundary ROOT substring must stay literal, got: {link_entry:?}"
+        );
+        assert!(
+            !link_entry["target"]
+                .as_str()
+                .unwrap_or("")
+                .contains("<ROOT>-evil"),
+            "must not map a non-boundary prefix, got: {link_entry:?}"
+        );
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = &evil_target;
+        assert_eq!(
+            link_entry["type"].as_str().unwrap_or(""),
+            "file",
+            "non-Unix placeholder must be a regular file, got: {link_entry:?}"
+        );
+        assert_eq!(
+            link_entry["bytes"].as_str().unwrap_or(""),
+            "placeholder",
+            "non-Unix placeholder bytes must be observed, got: {link_entry:?}"
+        );
+    }
+    // Probe errors must be observable, not an empty inventory. A real
+    // read_dir/metadata/read failure is a REQUIRED error observation;
+    // `error OR inner exists` would hide a silently skipped failure.
     let root_d = tempfile::tempdir().expect("root-d");
     let locked = root_d.path().join("locked");
     std::fs::create_dir_all(&locked).expect("locked");
@@ -11909,37 +12013,168 @@ fn gallery_disk_observes_nested_content_and_errors() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
             .expect("drop perms");
+        // Privileged runners (root) can still list 000 dirs; perms do not
+        // apply there. In that case skip the strict denial and rely on the
+        // portable bad-zip genuine error below.
+        let privileged = std::fs::read_dir(&locked).is_ok();
         let dirs_d = compat_gallery_dirs(root_d.path());
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("restore");
+        if !privileged {
+            assert!(
+                dirs_d.iter().any(|entry| {
+                    entry["path"].as_str().unwrap_or("").contains("locked")
+                        && entry["type"].as_str().unwrap_or("") == "error"
+                }),
+                "a probe failure must be an explicit error observation, got: {dirs_d:?}"
+            );
+        }
+    }
+    // Genuine portable filesystem error: a corrupt sibling ZIP is an
+    // explicit error observation, never disappearance. Works as root too.
+    {
+        let bad_zip = root_d.path().join("downloads-bad.zip");
+        std::fs::create_dir_all(root_d.path()).expect("root");
+        std::fs::write(&bad_zip, b"not a zip").expect("bad zip");
+        let dirs_bad = compat_gallery_dirs(root_d.path());
         assert!(
-            dirs_d.iter().any(|entry| {
-                entry["path"].as_str().unwrap_or("").contains("locked")
-                    && (entry["type"].as_str().unwrap_or("") == "error"
-                        || entry["path"].as_str().unwrap_or("").contains("inner"))
+            dirs_bad.iter().any(|entry| {
+                entry["path"].as_str().unwrap_or("") == "downloads-bad.zip"
+                    && entry["type"].as_str().unwrap_or("") == "error"
             }),
-            "a probe failure must be observable, not silently skipped, got: {dirs_d:?}"
+            "a corrupt ZIP must be an explicit error observation, got: {dirs_bad:?}"
+        );
+        let _ = std::fs::remove_file(&bad_zip);
+    }
+}
+
+/// Lossless filesystem: literal backslashes stay distinct from nesting,
+/// raw link targets preserve backslash/prefix-sibling/non-leading
+/// substrings, and injected readdir item errors use the same production
+/// collection as genuine kernel errors.
+#[test]
+fn gallery_disk_preserves_backslash_and_reports_injected_errors() {
+    // Backslash filename vs genuine nested path remain distinct.
+    let root = tempfile::tempdir().expect("root");
+    let downloads = root.path().join("downloads");
+    std::fs::create_dir_all(&downloads).expect("downloads");
+    std::fs::write(downloads.join("a\\b.jpg"), b"BACKSLASH").expect("backslash file");
+    std::fs::create_dir_all(downloads.join("a")).expect("nested dir");
+    std::fs::write(downloads.join("a").join("b.jpg"), b"NESTED").expect("nested file");
+    let dirs = compat_gallery_dirs(root.path());
+    let backslash = dirs
+        .iter()
+        .find(|entry| entry["path"].as_str().unwrap_or("") == "downloads/a\\b.jpg");
+    let nested = dirs
+        .iter()
+        .find(|entry| entry["path"].as_str().unwrap_or("") == "downloads/a/b.jpg");
+    assert!(
+        backslash.is_some() && nested.is_some(),
+        "backslash file and nested path must both be observed distinctly, got: {dirs:?}"
+    );
+    assert_eq!(
+        backslash.unwrap()["bytes"].as_str().unwrap_or(""),
+        "BACKSLASH"
+    );
+    assert_eq!(nested.unwrap()["bytes"].as_str().unwrap_or(""), "NESTED");
+    assert_ne!(
+        backslash.unwrap(),
+        nested.unwrap(),
+        "backslash must not collapse to nesting"
+    );
+    // Raw link target backslash preserved (no global separator rewrite).
+    let root_b = tempfile::tempdir().expect("root-b");
+    let gallery_b = root_b.path().join("downloads");
+    std::fs::create_dir_all(&gallery_b).expect("gallery");
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("a\\b-target.jpg", gallery_b.join("link.jpg"))
+            .expect("backslash link");
+        let dirs_b = compat_gallery_dirs(root_b.path());
+        let link = dirs_b
+            .iter()
+            .find(|entry| entry["path"].as_str().unwrap_or("") == "downloads/link.jpg")
+            .expect("link entry");
+        assert_eq!(link["type"].as_str().unwrap_or(""), "link");
+        assert_eq!(
+            link["target"].as_str().unwrap_or(""),
+            "a\\b-target.jpg",
+            "raw link target backslash must be preserved, got: {link:?}"
         );
     }
+}
+
+/// Injected readdir item errors use the SAME production collection as
+/// genuine kernel errors (labeled injected, not actual EIO). A genuine
+/// filesystem error control is kept separately (corrupt ZIP above).
+#[test]
+fn gallery_disk_injected_readdir_error_is_recorded() {
+    let mut out = Vec::new();
+    let good = std::path::PathBuf::from("/tmp/good.jpg");
+    let injected: Vec<Result<std::path::PathBuf, std::io::Error>> = vec![
+        Ok(good.clone()),
+        Err(std::io::Error::other("injected-iterator-error")),
+    ];
+    // SAME production collection walk uses for genuine kernel errors.
+    let paths = record_readdir_item_results("downloads", injected.into_iter(), &mut out);
+    assert!(
+        out.iter()
+            .any(|entry| entry["type"].as_str().unwrap_or("") == "error"
+                && entry["path"].as_str().unwrap_or("").contains("#1")),
+        "injected readdir item error must be an explicit error observation, got: {out:?}"
+    );
+    assert_eq!(
+        paths,
+        vec![good],
+        "only the good item survives; the error is recorded, not fabricated"
+    );
+    assert!(
+        out.iter()
+            .any(|entry| entry["stage"].as_str().unwrap_or("") == "readdir"),
+        "injected error must carry the readdir stage, got: {out:?}"
+    );
+}
+
+/// Gallery-only boundary normalization for `config.dir`: map ONLY the
+/// controlled absolute fixture root with an exact component boundary,
+/// preserve literal `..`, `.`, relative/external/root-substring tails.
+fn gallery_norm_dir(value: &str, root: &std::path::Path) -> String {
+    let root_str = root.to_string_lossy();
+    if value == root_str {
+        return "<ROOT>".to_string();
+    }
+    let prefix = format!("{root_str}/");
+    if value.starts_with(&prefix) {
+        return format!("<ROOT>{}", &value[root_str.len()..]);
+    }
+    value.to_string()
 }
 
 /// Independent full poststate: task/session/queue/cookie/header/login/disk.
 ///
 /// Cookies/headers preserve actual insertion order (no sorting): business
-/// order is observable and reorder mutations must be caught. Tasks capture
-/// ALL actual App tasks via `all_task_guids` (preserving registry order),
-/// not just the input subset; queue order is preserved separately.
+/// order is observable and reorder mutations must be caught. Tasks are the
+/// FULL ordered registry `[[guid, record], ...]` reusing the M2 record
+/// shape (url/failcode/state/guid/config/meta/reload/duplicate/renamed/
+/// img_q/page_q/flist plus gid/sethash), not a state/meta projection.
+/// `config` is the actual raw task config with ONLY `dir` mapped through
+/// the gallery boundary; every other value is preserved unchanged.
 fn compat_gallery_poststate(
     app: &crate::core::App,
     root: &std::path::Path,
     _inputs: &serde_json::Value,
 ) -> serde_json::Value {
-    let mut tasks = serde_json::Map::new();
+    let mut tasks = Vec::new();
     for guid in app.all_task_guids() {
         if let Some(task) = app.task(&guid) {
-            tasks.insert(
-                guid.clone(),
-                serde_json::json!({"state": task.state, "meta": task.meta}),
-            );
+            let mut record = m2_task_obs(task, root);
+            if let Some(config) = record
+                .get_mut("config")
+                .and_then(|value| value.as_object_mut())
+            {
+                let mapped = gallery_norm_dir(&task.config.dir, root);
+                config.insert("dir".to_string(), serde_json::json!(mapped));
+            }
+            tasks.push(serde_json::json!([guid.clone(), record]));
         }
     }
     // Preserve insertion order: no sorting. `cookies` is Vec in registry
@@ -12023,12 +12258,53 @@ fn gallery_poststate_preserves_order_and_all_tasks() {
     // Cookie header must be the ordered serialization.
     let cookie_header = state["login"]["cookie_header"].as_str().unwrap_or("");
     assert_eq!(cookie_header, "nw=1;zebra=3;apple=1;mango=2");
-    // ALL tasks, including the extra beyond inputs, must be present.
-    let tasks = state["tasks"].as_object().expect("tasks");
+    // ALL tasks, including the extra beyond inputs, must be present as an
+    // ordered registry [[guid, record], ...] with the full M2 record shape,
+    // not a state/meta projection.
+    let tasks = state["tasks"].as_array().expect("tasks ordered list");
     assert!(
-        tasks.contains_key(&extra_guid),
+        tasks
+            .iter()
+            .any(|pair| pair[0].as_str().unwrap_or("") == extra_guid),
         "poststate must capture ALL App tasks, not just inputs; missing {extra_guid}"
     );
+    // Registry order is preserved: guids appear in all_task_guids order.
+    let guids: Vec<String> = tasks
+        .iter()
+        .map(|pair| pair[0].as_str().unwrap_or("").to_string())
+        .collect();
+    let expected: Vec<String> = app.all_task_guids();
+    assert_eq!(guids, expected, "tasks must preserve registry order");
+    // Full record shape: every entry carries the M2 public fields and the
+    // raw config with ONLY dir boundary-mapped.
+    for pair in tasks {
+        let guid = pair[0].as_str().expect("guid");
+        let record = pair[1].as_object().expect("record");
+        for field in [
+            "url",
+            "failcode",
+            "state",
+            "guid",
+            "config",
+            "meta",
+            "reload",
+            "duplicate",
+            "renamed",
+            "img_q",
+            "page_q",
+            "flist",
+        ] {
+            assert!(
+                record.contains_key(field),
+                "task {guid} missing required field {field}"
+            );
+        }
+        assert_eq!(
+            record["guid"].as_str().unwrap_or(""),
+            guid,
+            "guid must match registry key"
+        );
+    }
     // Queue must preserve order too.
     let queue: Vec<String> = serde_json::from_value(state["queue"].clone()).expect("queue");
     assert!(queue.contains(&extra_guid));
