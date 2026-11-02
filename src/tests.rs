@@ -11705,16 +11705,40 @@ fn compat_rpc(inputs: &serde_json::Value) -> serde_json::Value {
     })
 }
 
-fn compat_gallery_dirs(root: &std::path::Path) -> Vec<String> {
-    const EXCLUDED: [&str; 4] = ["h.json", "eh.log", "webui.gz", "webui-cache.json"];
-    const TOP_EXCLUDED: [&str; 3] = ["home", "cache", "tmp"];
-    fn walk(root: &std::path::Path, dir: &std::path::Path, top: bool, out: &mut Vec<String>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
+fn compat_gallery_dirs(root: &std::path::Path) -> Vec<serde_json::Value> {
+    const TOP_FILE_EXCLUDED: [&str; 4] = ["h.json", "eh.log", "webui.gz", "webui-cache.json"];
+    const TOP_DIR_EXCLUDED: [&str; 3] = ["home", "cache", "tmp"];
+    fn map_target(root: &std::path::Path, target: &std::path::Path) -> String {
+        let root_str = root.to_string_lossy().into_owned();
+        let target_str = target.to_string_lossy().into_owned().replace('\\', "/");
+        if target_str == root_str.replace('\\', "/") {
+            return "<ROOT>".to_string();
+        }
+        let prefix = format!("{}/", root_str.replace('\\', "/"));
+        if target_str.starts_with(&prefix) {
+            return format!("<ROOT>/{}", &target_str[prefix.len()..]);
+        }
+        target_str
+    }
+    fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<serde_json::Value>) {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                let rel = dir
+                    .strip_prefix(root)
+                    .map(|part| part.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
+                let path = if rel.is_empty() {
+                    "./".to_string()
+                } else {
+                    format!("{rel}/")
+                };
+                out.push(serde_json::json!({"path": path, "type": "error", "error": error.kind().to_string()}));
+                return;
+            }
         };
         let mut paths: Vec<_> = entries
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.path())
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
             .collect();
         paths.sort();
         for path in paths {
@@ -11726,64 +11750,208 @@ fn compat_gallery_dirs(root: &std::path::Path) -> Vec<String> {
                 .strip_prefix(root)
                 .map(|part| part.to_string_lossy().replace('\\', "/"))
                 .unwrap_or_default();
-            if top && TOP_EXCLUDED.contains(&name.as_str()) {
+            // Exact top-level transport artifacts only; nested same basenames observed.
+            if !rel.contains('/') && TOP_DIR_EXCLUDED.contains(&rel.as_str()) {
                 continue;
             }
-            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            if !rel.contains('/') && TOP_FILE_EXCLUDED.contains(&name.as_str()) {
                 continue;
+            }
+            let metadata = match std::fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    out.push(serde_json::json!({"path": rel, "type": "error", "error": error.kind().to_string()}));
+                    continue;
+                }
             };
             if metadata.file_type().is_symlink() {
-                let target = std::fs::read_link(&path)
-                    .map(|target| target.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                out.push(format!("{rel} -> {target}"));
+                let target = std::fs::read_link(&path).map(|target| map_target(root, &target)).unwrap_or_else(|error| {
+                    out.push(serde_json::json!({"path": rel, "type": "error", "error": error.kind().to_string()}));
+                    String::new()
+                });
+                // If read_link failed we already pushed an error; skip the link entry.
+                if target.is_empty() && !path.exists() {
+                    // read_link error case already recorded; do not add a link entry.
+                    continue;
+                }
+                out.push(serde_json::json!({"path": rel, "type": "link", "target": target}));
             } else if metadata.is_dir() {
-                out.push(format!("{rel}/"));
-                walk(root, &path, false, out);
-            } else if !EXCLUDED.contains(&name.as_str()) {
-                out.push(rel);
+                out.push(serde_json::json!({"path": format!("{rel}/"), "type": "dir"}));
+                walk(root, &path, out);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("zip") {
+                match (|| -> Result<(Vec<String>, std::collections::BTreeMap<String, String>), String> {
+                    let file = std::fs::File::open(&path).map_err(|error| error.kind().to_string())?;
+                    let mut archive = zip::ZipArchive::new(file).map_err(|_| "bad_zip".to_string())?;
+                    let mut names = Vec::new();
+                    let mut contents = std::collections::BTreeMap::new();
+                    for index in 0..archive.len() {
+                        let mut entry = archive.by_index(index).map_err(|_| "bad_zip".to_string())?;
+                        let name = entry.name().to_string();
+                        let mut bytes = Vec::new();
+                        use std::io::Read;
+                        entry.read_to_end(&mut bytes).map_err(|error| error.kind().to_string())?;
+                        contents.insert(name.clone(), bytes.iter().map(|&byte| byte as char).collect::<String>());
+                        names.push(name);
+                    }
+                    names.sort();
+                    Ok((names, contents))
+                })() {
+                    Ok((names, contents)) => {
+                        out.push(serde_json::json!({"path": rel, "type": "zip", "names": names, "contents": contents}));
+                    }
+                    Err(error) => {
+                        out.push(serde_json::json!({"path": rel, "type": "error", "error": error}));
+                    }
+                }
+            } else {
+                match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        let text: String = bytes.iter().map(|&byte| byte as char).collect();
+                        out.push(serde_json::json!({"path": rel, "type": "file", "bytes": text}));
+                    }
+                    Err(error) => {
+                        out.push(serde_json::json!({"path": rel, "type": "error", "error": error.kind().to_string()}));
+                    }
+                }
             }
         }
     }
     let mut out = Vec::new();
-    walk(root, root, true, &mut out);
-    out.sort();
-    let prefix = root.to_string_lossy().into_owned();
-    out.into_iter()
-        .map(|item| item.replace(&prefix, "<ROOT>"))
-        .collect()
+    walk(root, root, &mut out);
+    out.sort_by(|left, right| left["path"].as_str().cmp(&right["path"].as_str()));
+    out
+}
+
+/// M5 FD R2 P3 disk: nested persistence basenames, same-name content,
+/// ROOT-substring boundary and probe errors must be observable. A nested
+/// `h.json` is business data (not a top-level transport artifact) and must
+/// appear; same names with different bytes must differ; only a leading
+/// absolute FixtureROOT with a component boundary may map to `<ROOT>`; a
+/// probe failure must not silently vanish.
+#[test]
+fn gallery_disk_observes_nested_content_and_errors() {
+    // Nested h.json must be observed (global basename filter hides it).
+    let root = tempfile::tempdir().expect("root");
+    let nested = root.path().join("downloads").join("nested");
+    std::fs::create_dir_all(&nested).expect("nested");
+    std::fs::write(nested.join("h.json"), b"NESTED-SENTINEL").expect("sentinel");
+    let dirs = compat_gallery_dirs(root.path());
+    assert!(
+        dirs.iter().any(|entry| {
+            entry["path"].as_str().unwrap_or("") == "downloads/nested/h.json"
+                && entry["type"].as_str().unwrap_or("") == "file"
+                && entry["bytes"].as_str().unwrap_or("") == "NESTED-SENTINEL"
+        }),
+        "nested h.json must be observed with bytes, got: {dirs:?}"
+    );
+    // Same name, different bytes must differ (names alone hide corruption).
+    let root_a = tempfile::tempdir().expect("root-a");
+    let root_b = tempfile::tempdir().expect("root-b");
+    for (root, bytes) in [
+        (root_a.path(), b"BYTES-A".as_slice()),
+        (root_b.path(), b"BYTES-B".as_slice()),
+    ] {
+        let dir = root.join("downloads");
+        std::fs::create_dir_all(&dir).expect("downloads");
+        std::fs::write(dir.join("same.jpg"), bytes).expect("same name");
+    }
+    let dirs_a = compat_gallery_dirs(root_a.path());
+    let dirs_b = compat_gallery_dirs(root_b.path());
+    // Strip the mapped ROOT prefix for comparison: both have
+    // downloads/same.jpg, but contents differ and must be observed.
+    // Before GREEN (names only) they are equal; after GREEN (content) they differ.
+    assert_ne!(
+        dirs_a, dirs_b,
+        "same filename with different bytes must be distinguished"
+    );
+    // Only leading FixtureROOT with boundary maps: a sibling prefix without
+    // the trailing component boundary must stay literal.
+    let root_c = tempfile::tempdir().expect("root-c");
+    let gallery = root_c.path().join("downloads");
+    std::fs::create_dir_all(&gallery).expect("gallery");
+    let prefix = root_c.path().to_string_lossy().into_owned();
+    // Target shares the prefix text but not a component boundary
+    // (prefix + "-evil" instead of prefix + "/").
+    let evil_target = format!("{prefix}-evil/file.jpg");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&evil_target, gallery.join("link.jpg")).expect("evil link");
+    #[cfg(not(unix))]
+    std::fs::write(gallery.join("link.jpg"), b"placeholder").expect("placeholder");
+    let dirs_c = compat_gallery_dirs(root_c.path());
+    let link_entry = dirs_c
+        .iter()
+        .find(|entry| entry["path"].as_str().unwrap_or("") == "downloads/link.jpg")
+        .expect("link entry");
+    assert_eq!(
+        link_entry["type"].as_str().unwrap_or(""),
+        "link",
+        "link must be typed, got: {link_entry:?}"
+    );
+    assert_eq!(
+        link_entry["target"].as_str().unwrap_or(""),
+        evil_target,
+        "non-boundary ROOT substring must stay literal, got: {link_entry:?}"
+    );
+    assert!(
+        !link_entry["target"]
+            .as_str()
+            .unwrap_or("")
+            .contains("<ROOT>-evil"),
+        "must not map a non-boundary prefix, got: {link_entry:?}"
+    );
+    // Probe errors must be observable, not an empty inventory.
+    let root_d = tempfile::tempdir().expect("root-d");
+    let locked = root_d.path().join("locked");
+    std::fs::create_dir_all(&locked).expect("locked");
+    std::fs::write(locked.join("inner.jpg"), b"inner").expect("inner");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+            .expect("drop perms");
+        let dirs_d = compat_gallery_dirs(root_d.path());
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("restore");
+        assert!(
+            dirs_d.iter().any(|entry| {
+                entry["path"].as_str().unwrap_or("").contains("locked")
+                    && (entry["type"].as_str().unwrap_or("") == "error"
+                        || entry["path"].as_str().unwrap_or("").contains("inner"))
+            }),
+            "a probe failure must be observable, not silently skipped, got: {dirs_d:?}"
+        );
+    }
 }
 
 /// Independent full poststate: task/session/queue/cookie/header/login/disk.
+///
+/// Cookies/headers preserve actual insertion order (no sorting): business
+/// order is observable and reorder mutations must be caught. Tasks capture
+/// ALL actual App tasks via `all_task_guids` (preserving registry order),
+/// not just the input subset; queue order is preserved separately.
 fn compat_gallery_poststate(
     app: &crate::core::App,
     root: &std::path::Path,
-    inputs: &serde_json::Value,
+    _inputs: &serde_json::Value,
 ) -> serde_json::Value {
     let mut tasks = serde_json::Map::new();
-    for spec in inputs["tasks"].as_array().cloned().unwrap_or_default() {
-        let guid = spec["guid"].as_str().unwrap_or("");
-        if let Some(task) = app.task(guid) {
+    for guid in app.all_task_guids() {
+        if let Some(task) = app.task(&guid) {
             tasks.insert(
-                guid.to_string(),
+                guid.clone(),
                 serde_json::json!({"state": task.state, "meta": task.meta}),
             );
         }
     }
-    let mut headers: Vec<(String, Option<String>)> = app
+    // Preserve insertion order: no sorting. `cookies` is Vec in registry
+    // order, `headers` is Vec<Header> in registry order.
+    let headers: Vec<serde_json::Value> = app
         .headers()
         .iter()
-        .map(|header| (header.name.clone(), header.value.clone()))
+        .map(|header| serde_json::json!([header.name, header.value]))
         .collect();
-    headers.sort_by(|left, right| left.0.cmp(&right.0));
-    let headers: Vec<serde_json::Value> = headers
-        .into_iter()
-        .map(|(name, value)| serde_json::json!([name, value]))
-        .collect();
-    let mut cookies: Vec<(String, String)> = app.cookies().to_vec();
-    cookies.sort_by(|left, right| left.0.cmp(&right.0));
-    let cookies: Vec<serde_json::Value> = cookies
-        .into_iter()
+    let cookies: Vec<serde_json::Value> = app
+        .cookies()
+        .iter()
         .map(|(name, value)| serde_json::json!([name, value]))
         .collect();
     serde_json::json!({
@@ -11797,10 +11965,82 @@ fn compat_gallery_poststate(
     })
 }
 
+/// M5 FD R2 P3: the gallery poststate must preserve actual insertion order
+/// and capture ALL App tasks, not just the input subset. Reverse-order
+/// cookies via the real `set_cookie` production path plus an extra task
+/// beyond `inputs` prove it: sorting or input-only capture hides them.
+#[test]
+fn gallery_poststate_preserves_order_and_all_tasks() {
+    let root = tempfile::tempdir().expect("root");
+    let mut app = test_app(root.path(), &["guid-order"]);
+    // Production path, reverse alphabetical to catch sorting: insertion
+    // order is nw, zebra, apple, mango; sorted would be apple, mango, nw, zebra.
+    app.set_cookie("zebra=3; apple=1; mango=2");
+    // Extra task beyond inputs via the real add_task entry.
+    let (code, extra_guid) = app
+        .add_task(
+            "http://e-hentai.org/g/999/abcdef0123/",
+            serde_json::Map::new(),
+        )
+        .expect("extra task");
+    assert_eq!(code, 0);
+    let extra_guid = extra_guid.expect("extra guid");
+    let inputs = serde_json::json!({"tasks": [], "root": root.path().to_string_lossy()});
+    let state = compat_gallery_poststate(&app, root.path(), &inputs);
+    // Cookies must be insertion order, not sorted.
+    let cookies: Vec<Vec<String>> =
+        serde_json::from_value(state["cookies"].clone()).expect("cookies");
+    let names: Vec<String> = cookies.iter().map(|pair| pair[0].clone()).collect();
+    assert_eq!(
+        names,
+        vec![
+            "nw".to_string(),
+            "zebra".to_string(),
+            "apple".to_string(),
+            "mango".to_string()
+        ],
+        "cookies must preserve insertion order, not sorted"
+    );
+    // Headers must be insertion order: User-Agent, Accept-Charset, Accept,
+    // Connection, then Cookie appended by set_cookie.
+    let headers: Vec<Vec<serde_json::Value>> =
+        serde_json::from_value(state["headers"].clone()).expect("headers");
+    let header_names: Vec<String> = headers
+        .iter()
+        .map(|pair| pair[0].as_str().unwrap_or("").to_string())
+        .collect();
+    assert_eq!(
+        header_names,
+        vec![
+            "User-Agent".to_string(),
+            "Accept-Charset".to_string(),
+            "Accept".to_string(),
+            "Connection".to_string(),
+            "Cookie".to_string()
+        ],
+        "headers must preserve insertion order, not sorted"
+    );
+    // Cookie header must be the ordered serialization.
+    let cookie_header = state["login"]["cookie_header"].as_str().unwrap_or("");
+    assert_eq!(cookie_header, "nw=1;zebra=3;apple=1;mango=2");
+    // ALL tasks, including the extra beyond inputs, must be present.
+    let tasks = state["tasks"].as_object().expect("tasks");
+    assert!(
+        tasks.contains_key(&extra_guid),
+        "poststate must capture ALL App tasks, not just inputs; missing {extra_guid}"
+    );
+    // Queue must preserve order too.
+    let queue: Vec<String> = serde_json::from_value(state["queue"].clone()).expect("queue");
+    assert!(queue.contains(&extra_guid));
+}
+
 fn compat_gallery(inputs: &serde_json::Value) -> serde_json::Value {
     use crate::rpc::{read_archive, read_gallery_file, thumbnail};
     let root = std::path::PathBuf::from(inputs["root"].as_str().expect("root"));
-    let app = compat_rpc_app(&root, inputs);
+    let mut app = compat_rpc_app(&root, inputs);
+    // Same reverse-order cookie fixture as the oracle, via the real
+    // production `set_cookie` path, preserving insertion order.
+    app.set_cookie("zebra=3; apple=1; mango=2");
     let before = compat_gallery_poststate(&app, &root, inputs);
     let mut reads = Vec::new();
     for query in inputs["reads"].as_array().cloned().unwrap_or_default() {
@@ -11852,7 +12092,7 @@ fn compat_gallery(inputs: &serde_json::Value) -> serde_json::Value {
                         Err(_) => (0, 0),
                     };
                     thumbs.push(serde_json::json!({
-                        "guid": guid, "fid": fid, "outcome": "resized",
+                        "guid": guid, "fid": fid, "query": query["query"].as_str().unwrap_or(""), "outcome": "resized",
                         "mime": mime, "width": width, "height": height,
                     }))
                 }

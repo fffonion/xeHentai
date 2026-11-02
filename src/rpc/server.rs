@@ -4116,6 +4116,11 @@ mod tests {
     // borrow, unconfined symlink targets, unbounded decode/cache/zip reads)
     // and pass once snapshots stream with enforced budgets.
 
+    /// Test-only FIFO creator via the Unix `mkfifo` command. Linux FD scope:
+    /// only Unix targets provide `mkfifo`, and only Linux runs the FD
+    /// dispatch/archive producer paths that need a FIFO. Non-Linux builds
+    /// exclude this helper entirely.
+    #[cfg(unix)]
     fn make_fifo(path: &std::path::Path) {
         let status = std::process::Command::new("mkfifo")
             .arg(path)
@@ -4141,6 +4146,11 @@ mod tests {
         out
     }
 
+    /// Linux FD scope: symlink-escape and reserved-target denial run on the
+    /// Linux FD backend (`std::os::unix::symlink` construction plus FD grant
+    /// gates). Non-Linux targets use the explicit `Unsupported` stub below
+    /// and never compile this Unix-only construction.
+    #[cfg(target_os = "linux")]
     #[test]
     fn gallery_symlink_escape_and_reserved_are_denied() {
         let mut app = test_app();
@@ -4168,6 +4178,10 @@ mod tests {
         );
     }
 
+    /// Linux FD scope: sibling-archive symlink denial needs the Linux FD
+    /// sibling grant plus Unix symlink construction. Non-Linux uses the
+    /// `Unsupported` stub and never compiles this case.
+    #[cfg(target_os = "linux")]
     #[test]
     fn gallery_sibling_archive_symlink_is_denied() {
         let mut app = test_app();
@@ -4199,6 +4213,10 @@ mod tests {
         );
     }
 
+    /// Linux FD scope: dispatch must release before any FIFO read. The FIFO
+    /// itself needs Unix `mkfifo`, and the non-blocking dispatch guarantee is
+    /// a Linux FD property. Non-Linux targets use the `Unsupported` stub.
+    #[cfg(target_os = "linux")]
     #[test]
     fn gallery_dispatch_releases_before_reads() {
         let mut app = test_app();
@@ -4223,6 +4241,27 @@ mod tests {
         });
         rx.recv_timeout(std::time::Duration::from_secs(5))
             .expect("dispatch blocked on a media read");
+    }
+
+    /// Non-Linux stub scope: every gallery payload read is an explicit
+    /// `Unsupported` denial before any ambient open. There is no portable
+    /// fallback; the full non-Linux functional port stays an M8 item. This
+    /// test never runs on Linux (it is compiled out there) and never claims a
+    /// cross-target PASS — it only pins the non-native surface.
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn gallery_non_linux_reports_unsupported() {
+        let mut app = test_app();
+        let png = png_bytes(8, 8);
+        let guid = task_with_image(&mut app, "1.jpg", &png);
+        match read_gallery_file(&app, &guid, "1") {
+            Err(fail) => assert_eq!(
+                fail.status(),
+                404,
+                "non-Linux gallery reads must deny without a payload"
+            ),
+            Ok(_) => panic!("non-Linux gallery reads must never serve bytes"),
+        }
     }
 
     #[test]
@@ -7343,6 +7382,148 @@ mod tests {
         );
     }
 
+    /// M5 FD R2 P2: a known-absent CONSUMED referent must not globally disable
+    /// the healthy App. A valid `config.rss` wins over an unused dangling
+    /// legacy `config.py`; the ordinary gallery image must serve its exact
+    /// bytes while true private `config.rss`/log targets stay denied. The
+    /// live held log stays denied across a dangling/retarget, and a loop, a
+    /// permission failure or an unobservable held file still fails closed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn m5_fd_dangling_legacy_py_does_not_globally_deny() {
+        use crate::config::{Config, Origin};
+        // Real base: valid RSS plus an unused dangling legacy spelling.
+        let base = tempfile::tempdir().expect("root").keep();
+        Config::default().save(&base).expect("valid RSS");
+        let legacy = base.join(crate::config::LEGACY_CONFIG_FILE);
+        let absent_target = base.join("absent-legacy-target");
+        assert!(!absent_target.exists(), "legacy target must be absent");
+        std::os::unix::fs::symlink(&absent_target, &legacy).expect("dangling legacy PY");
+        // Real loader priority: RSS wins, the legacy file is never consumed.
+        let loaded = Config::load(&base).expect("valid RSS must load");
+        assert!(
+            matches!(loaded.origin, Origin::Rss),
+            "RSS must win over dangling legacy, got {:?}",
+            loaded.origin
+        );
+        let logger = crate::util::logger::Logger::with_output(Box::new(Vec::new()), false);
+        let mut app = crate::core::App::new(loaded.config, logger, &base, &base).expect("app");
+        let png = png_bytes(16, 16);
+        let (guid, gallery) = fd_add_task(&mut app, "dangling-legacy-gallery", 3);
+        std::fs::write(gallery.join("1.jpg"), &png).expect("ordinary image");
+        fd_map(&mut app, &guid, 1, "1.jpg");
+        // The ordinary image must serve its exact bytes: a dangling CONSUMED
+        // referent contributes no target identity.
+        assert_eq!(
+            fd_status(&app, &guid, "1").expect("ordinary image must serve"),
+            png,
+            "a dangling unused legacy referent must not deny the healthy gallery"
+        );
+        // True private targets stay denied.
+        let rss = base.join(crate::config::CONFIG_FILE);
+        std::fs::hard_link(&rss, gallery.join("2.jpg")).expect("private rss link");
+        fd_map(&mut app, &guid, 2, "2.jpg");
+        assert_eq!(fd_status(&app, &guid, "2"), Err(404));
+        let log_spelling = base.join("eh.log");
+        std::fs::write(&log_spelling, b"LOG-PRIVATE-BYTES").expect("log bytes");
+        std::fs::hard_link(&log_spelling, gallery.join("3.jpg")).expect("private log link");
+        fd_map(&mut app, &guid, 3, "3.jpg");
+        assert_eq!(fd_status(&app, &guid, "3"), Err(404));
+
+        // Held-logger retarget stays denied while an unrelated image serves.
+        let mut held_app = test_app();
+        let (held_guid, held_gallery) = fd_add_task(&mut held_app, "held-retarget-gallery", 3);
+        let mut patch = JsonMap::new();
+        patch.insert(
+            "log_path".to_string(),
+            Value::String("live.log".to_string()),
+        );
+        held_app.update_config(patch).expect("log_path update");
+        held_app
+            .logger_mut()
+            .warning("LIVE-LOG-A")
+            .expect("log record");
+        let held_private = held_app.base_dir().join("live.log");
+        std::fs::hard_link(&held_private, held_gallery.join("1.jpg")).expect("held link");
+        fd_map(&mut held_app, &held_guid, 1, "1.jpg");
+        let bext = held_gallery.join("2.jpg");
+        std::fs::write(&bext, &png).expect("fresh referent");
+        fd_map(&mut held_app, &held_guid, 2, "2.jpg");
+        std::fs::remove_file(&held_private).expect("unlink held name");
+        std::os::unix::fs::symlink(&bext, &held_private).expect("retarget spelling");
+        held_app
+            .logger_mut()
+            .warning("LIVE-LOG-A-AFTER")
+            .expect("held write continues");
+        assert_eq!(fd_status(&held_app, &held_guid, "1"), Err(404));
+        assert_eq!(fd_status(&held_app, &held_guid, "2"), Err(404));
+        let (other_guid, other_gallery) = fd_add_task(&mut held_app, "held-other", 3);
+        std::fs::write(other_gallery.join("1.jpg"), &png).expect("other image");
+        assert_eq!(
+            fd_status(&held_app, &other_guid, "1").expect("healthy unrelated"),
+            png
+        );
+
+        // A symlink loop on a private spelling still fails closed.
+        let mut loop_app = test_app();
+        let (loop_guid, loop_gallery) = fd_add_task(&mut loop_app, "loop-gallery", 3);
+        std::fs::write(loop_gallery.join("1.jpg"), &png).expect("loop ordinary");
+        fd_map(&mut loop_app, &loop_guid, 1, "1.jpg");
+        let loop_base = loop_app.base_dir().to_path_buf();
+        let loop_a = loop_base.join("loop-a");
+        let loop_b = loop_base.join("loop-b");
+        std::os::unix::fs::symlink(&loop_b, &loop_a).expect("loop a");
+        std::os::unix::fs::symlink(&loop_a, &loop_b).expect("loop b");
+        let loop_private = loop_base.join(crate::config::LEGACY_CONFIG_FILE);
+        let _ = std::fs::remove_file(&loop_private);
+        std::os::unix::fs::symlink(&loop_a, &loop_private).expect("loop spelling");
+        assert_eq!(
+            fd_status(&loop_app, &loop_guid, "1"),
+            Err(404),
+            "a private-spelling loop must fail closed"
+        );
+        let _ = std::fs::remove_file(&loop_private);
+        let _ = std::fs::remove_file(&loop_a);
+        let _ = std::fs::remove_file(&loop_b);
+
+        // A permission failure on a followed referent still fails closed.
+        let mut perm_app = test_app();
+        let (perm_guid, perm_gallery) = fd_add_task(&mut perm_app, "perm-gallery", 3);
+        std::fs::write(perm_gallery.join("1.jpg"), &png).expect("perm ordinary");
+        fd_map(&mut perm_app, &perm_guid, 1, "1.jpg");
+        let perm_base = perm_app.base_dir().to_path_buf();
+        let noexec = perm_base.join("noexec-dir");
+        std::fs::create_dir_all(&noexec).expect("noexec dir");
+        let secret = noexec.join("secret");
+        std::fs::write(&secret, b"SECRET").expect("secret");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&noexec, std::fs::Permissions::from_mode(0o000))
+            .expect("drop exec");
+        let perm_private = perm_base.join(crate::config::LEGACY_CONFIG_FILE);
+        let _ = std::fs::remove_file(&perm_private);
+        std::os::unix::fs::symlink(&secret, &perm_private).expect("perm spelling");
+        assert_eq!(
+            fd_status(&perm_app, &perm_guid, "1"),
+            Err(404),
+            "a permission failure must fail closed"
+        );
+        std::fs::set_permissions(&noexec, std::fs::Permissions::from_mode(0o755))
+            .expect("restore exec");
+
+        // An unobservable held log still fails closed.
+        {
+            use crate::task::{ActivePrivateLog, PrivatePaths, PrivatePolicy};
+            let ubase = tempfile::tempdir().expect("unobs base").keep();
+            let paths = PrivatePaths::for_base(&ubase);
+            paths.publish_active_log(ActivePrivateLog::Unobservable);
+            let policy = PrivatePolicy::freeze(std::sync::Arc::clone(&paths));
+            assert!(
+                policy.deny((1, 2), &ubase.join("probe")).is_err(),
+                "unobservable held log must deny"
+            );
+        }
+    }
+
     /// M5 FD tracer B: a mapped leaf that is a link to a literal path OUTSIDE
     /// the gallery, whose target does not exist, must be denied before any
     /// lookup or fallback — even when the sibling archive has a matching entry.
@@ -7451,6 +7632,10 @@ mod tests {
     /// M5 FD tracer C (on-demand RPC producer): a private persistence file
     /// hardlinked as an ordinary gallery entry must be denied before any byte is
     /// copied, with no archive published and no stage left behind.
+    ///
+    /// Linux FD scope: the denial is enforced by the Linux FD private policy.
+    /// Non-Linux targets deny via the explicit `Unsupported` stub.
+    #[cfg(target_os = "linux")]
     #[test]
     fn m5_fd_archive_private_hardlink_is_denied() {
         let mut app = test_app();
@@ -7503,6 +7688,11 @@ mod tests {
 
     /// Child half of [`m5_archive_fifo_entry_is_bounded`]: a real gallery with
     /// one ordinary image and one FIFO entry, then the real archive producer.
+    ///
+    /// Same Unix scope as its parent: the FIFO is built with the Unix
+    /// `make_fifo` helper and the bounded-producer guarantee is a Linux FD
+    /// property exercised through this Unix child.
+    #[cfg(all(unix, not(target_vendor = "apple")))]
     #[test]
     #[ignore = "bounded child helper driven by m5_archive_fifo_entry_is_bounded"]
     fn m5_child_archive_fifo() {

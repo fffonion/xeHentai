@@ -461,29 +461,35 @@ fn push_unique_id(ids: &mut Vec<FileId>, id: FileId) {
 /// `config::load` and `Logger::set_logfile` follow a legal private symlink, so
 /// the target — not the link node — is the private object. `link` keeps the
 /// link node's own identity as an extra (a descriptor can never be a symlink,
-/// so it is never a substitute for the followed target).
+/// so it is never a substitute for the followed target). A dangling symlink
+/// has no target (`None`): the link inode is retained as an extra but no
+/// target identity is invented, so a known-absent CONSUMED referent denies
+/// nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PrivateObject {
-    target: FileId,
+    target: Option<FileId>,
     link: Option<FileId>,
 }
 
 impl PrivateObject {
     fn covers(&self, id: FileId) -> bool {
-        self.target == id || self.link == Some(id)
+        self.target == Some(id) || self.link == Some(id)
     }
 
     fn ids(&self) -> impl Iterator<Item = FileId> {
-        [Some(self.target), self.link].into_iter().flatten()
+        [self.target, self.link].into_iter().flatten()
     }
 }
 
 /// Resolve one private spelling to the objects it protects.
 ///
 /// Only genuine absence (the spelling itself does not exist) is `Ok(None)`.
-/// A dangling link, a link loop, a permission failure or any other probe error
-/// is an error, so the policy fails closed instead of silently forgetting a
-/// private object.
+/// A dangling symlink (the spelling exists, its referent does not) is
+/// `Ok` with no target identity — only the link inode as an extra — so an
+/// unused known-absent referent contributes nothing and never globally
+/// disables the App. A link loop, a permission failure or any other probe
+/// error is an error, so the policy fails closed instead of silently
+/// forgetting a private object. No target identity is ever invented.
 #[cfg(unix)]
 fn observe_identity(path: &Path) -> Result<Option<PrivateObject>, std::io::ErrorKind> {
     use std::os::unix::fs::MetadataExt;
@@ -495,13 +501,20 @@ fn observe_identity(path: &Path) -> Result<Option<PrivateObject>, std::io::Error
     let link_id = (link.dev(), link.ino());
     if !link.file_type().is_symlink() {
         return Ok(Some(PrivateObject {
-            target: link_id,
+            target: Some(link_id),
             link: None,
         }));
     }
     match fs::metadata(path) {
         Ok(metadata) => Ok(Some(PrivateObject {
-            target: (metadata.dev(), metadata.ino()),
+            target: Some((metadata.dev(), metadata.ino())),
+            link: Some(link_id),
+        })),
+        // The spelling exists but its referent is genuinely absent: no target
+        // to protect, only the link inode as an extra. Anything else (loop,
+        // permission, I/O) still fails closed via `Err`.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Some(PrivateObject {
+            target: None,
             link: Some(link_id),
         })),
         Err(error) => Err(error.kind()),
@@ -658,8 +671,10 @@ fn app_spellings(base: &Path, filepath: &Path, log_path: &str) -> Vec<PathBuf> {
 ///
 /// Metadata capture is ordinary filesystem I/O, exactly like the `6a`
 /// directory observations: it is not a pure or latency-free operation. Only a
-/// genuine `NotFound` may be absent from the policy; every other probe failure
-/// freezes a denial instead of weakening the set.
+/// genuine `NotFound` may be absent from the policy — a missing spelling
+/// contributes nothing and a dangling spelling contributes only its link
+/// inode, never a fabricated target; every other probe failure (loop,
+/// permission, I/O) freezes a denial instead of weakening the set.
 #[derive(Clone, Debug)]
 pub struct PrivatePolicy {
     captured: Vec<PathBuf>,

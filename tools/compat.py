@@ -4707,6 +4707,68 @@ def self_check(suite, oracle, candidate):
         compare_gallery(cases, oracle, mutated)
         checks.append(
             ("poststate-disk", not cases.get("gallery.poststate.before", True)))
+        # Order must be preserved: reversing headers/cookies must be caught.
+        mutated = copy.deepcopy(candidate)
+        mutated["poststate"]["before"]["headers"] = list(
+            reversed(mutated["poststate"]["before"]["headers"]))
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(
+            ("poststate-header-order", not cases.get("gallery.poststate.before", True)))
+        mutated = copy.deepcopy(candidate)
+        mutated["poststate"]["before"]["cookies"] = list(
+            reversed(mutated["poststate"]["before"]["cookies"]))
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(
+            ("poststate-cookie-order", not cases.get("gallery.poststate.before", True)))
+        mutated = copy.deepcopy(candidate)
+        mutated["poststate"]["before"]["login"]["cookie_header"] = "mutated"
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(
+            ("poststate-cookie-header", not cases.get("gallery.poststate.before", True)))
+        # Queue order must be preserved.
+        mutated = copy.deepcopy(candidate)
+        mutated["poststate"]["before"]["queue"] = list(
+            reversed(mutated["poststate"]["before"]["queue"]))
+        # An empty queue reverses to itself; force a difference when empty.
+        if mutated["poststate"]["before"]["queue"] == candidate["poststate"]["before"]["queue"]:
+            mutated["poststate"]["before"]["queue"] = ["__mutated__"]
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(
+            ("poststate-queue-order", not cases.get("gallery.poststate.before", True)))
+        # Extra/missing task and field changes must be caught.
+        mutated = copy.deepcopy(candidate)
+        mutated["poststate"]["after"]["tasks"]["__extra__"] = {"state": 10, "meta": {}}
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(
+            ("poststate-extra-task", not cases.get("gallery.poststate.after", True)))
+        mutated = copy.deepcopy(candidate)
+        first_guid = next(iter(mutated["poststate"]["after"]["tasks"]), None)
+        if first_guid is not None:
+            del mutated["poststate"]["after"]["tasks"][first_guid]
+        else:
+            mutated["poststate"]["after"]["tasks"]["__deleted__"] = {"state": 0, "meta": {}}
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(
+            ("poststate-missing-task", not cases.get("gallery.poststate.after", True)))
+        # Each state dimension: session/login must be caught when changed.
+        mutated = copy.deepcopy(candidate)
+        mutated["poststate"]["after"]["session"]["has_login"] = not mutated["poststate"]["after"]["session"].get("has_login", False)
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(
+            ("poststate-session", not cases.get("gallery.poststate.after", True)))
+        mutated = copy.deepcopy(candidate)
+        mutated["poststate"]["after"]["login"]["has_login"] = not mutated["poststate"]["after"]["login"].get("has_login", False)
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(
+            ("poststate-login", not cases.get("gallery.poststate.after", True)))
     elif suite == "webui":
         mutated = copy.deepcopy(candidate)
         mutated["index_markers"]["has_app"] = False
@@ -5774,9 +5836,99 @@ GALLERY_DELTA_CASES = {
 
 
 def _gallery_dirs(work):
-    """Disk dimension: relative tree plus exact link targets, roots normalized."""
-    prefix = str(work)
-    return [item.replace(prefix, "<ROOT>") for item in _dir_paths(work)]
+    """Disk dimension: relative tree with content, typed link targets.
+
+    - Only exact top-level transport artifacts are excluded (root `h.json`,
+      `eh.log`, `webui.gz`, `webui-cache.json` and top `home/cache/tmp`).
+      Nested files with those basenames are business data and observed.
+    - Ordinary files carry exact bytes (latin-1); ZIPs carry the approved
+      semantic (sorted names + latin-1 contents, no comment waiver).
+    - Symlink `path` and `target` are distinct fields. Only a leading absolute
+      FixtureROOT with a component boundary maps to `<ROOT>`; literal
+      relative tails, `..`/`.` text and non-boundary substrings stay literal.
+    - Probe errors are observable entries, never silent skips.
+    """
+    import os
+    import zipfile
+    root = str(work)
+    out = []
+    stack = [root]
+    # Exact top-level transport artifacts only (never nested).
+    top_file_excluded = {"h.json", "eh.log", "webui.gz", "webui-cache.json"}
+    top_dir_excluded = {"home", "cache", "tmp"}
+
+    def map_target(target):
+        # Only leading absolute FixtureROOT with boundary.
+        if target == root:
+            return "<ROOT>"
+        if target.startswith(root + "/"):
+            return "<ROOT>" + target[len(root):]
+        return target
+
+    while stack:
+        directory = stack.pop()
+        try:
+            names = sorted(os.listdir(directory))
+        except OSError as exc:
+            rel_dir = os.path.relpath(directory, root).replace(os.sep, "/")
+            out.append({"path": rel_dir + "/" if rel_dir != "." else "./",
+                        "type": "error", "error": type(exc).__name__})
+            continue
+        for name in names:
+            full = os.path.join(directory, name)
+            rel = os.path.relpath(full, root).replace(os.sep, "/")
+            if "/" not in rel and rel in top_dir_excluded:
+                continue
+            # Top-level file exclusion only; nested same basenames observed.
+            if "/" not in rel and name in top_file_excluded:
+                # Record top-level transport artifacts as excluded? No, skip
+                # only exact top-level, with justification in docstring.
+                continue
+            try:
+                is_link = os.path.islink(full)
+                if is_link:
+                    try:
+                        target = os.readlink(full)
+                    except OSError as exc:
+                        out.append({"path": rel, "type": "error",
+                                    "error": type(exc).__name__})
+                        continue
+                    out.append({"path": rel, "type": "link",
+                                "target": map_target(target)})
+                    continue
+                if os.path.isdir(full):
+                    out.append({"path": rel + "/", "type": "dir"})
+                    stack.append(full)
+                    continue
+                # Ordinary file or ZIP.
+                if name.endswith(".zip"):
+                    try:
+                        with zipfile.ZipFile(full) as archive:
+                            zip_names = sorted(archive.namelist())
+                            contents = {n: archive.read(n).decode("latin-1")
+                                        for n in zip_names}
+                    except Exception as exc:
+                        out.append({"path": rel, "type": "error",
+                                    "error": type(exc).__name__})
+                        continue
+                    out.append({"path": rel, "type": "zip",
+                                "names": zip_names, "contents": contents})
+                    continue
+                try:
+                    with open(full, "rb") as handle:
+                        data = handle.read()
+                except OSError as exc:
+                    out.append({"path": rel, "type": "error",
+                                "error": type(exc).__name__})
+                    continue
+                out.append({"path": rel, "type": "file",
+                            "bytes": data.decode("latin-1")})
+            except OSError as exc:
+                out.append({"path": rel, "type": "error",
+                            "error": type(exc).__name__})
+                continue
+    out.sort(key=lambda entry: entry.get("path", ""))
+    return out
 
 
 def _gallery_materialize(directory, spec, work):
@@ -5802,7 +5954,12 @@ def _gallery_materialize(directory, spec, work):
 
 
 def _gallery_poststate(app, work):
-    """Independent full poststate: task/session/queue/cookie/header/login/disk."""
+    """Independent full poststate: task/session/queue/cookie/header/login/disk.
+
+    Cookies/headers preserve actual insertion order (no sorting): business
+    order is observable and reorder mutations must be caught. `cookie_header`
+    is the ordered serialization.
+    """
     tasks = {}
     for guid, task in app._all_tasks.items():
         tasks[guid] = {
@@ -5813,8 +5970,8 @@ def _gallery_poststate(app, work):
         "tasks": tasks,
         "session": {"has_login": app.has_login},
         "queue": list(app.tasks.queue),
-        "cookies": sorted([list(item) for item in app.cookies.items()]),
-        "headers": [[name, value] for name, value in sorted(app.headers.items())],
+        "cookies": [list(item) for item in app.cookies.items()],
+        "headers": [[name, value] for name, value in app.headers.items()],
         "login": {"has_login": app.has_login,
                   "cookie_header": app.headers.get("Cookie")},
         "disk": _gallery_dirs(work),
@@ -5829,6 +5986,9 @@ def oracle_gallery(upstream, request):
     work.mkdir(parents=True, exist_ok=True)
     app = _rpc_build_app(
         core, task_module, const_module, defaults, work, request["tasks"])
+    # Nontrivial reverse-order cookie fixture via the real production path:
+    # same set, insertion order matters, preserved in poststate.
+    app.set_cookie("zebra=3; apple=1; mango=2")
     for spec in request["tasks"]:
         _gallery_materialize(
             app._all_tasks[spec["guid"]].get_fpath(), spec, work)
@@ -5947,9 +6107,118 @@ def oracle_gallery(upstream, request):
                           "after": _gallery_poststate(app, work)}}
 
 
-def compare_gallery(cases, oracle, candidate):
+def compare_gallery(cases, oracle, candidate, request=None):
     diffs = []
+    # Exact section presence/types/cardinality/per-row identity against the
+    # existing request inventory BEFORE comparison. Missing/extra/reordered/
+    # deduplicated rows cannot disappear, including BOTH sides shortened.
+    # Reuse gallery_request() when the caller has no request (self-check).
+    try:
+        expected_request = request if request is not None else gallery_request()
+    except Exception:
+        expected_request = None
+    for section in ("reads", "thumbs", "archives"):
+        if section not in oracle or section not in candidate:
+            diffs.append(f"gallery.{section}: missing section")
+            cases[f"gallery.{section}.present"] = False
+            return diffs
+        if not isinstance(oracle[section], list) or not isinstance(candidate[section], list):
+            diffs.append(f"gallery.{section}: bad type")
+            cases[f"gallery.{section}.present"] = False
+            return diffs
+    if expected_request is not None:
+        for section in ("reads", "thumbs", "archives"):
+            expected = expected_request.get(section, [])
+            if len(oracle[section]) != len(expected) or len(candidate[section]) != len(expected):
+                diffs.append(
+                    f"gallery.{section}: length {len(oracle[section])}/{len(candidate[section])} != expected {len(expected)}")
+                # Mark every expected case False so both-shortened/extra cannot vanish.
+                for entry in expected:
+                    if section == "reads":
+                        key = entry.get("case") or f"gallery.read.{entry.get('guid')}.{entry.get('fid')}"
+                    elif section == "thumbs":
+                        # Map query to the registered slug for the expected case key.
+                        slug_map = {"w=4&h=4": "resized", "w=4": "w-only", "": "passthrough", "w": "bad-query"}
+                        slug = slug_map.get(entry.get("query", ""), entry.get("query", ""))
+                        # For the invalid-image decode delta the registered key uses "decode".
+                        # The request has query w=4 for task-wait 5; the registered
+                        # GALLERY_CASE_IDS key is ...decode, not ...w-only.
+                        if entry.get("guid") == "task-wait" and entry.get("fid") == "5":
+                            slug = "decode"
+                        if entry.get("query", "") == "w":
+                            key = f"gallery.thumb.{entry.get('guid')}.{entry.get('fid')}.bad-query"
+                        elif entry.get("guid") == "task-wait" and entry.get("fid") == "nope":
+                            key = f"gallery.thumb.{entry.get('guid')}.{entry.get('fid')}.not-found"
+                        else:
+                            key = f"gallery.thumb.{entry.get('guid')}.{entry.get('fid')}.{slug}"
+                    else:
+                        key = f"gallery.archive.{entry.get('guid')}"
+                    cases[key] = False
+                # Length mismatch is fatal: do not let later zip loops overwrite
+                # with True for the matching prefix rows.
+                return diffs
+            # Per-row identity/order/duplicates against the request.
+            for section in ("reads", "thumbs", "archives"):
+                expected = expected_request.get(section, [])
+                seen = set()
+                for index, (old, new, exp) in enumerate(zip(oracle[section], candidate[section], expected)):
+                    if section == "thumbs":
+                        # Thumbs are keyed by guid/fid/query (multiple queries per image).
+                        for side, entry in (("oracle", old), ("candidate", new)):
+                            gid = entry.get("guid"); fid = entry.get("fid"); query = entry.get("query", "")
+                            exp_gid = exp.get("guid"); exp_fid = exp.get("fid"); exp_query = exp.get("query", "")
+                            if gid != exp_gid or fid != exp_fid or query != exp_query:
+                                diffs.append(
+                                    f"gallery.{section}[{index}].{side}: identity {gid}/{fid}/{query} != expected {exp_gid}/{exp_fid}/{exp_query}")
+                                # Map to a diagnostic key; exact inventory is enforced via length + slug keys.
+                                cases[f"gallery.{section}.{exp_gid}.{exp_fid}.row-identity"] = False
+                        if (old.get("guid"), old.get("fid"), old.get("query")) != (new.get("guid"), new.get("fid"), new.get("query")):
+                            diffs.append(f"gallery.{section}[{index}]: row identity oracle != candidate")
+                            cases[f"gallery.{section}.{old.get('guid')}.{old.get('fid')}.row-identity"] = False
+                        row_id = (old.get("guid"), old.get("fid"), old.get("query"))
+                        if row_id in seen:
+                            diffs.append(f"gallery.{section}[{index}]: duplicate row {row_id}")
+                            cases[f"gallery.{section}.{row_id[0]}.{row_id[1]}.row-identity"] = False
+                        seen.add(row_id)
+                        continue
+                    for side, entry in (("oracle", old), ("candidate", new)):
+                        gid = entry.get("guid"); fid = entry.get("fid", "1" if section != "archives" else None)
+                        case = entry.get("case")
+                        exp_gid = exp.get("guid"); exp_fid = exp.get("fid", "1" if section != "archives" else None)
+                        exp_case = exp.get("case")
+                        if gid != exp_gid or (section != "archives" and fid != exp_fid) or case != exp_case:
+                            diffs.append(
+                                f"gallery.{section}[{index}].{side}: identity {gid}/{fid}/{case} != expected {exp_gid}/{exp_fid}/{exp_case}")
+                            key = exp_case or (f"gallery.{section}.{exp_gid}" + (f".{exp_fid}" if section != "archives" else ""))
+                            # Map to the registered case inventory key where possible.
+                            cases[key] = False
+                    # Oracle vs candidate must agree row-for-row; no reorder/dedup.
+                    if (old.get("guid"), old.get("fid"), old.get("case")) != (new.get("guid"), new.get("fid"), new.get("case")):
+                        diffs.append(f"gallery.{section}[{index}]: row identity oracle != candidate")
+                        key = old.get("case") or new.get("case") or f"gallery.{section}.{old.get('guid')}"
+                        cases[key] = False
+                    row_id = (old.get("guid"), old.get("fid"), old.get("case"))
+                    if row_id in seen:
+                        diffs.append(f"gallery.{section}[{index}]: duplicate row {row_id}")
+                        cases[row_id[0] if row_id[0] else section] = False
+                    seen.add(row_id)
+    else:
+        # No expected inventory: at least require both sides have equal lengths
+        # so extra/missing cannot hide via zip truncation.
+        for section in ("reads", "thumbs", "archives"):
+            if len(oracle[section]) != len(candidate[section]):
+                diffs.append(f"gallery.{section}: length oracle {len(oracle[section])} != candidate {len(candidate[section])}")
+                cases[f"gallery.{section}.length"] = False
+                return diffs
     for old, new in zip(oracle["reads"], candidate["reads"]):
+        # Exact row identity: GUID/FID/case must match row-for-row, no
+        # reorder/duplicate/wrong-GUID can hide. Check BEFORE any status/bytes
+        # comparison so a wrong GUID with same bytes still fails.
+        if (old.get("guid"), old.get("fid"), old.get("case")) != (new.get("guid"), new.get("fid"), new.get("case")):
+            key = old.get("case") or f"gallery.read.{old.get('guid')}.{old.get('fid')}"
+            diffs.append(f"{key}: row identity oracle {old.get('guid')}/{old.get('fid')}/{old.get('case')} != candidate {new.get('guid')}/{new.get('fid')}/{new.get('case')}")
+            cases[key] = False
+            continue
         case_id = old.get("case")
         if case_id in GALLERY_DELTA_CASES:
             expected = GALLERY_DELTA_CASES[case_id]
@@ -5966,7 +6235,10 @@ def compare_gallery(cases, oracle, candidate):
         key = case_id or f"gallery.read.{old['guid']}.{old['fid']}"
         if old.get("raised") or new.get("status") in (400,):
             # int("nope") paths: both sides refuse without touching disk.
-            same = (old.get("raised") == "ValueError") == (new.get("status") == 400)
+            # Preserve ONLY the exact registered ValueError/400 delta: an
+            # unexpected oracle exception or a non-400 candidate on a positive
+            # must fail. The old boolean equate (False==False True) hid that.
+            same = (old.get("raised") == "ValueError") and (new.get("status") == 400)
             if not same:
                 diffs.append(f"{key}: refusal mismatch {old} != {new}")
                 cases[key] = False
@@ -5985,6 +6257,11 @@ def compare_gallery(cases, oracle, candidate):
     thumb_slugs = {"w=4&h=4": "resized", "w=4": "w-only", "": "passthrough",
                    "w": "bad-query"}
     for old, new in zip(oracle["thumbs"], candidate["thumbs"]):
+        if (old.get("guid"), old.get("fid"), old.get("query")) != (new.get("guid"), new.get("fid"), new.get("query")):
+            key = f"gallery.thumb.{old.get('guid')}.{old.get('fid')}.row-identity"
+            diffs.append(f"{key}: row identity oracle {old.get('guid')}/{old.get('fid')}/{old.get('query')} != candidate {new.get('guid')}/{new.get('fid')}/{new.get('query')}")
+            cases[key] = False
+            continue
         key = f"gallery.thumb.{old['guid']}.{old['fid']}.bad-query"
         if old.get("query", "") == "w":
             # `dict(q.split("="))` in the reference raises ValueError on a
@@ -5996,8 +6273,17 @@ def compare_gallery(cases, oracle, candidate):
                 diffs.append(f"{key}: bad-query mismatch {old} != {new}")
             continue
         slug = thumb_slugs.get(old.get("query", ""), old.get("query", ""))
-        if old.get("outcome") == "raised" or new.get("outcome") == "decode_error":
+        # Preserve ONLY the exact registered decode delta: both sides refuse
+        # (oracle raised, candidate decode_error) on the invalid image. A
+        # valid oracle thumbnail that becomes a native decode failure must fail.
+        if old.get("outcome") == "raised" and new.get("outcome") == "decode_error":
             slug = "decode"
+        elif old.get("outcome") == "raised" or new.get("outcome") == "decode_error":
+            slug = "decode"
+            key = f"gallery.thumb.{old['guid']}.{old['fid']}.{slug}"
+            diffs.append(f"{key}: decode mismatch {old} != {new}")
+            cases[key] = False
+            continue
         key = f"gallery.thumb.{old['guid']}.{old['fid']}.{slug}"
         if old.get("outcome") == "not_found" or new.get("outcome") == "not_found":
             key = f"gallery.thumb.{old['guid']}.{old['fid']}.not-found"
@@ -6005,10 +6291,14 @@ def compare_gallery(cases, oracle, candidate):
             if not cases[key]:
                 diffs.append(f"{key}: not-found mismatch")
             continue
-        if old.get("outcome") == "raised" or new.get("outcome") == "decode_error":
+        if old.get("outcome") == "raised" and new.get("outcome") == "decode_error":
             # PIL raises on undecodable input where the candidate answers a
             # typed decode failure; both sides refuse to serve pixels.
             cases[key] = True
+            continue
+        if old.get("outcome") == "raised" or new.get("outcome") == "decode_error":
+            diffs.append(f"{key}: decode mismatch {old} != {new}")
+            cases[key] = False
             continue
         for field in ("mime", "width", "height"):
             if old.get(field) != new.get(field):
@@ -6022,12 +6312,19 @@ def compare_gallery(cases, oracle, candidate):
                 continue
             cases[key] = cases.get(key, True)
     for old, new in zip(oracle["archives"], candidate["archives"]):
+        if old.get("guid") != new.get("guid"):
+            key = f"gallery.archive.{old.get('guid')}"
+            diffs.append(f"{key}: row identity oracle {old.get('guid')} != candidate {new.get('guid')}")
+            cases[key] = False
+            continue
         key = f"gallery.archive.{old['guid']}"
         if old.get("status") == "dropped":
             # Reference bug: unknown guid yields a `(None, None)` tuple that
             # `do_GET` feeds to `os.path.exists`, aborting the connection;
             # the candidate answers 404. Pinned, not normalized away.
-            ok = new.get("status") == 404
+            # Preserve ONLY this exact per-side delta: oracle dropped+tuple,
+            # candidate 404. Any success->failure injection must fail.
+            ok = (old.get("returned") == "tuple" and new.get("status") == 404)
             cases[key] = ok
             if not ok:
                 diffs.append(f"{key}: dropped-path mismatch {old} != {new}")
@@ -6662,7 +6959,17 @@ def run_suite(suite, output_root, upstream, target_dir):
                 root / "probe-gallery.log",
             )
             cases = {}
-            diffs = compare_gallery(cases, oracle, candidate)
+            diffs = compare_gallery(cases, oracle, candidate, gallery)
+            # The suite itself enforces the EXACT expected case inventory for
+            # this suite (including the delta): no missing/extra/reordered
+            # rows, no both-sides-shortened, no case deletion. Reuse the
+            # existing inventory, not hardcoded counts as sole proof.
+            expected_gallery = set(GALLERY_CASE_IDS)
+            missing_gallery = sorted(expected_gallery - set(cases.keys()))
+            if missing_gallery:
+                diffs.append(f"gallery cases missing: {missing_gallery}")
+                for key in missing_gallery:
+                    cases[key] = False
         elif suite == "webui":
             checkout = Path(os.environ.get(
                 "XEH_WEBUI_CHECKOUT",
