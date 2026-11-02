@@ -2521,7 +2521,7 @@
         "real RSS decision changes requests and pending files"
       ],
       "status": "unimplemented",
-      "delta": null
+      "delta": "check-only scope: the native stable channel ('rss') and an explicitly bound beta channel drive the real request; the Python master/dev archive mapping differs by design (plan 3.3) and package/download/apply is not implemented, so this row stays unimplemented."
     },
     {
       "id": "update.commit",
@@ -2533,7 +2533,7 @@
         "real RSS decision changes requests and pending files"
       ],
       "status": "unimplemented",
-      "delta": null
+      "delta": "check-only scope: the real RSS module builds the commits query, selects the first entry and rewrites CR/LF in the message; the native bundle link replaces the Python master zip (plan 3.3) and is not fetched in this scope."
     },
     {
       "id": "update.decision",
@@ -2545,7 +2545,7 @@
         "real RSS decision changes requests and pending files"
       ],
       "status": "unimplemented",
-      "delta": null
+      "delta": "check-only scope: off/check decisions, same-update-id and the mode/log action run through the real RSS VM and loopback HTTP; download mode reports an explicit unsupported stage and creates no pending file, so the pending-file assertion is not met."
     },
     {
       "id": "update.package",

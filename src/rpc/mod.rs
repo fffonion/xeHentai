@@ -2305,11 +2305,12 @@ pub fn run_with_rpc(app: crate::core::App, root: &Path) -> i32 {
         }
     };
     let local = tokio::task::LocalSet::new();
-    let runtime = crate::core::Runtime::new(app, resource_root);
+    let runtime = crate::core::Runtime::new(app, resource_root.clone());
     tokio_runtime.block_on(local.run_until(crate::run_supervised(
         runtime,
         Vec::new(),
         crate::i18n::Locale::EnUs,
+        resource_root,
     )))
 }
 

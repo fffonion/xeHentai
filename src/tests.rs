@@ -12630,7 +12630,7 @@ mod m6 {
     /// The real binary next to the test harness, rebuilt when the sources are
     /// newer than it. `cargo test` builds the bin target in *test* mode, so the
     /// plain executable is produced here once per test binary run.
-    fn binary() -> PathBuf {
+    pub(super) fn binary() -> PathBuf {
         static BINARY: OnceLock<PathBuf> = OnceLock::new();
         BINARY
             .get_or_init(|| {
@@ -12696,7 +12696,7 @@ mod m6 {
         stderr: String,
     }
 
-    fn base_command(root: &Path) -> Command {
+    pub(super) fn base_command(root: &Path) -> Command {
         let mut command = Command::new(binary());
         command
             .current_dir(root)
@@ -12720,7 +12720,7 @@ mod m6 {
         command
     }
 
-    fn copy_tree(from: &Path, to: &Path) {
+    pub(super) fn copy_tree(from: &Path, to: &Path) {
         std::fs::create_dir_all(to).unwrap();
         for entry in std::fs::read_dir(from).unwrap().flatten() {
             let path = entry.path();
@@ -12746,7 +12746,10 @@ mod m6 {
         }
     }
 
-    fn wait_exit(child: &mut Child, timeout: Duration) -> Option<std::process::ExitStatus> {
+    pub(super) fn wait_exit(
+        child: &mut Child,
+        timeout: Duration,
+    ) -> Option<std::process::ExitStatus> {
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(status) = child.try_wait().expect("try_wait") {
@@ -12759,7 +12762,7 @@ mod m6 {
         }
     }
 
-    fn wait_for<F: FnMut() -> bool>(timeout: Duration, mut check: F) -> bool {
+    pub(super) fn wait_for<F: FnMut() -> bool>(timeout: Duration, mut check: F) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
             if check() {
@@ -12772,7 +12775,7 @@ mod m6 {
         }
     }
 
-    fn image_files(root: &Path) -> Vec<PathBuf> {
+    pub(super) fn image_files(root: &Path) -> Vec<PathBuf> {
         let mut out = Vec::new();
         let mut stack = vec![root.to_path_buf()];
         while let Some(dir) = stack.pop() {
@@ -12802,7 +12805,7 @@ mod m6 {
     /// an HTTP proxy receives for `http://e-hentai.org/...` and keeps every
     /// requested path, so tests observe actual traffic instead of guessed
     /// state.
-    struct Gallery {
+    pub(super) struct Gallery {
         port: u16,
         paths: Arc<Mutex<Vec<String>>>,
         stop: Arc<AtomicBool>,
@@ -12810,7 +12813,7 @@ mod m6 {
     }
 
     impl Gallery {
-        fn start(count: usize) -> Self {
+        pub(super) fn start(count: usize) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture");
             listener.set_nonblocking(true).unwrap();
             let port = listener.local_addr().unwrap().port();
@@ -12842,11 +12845,11 @@ mod m6 {
             }
         }
 
-        fn proxy(&self) -> String {
+        pub(super) fn proxy(&self) -> String {
             format!("http://127.0.0.1:{}", self.port)
         }
 
-        fn paths(&self) -> Vec<String> {
+        pub(super) fn paths(&self) -> Vec<String> {
             self.paths.lock().unwrap().clone()
         }
     }
@@ -13772,5 +13775,659 @@ mod m6 {
             serde_json::from_str(&std::fs::read_to_string(root.path().join("h.json")).unwrap())
                 .expect("session JSON");
         assert_eq!(session["cookies"]["nw"], "1");
+    }
+}
+
+/// M7: the real binary update check. The business decision lives in
+/// `rss/updater/*`; these tests drive the production entry and observe actual
+/// loopback HTTP transcripts, logs and process lifetime.
+mod m7 {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::path::Path;
+    use std::process::{Child, Stdio};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::Duration;
+
+    use super::m6;
+
+    const MANIFEST: &str = env!("CARGO_MANIFEST_DIR");
+
+    /// The commit fixture is the frozen oracle's real response body
+    /// (`m7-updater-oracle`, u1_release_master_first_of_two_crlf): two entries,
+    /// CR/LF in the first message, and a second entry that must be ignored.
+    pub(super) const COMMITS: &str = "[{\"sha\": \"a1b2c3d4e5f60718293a4b5c6d7e8f9012345678\", \
+        \"commit\": {\"author\": {\"date\": \"2026-10-31T12:34:56Z\"}, \
+        \"message\": \"first entry\\r\\nwith CRLF\\r\\nthird line\"}}, \
+        {\"sha\": \"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c\", \
+        \"commit\": {\"author\": {\"date\": \"2026-10-30T01:02:03Z\"}, \
+        \"message\": \"second entry\"}}]";
+
+    pub(super) const UPDATE_ID: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+
+    #[derive(Clone, Debug)]
+    pub(super) struct Request {
+        pub method: String,
+        pub target: String,
+        pub headers: Vec<(String, String)>,
+    }
+
+    impl Request {
+        pub fn header(&self, name: &str) -> Option<&str> {
+            self.headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        }
+    }
+
+    /// A real loopback HTTP server. It records every request head and answers
+    /// immediately, or holds the response until `release` and records whether
+    /// the client closed the connection first.
+    pub(super) struct Server {
+        pub port: u16,
+        requests: Arc<Mutex<Vec<Request>>>,
+        closed: Arc<AtomicBool>,
+        release: Arc<(Mutex<bool>, Condvar)>,
+        stop: Arc<AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Server {
+        pub fn start(status: u16, body: &'static str) -> Self {
+            Self::build(status, body, false, false)
+        }
+
+        pub fn start_holding() -> Self {
+            Self::build(200, COMMITS, true, false)
+        }
+
+        pub fn start_closing() -> Self {
+            Self::build(200, COMMITS, false, true)
+        }
+
+        fn build(status: u16, body: &'static str, hold: bool, closing: bool) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture");
+            listener.set_nonblocking(true).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let closed = Arc::new(AtomicBool::new(false));
+            let release = Arc::new((Mutex::new(false), Condvar::new()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let seen = Arc::clone(&requests);
+            let client_closed = Arc::clone(&closed);
+            let gate = Arc::clone(&release);
+            let stopping = Arc::clone(&stop);
+            let handle = std::thread::spawn(move || {
+                while !stopping.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((socket, _)) => {
+                            socket.set_nonblocking(false).unwrap();
+                            if closing {
+                                let mut socket = socket;
+                                record(&mut socket, &seen);
+                                drop(socket);
+                            } else if hold {
+                                serve_held(socket, &seen, &client_closed, &gate, body);
+                            } else {
+                                serve(socket, &seen, status, body);
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(_) => return,
+                    }
+                }
+            });
+            Server {
+                port,
+                requests,
+                closed,
+                release,
+                stop,
+                handle: Some(handle),
+            }
+        }
+
+        pub fn origin(&self) -> String {
+            format!("http://127.0.0.1:{}", self.port)
+        }
+
+        pub fn requests(&self) -> Vec<Request> {
+            self.requests.lock().unwrap().clone()
+        }
+
+        pub fn client_closed(&self) -> bool {
+            self.closed.load(Ordering::SeqCst)
+        }
+
+        pub fn release(&self) {
+            let (lock, cond) = &*self.release;
+            *lock.lock().unwrap() = true;
+            cond.notify_all();
+        }
+    }
+
+    impl Drop for Server {
+        fn drop(&mut self) {
+            self.release();
+            self.stop.store(true, Ordering::SeqCst);
+            let _ = TcpStream::connect(("127.0.0.1", self.port));
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn read_head(socket: &mut TcpStream) -> Option<String> {
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 1024];
+        while !buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+            match socket.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+                Err(_) => return None,
+            }
+            if buffer.len() > 64 * 1024 {
+                return None;
+            }
+        }
+        Some(String::from_utf8_lossy(&buffer).into_owned())
+    }
+
+    fn record(socket: &mut TcpStream, seen: &Arc<Mutex<Vec<Request>>>) -> bool {
+        let Some(head) = read_head(socket) else {
+            return false;
+        };
+        let mut lines = head.lines();
+        let Some(request_line) = lines.next() else {
+            return false;
+        };
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().unwrap_or("").to_string();
+        let target = parts.next().unwrap_or("").to_string();
+        let mut headers = Vec::new();
+        for line in lines {
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            headers.push((name.trim().to_string(), value.trim().to_string()));
+        }
+        seen.lock().unwrap().push(Request {
+            method,
+            target,
+            headers,
+        });
+        true
+    }
+
+    fn write_response(socket: &mut TcpStream, status: u16, body: &str) {
+        let reason = match status {
+            200 => "OK",
+            500 => "Internal Server Error",
+            503 => "Service Unavailable",
+            _ => "Status",
+        };
+        let response = format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = socket.write_all(response.as_bytes());
+        let _ = socket.flush();
+        let _ = socket.shutdown(std::net::Shutdown::Both);
+    }
+
+    fn serve(mut socket: TcpStream, seen: &Arc<Mutex<Vec<Request>>>, status: u16, body: &str) {
+        if record(&mut socket, seen) {
+            write_response(&mut socket, status, body);
+        }
+    }
+
+    fn serve_held(
+        mut socket: TcpStream,
+        seen: &Arc<Mutex<Vec<Request>>>,
+        closed: &Arc<AtomicBool>,
+        gate: &Arc<(Mutex<bool>, Condvar)>,
+        body: &str,
+    ) {
+        if !record(&mut socket, seen) {
+            return;
+        }
+        socket
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        let (lock, cond) = &**gate;
+        loop {
+            if *lock.lock().unwrap() {
+                write_response(&mut socket, 200, body);
+                return;
+            }
+            let mut chunk = [0u8; 256];
+            match socket.read(&mut chunk) {
+                Ok(0) => {
+                    closed.store(true, Ordering::SeqCst);
+                    return;
+                }
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(_) => return,
+            }
+            let (guard, _) = cond
+                .wait_timeout(lock.lock().unwrap(), Duration::from_millis(10))
+                .unwrap();
+            drop(guard);
+        }
+    }
+
+    /// Publish the copied production resources, then replace ONLY the trusted
+    /// source binding constants with the owned loopback fixture origin. The
+    /// business functions and fixture bodies stay byte-identical.
+    pub(super) fn prepare_binding(root: &Path, origin: &str, beta: Option<&str>) {
+        let rss = root.join("rss");
+        if !rss.is_dir() {
+            m6::copy_tree(&Path::new(MANIFEST).join("rss"), &rss);
+        }
+        let path = rss.join("updater/github.rss");
+        let source = std::fs::read_to_string(&path).expect("github.rss");
+        let beta_line = match beta {
+            Some(channel) => format!("beta_channel: \"{channel}\","),
+            None => "beta_channel: null,".to_string(),
+        };
+        let source = source
+            .replace(
+                "api_origin: \"https://api.github.com\",",
+                &format!("api_origin: \"{origin}\","),
+            )
+            .replace(
+                "package_download_origin: \"https://github.com\",",
+                &format!("package_download_origin: \"{origin}\","),
+            )
+            .replace("beta_channel: null,", &beta_line);
+        std::fs::write(&path, source).unwrap();
+    }
+
+    fn spawn(root: &Path, args: &[&str]) -> Child {
+        m6::base_command(root)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the production binary")
+    }
+
+    fn log(root: &Path) -> String {
+        std::fs::read_to_string(root.join("eh.log")).unwrap_or_default()
+    }
+
+    #[test]
+    fn m7_binary_check_requests_native_stable_channel_and_logs_available() {
+        let root = tempfile::tempdir().expect("root");
+        let server = Server::start(200, COMMITS);
+        prepare_binding(root.path(), &server.origin(), None);
+        let mut child = spawn(
+            root.path(),
+            &["-l", "eh.log", "-vv", "--auto-update", "check"],
+        );
+        assert!(
+            m6::wait_for(Duration::from_secs(20), || !server.requests().is_empty()),
+            "the update check never reached the source binding; log:\n{}",
+            log(root.path())
+        );
+        assert!(
+            m6::wait_for(Duration::from_secs(20), || log(root.path())
+                .contains("Update available")),
+            "no availability log; log:\n{}",
+            log(root.path())
+        );
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(child.id() as i32),
+            nix::sys::signal::Signal::SIGINT,
+        )
+        .expect("SIGINT");
+        let status = m6::wait_exit(&mut child, Duration::from_secs(30)).expect("stopped");
+        assert_eq!(status.code(), Some(0));
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1, "requests: {requests:?}");
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(
+            requests[0].target,
+            "/repos/fffonion/xeHentai/commits?sha=rss"
+        );
+        assert_eq!(requests[0].header("cookie"), None);
+        assert_eq!(requests[0].header("authorization"), None);
+        let log = log(root.path());
+        assert!(log.contains("Update channel is: release"), "{log}");
+        assert!(
+            log.contains(
+                "Update available: 2026-10-31T12:34:56Z \"first entry  with CRLF  third line\" (a1b2c3d4e5f60718293a4b5c6d7e8f9012345678)"
+            ),
+            "{log}"
+        );
+        assert!(
+            log.contains("You can download update from https://dl.yooooo.us/share/xeHentai/"),
+            "{log}"
+        );
+        assert!(!log.contains("Update is complete"), "{log}");
+        assert!(log.contains("cleaning up..."), "{log}");
+    }
+
+    fn stop(child: &mut Child) -> i32 {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(child.id() as i32),
+            nix::sys::signal::Signal::SIGINT,
+        );
+        m6::wait_exit(child, Duration::from_secs(30))
+            .expect("the update owner must retire on the first signal")
+            .code()
+            .unwrap_or(-1)
+    }
+
+    fn wait_log(root: &Path, needle: &str) -> bool {
+        m6::wait_for(Duration::from_secs(20), || log(root).contains(needle))
+    }
+
+    #[test]
+    fn m7_binary_off_never_loads_the_update_module() {
+        let root = tempfile::tempdir().expect("root");
+        let server = Server::start(200, COMMITS);
+        prepare_binding(root.path(), &server.origin(), None);
+        // A deliberately uncompilable update module: `off` must never load it.
+        std::fs::write(root.path().join("rss/updater/github.rss"), "fn broken( {").unwrap();
+        let mut child = spawn(
+            root.path(),
+            &["-l", "eh.log", "-vv", "--auto-update", "off"],
+        );
+        assert!(
+            wait_log(root.path(), "started."),
+            "startup never logged: {}",
+            log(root.path())
+        );
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(stop(&mut child), 0);
+        assert!(server.requests().is_empty(), "off must not request");
+        let log = log(root.path());
+        for needle in [
+            "Update channel",
+            "Update available",
+            "Failure when updating",
+            "update module",
+        ] {
+            assert!(!log.contains(needle), "off log contains {needle:?}: {log}");
+        }
+        assert!(log.contains("cleaning up..."), "{log}");
+    }
+
+    #[test]
+    fn m7_binary_check_loads_the_real_update_module() {
+        let root = tempfile::tempdir().expect("root");
+        let server = Server::start(200, COMMITS);
+        prepare_binding(root.path(), &server.origin(), None);
+        std::fs::write(root.path().join("rss/updater/github.rss"), "fn broken( {").unwrap();
+        let mut child = spawn(root.path(), &["-l", "eh.log", "--auto-update", "check"]);
+        assert!(
+            wait_log(root.path(), "github.rss compile error"),
+            "the check path never loaded the module: {}",
+            log(root.path())
+        );
+        assert_eq!(stop(&mut child), 0);
+        assert!(server.requests().is_empty());
+    }
+
+    #[test]
+    fn m7_binary_explicit_beta_binding_selects_that_channel() {
+        let root = tempfile::tempdir().expect("root");
+        let server = Server::start(200, COMMITS);
+        prepare_binding(root.path(), &server.origin(), Some("rss-beta"));
+        let mut child = spawn(
+            root.path(),
+            &[
+                "-l",
+                "eh.log",
+                "-vv",
+                "--auto-update",
+                "check",
+                "--update-beta-channel",
+                "1",
+            ],
+        );
+        assert!(
+            m6::wait_for(Duration::from_secs(20), || log(root.path())
+                .contains("Update available")),
+            "no beta availability log: {}",
+            log(root.path())
+        );
+        assert_eq!(stop(&mut child), 0);
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        assert_eq!(
+            requests[0].target,
+            "/repos/fffonion/xeHentai/commits?sha=rss-beta"
+        );
+        let log = log(root.path());
+        assert!(log.contains("Update channel is: dev"), "{log}");
+    }
+
+    #[test]
+    fn m7_binary_beta_without_explicit_binding_fails_without_request() {
+        let root = tempfile::tempdir().expect("root");
+        let server = Server::start(200, COMMITS);
+        prepare_binding(root.path(), &server.origin(), None);
+        let mut child = spawn(
+            root.path(),
+            &[
+                "-l",
+                "eh.log",
+                "--auto-update",
+                "check",
+                "--update-beta-channel",
+                "1",
+            ],
+        );
+        assert!(
+            wait_log(root.path(), "Failure when updating program"),
+            "missing beta binding did not fail: {}",
+            log(root.path())
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(stop(&mut child), 0);
+        assert!(server.requests().is_empty(), "no fallback channel request");
+        let log = log(root.path());
+        assert!(!log.contains("Update available"), "{log}");
+    }
+
+    #[test]
+    fn m7_binary_check_failure_classes_are_warnings() {
+        const MISSING_DATE: &str = "[{\"sha\": \"a1b2c3d4e5f60718293a4b5c6d7e8f9012345678\", \"commit\": {\"author\": {}, \"message\": \"m\"}}]";
+        for (status, body) in [
+            (500u16, COMMITS),
+            (200, "[]"),
+            (200, "{not valid json"),
+            (200, MISSING_DATE),
+        ] {
+            let root = tempfile::tempdir().expect("root");
+            let server = Server::start(status, body);
+            prepare_binding(root.path(), &server.origin(), None);
+            let mut child = spawn(root.path(), &["-l", "eh.log", "--auto-update", "check"]);
+            assert!(
+                wait_log(root.path(), "Failure when updating program"),
+                "status {status} body {body:?} did not warn: {}",
+                log(root.path())
+            );
+            assert_eq!(stop(&mut child), 0);
+            let requests = server.requests();
+            assert_eq!(requests.len(), 1, "status {status}: {requests:?}");
+            let log = log(root.path());
+            assert!(!log.contains("Update available"), "status {status}: {log}");
+            assert!(
+                !log.contains("Update is complete"),
+                "status {status}: {log}"
+            );
+        }
+    }
+
+    #[test]
+    fn m7_binary_transport_failure_is_a_warning_and_retires() {
+        let root = tempfile::tempdir().expect("root");
+        let server = Server::start_closing();
+        prepare_binding(root.path(), &server.origin(), None);
+        let mut child = spawn(root.path(), &["-l", "eh.log", "--auto-update", "check"]);
+        assert!(
+            wait_log(root.path(), "Failure when updating program"),
+            "a closed transport did not warn: {}",
+            log(root.path())
+        );
+        assert_eq!(stop(&mut child), 0);
+        assert_eq!(server.requests().len(), 1);
+        assert!(!log(root.path()).contains("Update available"));
+    }
+
+    #[test]
+    fn m7_binary_download_mode_checks_then_reports_unsupported_stage() {
+        let root = tempfile::tempdir().expect("root");
+        let server = Server::start(200, COMMITS);
+        prepare_binding(root.path(), &server.origin(), None);
+        let mut child = spawn(root.path(), &["-l", "eh.log", "--auto-update", "download"]);
+        assert!(
+            wait_log(root.path(), "does not download or install packages"),
+            "the unsupported download stage was not reported: {}",
+            log(root.path())
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(stop(&mut child), 0);
+        assert_eq!(
+            server.requests().len(),
+            1,
+            "download must not fetch a package: {:?}",
+            server.requests()
+        );
+        let log = log(root.path());
+        assert!(log.contains("Update available"), "{log}");
+        assert!(!log.contains("Update is complete"), "{log}");
+    }
+
+    #[test]
+    fn m7_binary_slow_check_does_not_block_gallery_work() {
+        let root = tempfile::tempdir().expect("root");
+        let update = Server::start_holding();
+        prepare_binding(root.path(), &update.origin(), None);
+        let gallery = m6::Gallery::start(4);
+        let mut child = spawn(
+            root.path(),
+            &[
+                "-p",
+                &gallery.proxy(),
+                "-d",
+                "dl",
+                "-l",
+                "eh.log",
+                "--auto-update",
+                "check",
+                "http://e-hentai.org/g/1/aaaa",
+            ],
+        );
+        assert!(
+            m6::wait_for(Duration::from_secs(20), || !update.requests().is_empty()),
+            "the check never reached the held source"
+        );
+        // Real barrier: the gallery download completes while the update
+        // response is still held open.
+        assert!(
+            m6::wait_for(Duration::from_secs(30), || {
+                m6::image_files(&root.path().join("dl")).len() == 4
+            }),
+            "gallery work was blocked by the held check"
+        );
+        assert!(
+            child.try_wait().expect("try_wait").is_none(),
+            "the process must not exit while the update response is held"
+        );
+        update.release();
+        let status =
+            m6::wait_exit(&mut child, Duration::from_secs(30)).expect("URL completion exit");
+        assert_eq!(status.code(), Some(0));
+        assert!(gallery.paths().iter().any(|path| path.contains("/s/")));
+    }
+
+    #[test]
+    fn m7_binary_first_signal_cancels_the_held_check_and_closes_the_request() {
+        let root = tempfile::tempdir().expect("root");
+        let update = Server::start_holding();
+        prepare_binding(root.path(), &update.origin(), None);
+        let mut child = spawn(root.path(), &["-l", "eh.log", "--auto-update", "check"]);
+        assert!(
+            m6::wait_for(Duration::from_secs(20), || !update.requests().is_empty()),
+            "the check never reached the held source"
+        );
+        assert_eq!(stop(&mut child), 0);
+        assert!(
+            m6::wait_for(Duration::from_secs(10), || update.client_closed()),
+            "the cancelled update request kept its connection open"
+        );
+        let log = log(root.path());
+        assert!(log.contains("cleaning up..."), "{log}");
+        assert!(!log.contains("Update available"), "{log}");
+    }
+
+    #[test]
+    fn m7_module_same_id_and_rss_channel_change_change_real_requests() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async {
+            let root = tempfile::tempdir().expect("root");
+            let server = Server::start(200, COMMITS);
+            prepare_binding(root.path(), &server.origin(), None);
+            let mut updater = crate::updater::Updater::load(root.path()).expect("load");
+            let report = updater
+                .check("check", false, Some(UPDATE_ID), "xeHentai/test")
+                .await
+                .expect("check");
+            assert_eq!(report.outcome, "up_to_date");
+            assert_eq!(report.events.len(), 1);
+            assert_eq!(report.events[0].key, "UPDATE_NO_UPDATE");
+            let available = updater
+                .check("check", false, Some("different-id"), "xeHentai/test")
+                .await
+                .expect("check");
+            assert_eq!(available.outcome, "available");
+            let info = available.update.expect("update info");
+            assert_eq!(info.update_id, UPDATE_ID);
+            assert_eq!(info.ts, "2026-10-31T12:34:56Z");
+            assert_eq!(info.message, "first entry  with CRLF  third line");
+            assert!(info.download_link.ends_with("/xeHentai-rss.zip"));
+            assert!(!info.download_link.contains("archive"));
+            let requests = server.requests();
+            assert_eq!(requests.len(), 2, "{requests:?}");
+
+            // Change ONLY the RSS source binding channel: the real VM must ask
+            // for the new channel instead of a native-coded version.
+            let path = root.path().join("rss/updater/github.rss");
+            let source = std::fs::read_to_string(&path).unwrap().replace(
+                "stable_channel: \"rss\",",
+                "stable_channel: \"rss-choice\",",
+            );
+            std::fs::write(&path, source).unwrap();
+            let mut changed = crate::updater::Updater::load(root.path()).expect("reload");
+            let report = changed
+                .check("check", false, None, "xeHentai/test")
+                .await
+                .expect("check");
+            assert_eq!(report.outcome, "available");
+            let requests = server.requests();
+            assert_eq!(requests.len(), 3, "{requests:?}");
+            assert_eq!(
+                requests[2].target,
+                "/repos/fffonion/xeHentai/commits?sha=rss-choice"
+            );
+        }));
     }
 }

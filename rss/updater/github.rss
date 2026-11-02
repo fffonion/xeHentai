@@ -1,0 +1,160 @@
+use json;
+
+// Update source binding and GitHub commit interpretation
+// (`updater/github.py:17-35`).
+//
+// Every business decision for the source stays here: which native channel a
+// request targets, the commits query, taking the FIRST list entry, the named
+// commit fields, the CR/LF-to-space message rewrite, and the native bundle
+// download link. The Rust owner supplies only the HTTP transport, the typed
+// binding value and the log sink.
+//
+// This file is also the trusted install-resource source binding: production
+// ships the fixed GitHub origins below. A test/controlled install may replace
+// ONLY these constants with an owned loopback origin; the rest of the module
+// is the production business body and must not be replaced by a native
+// producer.
+//
+// Migration note (plan §9.2.4/§9.2.5): the stable channel is the native `rss`
+// branch, not the Python `master` archive. `download_link` is the native
+// bundle location derived from `package_download_origin`; the actual release
+// asset names are bound at M8, so this check-scope link is informational and
+// is never fetched here.
+
+struct SourceBinding {
+    api_origin: string,
+    repo: string,
+    stable_channel: string,
+    beta_channel: string?,
+    package_download_origin: string,
+}
+
+struct RequestPlan {
+    outcome: string,
+    channel: string,
+    method: string,
+    url: string,
+    headers: [[string]],
+    exception: string?,
+}
+
+// JSON shape used only at the wire boundary. The reference indexes
+// `commit["sha"]`, `commit["commit"]["author"]["date"]` and
+// `commit["commit"]["message"]`; a structurally valid document missing those
+// fields fails strict typed decode (recorded representation difference), so no
+// partial UpdateInfo is ever produced. Extra GitHub fields are ignored.
+struct CommitAuthor {
+    date: string,
+}
+
+struct CommitBody {
+    author: CommitAuthor,
+    message: string,
+}
+
+struct Commit {
+    sha: string,
+    commit: CommitBody,
+}
+
+struct CommitInfo {
+    outcome: string,
+    update_id: string,
+    ts: string,
+    message: string,
+    download_link: string,
+    exception: string?,
+}
+
+fn binding_error() -> string {
+    "source binding is missing an origin or repository"
+}
+
+fn http_error(body: string) -> string {
+    "Failed to get latest release info: " + body
+}
+
+pub fn gh_binding() -> SourceBinding {
+    {
+        api_origin: "https://api.github.com",
+        repo: "fffonion/xeHentai",
+        stable_channel: "rss",
+        beta_channel: null,
+        package_download_origin: "https://github.com",
+    }
+}
+
+/// Build the commits query for the requested channel. `beta` comes from the
+/// config/CLI; when it is set but this binding carries no beta channel the
+/// result is an explicit failure, never a Python `dev` fallback.
+pub fn gh_plan(binding: SourceBinding, beta: bool, user_agent: string) -> RequestPlan {
+    let mut outcome = "ok";
+    let mut channel = "" + binding.stable_channel;
+    let mut exception: string? = null;
+    if binding.api_origin.length == 0 || binding.repo.length == 0 {
+        outcome = "binding_invalid";
+        exception = binding_error();
+        channel = "";
+    } else if beta {
+        if binding.beta_channel == null {
+            outcome = "beta_channel_missing";
+            exception = "update_beta_channel is enabled but the source binding has no beta channel";
+            channel = "";
+        } else {
+            channel = "" + binding.beta_channel;
+        }
+    }
+    let url = binding.api_origin + "/repos/" + binding.repo + "/commits?sha=" + channel;
+    let headers: [[string]] = [["Accept", "application/vnd.github+json"], ["User-Agent", user_agent]];
+    let plan = {
+        outcome: outcome,
+        channel: channel,
+        method: "GET",
+        url: url,
+        headers: headers,
+        exception: exception,
+    };
+    plan
+}
+
+/// Interpret one commits response.
+///
+/// Order matches the reference exactly: JSON is decoded before the status
+/// check, then a non-200 or empty list fails, then the first entry's fields
+/// are read. The reference rewrites CR and LF to spaces one character at a
+/// time; the two literal replacements keep that byte-for-byte result.
+pub fn gh_parse(binding: SourceBinding, status: int, body: string) -> CommitInfo {
+    let commits = json::decode::<[Commit]>(body);
+    let mut outcome = "ok";
+    let mut update_id = "";
+    let mut ts = "";
+    let mut message = "";
+    let mut download_link = "";
+    let mut exception: string? = null;
+    if status != 200 {
+        outcome = "http_error";
+        exception = http_error("" + body);
+    } else if commits.length == 0 {
+        outcome = "empty";
+        exception = http_error("" + body);
+    } else {
+        let commit = commits[0].copy();
+        let commit_body = commit.commit;
+        let author = commit_body.author;
+        update_id = "" + commit.sha;
+        ts = "" + author.date;
+        let cleaned = string_replace_literal("" + commit_body.message, "\r", " ");
+        message = string_replace_literal(cleaned, "\n", " ");
+        let release_base = binding.package_download_origin + "/" + binding.repo + "/releases/download/rss-";
+        download_link = release_base + update_id + "/xeHentai-rss.zip";
+    }
+    let info = {
+        outcome: outcome,
+        update_id: update_id,
+        ts: ts,
+        message: message,
+        download_link: download_link,
+        exception: exception,
+    };
+    info
+}

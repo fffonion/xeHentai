@@ -98,7 +98,7 @@ pub fn err_msg(locale: Locale, code: i64, args: &[&str]) -> String {
 }
 
 /// Every translation key defined by the reference locale modules.
-pub const REFERENCE_KEYS: [&str; 97] = [
+pub const REFERENCE_KEYS: [&str; 98] = [
     "ERR_NOMSG",
     "PROXY_CANDIDATE_CNT",
     "PROXY_DISABLE_BANNED",
@@ -144,6 +144,7 @@ pub const REFERENCE_KEYS: [&str; 97] = [
     "UPDATE_COMPLETE",
     "UPDATE_DEV_CHANNEL",
     "UPDATE_DOWNLOAD_MANUALLY",
+    "UPDATE_DOWNLOAD_UNSUPPORTED",
     "UPDATE_FAILED",
     "UPDATE_NO_UPDATE",
     "UPDATE_RELEASE_CHANNEL",

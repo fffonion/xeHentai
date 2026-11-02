@@ -47,6 +47,7 @@ UPDATE_CHANNEL: 'Update channel is: %{0}'
 UPDATE_COMPLETE: Update is complete, it will take effect on next run
 UPDATE_DEV_CHANNEL: dev
 UPDATE_DOWNLOAD_MANUALLY: You can download update from https://dl.yooooo.us/share/xeHentai/
+UPDATE_DOWNLOAD_UNSUPPORTED: Update check completed, but this build does not download or install packages
 UPDATE_FAILED: 'Failure when updating program: %{0}'
 UPDATE_NO_UPDATE: Program is up-to-date
 UPDATE_RELEASE_CHANNEL: release

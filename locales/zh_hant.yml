@@ -47,6 +47,7 @@ UPDATE_CHANNEL: '更新渠道為: %{0}'
 UPDATE_COMPLETE: 更新完成，請重新啟動程序應用更新
 UPDATE_DEV_CHANNEL: 測試版
 UPDATE_DOWNLOAD_MANUALLY: 可以從 https://dl.yooooo.us/share/xeHentai/ 下載更新
+UPDATE_DOWNLOAD_UNSUPPORTED: 更新檢查已完成，但此版本不下載或安裝更新包
 UPDATE_FAILED: '更新時遇到錯誤: %{0}'
 UPDATE_NO_UPDATE: 沒有可用更新
 UPDATE_RELEASE_CHANNEL: 正式版

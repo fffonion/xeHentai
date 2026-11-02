@@ -18,6 +18,7 @@ mod i18n;
 mod proxy;
 mod rpc;
 mod task;
+mod updater;
 mod util;
 mod worker;
 
@@ -225,13 +226,22 @@ async fn application(mut app: App, resource: &Path, opts: &Opts, locale: Locale)
         let _ = app.add_task(url, Map::new());
     }
     let runtime = core::Runtime::new(app, resource.to_path_buf());
-    run_supervised(runtime, urls, locale).await
+    run_supervised(runtime, urls, locale, resource.to_path_buf()).await
 }
 
 /// The supervised real run: task loop, optional RPC server, URL-completion
 /// auto-exit and the reference signal lifecycle.
-async fn run_supervised(runtime: core::Runtime, urls: Vec<String>, locale: Locale) -> i32 {
+async fn run_supervised(
+    runtime: core::Runtime,
+    urls: Vec<String>,
+    locale: Locale,
+    resource: PathBuf,
+) -> i32 {
     let (task_loop, handle) = runtime.spawn();
+    // The reference `cli.start` starts the updater as a daemon thread before
+    // the task loop; this owned background task is retired by the same
+    // supervisor on URL completion or the first signal.
+    let update_task = spawn_update_check(handle.clone(), resource, locale);
     let rpc_enabled = handle.borrow_app(|app| app.cfg.rpc_port.is_some());
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let rpc = if rpc_enabled {
@@ -283,6 +293,10 @@ async fn run_supervised(runtime: core::Runtime, urls: Vec<String>, locale: Local
             }
         }
     };
+    if let Some(task) = update_task {
+        task.abort();
+        let _ = task.await;
+    }
     let _ = shutdown_tx.send(true);
     match stopped {
         Stop::AutoExit => {
@@ -353,6 +367,70 @@ fn has_active_task(app: &App) -> bool {
             r#const::TASK_STATE_WAITING <= task.state && task.state < r#const::TASK_STATE_FINISHED
         })
     })
+}
+
+/// The reference `cli.start` gate is in the caller: `off` never constructs the
+/// update module or a request. Other modes run in one owned background local
+/// task, so the check never blocks downloads, prompts or server startup.
+fn spawn_update_check(
+    app: core::AppHandle,
+    resource: PathBuf,
+    locale: Locale,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let mode = app.borrow_app(|app| app.cfg.auto_update.clone());
+    if mode == "off" {
+        return None;
+    }
+    let beta = app.borrow_app(|app| app.cfg.update_beta_channel);
+    Some(tokio::task::spawn_local(async move {
+        let mut updater = match updater::Updater::load(&resource) {
+            Ok(updater) => updater,
+            Err(error) => {
+                log_update_failure(&app, locale, &error.to_string());
+                return;
+            }
+        };
+        let channel = updater::render_channel(locale, beta);
+        app.borrow_app_mut(|app| {
+            let _ = app.logger_mut().debug(&channel);
+        });
+        // This build carries no applied update id yet; the package loader in
+        // the following scope supplies the applied id on a later startup.
+        let applied_update_id = None;
+        let user_agent = format!("xeHentai/{}", r#const::VERSION_DISPLAY);
+        match updater
+            .check(&mode, beta, applied_update_id, &user_agent)
+            .await
+        {
+            Ok(report) => {
+                for event in &report.events {
+                    log_update_event(&app, locale, event);
+                }
+            }
+            Err(error) => log_update_failure(&app, locale, &error.to_string()),
+        }
+    }))
+}
+
+fn log_update_event(app: &core::AppHandle, locale: Locale, event: &updater::LogEvent) {
+    let message = updater::render_event(locale, event);
+    app.borrow_app_mut(|app| {
+        let logger = app.logger_mut();
+        let _ = match event.level.as_str() {
+            "debug" => logger.debug(&message),
+            "warning" => logger.warning(&message),
+            "error" => logger.error(&message),
+            _ => logger.info(&message),
+        };
+    });
+}
+
+fn log_update_failure(app: &core::AppHandle, locale: Locale, detail: &str) {
+    let message = i18n::render(locale, "UPDATE_FAILED", &[detail])
+        .unwrap_or_else(|| format!("Failure when updating program: {detail}"));
+    app.borrow_app_mut(|app| {
+        let _ = app.logger_mut().warning(&message);
+    });
 }
 
 /// The interrupt stream behind `interactive()` and the supervisor: the Unix
