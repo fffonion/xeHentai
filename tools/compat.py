@@ -1156,10 +1156,100 @@ def parse_test_results(output):
     }
 
 
+def parse_gallery_native_stdout(output):
+    """Strict multiplicity-preserving parse of ONE gallery native stdout.
+
+    Returns (rows, results, summary, running, diffs): rows is the ordered
+    [(name, status)] terminal list with duplicates preserved; results is
+    the last-wins map for cross-run merging; summary matches
+    parse_test_results shape; running is the declared `running N tests`
+    count or None when absent. diffs is empty iff the single output is
+    internally consistent: at least one terminal row, no repeated test
+    name, exactly one summary, and the row count reconciles with the
+    declared running count (when present), the summary
+    passed/failed/ignored total AND each per-status count.
+    """
+    row_re = re.compile(r"^test ([\w:#]+) \.\.\. (ok|FAILED|ignored)$")
+    summary_re = re.compile(
+        r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; "
+        r"(\d+) ignored", re.M)
+    running_re = re.compile(r"^running (\d+) tests?$", re.M)
+    rows = []
+    for line in output.splitlines():
+        match = row_re.match(line)
+        if match:
+            rows.append((match.group(1), match.group(2)))
+    results = {}
+    for name, status in rows:
+        results[name] = status
+    summaries = [match for match in summary_re.finditer(output)]
+    running_values = [int(match.group(1))
+                      for match in running_re.finditer(output)]
+    summary = None
+    if summaries:
+        first = summaries[0]
+        summary = {
+            "status": first.group(1),
+            "passed": int(first.group(2)),
+            "failed": int(first.group(3)),
+            "ignored": int(first.group(4)),
+        }
+    running = running_values[0] if running_values else None
+    diffs = []
+    if not rows:
+        diffs.append("gallery native: no terminal test rows")
+    seen = set()
+    duplicates = set()
+    for name, _ in rows:
+        if name in seen:
+            duplicates.add(name)
+        seen.add(name)
+    if duplicates:
+        diffs.append("gallery native: duplicate test names in one "
+                     f"output: {sorted(duplicates)}")
+    if not summaries:
+        diffs.append("gallery native: no test summary")
+    elif len(summaries) > 1:
+        diffs.append("gallery native: multiple test summaries in one output")
+    if len(set(running_values)) > 1:
+        diffs.append("gallery native: inconsistent declared running counts "
+                     f"{sorted(set(running_values))}")
+    if running is not None and len(rows) != running:
+        diffs.append(f"gallery native: declared running {running} != "
+                     f"parsed rows {len(rows)}")
+    if summary is not None:
+        total = summary["passed"] + summary["failed"] + summary["ignored"]
+        if total != len(rows):
+            diffs.append(f"gallery native: summary total {total} != "
+                         f"parsed rows {len(rows)}")
+        counted = {"ok": 0, "FAILED": 0, "ignored": 0}
+        for _, status in rows:
+            counted[status] += 1
+        if counted["ok"] != summary["passed"]:
+            diffs.append(f"gallery native: ok rows {counted['ok']} != "
+                         f"summary passed {summary['passed']}")
+        if counted["FAILED"] != summary["failed"]:
+            diffs.append(f"gallery native: FAILED rows {counted['FAILED']} "
+                         f"!= summary failed {summary['failed']}")
+        if counted["ignored"] != summary["ignored"]:
+            diffs.append(f"gallery native: ignored rows {counted['ignored']} "
+                         f"!= summary ignored {summary['ignored']}")
+    return rows, results, summary, running, diffs
+
+
 def require_native(run, suite):
     results, summary = parse_test_results(run["stdout"])
     if summary is None:
         raise CompatError(f"{suite}: cargo output has no test summary")
+    if suite == "gallery":
+        # Gallery publication parses the ACTUAL terminal rows with
+        # multiplicity BEFORE any dict construction: a repeated test name
+        # or an inconsistent count/summary in one stdout is rejected here,
+        # not hidden by the collapsed results map.
+        _, _, _, _, strict_diffs = parse_gallery_native_stdout(run["stdout"])
+        if strict_diffs:
+            raise CompatError(f"{suite}: native stdout integrity: "
+                              f"{strict_diffs}")
     if summary["status"] != "ok" or summary["failed"] != 0 or summary["passed"] == 0:
         raise CompatError(f"{suite}: native tests failed: {summary}")
     return results, summary
@@ -4027,6 +4117,13 @@ def run_native(suite, root, target_dir):
         _, summary = parse_test_results(result.stdout)
         if summary is None:
             raise CompatError(f"no test summary for {' '.join(argv)}")
+        if suite == "gallery":
+            _, _, _, _, strict_diffs = parse_gallery_native_stdout(
+                result.stdout)
+            if strict_diffs:
+                raise CompatError(
+                    f"gallery native stdout integrity for "
+                    f"{' '.join(argv)}: {strict_diffs}")
         if summary["status"] != "ok" or summary["failed"] != 0 or summary["passed"] == 0:
             raise CompatError(f"native tests failed for {suite}: {summary}")
         evidence.append(
@@ -4968,6 +5065,300 @@ def self_check(suite, oracle, candidate, native_runs=None):
         compare_gallery(cases, mutated_oracle, mutated_candidate)
         checks.append(("poststate-task-gid-shape",
                        not cases.get("gallery.poststate.before", True)))
+        # Durable exact-grammar matrix over ACTUAL captured rows (FD8ee
+        # blocker 1): the required-field inventory is read off the real
+        # captured rows, never the validator table, so a table omission
+        # cannot hide. For every non-identity field present on a side:
+        # remove it on that side, change its primitive type on that
+        # side; where present on both sides, remove it on both sides
+        # identically (None==None must still fail). Plus one unknown-key
+        # add per row per side. Every mutant must fail the row's own
+        # case through the REAL production comparator.
+        def _matrix_row_case(section, exp):
+            if section == "reads":
+                return exp.get("case") or "gallery.read.%s.%s" % (
+                    exp.get("guid"), exp.get("fid"))
+            if section == "thumbs":
+                guid = exp.get("guid")
+                fid = exp.get("fid")
+                query = exp.get("query", "")
+                if query == "w":
+                    return "gallery.thumb.%s.%s.bad-query" % (guid, fid)
+                if guid == "task-wait" and fid == "nope":
+                    return "gallery.thumb.%s.%s.not-found" % (guid, fid)
+                if guid == "task-wait" and fid == "5":
+                    return "gallery.thumb.%s.%s.decode" % (guid, fid)
+                slug = {"w=4&h=4": "resized", "w=4": "w-only",
+                        "": "passthrough"}.get(query, query)
+                return "gallery.thumb.%s.%s.%s" % (guid, fid, slug)
+            return "gallery.archive.%s" % exp.get("guid")
+
+        def _matrix_wrongtype(value):
+            if isinstance(value, bool):
+                return "wrongtype"
+            if isinstance(value, int):
+                return True
+            if isinstance(value, str):
+                return 0
+            if isinstance(value, list):
+                return "wrongtype"
+            if isinstance(value, dict):
+                return []
+            return "wrongtype"
+
+        _matrix_inventory = gallery_request()
+        for _section in ("reads", "thumbs", "archives"):
+            _expected_rows = _matrix_inventory.get(_section, [])
+            for _index, _exp in enumerate(_expected_rows):
+                if not isinstance(_exp, dict):
+                    continue
+                _rowkey = _matrix_row_case(_section, _exp)
+                for _side in ("oracle", "candidate"):
+                    _doc = oracle if _side == "oracle" else candidate
+                    _tag = "o" if _side == "oracle" else "c"
+                    _rows = _doc.get(_section) or []
+                    if _index >= len(_rows) or not isinstance(
+                            _rows[_index], dict):
+                        continue
+                    for _field in list(_rows[_index].keys()):
+                        if _field in ("guid", "fid", "query", "case"):
+                            continue
+                        mutated = copy.deepcopy(
+                            oracle if _side == "oracle" else candidate)
+                        del mutated[_section][_index][_field]
+                        cases = {}
+                        if _side == "oracle":
+                            compare_gallery(cases, mutated, candidate)
+                        else:
+                            compare_gallery(cases, oracle, mutated)
+                        checks.append(
+                            ("m-%s-%02d-%s-rm-%s" % (
+                                _section, _index, _tag, _field),
+                             not cases.get(_rowkey, True)))
+                        mutated = copy.deepcopy(
+                            oracle if _side == "oracle" else candidate)
+                        mutated[_section][_index][_field] = (
+                            _matrix_wrongtype(
+                                mutated[_section][_index][_field]))
+                        cases = {}
+                        if _side == "oracle":
+                            compare_gallery(cases, mutated, candidate)
+                        else:
+                            compare_gallery(cases, oracle, mutated)
+                        checks.append(
+                            ("m-%s-%02d-%s-ty-%s" % (
+                                _section, _index, _tag, _field),
+                             not cases.get(_rowkey, True)))
+                    mutated = copy.deepcopy(
+                        oracle if _side == "oracle" else candidate)
+                    mutated[_section][_index]["__unknown__"] = "evil"
+                    cases = {}
+                    if _side == "oracle":
+                        compare_gallery(cases, mutated, candidate)
+                    else:
+                        compare_gallery(cases, oracle, mutated)
+                    checks.append(
+                        ("m-%s-%02d-%s-unknown" % (_section, _index, _tag),
+                         not cases.get(_rowkey, True)))
+                _old_row = (oracle.get(_section) or [])[_index] \
+                    if _index < len(oracle.get(_section) or []) else None
+                _new_row = (candidate.get(_section) or [])[_index] \
+                    if _index < len(candidate.get(_section) or []) else None
+                if isinstance(_old_row, dict) and isinstance(_new_row, dict):
+                    for _field in list(_old_row.keys()):
+                        if _field in ("guid", "fid", "query", "case"):
+                            continue
+                        if _field not in _new_row:
+                            continue
+                        mutated_oracle = copy.deepcopy(oracle)
+                        mutated_candidate = copy.deepcopy(candidate)
+                        del mutated_oracle[_section][_index][_field]
+                        del mutated_candidate[_section][_index][_field]
+                        cases = {}
+                        compare_gallery(
+                            cases, mutated_oracle, mutated_candidate)
+                        checks.append(
+                            ("m-%s-%02d-both-rm-%s" % (
+                                _section, _index, _field),
+                             not cases.get(_rowkey, True)))
+        # Explicit specified wrong-literal / forbidden-combination controls.
+        mutated = copy.deepcopy(candidate)
+        mutated["thumbs"][4]["status"] = 404
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(("thumb-notfound-status-404",
+                       not cases.get("gallery.thumb.task-wait.nope.not-found",
+                                     True)))
+        mutated = copy.deepcopy(candidate)
+        del mutated["thumbs"][5]["message"]
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(("thumb-decode-no-message",
+                       not cases.get("gallery.thumb.task-wait.5.decode", True)))
+        mutated = copy.deepcopy(candidate)
+        del mutated["archives"][0]["comment"]
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(("archive-no-comment",
+                       not cases.get("gallery.archive.task-wait", True)))
+        mutated = copy.deepcopy(candidate)
+        mutated["archives"][0]["names"] = list(
+            mutated["archives"][0]["names"]) + [
+                mutated["archives"][0]["names"][0]]
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(("archive-names-dup",
+                       not cases.get("gallery.archive.task-wait", True)))
+        mutated = copy.deepcopy(candidate)
+        mutated["archives"][0]["names"] = [0] + list(
+            mutated["archives"][0]["names"][1:])
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(("archive-names-nonstr",
+                       not cases.get("gallery.archive.task-wait", True)))
+        mutated = copy.deepcopy(candidate)
+        mutated["archives"][0]["contents"]["__extra__.jpg"] = "EXTRA"
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(("archive-contents-key-extra",
+                       not cases.get("gallery.archive.task-wait", True)))
+        mutated = copy.deepcopy(candidate)
+        mutated["archives"][0]["contents"].pop(
+            sorted(mutated["archives"][0]["contents"])[0])
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(("archive-contents-key-missing",
+                       not cases.get("gallery.archive.task-wait", True)))
+        mutated = copy.deepcopy(candidate)
+        mutated["archives"][0]["contents"][sorted(
+            mutated["archives"][0]["contents"])[0]] = 0
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(("archive-contents-value-nonstr",
+                       not cases.get("gallery.archive.task-wait", True)))
+        mutated = copy.deepcopy(candidate)
+        mutated["thumbs"][3]["status"] = 400
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(("thumb-badquery-extra-status",
+                       not cases.get("gallery.thumb.task-wait.1.bad-query",
+                                     True)))
+        mutated_oracle = copy.deepcopy(oracle)
+        mutated_oracle["thumbs"][4]["status"] = 400
+        cases = {}
+        compare_gallery(cases, mutated_oracle, candidate)
+        checks.append(("thumb-notfound-oracle-extra-status",
+                       not cases.get("gallery.thumb.task-wait.nope.not-found",
+                                     True)))
+        mutated = copy.deepcopy(candidate)
+        mutated["reads"][3]["bytes"] = "mutated"
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(("read-missing-extra-bytes",
+                       not cases.get("gallery.read.missing.1", True)))
+        mutated_oracle = copy.deepcopy(oracle)
+        mutated_oracle["reads"][0]["raised"] = "ValueError"
+        cases = {}
+        compare_gallery(cases, mutated_oracle, candidate)
+        checks.append(("read-success-extra-raised",
+                       not cases.get("gallery.read.task-wait.1", True)))
+        # Root/wrapper exact-key controls (FD8ee blocker 2): extra keys
+        # on the result root or the poststate wrapper, on oracle-only,
+        # candidate-only or both sides identically, must fail instead of
+        # being silently dropped.
+        mutated = copy.deepcopy(oracle)
+        mutated["__extra__"] = "evil"
+        cases = {}
+        compare_gallery(cases, mutated, candidate)
+        checks.append(("root-extra-oracle",
+                       not cases.get("gallery.read.task-wait.1", True)))
+        mutated = copy.deepcopy(candidate)
+        mutated["__extra__"] = "evil"
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(("root-extra-candidate",
+                       not cases.get("gallery.read.task-wait.1", True)))
+        mutated_oracle = copy.deepcopy(oracle)
+        mutated_candidate = copy.deepcopy(candidate)
+        mutated_oracle["__extra__"] = "evil"
+        mutated_candidate["__extra__"] = "evil"
+        cases = {}
+        compare_gallery(cases, mutated_oracle, mutated_candidate)
+        checks.append(("root-extra-both",
+                       not cases.get("gallery.read.task-wait.1", True)))
+        mutated = copy.deepcopy(oracle)
+        mutated["poststate"]["__extra__"] = "evil"
+        cases = {}
+        compare_gallery(cases, mutated, candidate)
+        checks.append(("wrapper-extra-oracle",
+                       not cases.get("gallery.poststate.before", True)))
+        mutated = copy.deepcopy(candidate)
+        mutated["poststate"]["__extra__"] = "evil"
+        cases = {}
+        compare_gallery(cases, oracle, mutated)
+        checks.append(("wrapper-extra-candidate",
+                       not cases.get("gallery.poststate.before", True)))
+        mutated_oracle = copy.deepcopy(oracle)
+        mutated_candidate = copy.deepcopy(candidate)
+        mutated_oracle["poststate"]["__extra__"] = "evil"
+        mutated_candidate["poststate"]["__extra__"] = "evil"
+        cases = {}
+        compare_gallery(cases, mutated_oracle, mutated_candidate)
+        checks.append(("wrapper-extra-both",
+                       not cases.get("gallery.poststate.before", True)))
+        # Raw native stdout integrity controls (FD8ee blocker 3): mutate
+        # ACTUAL captured terminal stdout bytes (a repeated terminal row
+        # with identical status, with conflicting status, a wrong summary
+        # count, a wrong declared running count) through the SAME
+        # production require_native gallery path. The collapsed results
+        # map alone must never hide a single-output duplicate or a count
+        # mismatch. Skipped only when no raw stdout is attached.
+        raw_stdouts = [run.get("stdout") for run in (native_runs or [])
+                       if isinstance(run, dict) and run.get("stdout")]
+        if raw_stdouts:
+            base_stdout = raw_stdouts[0]
+            row_lines = [line for line in base_stdout.splitlines()
+                         if re.match(r"^test [\w:#]+ \.\.\. "
+                                     r"(?:ok|FAILED|ignored)$", line)]
+            summary_match = re.search(
+                r"test result: (ok|FAILED)\. (\d+) passed; "
+                r"(\d+) failed; (\d+) ignored", base_stdout)
+            running_match = re.search(
+                r"^running (\d+) tests?$", base_stdout, re.M)
+            if row_lines and summary_match and running_match:
+                first_row = row_lines[0]
+                dup_identical = base_stdout.replace(
+                    first_row, first_row + "\n" + first_row, 1)
+                if first_row.rstrip().endswith(" ok"):
+                    conflict_row = first_row.replace(" ok", " FAILED")
+                else:
+                    conflict_row = re.sub(
+                        r" (FAILED|ignored)$", " ok", first_row)
+                dup_conflict = base_stdout.replace(
+                    first_row, first_row + "\n" + conflict_row, 1)
+                passed = int(summary_match.group(2))
+                wrong_summary = base_stdout.replace(
+                    "%d passed" % passed, "%d passed" % (passed + 1), 1)
+                wrong_running = base_stdout.replace(
+                    running_match.group(0),
+                    "running %d tests" % (
+                        int(running_match.group(1)) + 100), 1)
+
+                def _strict_rejects(text):
+                    try:
+                        require_native({"stdout": text}, "gallery")
+                    except CompatError:
+                        return True
+                    return False
+
+                checks.append(("native-stdout-duplicate-identical",
+                               _strict_rejects(dup_identical)))
+                checks.append(("native-stdout-duplicate-conflicting",
+                               _strict_rejects(dup_conflict)))
+                checks.append(("native-stdout-summary-count",
+                               _strict_rejects(wrong_summary)))
+                checks.append(("native-stdout-running-count",
+                               _strict_rejects(wrong_running)))
         # Gallery native/final durable controls: the SAME production
         # validator used by the publication path must reject empty,
         # partial, unexpected-name, duplicate, non-ok, missing/extra
@@ -6538,6 +6929,16 @@ def compare_gallery(cases, oracle, candidate, request=None):
         for key in GALLERY_CASE_IDS:
             cases[key] = False
         return diffs
+    # Exact result root keys on both sides: no silently dropped extra
+    # diagnostics. Both-sides identical extras must still fail.
+    for side, doc in (("oracle", oracle), ("candidate", candidate)):
+        if set(doc.keys()) != {"reads", "thumbs", "archives", "poststate"}:
+            diffs.append(f"gallery.root: {side} keys {sorted(doc.keys())} "
+                         f"!= exact ['archives', 'poststate', 'reads', "
+                         f"'thumbs']")
+            for key in GALLERY_CASE_IDS:
+                cases[key] = False
+            return diffs
     # Exact section presence/types/cardinality/per-row identity against the
     # existing request inventory BEFORE comparison. Missing/extra/reordered/
     # deduplicated rows cannot disappear, including BOTH sides shortened.
@@ -6666,6 +7067,17 @@ def compare_gallery(cases, oracle, candidate, request=None):
     # Schema-first poststate: before/after are mandatory on both sides.
     # Both-sides removal must fail, never None==None success. Strict bool
     # for has_login (bool is not int), strict object/list shapes otherwise.
+    # Exact poststate wrapper keys on both sides first: extra wrapper keys
+    # are rejected, never ignored.
+    for side, doc in (("oracle", oracle), ("candidate", candidate)):
+        wrapper = doc.get("poststate")
+        if not isinstance(wrapper, dict) or set(wrapper.keys()) != {"before", "after"}:
+            got = sorted(wrapper.keys()) if isinstance(wrapper, dict) else type(wrapper).__name__
+            diffs.append(f"gallery.poststate: {side} wrapper keys {got} "
+                         f"!= exact ['after', 'before']")
+            for key in GALLERY_CASE_IDS:
+                cases[key] = False
+            return diffs
     for phase in ("before", "after"):
         old_state = (oracle.get("poststate") or {}) if isinstance(oracle.get("poststate"), dict) else {}
         new_state = (candidate.get("poststate") or {}) if isinstance(candidate.get("poststate"), dict) else {}
@@ -6808,288 +7220,280 @@ def compare_gallery(cases, oracle, candidate, request=None):
                         diffs.append(f"gallery.poststate.{phase}.{side}.{holder}.{field}: must be bool, got {type(value).__name__}")
                         cases[f"gallery.poststate.{phase}"] = False
                         return diffs
-    for old, new in zip(oracle["reads"], candidate["reads"]):
-        # Exact row identity: GUID/FID/case must match row-for-row, no
-        # reorder/duplicate/wrong-GUID can hide. Check BEFORE any status/bytes
-        # comparison so a wrong GUID with same bytes still fails.
-        if (old.get("guid"), old.get("fid"), old.get("case")) != (new.get("guid"), new.get("fid"), new.get("case")):
-            key = old.get("case") or f"gallery.read.{old.get('guid')}.{old.get('fid')}"
-            diffs.append(f"{key}: row identity oracle {old.get('guid')}/{old.get('fid')}/{old.get('case')} != candidate {new.get('guid')}/{new.get('fid')}/{new.get('case')}")
+    for old, new, exp in zip(oracle["reads"], candidate["reads"],
+                             expected_request.get("reads", [])):
+        # Finite exact read grammar: branch by EXPECTED request identity
+        # only, then exact per-side key sets, strict types and pinned
+        # literals BEFORE any value comparison. Any unsupported request
+        # variant fails explicitly.
+        exp_pair = (exp.get("guid"), exp.get("fid"))
+        exp_case = exp.get("case")
+        key = exp_case or f"gallery.read.{exp.get('guid')}.{exp.get('fid')}"
+        if ((old.get("guid"), old.get("fid"), old.get("case"))
+                != (exp.get("guid"), exp.get("fid"), exp.get("case"))
+                or (new.get("guid"), new.get("fid"), new.get("case"))
+                != (exp.get("guid"), exp.get("fid"), exp.get("case"))):
+            diffs.append(f"{key}: row identity diverges from expected request")
             cases[key] = False
             continue
-        # Schema-first row shape: allowed keys only, strict types, no
-        # bool-as-int, no missing==missing success. Unknown keys never
-        # dropped silently.
-        _allowed_read_keys = {"guid", "fid", "case", "status", "mime", "bytes", "raised", "zip_error"}
+        if exp_pair == ("task-wait", "nope") and "case" not in exp:
+            want_old = {"guid", "fid", "raised"}
+            want_new = {"guid", "fid", "status"}
+        elif exp_pair == ("missing", "1") and "case" not in exp:
+            want_old = {"guid", "fid", "status"}
+            want_new = {"guid", "fid", "status"}
+        elif exp_pair == ("task-zip", "9") and "case" not in exp:
+            want_old = {"guid", "fid", "status", "zip_error"}
+            want_new = {"guid", "fid", "status"}
+        elif (exp_pair == ("task-outside", "1")
+                and exp_case == "delta.fd-outside-referent-denial"):
+            want_old = {"guid", "fid", "case", "status", "mime", "bytes"}
+            want_new = {"guid", "fid", "case", "status"}
+        elif exp_pair in (("task-wait", "1"), ("task-wait", "5"),
+                          ("task-zip", "2")) and "case" not in exp:
+            want_old = {"guid", "fid", "status", "mime", "bytes"}
+            want_new = {"guid", "fid", "status", "mime", "bytes"}
+        elif exp_pair[0] == "task-alias" and exp_case in (
+                "gallery.alias.relative", "gallery.alias.direct-absolute",
+                "gallery.alias.absolute-intermediate",
+                "gallery.alias.nested-reset",
+                "gallery.alias.parent-spelling"):
+            want_old = {"guid", "fid", "case", "status", "mime", "bytes"}
+            want_new = {"guid", "fid", "case", "status", "mime", "bytes"}
+        else:
+            diffs.append(f"{key}: unsupported read request identity "
+                         f"{exp_pair}/{exp_case}")
+            cases[key] = False
+            continue
+        shape_ok = True
+        if set(old.keys()) != want_old:
+            diffs.append(f"{key}: oracle keys {sorted(old.keys())} != "
+                         f"exact {sorted(want_old)}")
+            shape_ok = False
+        if set(new.keys()) != want_new:
+            diffs.append(f"{key}: candidate keys {sorted(new.keys())} != "
+                         f"exact {sorted(want_new)}")
+            shape_ok = False
+        if not shape_ok:
+            cases[key] = False
+            continue
+        type_ok = True
         for side, entry in (("oracle", old), ("candidate", new)):
-            unknown = sorted(set(entry.keys()) - _allowed_read_keys)
-            if unknown:
-                key = old.get("case") or f"gallery.read.{old.get('guid')}.{old.get('fid')}"
-                diffs.append(f"{key}: {side} has unknown keys {unknown}")
-                cases[key] = False
-                break
             if not _is_str(entry.get("guid")) or not _is_str(entry.get("fid")):
-                key = old.get("case") or f"gallery.read.{old.get('guid')}.{old.get('fid')}"
                 diffs.append(f"{key}: {side} guid/fid must be str")
-                cases[key] = False
+                type_ok = False
                 break
-            if "case" in entry and not _is_str(entry.get("case")):
-                key = old.get("case") or f"gallery.read.{old.get('guid')}.{old.get('fid')}"
-                diffs.append(f"{key}: {side} case must be str")
-                cases[key] = False
+            if "case" in entry and entry.get("case") != exp_case:
+                diffs.append(f"{key}: {side} case must be exactly "
+                             f"{exp_case!r}")
+                type_ok = False
                 break
             if "status" in entry and not _is_strict_int(entry.get("status")):
-                key = old.get("case") or f"gallery.read.{old.get('guid')}.{old.get('fid')}"
-                diffs.append(f"{key}: {side} status must be int (not bool), got {type(entry.get('status')).__name__}")
-                cases[key] = False
+                diffs.append(f"{key}: {side} status must be int (not bool)")
+                type_ok = False
                 break
             for field in ("mime", "bytes", "raised", "zip_error"):
                 if field in entry and not _is_str(entry.get(field)):
-                    key = old.get("case") or f"gallery.read.{old.get('guid')}.{old.get('fid')}"
                     diffs.append(f"{key}: {side} {field} must be str")
-                    cases[key] = False
+                    type_ok = False
                     break
-        else:
-            pass
-        if any(not isinstance(entry, dict) for entry in (old, new)):
+            if not type_ok:
+                break
+        if not type_ok:
+            cases[key] = False
             continue
-        # Check for schema failure markers set above by re-validating quickly:
-        # if any side has unknown/bad types, the key is already False; skip value logic.
-        _schema_failed = False
-        for entry in (old, new):
-            if set(entry.keys()) - _allowed_read_keys:
-                _schema_failed = True
-            if "status" in entry and not _is_strict_int(entry.get("status")):
-                _schema_failed = True
-        if _schema_failed:
-            continue
-        # Positive cases must actually succeed: both sides turning a
-        # success into failure is not a success proof.
-        _expected_200_reads = {("task-wait", "1"), ("task-wait", "5"), ("task-zip", "2"),
-                               ("task-alias", "6"), ("task-alias", "7"), ("task-alias", "9"),
-                               ("task-alias", "12"), ("task-alias", "14")}
-        _read_identity = (old.get("guid"), old.get("fid"))
-        if _read_identity in _expected_200_reads:
-            if old.get("status") != 200 or new.get("status") != 200:
-                key = old.get("case") or f"gallery.read.{old.get('guid')}.{old.get('fid')}"
-                diffs.append(f"{key}: expected 200 success, got oracle={old.get('status')} candidate={new.get('status')}")
-                cases[key] = False
-                continue
-            # 200 requires nonempty MIME and exact byte string on both sides.
-            for side, entry in (("oracle", old), ("candidate", new)):
-                if not _is_str(entry.get("mime")) or not entry.get("mime"):
-                    key = old.get("case") or f"gallery.read.{old.get('guid')}.{old.get('fid')}"
-                    diffs.append(f"{key}: {side} 200 requires nonempty mime")
-                    cases[key] = False
-                    break
-                if not _is_str(entry.get("bytes")):
-                    key = old.get("case") or f"gallery.read.{old.get('guid')}.{old.get('fid')}"
-                    diffs.append(f"{key}: {side} 200 requires bytes str")
-                    cases[key] = False
-                    break
-            else:
-                pass
-            if diffs and diffs[-1].startswith((old.get("case") or f"gallery.read.{old.get('guid')}.{old.get('fid')}") + ":") and cases.get(old.get("case") or f"gallery.read.{old.get('guid')}.{old.get('fid')}") is False:
-                continue
-        case_id = old.get("case")
-        if case_id in GALLERY_DELTA_CASES:
-            expected = GALLERY_DELTA_CASES[case_id]
-            old_ok = (old.get("status") == expected["oracle"]["status"]
-                      and old.get("mime") == expected["oracle"]["mime"]
-                      and old.get("bytes") == expected["oracle"]["bytes"])
-            new_ok = (new.get("status") == expected["candidate"]["status"]
-                      and new.get("bytes") == expected["candidate"]["bytes"])
-            cases[case_id] = old_ok and new_ok
-            if not cases[case_id]:
-                diffs.append(f"{case_id}: pinned delta mismatch "
-                             f"oracle={old} candidate={new}")
-            continue
-        key = case_id or f"gallery.read.{old['guid']}.{old['fid']}"
-        _read_pair = (old.get("guid"), old.get("fid"))
-        if _read_pair == ("task-wait", "nope"):
-            # Approved refusal delta ONLY on this identity: int("nope")
-            # raises ValueError in the reference without touching disk; the
-            # candidate answers a typed 400. Exact per-side shape required.
-            oracle_ok = (old.get("raised") == "ValueError"
-                         and "status" not in old
-                         and "bytes" not in old and "mime" not in old
-                         and "zip_error" not in old)
-            candidate_ok = (_is_strict_int(new.get("status"))
-                            and new.get("status") == 400
-                            and "raised" not in new
-                            and "bytes" not in new and "mime" not in new
-                            and "zip_error" not in new)
-            if oracle_ok and candidate_ok:
+        if exp_pair == ("task-wait", "nope"):
+            # Approved refusal delta ONLY on this identity: the reference
+            # raises ValueError without touching disk; the candidate
+            # answers a typed STRICT 400 (404 here is a wrong state).
+            if old.get("raised") == "ValueError" and new.get("status") == 400:
                 cases[key] = True
             else:
                 diffs.append(f"{key}: refusal mismatch {old} != {new}")
                 cases[key] = False
             continue
-        if _read_pair == ("missing", "1"):
-            # Unknown-gallery 404: both sides typed 404 with no refusal or
-            # payload fields. A ValueError/400 row here is a wrong identity
-            # for the approved task-wait/nope delta and must fail.
-            oracle_ok = (old.get("status") == 404
-                         and _is_strict_int(old.get("status"))
-                         and "raised" not in old and "zip_error" not in old
-                         and "bytes" not in old and "mime" not in old)
-            candidate_ok = (new.get("status") == 404
-                            and _is_strict_int(new.get("status"))
-                            and "raised" not in new and "zip_error" not in new
-                            and "bytes" not in new and "mime" not in new)
-            if oracle_ok and candidate_ok:
+        if exp_pair == ("missing", "1"):
+            # Unknown-gallery 404 on both sides. A ValueError/400 row here
+            # is the wrong identity for the approved nope delta.
+            if old.get("status") == 404 and new.get("status") == 404:
                 cases[key] = True
             else:
                 diffs.append(f"{key}: missing-404 mismatch {old} != {new}")
                 cases[key] = False
             continue
-        if _read_pair == ("task-zip", "9"):
-            # Pinned ZIP-entry refusal: the oracle records the real sieve
+        if exp_pair == ("task-zip", "9"):
+            # Pinned ZIP-entry refusal: oracle records the real sieve
             # diagnostic class KeyError with typed 404; the candidate
-            # answers typed 404. Any other class or shape must fail.
-            oracle_ok = (old.get("status") == 404
-                         and _is_strict_int(old.get("status"))
-                         and old.get("zip_error") == "KeyError"
-                         and "raised" not in old
-                         and "bytes" not in old and "mime" not in old)
-            candidate_ok = (new.get("status") == 404
-                            and _is_strict_int(new.get("status"))
-                            and "raised" not in new and "zip_error" not in new
-                            and "bytes" not in new and "mime" not in new)
-            if oracle_ok and candidate_ok:
+            # answers typed 404 with no diagnostic fields.
+            if (old.get("status") == 404
+                    and old.get("zip_error") == "KeyError"
+                    and new.get("status") == 404):
                 cases[key] = True
             else:
                 diffs.append(f"{key}: zip-404 mismatch {old} != {new}")
                 cases[key] = False
             continue
-        if old.get("raised") or new.get("status") in (400,):
-            # A refusal-shaped row outside the approved task-wait/nope
-            # identity is never valid, even when both sides agree.
-            diffs.append(f"{key}: unexpected refusal shape {old} != {new}")
+        if exp_case == "delta.fd-outside-referent-denial":
+            expected = GALLERY_DELTA_CASES[exp_case]
+            old_ok = (old.get("status") == expected["oracle"]["status"]
+                      and old.get("mime") == expected["oracle"]["mime"]
+                      and old.get("bytes") == expected["oracle"]["bytes"])
+            new_ok = new.get("status") == expected["candidate"]["status"]
+            cases[key] = old_ok and new_ok
+            if not cases[key]:
+                diffs.append(f"{key}: pinned delta mismatch "
+                             f"oracle={old} candidate={new}")
+            continue
+        # Plain and alias success rows: both sides 200 with nonempty MIME
+        # and exactly equal payloads. Both sides failing together is not
+        # a success proof.
+        if old.get("status") != 200 or new.get("status") != 200:
+            diffs.append(f"{key}: expected 200 success, got "
+                         f"oracle={old.get('status')} "
+                         f"candidate={new.get('status')}")
             cases[key] = False
             continue
-        if old.get("status") != new.get("status"):
-            diffs.append(f"{key}: status {old} != {new}")
+        mime_ok = True
+        for side, entry in (("oracle", old), ("candidate", new)):
+            if not entry.get("mime"):
+                diffs.append(f"{key}: {side} 200 requires nonempty mime")
+                mime_ok = False
+                break
+        if not mime_ok:
             cases[key] = False
             continue
-        if old.get("status") == 200 and (old.get("bytes") != new.get("bytes") or old.get("mime") != new.get("mime")):
+        if old.get("bytes") != new.get("bytes") or old.get("mime") != new.get("mime"):
             diffs.append(f"{key}: bytes/mime mismatch")
             cases[key] = False
             continue
         cases[key] = True
-    thumb_slugs = {"w=4&h=4": "resized", "w=4": "w-only", "": "passthrough",
-                   "w": "bad-query"}
-    for old, new in zip(oracle["thumbs"], candidate["thumbs"]):
-        # Schema-first: allowed keys only, strict types. Unknown keys never
-        # dropped silently; bool is not int; width/height must be strict ints.
-        _allowed_thumb_keys = {"guid", "fid", "query", "outcome", "mime", "width", "height", "bytes", "message", "class", "status"}
-        _thumb_bad = False
-        for side, entry in (("oracle", old), ("candidate", new)):
-            if set(entry.keys()) - _allowed_thumb_keys:
-                key = f"gallery.thumb.{old.get('guid')}.{old.get('fid')}.row-identity"
-                diffs.append(f"{key}: {side} has unknown keys {sorted(set(entry.keys()) - _allowed_thumb_keys)}")
+    for old, new, exp in zip(oracle["thumbs"], candidate["thumbs"],
+                             expected_request.get("thumbs", [])):
+        # Finite exact thumb grammar: branch by EXPECTED request identity
+        # only, then exact per-side key sets, strict types and pinned
+        # literals BEFORE any value comparison.
+        exp_triple = (exp.get("guid"), exp.get("fid"), exp.get("query", ""))
+        if ((old.get("guid"), old.get("fid"), old.get("query", ""))
+                != exp_triple
+                or (new.get("guid"), new.get("fid"), new.get("query", ""))
+                != exp_triple):
+            diffs.append("gallery.thumbs: row identity diverges from "
+                         "expected request")
+            for key in GALLERY_CASE_IDS:
                 cases[key] = False
-                _thumb_bad = True
-                break
-            for field in ("guid", "fid", "query", "outcome"):
-                if field in entry and not _is_str(entry.get(field)):
-                    key = f"gallery.thumb.{old.get('guid')}.{old.get('fid')}.row-identity"
-                    diffs.append(f"{key}: {side} {field} must be str")
-                    cases[key] = False
-                    _thumb_bad = True
-                    break
-            if _thumb_bad:
-                break
-            if "status" in entry and not _is_strict_int(entry.get("status")):
-                key = f"gallery.thumb.{old.get('guid')}.{old.get('fid')}.row-identity"
-                diffs.append(f"{key}: {side} status must be int (not bool)")
-                cases[key] = False
-                _thumb_bad = True
-                break
-            for field in ("width", "height"):
-                if field in entry and not _is_strict_int(entry.get(field)):
-                    key = f"gallery.thumb.{old.get('guid')}.{old.get('fid')}.row-identity"
-                    diffs.append(f"{key}: {side} {field} must be int (not bool)")
-                    cases[key] = False
-                    _thumb_bad = True
-                    break
-            if _thumb_bad:
-                break
-        if _thumb_bad:
             continue
-        if (old.get("guid"), old.get("fid"), old.get("query")) != (new.get("guid"), new.get("fid"), new.get("query")):
-            key = f"gallery.thumb.{old.get('guid')}.{old.get('fid')}.row-identity"
-            diffs.append(f"{key}: row identity oracle {old.get('guid')}/{old.get('fid')}/{old.get('query')} != candidate {new.get('guid')}/{new.get('fid')}/{new.get('query')}")
+        if exp_triple == ("task-wait", "1", "w"):
+            key = "gallery.thumb.task-wait.1.bad-query"
+            want_old = {"guid", "fid", "query", "outcome", "class"}
+            want_new = {"guid", "fid", "query", "outcome"}
+        elif exp_triple == ("task-wait", "nope", "w=4"):
+            key = "gallery.thumb.task-wait.nope.not-found"
+            want_old = {"guid", "fid", "query", "outcome"}
+            want_new = {"guid", "fid", "query", "outcome", "status"}
+        elif exp_triple == ("task-wait", "5", "w=4"):
+            key = "gallery.thumb.task-wait.5.decode"
+            want_old = {"guid", "fid", "query", "outcome", "class"}
+            want_new = {"guid", "fid", "query", "outcome", "message"}
+        elif exp_triple in (("task-wait", "1", "w=4&h=4"),
+                            ("task-wait", "1", "w=4")):
+            slug = {"w=4&h=4": "resized", "w=4": "w-only"}[exp_triple[2]]
+            key = f"gallery.thumb.task-wait.1.{slug}"
+            want_old = {"guid", "fid", "query", "outcome", "mime",
+                        "width", "height"}
+            want_new = {"guid", "fid", "query", "outcome", "mime",
+                        "width", "height"}
+        elif exp_triple == ("task-wait", "1", ""):
+            key = "gallery.thumb.task-wait.1.passthrough"
+            want_old = {"guid", "fid", "query", "outcome", "mime", "bytes"}
+            want_new = {"guid", "fid", "query", "outcome", "mime", "bytes"}
+        else:
+            diffs.append(f"gallery.thumbs: unsupported request identity "
+                         f"{exp_triple}")
+            for key in GALLERY_CASE_IDS:
+                cases[key] = False
+            continue
+        shape_ok = True
+        if set(old.keys()) != want_old:
+            diffs.append(f"{key}: oracle keys {sorted(old.keys())} != "
+                         f"exact {sorted(want_old)}")
+            shape_ok = False
+        if set(new.keys()) != want_new:
+            diffs.append(f"{key}: candidate keys {sorted(new.keys())} != "
+                         f"exact {sorted(want_new)}")
+            shape_ok = False
+        if not shape_ok:
             cases[key] = False
             continue
-        key = f"gallery.thumb.{old['guid']}.{old['fid']}.bad-query"
-        if old.get("query", "") == "w":
-            # `dict(q.split("="))` in the reference raises ValueError on a
-            # bare token and the connection aborts; the candidate answers a
-            # typed 400. Both refuse to serve pixels. The oracle diagnostic
-            # class is pinned: any other exception class must fail.
-            ok = (old.get("outcome") == "raised"
-                  and old.get("class") == "ValueError"
-                  and new.get("outcome") == "bad_query")
-            cases[key] = ok
-            if not ok:
-                diffs.append(f"{key}: bad-query mismatch {old} != {new}")
+        type_ok = True
+        for side, entry in (("oracle", old), ("candidate", new)):
+            for field in ("guid", "fid", "query", "outcome"):
+                if not _is_str(entry.get(field)):
+                    diffs.append(f"{key}: {side} {field} must be str")
+                    type_ok = False
+                    break
+            if not type_ok:
+                break
+            if "class" in entry and not _is_str(entry.get("class")):
+                diffs.append(f"{key}: {side} class must be str")
+                type_ok = False
+                break
+            if "message" in entry and not entry.get("message"):
+                diffs.append(f"{key}: {side} message must be a "
+                             f"nonempty str")
+                type_ok = False
+                break
+            if "status" in entry and not _is_strict_int(entry.get("status")):
+                diffs.append(f"{key}: {side} status must be int (not bool)")
+                type_ok = False
+                break
+            if "mime" in entry and not entry.get("mime"):
+                diffs.append(f"{key}: {side} mime must be a nonempty str")
+                type_ok = False
+                break
+            for field in ("width", "height"):
+                if field in entry and (
+                        not _is_strict_int(entry.get(field))
+                        or entry.get(field) <= 0):
+                    diffs.append(f"{key}: {side} {field} must be a "
+                                 f"positive int (not bool)")
+                    type_ok = False
+                    break
+            if not type_ok:
+                break
+            if "bytes" in entry and not _is_str(entry.get("bytes")):
+                diffs.append(f"{key}: {side} bytes must be str")
+                type_ok = False
+                break
+        if not type_ok:
+            cases[key] = False
             continue
-        slug = thumb_slugs.get(old.get("query", ""), old.get("query", ""))
-        # Positive thumbs must actually succeed: both sides turning a
-        # resized/passthrough into failure is not a success proof.
-        _thumb_identity = (old.get("guid"), old.get("fid"), old.get("query", ""))
-        _expected_resized = {("task-wait", "1", "w=4&h=4"), ("task-wait", "1", "w=4")}
-        _expected_passthrough = {("task-wait", "1", "")}
-        if _thumb_identity in _expected_resized:
-            if old.get("outcome") != "resized" or new.get("outcome") != "resized":
-                key = f"gallery.thumb.{old['guid']}.{old['fid']}.{slug}"
-                diffs.append(f"{key}: expected resized success, got oracle={old.get('outcome')} candidate={new.get('outcome')}")
+        if exp_triple == ("task-wait", "1", "w"):
+            # Bare `w` raises ValueError in the reference; the candidate
+            # answers bad_query with no pixels, no status, no message.
+            if (old.get("outcome") == "raised"
+                    and old.get("class") == "ValueError"
+                    and new.get("outcome") == "bad_query"):
+                cases[key] = True
+            else:
+                diffs.append(f"{key}: bad-query mismatch {old} != {new}")
                 cases[key] = False
-                continue
-            for side, entry in (("oracle", old), ("candidate", new)):
-                if not _is_str(entry.get("mime")) or not entry.get("mime"):
-                    key = f"gallery.thumb.{old['guid']}.{old['fid']}.{slug}"
-                    diffs.append(f"{key}: {side} resized requires nonempty mime")
-                    cases[key] = False
-                    break
-                for field in ("width", "height"):
-                    if not _is_strict_int(entry.get(field)) or entry.get(field) <= 0:
-                        key = f"gallery.thumb.{old['guid']}.{old['fid']}.{slug}"
-                        diffs.append(f"{key}: {side} resized requires positive int {field}")
-                        cases[key] = False
-                        break
-                if cases.get(f"gallery.thumb.{old['guid']}.{old['fid']}.{slug}") is False:
-                    break
-            if cases.get(f"gallery.thumb.{old['guid']}.{old['fid']}.{slug}") is False:
-                continue
-        if _thumb_identity in _expected_passthrough:
-            if old.get("outcome") != "passthrough" or new.get("outcome") != "passthrough":
-                key = f"gallery.thumb.{old['guid']}.{old['fid']}.passthrough"
-                diffs.append(f"{key}: expected passthrough success, got oracle={old.get('outcome')} candidate={new.get('outcome')}")
+            continue
+        if exp_triple == ("task-wait", "nope", "w=4"):
+            # The missing image short-circuits before any decode: the
+            # reference reports not_found; the candidate reports not_found
+            # with a typed STRICT 400 (404 here is a wrong state).
+            if (old.get("outcome") == "not_found"
+                    and new.get("outcome") == "not_found"
+                    and new.get("status") == 400):
+                cases[key] = True
+            else:
+                diffs.append(f"{key}: not-found mismatch {old} != {new}")
                 cases[key] = False
-                continue
-            for side, entry in (("oracle", old), ("candidate", new)):
-                if not _is_str(entry.get("mime")) or not entry.get("mime"):
-                    key = f"gallery.thumb.{old['guid']}.{old['fid']}.passthrough"
-                    diffs.append(f"{key}: {side} passthrough requires nonempty mime")
-                    cases[key] = False
-                    break
-                if not _is_str(entry.get("bytes")):
-                    key = f"gallery.thumb.{old['guid']}.{old['fid']}.passthrough"
-                    diffs.append(f"{key}: {side} passthrough requires bytes str")
-                    cases[key] = False
-                    break
-            if cases.get(f"gallery.thumb.{old['guid']}.{old['fid']}.passthrough") is False:
-                continue
-        # Preserve ONLY the exact registered decode delta on the invalid
-        # image: the oracle raises UnidentifiedImageError (PIL cannot decode
-        # ASCII-DATA-2) and the candidate answers a typed decode_error; both
-        # sides refuse to serve pixels. Any other oracle exception class, or
-        # a valid oracle thumbnail that becomes a decode failure, must fail.
-        if old.get("outcome") == "raised" or new.get("outcome") == "decode_error":
-            slug = "decode"
-            key = f"gallery.thumb.{old['guid']}.{old['fid']}.{slug}"
+            continue
+        if exp_triple == ("task-wait", "5", "w=4"):
+            # Invalid image bytes: the oracle raises
+            # UnidentifiedImageError; the candidate answers decode_error
+            # with a REQUIRED nonempty message. No success dimensions.
             if (old.get("outcome") == "raised"
                     and old.get("class") == "UnidentifiedImageError"
                     and new.get("outcome") == "decode_error"):
@@ -7098,108 +7502,161 @@ def compare_gallery(cases, oracle, candidate, request=None):
                 diffs.append(f"{key}: decode mismatch {old} != {new}")
                 cases[key] = False
             continue
-        key = f"gallery.thumb.{old['guid']}.{old['fid']}.{slug}"
-        if old.get("outcome") == "not_found" or new.get("outcome") == "not_found":
-            key = f"gallery.thumb.{old['guid']}.{old['fid']}.not-found"
-            cases[key] = old.get("outcome") == new.get("outcome")
-            if not cases[key]:
-                diffs.append(f"{key}: not-found mismatch")
-            continue
-        for field in ("mime", "width", "height"):
-            if old.get(field) != new.get(field):
-                diffs.append(f"{key}: {field} {old.get(field)} != {new.get(field)}")
-                cases[key] = False
-                break
-        else:
-            if slug == "passthrough" and old.get("bytes") != new.get("bytes"):
-                diffs.append(f"{key}: passthrough bytes differ")
+        # Resized and passthrough success rows: both sides succeed with
+        # exactly equal payloads. Both sides failing together is not a
+        # success proof.
+        if exp_triple[2] == "":
+            if old.get("outcome") != "passthrough" or new.get("outcome") != "passthrough":
+                diffs.append(f"{key}: expected passthrough success, got "
+                             f"oracle={old.get('outcome')} "
+                             f"candidate={new.get('outcome')}")
                 cases[key] = False
                 continue
-            cases[key] = cases.get(key, True)
-    for old, new in zip(oracle["archives"], candidate["archives"]):
-        if old.get("guid") != new.get("guid"):
-            key = f"gallery.archive.{old.get('guid')}"
-            diffs.append(f"{key}: row identity oracle {old.get('guid')} != candidate {new.get('guid')}")
+            if old.get("mime") != new.get("mime") or old.get("bytes") != new.get("bytes"):
+                diffs.append(f"{key}: passthrough payload differs")
+                cases[key] = False
+                continue
+            cases[key] = True
+            continue
+        if old.get("outcome") != "resized" or new.get("outcome") != "resized":
+            diffs.append(f"{key}: expected resized success, got "
+                         f"oracle={old.get('outcome')} "
+                         f"candidate={new.get('outcome')}")
             cases[key] = False
             continue
-        # Schema-first archives: allowed keys, strict types, positive 200
-        # must actually succeed with names/contents.
-        _allowed_archive_keys = {"guid", "status", "names", "contents", "comment", "raised", "returned", "class"}
-        _arch_bad = False
-        for side, entry in (("oracle", old), ("candidate", new)):
-            if set(entry.keys()) - _allowed_archive_keys:
-                key = f"gallery.archive.{old.get('guid')}"
-                diffs.append(f"{key}: {side} has unknown keys {sorted(set(entry.keys()) - _allowed_archive_keys)}")
-                cases[key] = False
-                _arch_bad = True
-                break
-            if not _is_str(entry.get("guid")):
-                key = f"gallery.archive.{old.get('guid')}"
-                diffs.append(f"{key}: {side} guid must be str")
-                cases[key] = False
-                _arch_bad = True
-                break
-            if "status" in entry and not (_is_strict_int(entry.get("status")) or _is_str(entry.get("status"))):
-                key = f"gallery.archive.{old.get('guid')}"
-                diffs.append(f"{key}: {side} status must be int or str")
-                cases[key] = False
-                _arch_bad = True
-                break
-        if _arch_bad:
+        if (old.get("mime") != new.get("mime")
+                or old.get("width") != new.get("width")
+                or old.get("height") != new.get("height")):
+            diffs.append(f"{key}: resized payload differs")
+            cases[key] = False
             continue
-        # Positive archives (task-wait, task-zip) must be 200 on both sides.
-        if old.get("guid") in ("task-wait", "task-zip"):
-            if old.get("status") != 200 or new.get("status") != 200:
-                key = f"gallery.archive.{old['guid']}"
-                diffs.append(f"{key}: expected 200 success, got oracle={old.get('status')} candidate={new.get('status')}")
-                cases[key] = False
-                continue
-            for side, entry in (("oracle", old), ("candidate", new)):
-                if not isinstance(entry.get("names"), list) or not entry.get("names"):
-                    key = f"gallery.archive.{old['guid']}"
-                    diffs.append(f"{key}: {side} 200 requires nonempty names list")
-                    cases[key] = False
-                    break
-                if not isinstance(entry.get("contents"), dict) or not entry.get("contents"):
-                    key = f"gallery.archive.{old['guid']}"
-                    diffs.append(f"{key}: {side} 200 requires nonempty contents dict")
-                    cases[key] = False
-                    break
-            if cases.get(f"gallery.archive.{old['guid']}") is False:
-                continue
-        key = f"gallery.archive.{old['guid']}"
-        if old.get("status") == "dropped":
-            # Reference bug: unknown guid yields a `(None, None)` tuple that
-            # `do_GET` feeds to `os.path.exists`, aborting the connection;
-            # the candidate answers 404. Pinned, not normalized away.
-            # Preserve ONLY this exact per-side delta: oracle dropped+tuple,
-            # candidate 404. Any success->failure injection must fail.
-            ok = (old.get("returned") == "tuple" and new.get("status") == 404)
-            cases[key] = ok
-            if not ok:
+        cases[key] = True
+    for old, new, exp in zip(oracle["archives"], candidate["archives"],
+                             expected_request.get("archives", [])):
+        # Finite exact archive grammar: branch by EXPECTED request guid
+        # only, then exact per-side key sets, strict types and pinned
+        # literals BEFORE any value comparison. Element types are
+        # validated BEFORE any set/hash operation (no unhashable crash).
+        exp_guid = exp.get("guid")
+        key = f"gallery.archive.{exp_guid}"
+        if old.get("guid") != exp_guid or new.get("guid") != exp_guid:
+            diffs.append(f"{key}: row guid diverges from expected request")
+            cases[key] = False
+            continue
+        if exp_guid in ("task-wait", "task-zip"):
+            want_old = {"guid", "status", "comment", "names", "contents"}
+            want_new = {"guid", "status", "comment", "names", "contents"}
+        elif exp_guid == "missing":
+            want_old = {"guid", "status", "returned"}
+            want_new = {"guid", "status"}
+        else:
+            diffs.append(f"{key}: unsupported archive request identity "
+                         f"{exp_guid}")
+            cases[key] = False
+            continue
+        shape_ok = True
+        if set(old.keys()) != want_old:
+            diffs.append(f"{key}: oracle keys {sorted(old.keys())} != "
+                         f"exact {sorted(want_old)}")
+            shape_ok = False
+        if set(new.keys()) != want_new:
+            diffs.append(f"{key}: candidate keys {sorted(new.keys())} != "
+                         f"exact {sorted(want_new)}")
+            shape_ok = False
+        if not shape_ok:
+            cases[key] = False
+            continue
+        if not _is_str(old.get("guid")) or not _is_str(new.get("guid")):
+            diffs.append(f"{key}: guid must be str")
+            cases[key] = False
+            continue
+        if exp_guid == "missing":
+            # Reference bug: unknown guid yields a `(None, None)` tuple
+            # that `do_GET` feeds to `os.path.exists`, aborting the
+            # connection; the candidate answers a typed STRICT 404.
+            if (old.get("status") == "dropped"
+                    and old.get("returned") == "tuple"
+                    and _is_strict_int(new.get("status"))
+                    and new.get("status") == 404):
+                cases[key] = True
+            else:
                 diffs.append(f"{key}: dropped-path mismatch {old} != {new}")
+                cases[key] = False
             continue
-        if old.get("status") != new.get("status"):
-            diffs.append(f"{key}: status {old} != {new}")
+        # Positive 200 rows: strict int status, REQUIRED nonempty comment,
+        # nonempty names list of unique strict strs, contents dict of
+        # strict str keys/values whose key SET is exactly names.
+        type_ok = True
+        for side, entry in (("oracle", old), ("candidate", new)):
+            if not _is_strict_int(entry.get("status")):
+                diffs.append(f"{key}: {side} status must be int (not bool)")
+                type_ok = False
+                break
+            if not _is_str(entry.get("comment")) or not entry.get("comment"):
+                diffs.append(f"{key}: {side} comment must be a "
+                             f"nonempty str")
+                type_ok = False
+                break
+            names = entry.get("names")
+            if not isinstance(names, list) or not names:
+                diffs.append(f"{key}: {side} names must be a nonempty list")
+                type_ok = False
+                break
+            if any(not _is_str(name) for name in names):
+                diffs.append(f"{key}: {side} names must all be str")
+                type_ok = False
+                break
+            if len(set(names)) != len(names):
+                diffs.append(f"{key}: {side} names must be unique")
+                type_ok = False
+                break
+            contents = entry.get("contents")
+            if not isinstance(contents, dict) or not contents:
+                diffs.append(f"{key}: {side} contents must be a "
+                             f"nonempty dict")
+                type_ok = False
+                break
+            if any(not _is_str(name) for name in contents.keys()):
+                diffs.append(f"{key}: {side} contents keys must all be str")
+                type_ok = False
+                break
+            if any(not _is_str(value) for value in contents.values()):
+                diffs.append(f"{key}: {side} contents values must all "
+                             f"be str")
+                type_ok = False
+                break
+            if set(contents.keys()) != set(names):
+                diffs.append(f"{key}: {side} contents keys must be "
+                             f"exactly names")
+                type_ok = False
+                break
+        if not type_ok:
             cases[key] = False
             continue
-        if old.get("status") == 200:
-            if old.get("names") != new.get("names"):
-                diffs.append(f"{key}: entries {old.get('names')} != {new.get('names')}")
-                cases[key] = False
-                continue
-            if old.get("contents") != new.get("contents"):
-                diffs.append(f"{key}: entry contents differ")
-                cases[key] = False
-                continue
-            old_comment = old.get("comment", "").replace("2.023-py", "2.023-")
-            if old_comment != new.get("comment", ""):
-                diffs.append(f"{key}: comment mismatch")
-                cases[key] = False
-                continue
-            cases[key] = True
-        else:
-            cases[key] = True
+        # Both sides must actually be 200: joint failure is not proof.
+        if old.get("status") != 200 or new.get("status") != 200:
+            diffs.append(f"{key}: expected 200 success, got "
+                         f"oracle={old.get('status')} "
+                         f"candidate={new.get('status')}")
+            cases[key] = False
+            continue
+        # Names ORDER is preserved by the value comparison; comment
+        # normalizes the known producer tag before comparing.
+        if old.get("names") != new.get("names"):
+            diffs.append(f"{key}: entries differ "
+                         f"{old.get('names')} != {new.get('names')}")
+            cases[key] = False
+            continue
+        if old.get("contents") != new.get("contents"):
+            diffs.append(f"{key}: entry contents differ")
+            cases[key] = False
+            continue
+        old_comment = old.get("comment").replace("2.023-py", "2.023-")
+        if old_comment != new.get("comment"):
+            diffs.append(f"{key}: comment mismatch")
+            cases[key] = False
+            continue
+        cases[key] = True
     # A gallery read never changes the task/session/queue/cookie/header/login
     # dimensions (the on-demand archive case legitimately publishes its own
     # sibling ZIP on disk, which the disk comparison already covers). Check
@@ -7865,7 +8322,8 @@ def run_suite(suite, output_root, upstream, target_dir):
         ready_native = []
         for run in native_runs:
             results, summary = require_native(run, suite)
-            ready_native.append({"results": results, "summary": summary, "argv": run["argv"]})
+            ready_native.append({"results": results, "summary": summary, "argv": run["argv"],
+                                 "stdout": run["stdout"]})
         merge_native_cases(suite, ready_native, cases)
         if suite == "gallery":
             # Exact native/final publication inventory on the existing
