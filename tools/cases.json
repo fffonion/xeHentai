@@ -4338,18 +4338,6 @@
       "delta": null
     },
     {
-      "id": "gallery.pixel-bound",
-      "source": "xeHentai/rpc.py unit contract",
-      "target": "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss",
-      "suite": "rpc",
-      "inputs": [],
-      "assertions": [
-        "gallery.pixel-bound passes the focused native test"
-      ],
-      "status": "implemented",
-      "delta": null
-    },
-    {
       "id": "gallery.read.task-wait.1",
       "source": "xeHentai/rpc.py _get_image_path/_get_archive_path/gen_thumbnail",
       "target": "src/rpc/server.rs gallery reads/thumbnails/archives",

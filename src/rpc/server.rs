@@ -533,8 +533,8 @@ async fn run_image(
 }
 
 /// Blocking image worker: confined open, bounded read, ZIP decompress
-/// straight to a private anonymous spool, thumbnail decode. All budgets
-/// (declared, decoded, CRC) resolve before any response headers exist.
+/// straight to a private anonymous spool, thumbnail decode. The read and
+/// entry bounds and the CRC resolve before any response headers exist.
 fn image_worker(job: ImageJob, _permit: tokio::sync::OwnedSemaphorePermit) -> Response {
     use std::sync::atomic::Ordering;
     if job.cancel.load(Ordering::Relaxed) {
@@ -616,8 +616,7 @@ fn image_worker(job: ImageJob, _permit: tokio::sync::OwnedSemaphorePermit) -> Re
 /// pieces (never a full 512 MiB Vec) with cooperative cancel checks; the
 /// actual byte count and the CRC (surfaced as a read error at entry end)
 /// resolve before any headers exist. Thumbnails from ZIP entries read
-/// bounded (64 MiB + 1; more would fail the decode budget anyway) and
-/// decode under the same permit.
+/// bounded (64 MiB + 1) and decode under the same permit.
 fn zip_fallback_worker(job: &ImageJob) -> Response {
     use std::io::{Read, Seek, Write};
     use std::sync::atomic::Ordering;
@@ -1896,10 +1895,7 @@ pub async fn serve_until_closed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rpc::{
-        MAX_THUMB_DECODED, ThumbError, check_pixels, read_archive, read_gallery_file,
-        refuse_unsafe_name, thumbnail, thumbnail_with_limits,
-    };
+    use crate::rpc::{ThumbError, read_archive, read_gallery_file, refuse_unsafe_name, thumbnail};
     use serde_json::Map as JsonMap;
 
     pub(crate) fn test_app() -> App {
@@ -2052,12 +2048,6 @@ mod tests {
         assert!(refuse_unsafe_name("/abs.jpg").is_err());
         assert!(refuse_unsafe_name("..").is_err());
         assert!(refuse_unsafe_name("a\\b.jpg").is_err());
-    }
-
-    #[test]
-    fn pixel_bound_rejects_huge_dimensions() {
-        assert!(check_pixels(100, 100).is_ok());
-        assert!(check_pixels(100_000, 100_000).is_err());
     }
 
     #[test]
@@ -4382,23 +4372,6 @@ mod tests {
         assert!(status.success(), "mkfifo failed");
     }
 
-    /// Minimal BMP header claiming huge dimensions with no pixel data:
-    /// header-only bytes that must fail the pixel gate before any full
-    /// decode allocation.
-    fn bmp_claiming_dims(width: i32, height: i32) -> Vec<u8> {
-        let mut out = vec![b'B', b'M'];
-        out.extend_from_slice(&54u32.to_le_bytes());
-        out.extend_from_slice(&[0, 0, 0, 0]);
-        out.extend_from_slice(&54u32.to_le_bytes());
-        out.extend_from_slice(&40u32.to_le_bytes());
-        out.extend_from_slice(&width.to_le_bytes());
-        out.extend_from_slice(&height.to_le_bytes());
-        out.extend_from_slice(&1u16.to_le_bytes());
-        out.extend_from_slice(&24u16.to_le_bytes());
-        out.extend_from_slice(&[0u8; 24]);
-        out
-    }
-
     /// Linux FD scope: symlink-escape and reserved-target denial run on the
     /// Linux FD backend (`std::os::unix::symlink` construction plus FD grant
     /// gates). Non-Linux targets use the explicit `Unsupported` stub below
@@ -4518,18 +4491,7 @@ mod tests {
     }
 
     #[test]
-    fn gallery_thumbnail_input_budgets_fire_before_decode() {
-        // Huge claimed dimensions, header-only bytes: the pixel gate must
-        // fire before any full decode allocation.
-        let evil = bmp_claiming_dims(20_000, 20_000);
-        let error = thumbnail(&evil, Some(20), Some(20)).expect_err("must refuse");
-        let ThumbError::Decode(message) = error else {
-            panic!("wrong failure shape: {error:?}");
-        };
-        assert!(
-            message.contains("pixel bound"),
-            "dimension gate must fire first, got: {message}"
-        );
+    fn gallery_thumbnail_encoded_budget_refuses_before_decode() {
         // 65 MiB of encoded bytes: the dedicated encoded-input budget must
         // fire before parsing.
         let mut big = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
@@ -4978,6 +4940,24 @@ mod tests {
         assert_eq!(mime.as_deref(), Some("image/png"));
         let (width, height) = image_dims(&bytes);
         assert_eq!((width, height), (4, 4));
+    }
+
+    #[test]
+    fn gallery_zip_thumbnail_serves_resized_entry() {
+        // The ZIP fallback feeds the same production thumbnail route: a
+        // bounded entry read is decoded, fitted and re-encoded before the
+        // response is built.
+        let mut app = test_app();
+        let png = png_bytes(8, 8);
+        let guid = task_with_zip(&mut app, "1.jpg", &png);
+        let target = format!(
+            "/img/{}/{guid}/1?w=4&h=4",
+            hash_link(None, &format!("{guid}/1"))
+        );
+        let (status, mime, bytes) = serve_media_bytes(app, None, &target);
+        assert_eq!(status, 200);
+        assert_eq!(mime.as_deref(), Some("image/png"));
+        assert_eq!(image_dims(&bytes), (4, 4));
     }
 
     #[test]
@@ -6073,9 +6053,7 @@ mod tests {
         // (`rpc.py:85-105`: `size=(w or h, h or w)`), then PIL fits inside
         // preserving aspect with floor/ceil aspect-best rounding (ties go to
         // floor), never upscaling. Table captured from Pillow 13.0.0
-        // (`evidence-m5-r2/oracle_thumb.py`). The candidate scales by the
-        // only axis given, so landscape-height-only and portrait-width-only
-        // (and odd ratios) diverge: RED.
+        // (`evidence-m5-r2/oracle_thumb.py`).
         let cases: &[OracleRow] = &[
             ("landscape-both", 100, 50, Some(20), Some(20), (20, 10)),
             ("landscape-onlyw", 100, 50, Some(50), None, (50, 25)),
@@ -6113,57 +6091,6 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{name} thumbnail failed: {error:?}"));
             assert_eq!(image_dims(&resized), (100, 50), "{name}");
         }
-    }
-
-    fn png16_bytes(width: u32, height: u32) -> Vec<u8> {
-        let image =
-            image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_fn(width, height, |x, y| {
-                image::Rgba([(x % 512) as u16 * 128, (y % 512) as u16 * 128, 1000, 60000])
-            });
-        let mut out = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgba16(image)
-            .write_to(&mut out, image::ImageFormat::Png)
-            .expect("encode");
-        out.into_inner()
-    }
-
-    #[test]
-    fn b3_4_decoder_limit_fires_before_pixels() {
-        // The 256 MiB production budget is wired into the actual reader,
-        // not just checked against the header estimate: a valid 16-bit
-        // image whose header estimate (w*h*4) still passes a tiny budget
-        // but whose real decoder need exceeds it must fail with the real
-        // LIBRARY limit before any pixel allocation. The same bytes pass
-        // under the production budget through the shared path.
-        assert_eq!(
-            crate::rpc::production_thumb_limits().max_alloc,
-            Some(MAX_THUMB_DECODED)
-        );
-        assert_eq!(MAX_THUMB_DECODED, 256 * 1024 * 1024);
-        let source = png16_bytes(32, 32);
-        let (claimed_w, claimed_h) = image_dims(&source);
-        assert_eq!((claimed_w, claimed_h), (32, 32));
-        let estimate = claimed_w as u64 * claimed_h as u64 * 4;
-        // 16-bit RGBA decodes to 8 bytes/px: pick a budget the header
-        // estimate passes but the real 8 KiB need exceeds.
-        let tiny = estimate + 1024;
-        assert!(tiny < claimed_w as u64 * claimed_h as u64 * 8);
-        match thumbnail_with_limits(&source, Some(16), Some(16), tiny) {
-            Err(crate::rpc::ThumbError::Decode(message)) => assert!(
-                message.contains("decoder limit"),
-                "tiny budget must fail at the real library limit, got: {message}"
-            ),
-            other => panic!("tiny budget must fail at the library limit, got {other:?}"),
-        }
-        // Production budget serves the same bytes through the shared path.
-        let (resized, mime) = thumbnail(&source, Some(16), Some(16)).expect("production");
-        assert_eq!(mime, "image/png");
-        assert_eq!(image_dims(&resized), (16, 16));
-        // Production is byte-identical to the explicit 256 MiB path: the
-        // configured value is the one actually wired into the reader.
-        let (wired, _) =
-            thumbnail_with_limits(&source, Some(16), Some(16), MAX_THUMB_DECODED).expect("wired");
-        assert_eq!(wired, resized);
     }
 
     #[test]

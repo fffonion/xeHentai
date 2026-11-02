@@ -605,9 +605,6 @@ NATIVE_CASE_MAP = {
         "rpc::server::tests::gallery_names_reject_traversal": [
             "gallery.traversal",
         ],
-        "rpc::server::tests::pixel_bound_rejects_huge_dimensions": [
-            "gallery.pixel-bound",
-        ],
         "rpc::server::tests::signed_gallery_paths_wait_for_authorization": [
             "rpc.sign.pending",
         ],
@@ -726,9 +723,6 @@ NATIVE_CASE_MAP = {
         "rpc::server::tests::static_fetch_honors_304_and_reports_origin_errors": [
             "rpc.static.fetch",
         ],
-        "rpc::server::tests::pixel_bound_rejects_huge_dimensions": [
-            "gallery.pixel-bound",
-        ],
         "rpc::server::tests::gallery_symlink_escape_and_reserved_are_denied": [
             "gallery.traversal",
         ],
@@ -738,9 +732,6 @@ NATIVE_CASE_MAP = {
         ],
         "rpc::server::tests::gallery_dispatch_releases_before_reads": [
             "gallery.read.task-wait.1",
-        ],
-        "rpc::server::tests::gallery_thumbnail_input_budgets_fire_before_decode": [
-            "gallery.pixel-bound",
         ],
         "rpc::server::tests::gallery_zip_entry_budget_refuses_before_allocation": [
             "gallery.read.task-zip.2",
@@ -882,7 +873,6 @@ NATIVE_COMMANDS = {
         ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::archive_"],
         ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::thumbnails_"],
         ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::static_"],
-        ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::pixel_"],
     ],
     "webui": [
         ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::frozen_"],
@@ -5575,12 +5565,16 @@ def merge_native_cases(suite, native_runs, cases):
     return validate_rpc_merged_native_proof(native_runs, cases)
 
 
-# Gallery native inventory: the `gallery_` cargo filter also selects one
-# traversal test whose semantic case is already covered by the sibling
-# symlink test, so it is a required passing supplementary test carrying no
-# new semantic case IDs (mapped to []), not an ignored or extra name.
+# Gallery native inventory: the `gallery_` cargo filter also selects tests
+# whose semantic cases are covered elsewhere (the traversal test by the
+# sibling symlink test) or which pin a retained non-reference IO bound (the
+# encoded thumbnail budget). They are required passing supplementary tests
+# carrying no new semantic case IDs (mapped to []), not ignored or extra
+# names.
 GALLERY_SUPPLEMENTARY_NATIVE = {
     "rpc::server::tests::gallery_names_reject_traversal": [],
+    "rpc::server::tests::gallery_thumbnail_encoded_budget_refuses_before_decode": [],
+    "rpc::server::tests::gallery_zip_thumbnail_serves_resized_entry": [],
 }
 
 

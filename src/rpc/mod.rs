@@ -17,8 +17,6 @@
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use image::ImageDecoder;
-
 use serde_json::{Map as JsonMap, Value};
 use vm::{
     CompileSourceFileOptions, HostApiBuilder, HostApiCatalog, HostFunctionRegistry, SourceFlavor,
@@ -1529,13 +1527,11 @@ pub enum ThumbError {
 /// A single given axis forms a SQUARE box from that axis
 /// (`size=(w or h, h or w)`); the box then fits the source preserving
 /// aspect with PIL's floor/ceil aspect-best rounding (exact integer math,
-/// ties go to floor), never upscaling. Decode happens behind explicit
-/// pre-allocation budgets: the encoded input is capped, the actual reader
-/// carries the 256 MiB allocation limit and the 64 MP pixel bound BEFORE
-/// any pixel allocation, and the decoded dimensions are re-checked
-/// afterwards (headers may lie). Output stays bounded by the never-upscale
-/// rule. Pixel content equivalence with the reference resampler is
-/// documented as mean-channel proximity, not byte identity.
+/// ties go to floor), never upscaling. Decoding, resizing and encoding use
+/// the `image` crate's own APIs; the reader receives the production
+/// allocation limit as a plain `image::Limits` setting. Output stays bounded
+/// by the never-upscale rule. Pixel content equivalence with the reference
+/// resampler is documented as mean-channel proximity, not byte identity.
 pub fn thumbnail(
     data: &[u8],
     width: Option<u32>,
@@ -1544,25 +1540,16 @@ pub fn thumbnail(
     thumbnail_with_limits(data, width, height, MAX_THUMB_DECODED)
 }
 
-/// The exact budget production wires into every thumbnail reader.
-pub(crate) fn production_thumb_limits() -> image::Limits {
-    thumb_limits(MAX_THUMB_DECODED)
-}
-
-/// Production decoder budget: 256 MiB of decoder allocation with the 64 MP
-/// pixel bound enforced separately by [`check_pixels`].
+/// Standard `image::Limits` allocation setting handed to the reader; the
+/// library owns how each decoder applies it.
 fn thumb_limits(max_alloc: u64) -> image::Limits {
     let mut limits = image::Limits::default();
-    limits.max_image_width = None;
-    limits.max_image_height = None;
     limits.max_alloc = Some(max_alloc);
     limits
 }
 
-/// [`thumbnail`] with an injectable allocation budget. Production always
-/// passes [`MAX_THUMB_DECODED`]; tests inject a tiny budget to prove the
-/// real library limit fires before any pixel allocation, on an image whose
-/// header estimate still passes.
+/// [`thumbnail`] with the `image` allocation limit named at the caller.
+/// Every production caller passes [`MAX_THUMB_DECODED`].
 pub(crate) fn thumbnail_with_limits(
     data: &[u8],
     width: Option<u32>,
@@ -1594,49 +1581,13 @@ pub(crate) fn thumbnail_with_limits(
         image::ImageFormat::WebP => "image/webp",
         _ => return Err(ThumbError::Decode("unsupported image format".into())),
     };
-    // The actual reader carries the allocation limit BEFORE any decoder
-    // allocation: header dimensions, per-decoder buffers and the final
-    // pixel allocation all face it, not the 512 MiB library default.
-    // Formats whose decoder cannot support the limit fail closed here.
-    let reader = image::ImageReader::new(std::io::Cursor::new(data))
-        .with_guessed_format()
-        .map_err(|error| ThumbError::Decode(error.to_string()))?;
-    let mut reader = reader;
+    // `guess_format` pinned the format above; decode is the library's own
+    // path, with the standard reader limits applied.
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(data), format);
     reader.limits(thumb_limits(max_alloc));
-    let decoder = reader
-        .into_decoder()
+    let image = reader
+        .decode()
         .map_err(|error| ThumbError::Decode(error.to_string()))?;
-    // Header dimensions through the limited decoder, before any pixels.
-    let (claimed_w, claimed_h) = decoder.dimensions();
-    check_pixels(claimed_w, claimed_h)?;
-    let decoded_bytes = (claimed_w as u64)
-        .checked_mul(claimed_h as u64)
-        .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or_else(|| ThumbError::Decode("thumbnail dimensions overflow".into()))?;
-    if decoded_bytes > MAX_THUMB_DECODED {
-        return Err(ThumbError::Decode(format!(
-            "thumbnail decoded allocation {decoded_bytes} bytes exceeds the {MAX_THUMB_DECODED}-byte bound"
-        )));
-    }
-    // Strict library gate on what the decoder is actually about to
-    // allocate (16-bit or high-channel content needs more than the
-    // header estimate): this fires before any pixel allocation.
-    let mut gate = thumb_limits(max_alloc);
-    gate.reserve(decoder.total_bytes())
-        .map_err(|error| ThumbError::Decode(format!("thumbnail decoder limit: {error}")))?;
-    let image = image::DynamicImage::from_decoder(decoder)
-        .map_err(|error| ThumbError::Decode(error.to_string()))?;
-    // The header may lie: re-check what was actually allocated.
-    check_pixels(image.width(), image.height())?;
-    let actual = (image.width() as u64)
-        .checked_mul(image.height() as u64)
-        .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or_else(|| ThumbError::Decode("thumbnail dimensions overflow".into()))?;
-    if actual > MAX_THUMB_DECODED {
-        return Err(ThumbError::Decode(format!(
-            "thumbnail decoded allocation {actual} bytes exceeds the {MAX_THUMB_DECODED}-byte bound"
-        )));
-    }
     let (src_w, src_h) = (image.width(), image.height());
     // Single-axis bounds form a square box from the given axis, exactly
     // like the reference `size=(w or h, h or w)`.
@@ -1723,16 +1674,6 @@ fn pick_height_fit(sw: u128, sh: u128, wc: u128, floor: u32, ceil: u32) -> u32 {
         floor as u32
     }
     .max(1)
-}
-
-pub fn check_pixels(width: u32, height: u32) -> Result<(), ThumbError> {
-    let pixels = width as u64 * height as u64;
-    if pixels > MAX_IMAGE_PIXELS {
-        return Err(ThumbError::Decode(format!(
-            "image {width}x{height} exceeds the {MAX_IMAGE_PIXELS}-pixel bound"
-        )));
-    }
-    Ok(())
 }
 
 /// Parse `w`/`h` thumbnail query args with the reference strictness
@@ -2108,15 +2049,11 @@ pub const STATIC_TTL: f64 = 3600.0;
 /// is an RPC contract, not the config-import 1 MiB budget.
 pub const MAX_JSONRPC_BODY: usize = 8 * 1024 * 1024;
 pub const MAX_HEAD_BYTES: usize = 32 * 1024;
-/// Native image decode bound: refuse images above 64 megapixels before any
-/// resize work, instead of trusting the container header.
-pub const MAX_IMAGE_PIXELS: u64 = 64 * 1024 * 1024;
 /// Dedicated thumbnail input budget: encoded sources above 64 MiB are refused
 /// before parsing. Separate from the ZIP-image entry budget below and never
 /// applied to raw `/zip` or ordinary passthrough file streaming.
 pub const MAX_THUMB_ENCODED: usize = 64 * 1024 * 1024;
-/// Decoded thumbnail allocation budget: `width * height * 4` bytes above
-/// 256 MiB are refused before the full pixel allocation.
+/// Standard `image::Limits` allocation setting for thumbnail decodes.
 pub const MAX_THUMB_DECODED: u64 = 256 * 1024 * 1024;
 /// Dedicated ZIP-image entry budget: a gallery ZIP fallback entry whose
 /// declared or actual uncompressed size passes 512 MiB is refused before

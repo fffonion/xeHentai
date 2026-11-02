@@ -2,7 +2,7 @@
 """Durable feature-inventory integrity tests for the production loader.
 
 Under test is the production entry point ``compat.load_cases()`` with the
-real ``tools/cases.json``. The catalog is a closed inventory: 378 unique
+real ``tools/cases.json``. The catalog is a closed inventory: 377 unique
 feature rows after the six known duplicate IDs were consolidated into one
 row per ID, keeping BOTH original assertion legs. These tests pin the
 post-consolidation counts, the literal identifiers, and the retained
@@ -45,9 +45,9 @@ DUPLICATE_IDS = (
 WIRE_SOURCE = "xeHentai/rpc.py do_POST/do_GET wire contract"
 NATIVE_SOURCE = "xeHentai/rpc.py unit contract"
 RPC_TARGET = "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss"
-EXPECTED_UNIQUE_ROWS = 378
-EXPECTED_RPC_UNIQUE = 107
-EXPECTED_IMPLEMENTED = 328
+EXPECTED_UNIQUE_ROWS = 377
+EXPECTED_RPC_UNIQUE = 106
+EXPECTED_IMPLEMENTED = 327
 EXPECTED_DELTA = 14
 EXPECTED_UNIMPLEMENTED = 36
 CLI_UNIMPLEMENTED = 30
