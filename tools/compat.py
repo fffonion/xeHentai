@@ -3959,6 +3959,19 @@ def run_oracle(oracle, request, root, upstream, log_path, locale=None, cwd=None)
     return json.loads(output_path.read_text(encoding="utf-8"))
 
 
+def _cargo_target_argv(argv, target_dir):
+    """Explicit leased target dir for every nested cargo invocation.
+
+    Complements (never replaces) the CARGO_TARGET_DIR environment: the flag
+    is inserted right after the cargo subcommand so `cargo test/check` and
+    friends build in slot-2 even if the environment were dropped.
+    """
+    out = list(argv)
+    if "--target-dir" not in out and len(out) >= 2:
+        out[2:2] = ["--target-dir", str(target_dir)]
+    return out
+
+
 def run_probe(suite, inputs, root, target_dir, log_path):
     request_path = root / "probe-request.json"
     output_path = root / "probe-candidate.json"
@@ -3971,16 +3984,19 @@ def run_probe(suite, inputs, root, target_dir, log_path):
     env["XEH_COMPAT_OUTPUT"] = str(output_path)
     env["CARGO_TERM_COLOR"] = "never"
     result = run_command(
-        [
-            "cargo",
-            "test",
-            "--bin",
-            "xeHentai",
-            "tests::compat_probe",
-            "--",
-            "--exact",
-            "--nocapture",
-        ],
+        _cargo_target_argv(
+            [
+                "cargo",
+                "test",
+                "--bin",
+                "xeHentai",
+                "tests::compat_probe",
+                "--",
+                "--exact",
+                "--nocapture",
+            ],
+            target_dir,
+        ),
         REPO,
         env,
         log_path,
@@ -4002,7 +4018,8 @@ def run_native(suite, root, target_dir):
     evidence = []
     for index, argv in enumerate(NATIVE_COMMANDS[suite], start=1):
         log_path = root / f"native-{index}.log"
-        result = run_command(argv, REPO, env, log_path)
+        result = run_command(
+            _cargo_target_argv(argv, target_dir), REPO, env, log_path)
         if result.returncode != 0:
             raise CompatError(f"native tests failed for {suite}: {' '.join(argv)}")
         _, summary = parse_test_results(result.stdout)
