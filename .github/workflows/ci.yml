@@ -140,28 +140,220 @@ jobs:
           PY
           "$XEH_PYTHON" tools/compat.py --verify-all --evidence "$evidence"
 
-  macos-compile:
-    name: macOS compile-only (no runtime verification)
-    runs-on: macos-14
-    timeout-minutes: 30
+  # The only native-platform gate: ONE real gallery-read test on each host.
+  # Compile-only was insufficient (see the M8 platform facts); this step runs
+  # the exact production consumer on native macOS and Windows. A failing test
+  # is a behavior failure; a setup/compile failure is recorded as
+  # infrastructure, never as behavior RED. Diagnostics are uploaded either way.
+  native-gallery-read:
+    name: Native gallery read (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-15-intel
+          - windows-2022
+    env:
+      CARGO_TERM_COLOR: never
+      NATIVE_GALLERY_READ_TEST: rpc::server::tests::native_gallery_read_serves_an_ordinary_file_verbatim
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
       - name: Install Rust 1.99.1
         run: |
           rustup toolchain install 1.99.1 --profile minimal --component clippy
           rustup default 1.99.1
-      - name: Strict Clippy (compile only)
-        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Native gallery read (real execution, exact test)
+        shell: bash
+        timeout-minutes: 45
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          # --- native-gallery-read-gate: begin ---
+          # Run ONE required native gallery-read test and refuse every outcome
+          # that would otherwise look successful without executing it: a
+          # filter matching no test still exits 0, so the executed count and
+          # the exact test name are checked here rather than in the shell.
+          import json
+          import os
+          import pathlib
+          import re
+          import subprocess
+          import sys
 
-  windows-compile:
-    name: Windows compile-only (no runtime verification)
-    runs-on: windows-2022
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install Rust 1.99.1
-        run: |
-          rustup toolchain install 1.99.1 --profile minimal --component clippy
-          rustup default 1.99.1
-      - name: Strict Clippy (compile only)
+          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+          sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+          TEST_NAME = os.environ["NATIVE_GALLERY_READ_TEST"]
+          WORKSPACE = os.environ["GITHUB_WORKSPACE"]
+          OUTDIR = pathlib.Path(os.environ["RUNNER_TEMP"]) / "native-gallery-read"
+          OUTDIR.mkdir(parents=True, exist_ok=True)
+
+
+          def run(argv, **kwargs):
+              return subprocess.run(
+                  argv,
+                  cwd=WORKSPACE,
+                  stdin=subprocess.DEVNULL,
+                  capture_output=True,
+                  text=True,
+                  encoding="utf-8",
+                  errors="replace",
+                  **kwargs,
+              )
+
+
+          def classify(stdout, returncode, test_name):
+              running = [
+                  int(count)
+                  for count in re.findall(r"^running (\d+) tests?$", stdout, re.M)
+              ]
+              summary = re.search(
+                  r"^test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; "
+                  r"(\d+) ignored;",
+                  stdout,
+                  re.M,
+              )
+              exact = (
+                  re.search(r"^test " + re.escape(test_name) + r" \.\.\. ok$", stdout, re.M)
+                  is not None
+              )
+              executed = running[0] if running else 0
+              passed = int(summary.group(1)) if summary else 0
+              failed = int(summary.group(2)) if summary else -1
+              if executed == 0:
+                  verdict = "ZERO_MATCH_REJECTED" if returncode == 0 else "INFRA_SETUP_OR_COMPILE"
+              elif returncode == 0 and failed == 0 and passed >= 1 and passed == executed and exact:
+                  verdict = "PASS"
+              elif returncode != 0:
+                  verdict = "BEHAVIOR_RED"
+              else:
+                  verdict = "INVALID_LIBTEST_SUMMARY"
+              return {
+                  "test_name": test_name,
+                  "executed": executed,
+                  "passed": passed,
+                  "failed": failed,
+                  "exact_test_name_observed": exact,
+                  "returncode": returncode,
+                  "verdict": verdict,
+              }
+
+
+          def fail(verdict, detail=None):
+              summary = {"test_name": TEST_NAME, "verdict": verdict}
+              if detail is not None:
+                  summary["detail"] = detail
+              (OUTDIR / "summary.json").write_text(
+                  json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+              )
+              print("native-gallery-read: verdict", verdict)
+              if detail is not None:
+                  print("native-gallery-read:", detail)
+              return 1
+
+
+          def main():
+              try:
+                  head = run(["git", "rev-parse", "HEAD"])
+              except OSError as error:
+                  return fail("INFRA_SETUP_OR_COMPILE", f"cannot invoke git: {error}")
+              source_sha = head.stdout.strip()
+              (OUTDIR / "source-sha.txt").write_text(source_sha + "\n", encoding="utf-8")
+              (OUTDIR / "git-head.json").write_text(
+                  json.dumps(
+                      {
+                          "returncode": head.returncode,
+                          "stdout": head.stdout,
+                          "stderr": head.stderr,
+                      },
+                      indent=2,
+                  )
+                  + "\n",
+                  encoding="utf-8",
+              )
+
+              argv = [
+                  "cargo",
+                  "test",
+                  "--bin",
+                  "xeHentai",
+                  "--locked",
+                  "--",
+                  "--exact",
+                  TEST_NAME,
+                  "--nocapture",
+              ]
+              (OUTDIR / "argv.json").write_text(
+                  json.dumps({"argv": argv, "cwd": WORKSPACE, "source_sha": source_sha}, indent=2)
+                  + "\n",
+                  encoding="utf-8",
+              )
+              print("native-gallery-read: source", source_sha)
+              print("native-gallery-read: argv", json.dumps(argv))
+              try:
+                  proc = run(argv, timeout=2400)
+              except subprocess.TimeoutExpired as error:
+                  (OUTDIR / "stdout.txt").write_text(
+                      error.stdout or "", encoding="utf-8", errors="replace"
+                  )
+                  (OUTDIR / "stderr.txt").write_text(
+                      error.stderr or "", encoding="utf-8", errors="replace"
+                  )
+                  return fail("INFRA_TIMEOUT", f"cargo test exceeded the bound: {argv}")
+              except OSError as error:
+                  return fail("INFRA_SETUP_OR_COMPILE", f"cannot invoke cargo: {error}")
+
+              (OUTDIR / "stdout.txt").write_text(proc.stdout, encoding="utf-8")
+              (OUTDIR / "stderr.txt").write_text(proc.stderr, encoding="utf-8")
+              print("--- cargo test stdout ---")
+              print(proc.stdout)
+              print("--- cargo test stderr ---")
+              print(proc.stderr)
+
+              result = classify(proc.stdout, proc.returncode, TEST_NAME)
+              result["source_sha"] = source_sha
+              result["argv"] = argv
+              result["cwd"] = WORKSPACE
+              (OUTDIR / "summary.json").write_text(
+                  json.dumps(result, indent=2) + "\n", encoding="utf-8"
+              )
+              print("native-gallery-read: verdict", result["verdict"], json.dumps(result))
+              if result["verdict"] == "PASS":
+                  return 0
+              if result["verdict"] == "BEHAVIOR_RED":
+                  print(
+                      "native-gallery-read: the required test executed and FAILED "
+                      "on this platform; that is a behavior failure."
+                  )
+              elif result["verdict"] == "ZERO_MATCH_REJECTED":
+                  print(
+                      "native-gallery-read: cargo exited 0 without executing the "
+                      "required test; the zero-match pass is refused."
+                  )
+              elif result["verdict"] == "INFRA_SETUP_OR_COMPILE":
+                  print(
+                      "native-gallery-read: cargo failed before executing the test; "
+                      "treat this as infrastructure/setup, not as behavior RED."
+                  )
+              return 1
+
+
+          if __name__ == "__main__":
+              sys.exit(main())
+          # --- native-gallery-read-gate: end ---
+          PY
+      - name: Strict Clippy (all targets)
         run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Upload native gallery read diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-gallery-read-${{ matrix.os }}
+          path: ${{ runner.temp }}/native-gallery-read
+          retention-days: 7
+          if-no-files-found: warn

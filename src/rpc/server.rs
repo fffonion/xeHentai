@@ -3670,6 +3670,41 @@ mod tests {
         assert!(read_gallery_file(&app, &guid, "3").is_err());
     }
 
+    /// Known English bytes for the native gallery-read tracer. The payload is
+    /// transport evidence, not an encoded image: `/img` serves the ordinary
+    /// file's bytes verbatim and takes the MIME from the file name, so a
+    /// difference here is a read defect rather than image codec behaviour.
+    const NATIVE_GALLERY_READ_BYTES: &[u8] =
+        b"xeHentai native gallery read: ordinary file, known English bytes.\n";
+
+    /// ONE native gallery-read contract, identical on Linux, macOS and
+    /// Windows: a real App/Task fixture owns one ordinary regular file, and
+    /// the public consumer `read_gallery_file` must return that file's exact
+    /// bytes plus the reference MIME.
+    ///
+    /// There is no platform branch, skip, `#[ignore]` or error expectation
+    /// here. A host whose native read path is still unimplemented fails this
+    /// test; that failure is the intended native RED, never a silently
+    /// filtered `Unsupported` pass.
+    #[test]
+    fn native_gallery_read_serves_an_ordinary_file_verbatim() {
+        let mut app = test_app();
+        let guid = task_with_image(&mut app, "1.jpg", NATIVE_GALLERY_READ_BYTES);
+        let (bytes, mime) = read_gallery_file(&app, &guid, "1")
+            .expect("an ordinary gallery file must be served verbatim on every supported host");
+        assert_eq!(
+            bytes, NATIVE_GALLERY_READ_BYTES,
+            "served bytes must be the ordinary file's exact bytes"
+        );
+        assert_eq!(
+            mime, "image/jpeg",
+            "the reference MIME follows the ordinary file's name"
+        );
+        // The same public consumer must resolve the task's renamed fid to it.
+        let (renamed, _) = read_gallery_file(&app, &guid, "5").expect("renamed fid");
+        assert_eq!(renamed, NATIVE_GALLERY_READ_BYTES);
+    }
+
     // --- M5 frozen directory observations (snapshot boundary) ---------------
 
     /// Exact name of the child helper below. The parent drives it through
