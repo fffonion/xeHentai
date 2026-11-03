@@ -1921,7 +1921,9 @@ pub async fn serve_until_closed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rpc::{ThumbError, read_archive, read_gallery_file, refuse_unsafe_name, thumbnail};
+    #[cfg(target_os = "linux")]
+    use crate::rpc::read_archive;
+    use crate::rpc::{ThumbError, read_gallery_file, refuse_unsafe_name, thumbnail};
     use serde_json::Map as JsonMap;
 
     pub(crate) fn test_app() -> App {
@@ -2125,22 +2127,22 @@ mod tests {
             RequestAction::Ready(response) => assert_eq!(response.status, 403),
             other => panic!("expected ready refusal, got {other:?}"),
         }
-        // Serving the signed URL returns the exact file bytes on the Linux
-        // FD backend; non-Linux denies via the explicit Unsupported stub
-        // before any ambient open.
-        #[cfg(target_os = "linux")]
+        // Serving the signed URL returns the exact file bytes on the
+        // confined Linux/macOS backend; Windows denies via the explicit
+        // Unsupported stub before any ambient open.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let (status, mime, bytes) = serve_media_bytes(app, None, first);
             assert_eq!(status, 200);
             assert_eq!(mime.as_deref(), Some("image/jpeg"));
             assert_eq!(bytes, png);
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let (status, _, _) = serve_media_bytes(app, None, first);
             assert_eq!(
                 status, 404,
-                "non-Linux gallery reads must deny without a payload"
+                "unported platforms must deny gallery reads without a payload"
             );
         }
     }
@@ -2182,20 +2184,20 @@ mod tests {
             RequestAction::Ready(response) => assert_eq!(response.status, 403),
             other => panic!("expected a refusal, got {other:?}"),
         }
-        // The Linux FD backend serves the payload; non-Linux denies via
-        // the explicit Unsupported stub before any ambient open.
-        #[cfg(target_os = "linux")]
+        // The confined Linux/macOS backend serves the payload; Windows denies
+        // via the explicit Unsupported stub before any ambient open.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let (status, _, bytes) = serve_media_bytes(app, Some("s3cret".to_string()), first);
             assert_eq!(status, 200);
             assert_eq!(bytes, png);
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let (status, _, _) = serve_media_bytes(app, Some("s3cret".to_string()), first);
             assert_eq!(
                 status, 404,
-                "non-Linux gallery reads must deny without a payload"
+                "unported platforms must deny gallery reads without a payload"
             );
         }
     }
@@ -2237,27 +2239,28 @@ mod tests {
         assert_eq!(hash_link(None, "guid1/1").len(), 8);
         assert_ne!(hash_link(None, "guid1/1"), hash_link(None, "guid1/2"));
         assert_ne!(hash_link(Some("s"), "guid1/1"), hash_link(None, "guid1/1"));
-        // A valid /img signature serves the exact file bytes on Linux; a
-        // valid /zip signature streams the built archive bytes. Non-Linux
-        // denies both via the explicit Unsupported stub.
+        // A valid /img signature serves the exact file bytes on the confined
+        // Linux/macOS backend; a valid /zip signature streams the built
+        // archive bytes. Windows denies both via the explicit Unsupported
+        // stub.
         let image_path = format!("/img/{}/{guid}/1", hash_link(None, &format!("{guid}/1")));
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let (status, mime, bytes) = serve_media_bytes(app, None, &image_path);
             assert_eq!(status, 200);
             assert_eq!(mime.as_deref(), Some("image/jpeg"));
             assert_eq!(bytes, png);
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let (status, _, _) = serve_media_bytes(app, None, &image_path);
             assert_eq!(
                 status, 404,
-                "non-Linux gallery reads must deny without a payload"
+                "unported platforms must deny gallery reads without a payload"
             );
         }
         // A valid /zip signature streams the built archive bytes.
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let mut app = test_app();
             let zip_guid = task_with_image(&mut app, "1.jpg", &png_bytes(8, 8));
@@ -2267,7 +2270,7 @@ mod tests {
             assert_eq!(mime.as_deref(), Some("application/zip"));
             assert!(bytes.starts_with(b"PK"));
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let mut app = test_app();
             let zip_guid = task_with_image(&mut app, "1.jpg", &png_bytes(8, 8));
@@ -2275,7 +2278,7 @@ mod tests {
             let (status, _, _) = serve_media_bytes(app, None, &zip_path);
             assert_eq!(
                 status, 404,
-                "non-Linux archive reads must deny without a payload"
+                "unported platforms must deny archive reads without a payload"
             );
         }
     }
@@ -4501,8 +4504,9 @@ mod tests {
     }
 
     /// Linux FD scope: dispatch must release before any FIFO read. The FIFO
-    /// itself needs Unix `mkfifo`, and the non-blocking dispatch guarantee is
-    /// a Linux FD property. Non-Linux targets use the `Unsupported` stub.
+    /// itself needs Unix `mkfifo`, and the non-blocking dispatch guarantee
+    /// asserted here is the Linux FD property. Other targets use the
+    /// `Unsupported` stub.
     #[cfg(target_os = "linux")]
     #[test]
     fn gallery_dispatch_releases_before_reads() {
@@ -4530,14 +4534,14 @@ mod tests {
             .expect("dispatch blocked on a media read");
     }
 
-    /// Non-Linux stub scope: every gallery payload read is an explicit
+    /// Unported-platform scope: every gallery payload read is an explicit
     /// `Unsupported` denial before any ambient open. There is no portable
-    /// fallback; the full non-Linux functional port stays an M8 item. This
-    /// test never runs on Linux (it is compiled out there) and never claims a
-    /// cross-target PASS — it only pins the non-native surface.
-    #[cfg(not(target_os = "linux"))]
+    /// fallback; the Windows functional port stays an M8 item. Linux and macOS
+    /// do not compile this branch: their confined backend is asserted by the
+    /// tests above.
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     #[test]
-    fn gallery_non_linux_reports_unsupported() {
+    fn gallery_unported_platform_reports_unsupported() {
         let mut app = test_app();
         let png = png_bytes(8, 8);
         let guid = task_with_image(&mut app, "1.jpg", &png);
@@ -4545,9 +4549,9 @@ mod tests {
             Err(fail) => assert_eq!(
                 fail.status(),
                 404,
-                "non-Linux gallery reads must deny without a payload"
+                "unported platforms must deny gallery reads without a payload"
             ),
-            Ok(_) => panic!("non-Linux gallery reads must never serve bytes"),
+            Ok(_) => panic!("unported platforms must never serve gallery bytes"),
         }
     }
 
@@ -5934,9 +5938,9 @@ mod tests {
             Err(error) => panic!("swapped gallery root must be denied, got {error:?}"),
         }
         // (e) Control: a legitimate inside-root alias still serves, and a
-        // normal regular file is unaffected. Linux FD backend serves the
-        // payload; non-Linux denies via the explicit Unsupported stub
-        // before any ambient open (no portable fallback).
+        // normal regular file is unaffected. The confined Linux/macOS backend
+        // serves the payload; other targets deny via the explicit Unsupported
+        // stub before any ambient open (no portable fallback).
         let mut app = test_app();
         let png = png_bytes(16, 16);
         let guid = task_with_image(&mut app, "1.jpg", &png);
@@ -5945,7 +5949,7 @@ mod tests {
         std::fs::rename(snap.root.join(&snap.name), &real).expect("move");
         #[cfg(unix)]
         std::os::unix::fs::symlink("real.jpg", snap.root.join(&snap.name)).expect("alias");
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         match probe_gallery_file(&snap) {
             Ok(crate::rpc::OpenOutcome::File(mut opened)) => {
                 use std::io::Read;
@@ -5955,17 +5959,17 @@ mod tests {
             }
             _ => panic!("inside-root alias must serve"),
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         match probe_gallery_file(&snap) {
             Ok(crate::rpc::OpenOutcome::Denied) => {}
-            Ok(_) => panic!("non-Linux alias must deny via Unsupported, got File/Missing"),
-            Err(_) => panic!("non-Linux alias must deny via Unsupported, got Err"),
+            Ok(_) => panic!("unported alias must deny via Unsupported, got File/Missing"),
+            Err(_) => panic!("unported alias must deny via Unsupported, got Err"),
         }
         let mut app = test_app();
         let png = png_bytes(16, 16);
         let guid = task_with_image(&mut app, "1.jpg", &png);
         let snap = snapshot_gallery_file(&app, &guid, "1").expect("snap");
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         match probe_gallery_file(&snap) {
             Ok(crate::rpc::OpenOutcome::File(mut opened)) => {
                 use std::io::Read;
@@ -5975,11 +5979,11 @@ mod tests {
             }
             _ => panic!("regular file must serve"),
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         match probe_gallery_file(&snap) {
             Ok(crate::rpc::OpenOutcome::Denied) => {}
-            Ok(_) => panic!("non-Linux regular file must deny via Unsupported, got File/Missing"),
-            Err(_) => panic!("non-Linux regular file must deny via Unsupported, got Err"),
+            Ok(_) => panic!("unported regular file must deny via Unsupported, got File/Missing"),
+            Err(_) => panic!("unported regular file must deny via Unsupported, got Err"),
         }
     }
 

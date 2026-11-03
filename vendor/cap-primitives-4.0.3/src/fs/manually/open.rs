@@ -10,7 +10,6 @@ use crate::fs::{
 };
 #[cfg(any(target_os = "android", target_os = "linux", target_os = "freebsd"))]
 use rustix::fs::OFlags;
-use std::borrow::Cow;
 use std::ffi::OsStr;
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
@@ -66,7 +65,7 @@ struct Context<'start> {
 
     /// Optional host-absolute symlink prefix. `None` keeps the historical
     /// name-based expansion and absolute-literal escape for every caller.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     absolute_prefix: Option<PathBuf>,
 
     #[cfg(racy_asserts)]
@@ -136,7 +135,7 @@ impl<'start> Context<'start> {
 
             reuse: PathBuf::new(),
 
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             absolute_prefix: _options.absolute_prefix.clone(),
 
             #[cfg(racy_asserts)]
@@ -329,6 +328,11 @@ impl<'start> Context<'start> {
     }
 
     /// Dereference one symlink level.
+    ///
+    /// With the opt-in absolute-prefix policy, Linux reads the link literal
+    /// from one `O_PATH|O_NOFOLLOW` descriptor (`symlink_same_fd`). macOS has
+    /// no `O_PATH`, so it reads the literal by name from the captured
+    /// directory: confinement is identical, the descriptor property is not.
     fn symlink(&mut self, one: &OsStr, symlink_count: &mut u8) -> io::Result<()> {
         #[cfg(target_os = "linux")]
         if self.absolute_prefix.is_some() {
@@ -392,7 +396,7 @@ impl<'start> Context<'start> {
     /// directory handle (and its canonical-path component) until `base` is the
     /// caller-provided root again. Never resets the symlink hop count or the
     /// trailing dot/slash flags, and never jumps to the host root.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn reset_to_captured_start(&mut self) {
         while let Some(dir) = self.dirs.pop() {
             self.base = dir;
@@ -410,7 +414,7 @@ impl<'start> Context<'start> {
         // Opt-in host-absolute prefix: component-wise strip, then reset to the
         // original captured start and resolve the remainder beneath it. The
         // literal is never normalized and `..` keeps its verbatim meaning.
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some(prefix) = &self.absolute_prefix {
             if destination.is_absolute() {
                 let remainder = match destination.strip_prefix(prefix) {

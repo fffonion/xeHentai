@@ -15,9 +15,9 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use regex::Regex;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use cap_primitives::fs as capfs;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use cap_primitives::fs::OpenOptionsExt as _;
 
 use super::{FidKey, RenameError, Task, TaskError};
@@ -382,7 +382,8 @@ pub type DirIdentity = (u64, u64);
 /// `Present` carries the exact identity the path had when it was observed,
 /// `Missing` is a genuine `NotFound`, and `Unavailable` is every other
 /// outcome: an existing non-directory (FIFO, socket, regular file, device), a
-/// permission or probe error, or a target outside the confined Linux backend.
+/// permission or probe error, or a target outside the confined backend
+/// (Linux and macOS).
 /// Only `Present` can authorize an open, and that open must still
 /// match the recorded identity. A `Missing`/`Unavailable` observation can
 /// never be promoted to `Present`, not even after a wait or a later
@@ -428,9 +429,9 @@ pub fn observe_directory(path: &Path) -> DirectoryObservation {
 }
 
 /// Typed denial for a path that was observed but cannot carry directory
-/// authority for this request. Shared by the confined Linux backend and the
-/// non-Linux `Unsupported` surface so both report the same denial class
-/// instead of a missing leaf.
+/// authority for this request. Shared by the confined Linux/macOS backend and
+/// the `Unsupported` surface of every other target so both report the same
+/// denial class instead of a missing leaf.
 fn unavailable_denial(path: &Path, kind: std::io::ErrorKind) -> TaskError {
     TaskError::UnsafePath {
         path: path.to_path_buf(),
@@ -462,8 +463,8 @@ fn unavailable_reason(kind: std::io::ErrorKind) -> &'static str {
 //    gallery component as the only root provenance;
 // 3. the frozen pre-permit directory observations as the only binding;
 // 4. the accepted mature `cap-primitives` 4.0.3 resolver for the loose leaf
-//    (including the reviewed Linux `open_with_absolute_prefix` literal
-//    rebase) and for descriptor-relative enumeration;
+//    (including the reviewed `open_with_absolute_prefix` literal rebase on
+//    Linux and macOS) and for descriptor-relative enumeration;
 // 5. a single-component `openat` for archive entries, with the same-descriptor
 //    type and private-identity verdict before any byte is copied.
 // ---------------------------------------------------------------------------
@@ -856,7 +857,7 @@ impl PrivatePolicy {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Debug)]
 /// Frozen read authority for exactly one gallery.
 ///
@@ -873,7 +874,7 @@ pub struct GalleryGrant {
     private: PrivatePolicy,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl GalleryGrant {
     /// Sealed to the owning task module: a grant is only minted by
     /// [`TaskFiles::grant`] from the fixed authorized root, the validated
@@ -1089,7 +1090,7 @@ impl GalleryGrant {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 /// The captured descriptors behind one [`GalleryGrant`].
 struct Rooted {
     parent: File,
@@ -1097,7 +1098,7 @@ struct Rooted {
     gallery_spelling: PathBuf,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 /// A captured gallery directory for descriptor-relative enumeration.
 pub struct CapturedGalleryDir {
     dir: File,
@@ -1105,14 +1106,14 @@ pub struct CapturedGalleryDir {
     private: PrivatePolicy,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 /// What one archive entry descriptor turned out to be.
 pub enum OpenedEntry {
     Directory,
     File(File),
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl CapturedGalleryDir {
     /// Entry names as raw `OsString` bytes, sorted bytewise. `.`/`..` are
     /// filtered by the resolver.
@@ -1169,7 +1170,12 @@ impl CapturedGalleryDir {
             path: full.clone(),
             source: std::io::Error::from_raw_os_error(error.raw_os_error()),
         })?;
+        // `st_dev` is 32-bit on macOS and 64-bit on Linux; the product
+        // identity is the normalized 64-bit `(dev, ino)` pair on both.
+        #[cfg(target_os = "linux")]
         let id = (stat.st_dev, stat.st_ino);
+        #[cfg(target_os = "macos")]
+        let id = (stat.st_dev as u64, stat.st_ino);
         match rustix::fs::FileType::from_raw_mode(stat.st_mode) {
             rustix::fs::FileType::Directory => Ok(OpenedEntry::Directory),
             rustix::fs::FileType::RegularFile => {
@@ -1212,7 +1218,7 @@ fn check_leaf(leaf: &OsStr) -> Result<(), TaskError> {
 /// Read-only, non-blocking open options for every payload descriptor. O_NONBLOCK
 /// only exists to keep a FIFO from stalling the open; it is cleared from the
 /// returned descriptor after the regular-file and private-identity verdicts.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn leaf_options() -> capfs::OpenOptions {
     let mut options = capfs::OpenOptions::new();
     options
@@ -1222,7 +1228,7 @@ fn leaf_options() -> capfs::OpenOptions {
 }
 
 /// Identity and regularity of an opened descriptor, taken from that descriptor.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn descriptor_verdict(file: &File, path: &Path) -> Result<(FileId, bool), TaskError> {
     use std::os::unix::fs::MetadataExt;
     let metadata = file.metadata().map_err(|source| TaskError::Io {
@@ -1236,7 +1242,7 @@ fn descriptor_verdict(file: &File, path: &Path) -> Result<(FileId, bool), TaskEr
     ))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn descriptor_identity(file: &File, path: &Path) -> Result<FileId, TaskError> {
     use std::os::unix::fs::MetadataExt;
     let metadata = file.metadata().map_err(|source| TaskError::Io {
@@ -1248,7 +1254,7 @@ fn descriptor_identity(file: &File, path: &Path) -> Result<FileId, TaskError> {
 
 /// Clear `O_NONBLOCK` (set only to avoid hangs while opening) so the
 /// returned file has ordinary blocking semantics for the streaming reader.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn clear_nonblock(file: File, path: &Path) -> Result<File, TaskError> {
     rustix::fs::fcntl_setfl(&file, rustix::fs::OFlags::empty()).map_err(|error| TaskError::Io {
         path: path.to_path_buf(),
@@ -1257,7 +1263,7 @@ fn clear_nonblock(file: File, path: &Path) -> Result<File, TaskError> {
     Ok(file)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 /// Diagnosis for a denied gallery leaf. The variant is a label; the contract is
 /// "denied, no bytes, no fallback".
 fn leaf_denial_reason(error: &std::io::Error) -> &'static str {
@@ -1278,7 +1284,7 @@ fn leaf_denial_reason(error: &std::io::Error) -> &'static str {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn root_denial_reason(error: &std::io::Error) -> &'static str {
     match error.raw_os_error() {
         Some(code) if code == rustix_errno(rustix::io::Errno::LOOP) => {
@@ -1288,7 +1294,7 @@ fn root_denial_reason(error: &std::io::Error) -> &'static str {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn capture_denial_reason(error: &std::io::Error) -> &'static str {
     match error.raw_os_error() {
         Some(code) if code == rustix_errno(rustix::io::Errno::NOTDIR) => {
@@ -1299,20 +1305,20 @@ fn capture_denial_reason(error: &std::io::Error) -> &'static str {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn rustix_errno(errno: rustix::io::Errno) -> i32 {
     errno.raw_os_error()
 }
 
 // ---------------------------------------------------------------------------
-// Non-Linux surface: every payload read is an explicit `Unsupported` denial
-// BEFORE any ambient open. There is no portable fallback, no ambient re-open
-// and no forged cross-platform PASS; the full non-Linux functional port stays
-// an M8 item. Unix targets other than Linux take this surface too, because the
-// accepted resolver's absolute-prefix entry is Linux-only.
+// Non-Linux/macOS surface: every payload read is an explicit `Unsupported`
+// denial BEFORE any ambient open. There is no portable fallback, no ambient
+// re-open and no forged cross-platform PASS; the Windows functional port stays
+// an M8 item. Other Unix targets take this surface too, because the accepted
+// resolver's absolute-prefix entry only covers the two supported hosts.
 // ---------------------------------------------------------------------------
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct GalleryGrant {
@@ -1323,7 +1329,7 @@ pub struct GalleryGrant {
     private: PrivatePolicy,
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 impl GalleryGrant {
     pub(super) fn new(
         root: PathBuf,
@@ -1378,7 +1384,7 @@ impl GalleryGrant {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[allow(dead_code)]
 pub struct CapturedGalleryDir {
     dir: File,
@@ -1386,14 +1392,14 @@ pub struct CapturedGalleryDir {
     private: PrivatePolicy,
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[allow(dead_code)]
 pub enum OpenedEntry {
     Directory,
     File(File),
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 impl CapturedGalleryDir {
     pub fn names(&self) -> Result<Vec<OsString>, TaskError> {
         Err(unavailable_denial(

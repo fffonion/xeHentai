@@ -81,8 +81,10 @@ pub use is_file_read_write::is_file_read_write;
 pub use metadata::_WindowsByHandle;
 pub use metadata::{Metadata, MetadataExt};
 pub use open::open;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use open::open_with_absolute_prefix;
 #[cfg(target_os = "linux")]
-pub use open::{absolute_prefix_selective_gate, open_with_absolute_prefix};
+pub use open::absolute_prefix_selective_gate;
 pub use open_ambient::open_ambient;
 pub use open_dir::*;
 pub use open_options::*;
