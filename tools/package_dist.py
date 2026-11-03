@@ -70,7 +70,17 @@ def plan(source_root, binary):
 
 
 def build(source_root, binary, output):
-    """Copy the planned resources into `output` and create `output`.tar.gz."""
+    """Copy the planned resources into `output` and create `output`.tar.gz`.
+
+    The output directory is acquired with a single non-recursive mkdir after
+    the input plan is validated; that mkdir is the exclusivity authority, so a
+    directory that already exists (a previous package or a concurrent
+    invocation) is never replaced or removed. Only the directory this
+    invocation acquired is populated, and it is populated only from the
+    completed private staging tree. The finished archive is published last
+    with an atomic hard link to its final name, which fails instead of
+    overwriting an archive that appeared while this invocation was staging.
+    """
     output = Path(output)
     archive = output.with_name(output.name + ".tar.gz")
     if output.exists() or output.is_symlink():
@@ -83,7 +93,7 @@ def build(source_root, binary, output):
     staging = Path(tempfile.mkdtemp(prefix=".package-", dir=output.parent))
     staged = staging / output.name
     temporary_archive = None
-    committed = False
+    acquired = False
     try:
         staged.mkdir()
         for source, relative in pairs:
@@ -97,12 +107,21 @@ def build(source_root, binary, output):
         os.chmod(temporary_archive, 0o644)
         with tarfile.open(temporary_archive, "w:gz") as tar:
             tar.add(staged, arcname=output.name)
-        os.replace(staged, output)
-        committed = True
-        os.replace(temporary_archive, archive)
-        temporary_archive = None
+        try:
+            output.mkdir()
+        except FileExistsError as error:
+            raise PackagingError(f"output already exists: {output}") from error
+        acquired = True
+        # This directory is empty and owned by this invocation, so moving the
+        # staged children in cannot replace anything that already exists.
+        for child in sorted(staged.iterdir()):
+            os.replace(child, output / child.name)
+        try:
+            os.link(temporary_archive, archive)
+        except FileExistsError as error:
+            raise PackagingError(f"archive already exists: {archive}") from error
     except BaseException:
-        if committed:
+        if acquired:
             shutil.rmtree(output, ignore_errors=True)
         raise
     finally:

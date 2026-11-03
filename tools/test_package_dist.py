@@ -10,6 +10,7 @@ network, no signing. Standard library only:
     python3 tools/test_package_dist.py
 """
 
+import contextlib
 import io
 import os
 import shutil
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import traceback
 from pathlib import Path
 
@@ -168,12 +170,178 @@ def test_copy_failure_removes_partial_staging_output():
         assert sorted(path.name for path in (tmp / "dist").iterdir()) == []
 
 
+@contextlib.contextmanager
+def _after_first_copy(callback):
+    """Run `callback` once after the first real staging copy, then restore."""
+    real_copy2 = shutil.copy2
+    fired = []
+
+    def hooked(source, target, **kwargs):
+        result = real_copy2(source, target, **kwargs)
+        if not fired:
+            fired.append(True)
+            callback()
+        return result
+
+    package_dist.shutil.copy2 = hooked
+    try:
+        yield fired
+    finally:
+        package_dist.shutil.copy2 = real_copy2
+
+
+def test_archive_created_while_staging_is_refused_without_overwrite():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        source = tmp / "source"
+        _synthetic_source(source)
+        output = tmp / "dist" / "pkg"
+        archive = output.with_name(output.name + ".tar.gz")
+        sentinel = b"concurrent archive sentinel\n"
+
+        def publish_competitor_archive():
+            archive.write_bytes(sentinel)
+
+        with _after_first_copy(publish_competitor_archive) as fired:
+            try:
+                package_dist.build(source, _fake_binary(tmp), output)
+            except package_dist.PackagingError as error:
+                assert "archive" in str(error).lower(), error
+            else:
+                raise AssertionError(
+                    "an archive created while staging must be refused, not overwritten"
+                )
+            assert fired, "the archive race was never injected"
+            assert archive.is_file()
+            assert archive.read_bytes() == sentinel
+            assert not output.exists() and not output.is_symlink()
+            assert sorted(path.name for path in (tmp / "dist").iterdir()) == [archive.name]
+
+
+def test_empty_output_directory_created_while_staging_is_preserved():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        source = tmp / "source"
+        _synthetic_source(source)
+        output = tmp / "dist" / "pkg"
+        archive = output.with_name(output.name + ".tar.gz")
+        identities = []
+
+        def publish_competitor_directory():
+            output.mkdir()
+            identities.append(os.stat(output).st_ino)
+
+        with _after_first_copy(publish_competitor_directory) as fired:
+            try:
+                package_dist.build(source, _fake_binary(tmp), output)
+            except package_dist.PackagingError as error:
+                assert "output" in str(error).lower(), error
+            else:
+                raise AssertionError(
+                    "an output directory created while staging must be refused, not replaced"
+                )
+            assert fired, "the output-directory race was never injected"
+            assert identities, "the competing directory was never recorded"
+            assert output.is_dir() and not output.is_symlink()
+            assert os.stat(output).st_ino == identities[0]
+            assert sorted(path.name for path in output.iterdir()) == []
+            assert not archive.exists() and not archive.is_symlink()
+
+
+def test_overlapping_invocations_yield_one_winner_and_one_refusal():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        source = tmp / "source"
+        _synthetic_source(source)
+        labels = ("first", "second")
+        binaries = {}
+        for label in labels:
+            binary_directory = tmp / label
+            binary_directory.mkdir()
+            binaries[label] = _fake_binary(binary_directory)
+        output = tmp / "dist" / "pkg"
+        archive = output.with_name(output.name + ".tar.gz")
+        copies_per_build = len(package_dist.plan(source, binaries[labels[0]]))
+        arrival = threading.Barrier(len(labels))
+        real_copy2 = shutil.copy2
+        counts = {}
+        lock = threading.Lock()
+        outcomes = {}
+
+        def gated_copy2(copy_source, copy_target, **kwargs):
+            result = real_copy2(copy_source, copy_target, **kwargs)
+            label = threading.current_thread().name
+            with lock:
+                counts[label] = counts.get(label, 0) + 1
+                staged = counts[label] == copies_per_build
+            if staged:
+                arrival.wait(timeout=30)
+            return result
+
+        def run(label):
+            try:
+                package_dist.build(source, binaries[label], output)
+            except BaseException as error:  # noqa: BLE001 - classified below
+                outcomes[label] = error
+            else:
+                outcomes[label] = None
+
+        package_dist.shutil.copy2 = gated_copy2
+        threads = [
+            threading.Thread(target=run, args=(label,), name=label) for label in labels
+        ]
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=120)
+        finally:
+            package_dist.shutil.copy2 = real_copy2
+        for thread in threads:
+            assert not thread.is_alive(), thread.name
+        assert sorted(outcomes) == sorted(labels), outcomes
+
+        winners = [label for label, error in outcomes.items() if error is None]
+        refused = [
+            label for label, error in outcomes.items()
+            if isinstance(error, package_dist.PackagingError)
+        ]
+        assert len(winners) == 1, outcomes
+        assert len(refused) == 1, outcomes
+        assert "exists" in str(outcomes[refused[0]]).lower(), outcomes[refused[0]]
+        winner = winners[0]
+        winner_binary = binaries[winner].read_bytes()
+
+        assert output.is_dir() and not output.is_symlink()
+        assert (output / "xeHentai").read_bytes() == winner_binary
+        assert sorted(path.name for path in (tmp / "dist").iterdir()) == sorted(
+            [output.name, archive.name]
+        )
+        expected = {relative for _, relative in package_dist.plan(source, binaries[winner])}
+        assert set(_tree_files(output)) == expected
+        prefix = output.name + "/"
+        with tarfile.open(archive, "r:gz") as tar:
+            members = {
+                member.name: member for member in tar.getmembers() if member.isfile()
+            }
+            archived_names = {
+                name[len(prefix):] for name in members if name.startswith(prefix)
+            }
+            assert archived_names == expected
+            for relative in sorted(expected):
+                archived = tar.extractfile(members[prefix + relative]).read()
+                assert archived == (output / relative).read_bytes(), relative
+
+
 TESTS = [
     test_package_contains_runtime_files_with_exact_bytes,
     test_missing_binary_fails_and_writes_nothing,
     test_existing_output_is_rejected_and_preserved,
     test_missing_required_resource_is_rejected_without_partial_output,
     test_copy_failure_removes_partial_staging_output,
+    test_archive_created_while_staging_is_refused_without_overwrite,
+    test_empty_output_directory_created_while_staging_is_preserved,
+    test_overlapping_invocations_yield_one_winner_and_one_refusal,
 ]
 
 
