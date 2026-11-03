@@ -1787,6 +1787,7 @@ async fn accept_one(
 /// Bind the configured listener, load the real dispatcher/filters from the
 /// installed resource tree and serve until `shutdown` fires. Bind/load errors
 /// are real; the server is never reported started without a live listener.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve(
     interface: &str,
     port: u16,

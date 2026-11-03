@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""Content and failure tests for the self-contained Linux packager.
+
+The packager is the standard-library entry point that copies an explicitly
+built executable and the project's runtime resources into an exclusive output
+directory and a matching tar.gz. These tests exercise the real repository
+resources and a fake executable only as command input: no Cargo build, no
+network, no signing. Standard library only:
+
+    python3 tools/test_package_dist.py
+"""
+
+import io
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import traceback
+from pathlib import Path
+
+TOOLS = Path(__file__).resolve().parent
+ROOT = TOOLS.parent
+SCRIPT = TOOLS / "package_dist.py"
+
+sys.path.insert(0, str(TOOLS))
+import package_dist  # noqa: E402
+
+
+def _tree_files(root):
+    return sorted(
+        str(path.relative_to(root)).replace(os.sep, "/")
+        for path in root.rglob("*")
+        if path.is_file()
+    )
+
+
+def _run(binary, output):
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), "--binary", str(binary), "--output", str(output)],
+        capture_output=True,
+        text=True,
+        cwd=tempfile.gettempdir(),
+    )
+
+
+def _fake_binary(directory, name="xeHentai"):
+    binary = Path(directory) / name
+    binary.write_bytes(b"#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    return binary
+
+
+def test_package_contains_runtime_files_with_exact_bytes():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        binary = _fake_binary(tmp)
+        output = tmp / "dist" / "xehentai-linux-x86_64"
+        result = _run(binary, output)
+        assert result.returncode == 0, result.stderr
+        assert output.is_dir()
+        assert (output / "xeHentai").read_bytes() == binary.read_bytes()
+        assert os.access(output / "xeHentai", os.X_OK)
+        for relative in package_dist.REQUIRED_FILES:
+            assert (output / relative).read_bytes() == (ROOT / relative).read_bytes(), relative
+        for relative in package_dist.REQUIRED_DIRS:
+            expected = _tree_files(ROOT / relative)
+            assert expected, relative
+            assert _tree_files(output / relative) == expected, relative
+        assert not (output / "config.rss").exists()
+        assert not (output / "config.py").exists()
+        assert not (output / "target").exists()
+        assert not (output / ".git").exists()
+        archive = output.with_name(output.name + ".tar.gz")
+        assert archive.is_file()
+        with tarfile.open(archive, "r:gz") as tar:
+            members = {member.name: member for member in tar.getmembers() if member.isfile()}
+            prefix = output.name + "/"
+            names = {name[len(prefix):] for name in members if name.startswith(prefix)}
+            assert names == set(_tree_files(output)), sorted(names ^ set(_tree_files(output)))
+            for relative in [
+                "xeHentai",
+                "rss/rpc/handlers.rss",
+                "ui/index.html",
+                "locales/en_us.yml",
+            ]:
+                archived = tar.extractfile(members[prefix + relative]).read()
+                assert archived == (output / relative).read_bytes(), relative
+
+
+def test_missing_binary_fails_and_writes_nothing():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        output = tmp / "dist" / "pkg"
+        result = _run(tmp / "no-such-binary", output)
+        assert result.returncode != 0
+        assert "binary" in result.stderr.lower(), result.stderr
+        assert not output.exists()
+        assert not output.with_name(output.name + ".tar.gz").exists()
+
+
+def test_existing_output_is_rejected_and_preserved():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        output = tmp / "dist" / "pkg"
+        output.mkdir(parents=True)
+        sentinel = output / "keep.txt"
+        sentinel.write_text("untouched")
+        result = _run(_fake_binary(tmp), output)
+        assert result.returncode != 0
+        assert "exists" in result.stderr.lower(), result.stderr
+        assert sentinel.read_text() == "untouched"
+        assert _tree_files(output) == ["keep.txt"]
+        assert not output.with_name(output.name + ".tar.gz").exists()
+
+
+def _synthetic_source(root):
+    for relative in package_dist.REQUIRED_FILES:
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(("content of " + relative + "\n").encode())
+    for relative in package_dist.REQUIRED_DIRS:
+        target = root / relative
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "sample.txt").write_bytes(b"sample resource\n")
+
+
+def test_missing_required_resource_is_rejected_without_partial_output():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        source = tmp / "source"
+        _synthetic_source(source)
+        shutil.rmtree(source / "locales")
+        output = tmp / "dist" / "pkg"
+        try:
+            package_dist.build(source, _fake_binary(tmp), output)
+        except package_dist.PackagingError as error:
+            assert "locales" in str(error), error
+        else:
+            raise AssertionError("a missing required resource must be rejected")
+        assert not output.exists()
+        assert not output.with_name(output.name + ".tar.gz").exists()
+        assert not (tmp / "dist").exists() or sorted(
+            path.name for path in (tmp / "dist").iterdir()
+        ) == []
+
+
+def test_copy_failure_removes_partial_staging_output():
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        print("skipped: unreadable fixture is not enforced for root")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        source = tmp / "source"
+        _synthetic_source(source)
+        blocked = source / "config.example.rss"
+        blocked.chmod(0o000)
+        output = tmp / "dist" / "pkg"
+        try:
+            package_dist.build(source, _fake_binary(tmp), output)
+        except (package_dist.PackagingError, OSError):
+            pass
+        else:
+            raise AssertionError("an unreadable required resource must fail the package")
+        assert not output.exists()
+        assert not output.with_name(output.name + ".tar.gz").exists()
+        assert sorted(path.name for path in (tmp / "dist").iterdir()) == []
+
+
+TESTS = [
+    test_package_contains_runtime_files_with_exact_bytes,
+    test_missing_binary_fails_and_writes_nothing,
+    test_existing_output_is_rejected_and_preserved,
+    test_missing_required_resource_is_rejected_without_partial_output,
+    test_copy_failure_removes_partial_staging_output,
+]
+
+
+def main():
+    failures = 0
+    for test in TESTS:
+        try:
+            test()
+        except Exception:  # noqa: BLE001 - report, keep running
+            failures += 1
+            print(f"FAIL {test.__name__}")
+            traceback.print_exc()
+        else:
+            print(f"ok {test.__name__}")
+    print(f"{len(TESTS) - failures}/{len(TESTS)} passed")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

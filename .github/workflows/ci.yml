@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux runtime gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust 1.99.1
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
+          rustup default 1.99.1
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Strict Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Unit tests
+        run: cargo test --locked
+      - name: Python tool tests
+        run: |
+          python3 tools/test_cases_inventory.py
+          python3 tools/test_update_compat.py
+          python3 tools/test_package_dist.py
+      - name: Release build
+        run: cargo build --release --locked
+      - name: Package and offline smoke
+        run: |
+          set -euo pipefail
+          package="$RUNNER_TEMP/dist/xehentai-linux-x86_64"
+          python3 tools/package_dist.py --binary target/release/xeHentai --output "$package"
+          test -f "$package/rss/rpc/handlers.rss"
+          test -f "$package/ui/index.html"
+          mkdir -p "$RUNNER_TEMP/unpacked" "$RUNNER_TEMP/run"
+          tar -xzf "$package.tar.gz" -C "$RUNNER_TEMP/unpacked"
+          dist="$RUNNER_TEMP/unpacked/xehentai-linux-x86_64"
+          cd "$RUNNER_TEMP/run"
+          "$dist/xeHentai" --auto-update off --rpc-port 18010 --rpc-secret ci-smoke-secret &
+          pid=$!
+          trap 'kill -TERM "$pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 60); do
+            if curl -fsS -X POST -H 'Content-Type: application/json' \
+              --data '{"method":"xeH.getInfo","id":0,"params":[[],{}]}' \
+              http://127.0.0.1:18010/jsonrpc >/dev/null; then
+              break
+            fi
+            sleep 0.5
+          done
+          curl -fsS -X POST -H 'Content-Type: application/json' \
+            --data '{"method":"xeH.getConfig","id":1,"params":[["token:ci-smoke-secret"],{}]}' \
+            http://127.0.0.1:18010/jsonrpc | grep -q '"result"'
+          kill -TERM "$pid"
+          wait "$pid"
+          trap - EXIT
+
+  macos-compile:
+    name: macOS compile-only (no runtime verification)
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust 1.99.1
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup default 1.99.1
+      - name: Strict Clippy (compile only)
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+  windows-compile:
+    name: Windows compile-only (no runtime verification)
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust 1.99.1
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup default 1.99.1
+      - name: Strict Clippy (compile only)
+        run: cargo clippy --all-targets --locked -- -D warnings

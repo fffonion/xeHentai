@@ -363,9 +363,8 @@ mod tests {
             include_bytes!("testdata/manifest-bad.sig").as_slice(),
             include_bytes!("testdata/manifest-short.sig").as_slice(),
         ] {
-            match Signature::from_slice(bad) {
-                Ok(signature) => assert!(key.verify_strict(manifest, &signature).is_err()),
-                Err(_) => {}
+            if let Ok(signature) = Signature::from_slice(bad) {
+                assert!(key.verify_strict(manifest, &signature).is_err());
             }
         }
     }

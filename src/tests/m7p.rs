@@ -251,7 +251,9 @@ fn serve(
     }
 }
 
-fn read_head(socket: &mut TcpStream) -> Option<(String, String, Vec<(String, String)>)> {
+type RawHead = (String, String, Vec<(String, String)>);
+
+fn read_head(socket: &mut TcpStream) -> Option<RawHead> {
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 1024];
     while !buffer.windows(4).any(|window| window == b"\r\n\r\n") {
@@ -521,7 +523,7 @@ fn publish_rss(root: &Path, origin: &str, pem: Option<&str>, channel: &str) {
 /// A complete candidate resource tree: all four RSS modules, bound to the
 /// fixture source with the given channel.
 fn candidate_rss(origin: &str, pem: Option<&str>, channel: &str) -> Vec<(String, Vec<u8>)> {
-    let mut files = tree(&Path::new(MANIFEST), "rss");
+    let mut files = tree(Path::new(MANIFEST), "rss");
     let scratch = tempfile::tempdir().expect("scratch");
     let rss = scratch.path().join("rss");
     m6::copy_tree(&Path::new(MANIFEST).join("rss"), &rss);
@@ -847,11 +849,13 @@ fn m7p_package_rejections_keep_the_previous_pending_intact() {
     );
     let prefix = format!("xeHentai-{UPDATE_ID}/");
 
-    let mut cases: Vec<(
-        &str,
+    type SpecCase<'a> = (
+        &'a str,
         Option<String>,
-        Box<dyn Fn(&Spec, &Pkg, &Server, &str) -> Spec>,
-    )> = Vec::new();
+        Box<dyn Fn(&Spec, &Pkg, &Server, &str) -> Spec + 'a>,
+    );
+
+    let mut cases: Vec<SpecCase> = Vec::new();
 
     // Wrong verification key: the package is valid but this binding trusts a
     // different public key.
@@ -1073,7 +1077,9 @@ fn m7p_transport_failures_and_damaged_archives_are_rejected() {
     let mut damaged = pkg.payload.clone();
     damaged.truncate(damaged.len() / 2);
 
-    let cases: Vec<(&str, Box<dyn Fn(&Server, &str)>)> = vec![
+    type ServerCase<'a> = (&'a str, Box<dyn Fn(&Server, &str) + 'a>);
+
+    let cases: Vec<ServerCase> = vec![
         (
             "descriptor 500",
             Box::new(|server, origin| {
@@ -2570,7 +2576,7 @@ fn m7p_busy_startup_stops_before_the_business_app() {
         &["-l", "eh.log", "-vv", "--auto-update", "off"],
     );
     let status = m6::wait_exit(
-        &mut child.child.as_mut().expect("child"),
+        child.child.as_mut().expect("child"),
         Duration::from_secs(30),
     )
     .expect("a busy startup must stop instead of running the App")
@@ -2768,7 +2774,7 @@ fn m7p_startup_refuses_a_symlinked_pending_leaf_before_reading_it() {
         &["-l", "eh.log", "-vv", "--auto-update", "off"],
     );
     let code = m6::wait_exit(
-        &mut child.child.as_mut().expect("child"),
+        child.child.as_mut().expect("child"),
         Duration::from_secs(30),
     )
     .expect("an unsafe pending leaf must stop startup")

@@ -13563,7 +13563,7 @@ mod m6 {
     #[test]
     fn m6_pty_ctrl_c_at_the_login_prompt_cleans_up_and_exits_zero() {
         let root = tempfile::tempdir().expect("root");
-        let mut pty = spawn_pty(root.path(), &["-i", "--auto-update", "off"]);
+        let pty = spawn_pty(root.path(), &["-i", "--auto-update", "off"]);
         assert!(
             wait_for(Duration::from_secs(20), || pty
                 .output()
@@ -14060,6 +14060,7 @@ mod m7 {
     /// flush only a prefix of that body, then hold the remainder. A client that
     /// cancels must close the connection while the body is still incomplete;
     /// only an explicit `release()` completes it.
+    #[allow(clippy::too_many_arguments)]
     fn serve_held(
         mut socket: TcpStream,
         seen: &Arc<Mutex<Vec<Request>>>,

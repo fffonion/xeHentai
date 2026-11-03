@@ -390,8 +390,9 @@ fn open(payload: &[u8]) -> Result<ZipArchive<Cursor<&[u8]>>, UpdateError> {
         .map_err(|error| UpdateError::package(format!("payload is not a ZIP: {error}")))
 }
 
-/// Zip entry point used by the release/packaging helpers and tests: a STORE
-/// archive whose members are exactly `(name, bytes)` in the given order.
+/// Test entry point: a STORE archive whose members are exactly
+/// `(name, bytes)` in the given order.
+#[cfg(test)]
 pub fn store_zip(members: &[(String, Vec<u8>)]) -> Result<Vec<u8>, UpdateError> {
     let mut bytes = Vec::new();
     {

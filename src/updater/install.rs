@@ -379,6 +379,10 @@ impl InstallLock {
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd;
+            // The owning `Flock` API performs `LOCK_UN` in `Drop`; this lock
+            // must remain held by the open file description inherited across a
+            // daemon fork, so the raw call without an unlock stays.
+            #[allow(deprecated)]
             match nix::fcntl::flock(
                 file.as_raw_fd(),
                 nix::fcntl::FlockArg::LockExclusiveNonblock,
@@ -751,57 +755,6 @@ impl Drop for CancelOnDrop {
     }
 }
 
-/// Test-only hooks for the deterministic pre-commit and join barriers.
-#[cfg(test)]
-pub mod test_hooks {
-    #![allow(dead_code)]
-    use std::path::Path;
-    use std::sync::{Mutex, OnceLock};
-
-    pub type Hook = Box<dyn Fn(&Path) + Send + Sync>;
-
-    static HOOK: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
-    pub type JoinHook = Box<dyn Fn() + Send + Sync>;
-    static JOIN_HOOK: OnceLock<Mutex<Option<JoinHook>>> = OnceLock::new();
-
-    fn cell() -> &'static Mutex<Option<Hook>> {
-        HOOK.get_or_init(|| Mutex::new(None))
-    }
-
-    pub fn set(hook: Option<Hook>) {
-        *cell().lock().unwrap_or_else(|error| error.into_inner()) = hook;
-    }
-
-    fn join_cell() -> &'static Mutex<Option<JoinHook>> {
-        JOIN_HOOK.get_or_init(|| Mutex::new(None))
-    }
-
-    pub fn set_join(hook: Option<JoinHook>) {
-        *join_cell()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = hook;
-    }
-
-    /// Test-only barrier at the START of the supervisor's publication join,
-    /// i.e. after the local updater task was aborted and before the owned
-    /// blocking job is released.
-    pub fn join_boundary() {
-        let guard = join_cell()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if let Some(hook) = guard.as_ref() {
-            hook();
-        }
-    }
-
-    pub fn publish_boundary(path: &Path) {
-        let guard = cell().lock().unwrap_or_else(|error| error.into_inner());
-        if let Some(hook) = guard.as_ref() {
-            hook(path);
-        }
-    }
-}
-
 /// Facts a validated pending candidate provides to the startup decision.
 pub struct Candidate {
     pub descriptor: Descriptor,
@@ -837,7 +790,7 @@ pub fn install_candidate(
     let staging = tempfile::Builder::new()
         .prefix("candidate-")
         .tempdir_in(installation.staging_root())
-        .map_err(|error| UpdateError::io(&installation.staging_root(), &error))?;
+        .map_err(|error| UpdateError::io(installation.staging_root(), &error))?;
     let selected = package::materialize(
         &candidate.payload,
         &candidate.descriptor,
@@ -1072,5 +1025,56 @@ pub fn reexec(exe: &Path) -> UpdateError {
     {
         let _ = exe;
         UpdateError::install("re-execution is not verified on this platform")
+    }
+}
+
+/// Test-only hooks for the deterministic pre-commit and join barriers.
+#[cfg(test)]
+pub mod test_hooks {
+    #![allow(dead_code)]
+    use std::path::Path;
+    use std::sync::{Mutex, OnceLock};
+
+    pub type Hook = Box<dyn Fn(&Path) + Send + Sync>;
+
+    static HOOK: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
+    pub type JoinHook = Box<dyn Fn() + Send + Sync>;
+    static JOIN_HOOK: OnceLock<Mutex<Option<JoinHook>>> = OnceLock::new();
+
+    fn cell() -> &'static Mutex<Option<Hook>> {
+        HOOK.get_or_init(|| Mutex::new(None))
+    }
+
+    pub fn set(hook: Option<Hook>) {
+        *cell().lock().unwrap_or_else(|error| error.into_inner()) = hook;
+    }
+
+    fn join_cell() -> &'static Mutex<Option<JoinHook>> {
+        JOIN_HOOK.get_or_init(|| Mutex::new(None))
+    }
+
+    pub fn set_join(hook: Option<JoinHook>) {
+        *join_cell()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = hook;
+    }
+
+    /// Test-only barrier at the START of the supervisor's publication join,
+    /// i.e. after the local updater task was aborted and before the owned
+    /// blocking job is released.
+    pub fn join_boundary() {
+        let guard = join_cell()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(hook) = guard.as_ref() {
+            hook();
+        }
+    }
+
+    pub fn publish_boundary(path: &Path) {
+        let guard = cell().lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(hook) = guard.as_ref() {
+            hook(path);
+        }
     }
 }
