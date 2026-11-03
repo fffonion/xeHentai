@@ -19,17 +19,65 @@ from __future__ import annotations
 
 import argparse
 import copy
+import http.server
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CASES_FILE = REPO / "tools" / "cases.json"
+
+# Every comparison suite, in the order `--suite all` runs them. The update
+# suite was added with the B6 producer wiring and stays in the expansion.
+ALL_SUITES = (
+    "config",
+    "util",
+    "i18n",
+    "worker",
+    "rpc",
+    "gallery",
+    "webui",
+    "task-api",
+    "session",
+    "files",
+    "site",
+    "proxy",
+    "transport",
+    "monitor",
+    "download",
+    "concurrency",
+    "cli",
+    "update",
+)
+
+# Oracle entry points that execute reference business bodies.
+ORACLE_SUITES = (
+    "config",
+    "util",
+    "i18n",
+    "task-api",
+    "session",
+    "session-fixture",
+    "files",
+    "site",
+    "proxy",
+    "transport",
+    "monitor",
+    "download",
+    "rpc",
+    "gallery",
+    "webui",
+    "cli",
+    "update",
+)
 CONFIG_FIELDS = [
     "daemon",
     "dir",
@@ -1054,6 +1102,24 @@ NATIVE_CASE_MAP = {
             "worker.cancel-join-connection"
         ],
     },
+    "update": {
+        "tests::m7::m7_binary_check_requests_native_stable_channel_and_logs_available": ["update.channel", "update.commit"],
+        "tests::m7::m7_binary_explicit_beta_binding_selects_that_channel": ["update.channel"],
+        "tests::m7::m7_binary_beta_without_explicit_binding_fails_without_request": ["update.channel"],
+        "tests::m7::m7_module_same_id_and_rss_channel_change_change_real_requests": ["update.channel", "update.commit", "update.decision"],
+        "tests::m7::m7_module_direct_off_check_requests_and_hints_manually": ["update.decision"],
+        "tests::m7::m7_binary_off_never_loads_the_update_module": ["update.decision"],
+        "tests::m7p::m7p_download_publishes_one_signed_pending_envelope_and_keeps_the_live_tree": ["update.commit", "update.package"],
+        "tests::m7p::m7p_download_same_update_id_skips_the_package": ["update.decision"],
+        "tests::m7p::m7p_cancelled_download_keeps_the_old_pending_and_a_fresh_run_succeeds": ["update.package"],
+        "tests::m7p::m7p_next_start_applies_the_resource_candidate_and_runs_the_new_rss": ["update.apply"],
+        "tests::m7p::m7p_next_start_rejects_an_uncompilable_candidate_and_keeps_the_live_tree": ["update.apply", "update.package"],
+        "tests::m7p::m7p_native_ab_reexec_runs_the_new_image_and_rejects_a_bad_candidate": ["update.apply"],
+        "tests::m7p::m7p_successful_upgrade_leaves_no_rollback_artifacts": ["update.apply"],
+        "tests::m7p::m7p_next_start_discards_a_tampered_pending_and_keeps_the_running_release": ["update.apply"],
+        "tests::m7p::m7p_next_start_drops_a_pending_candidate_that_is_already_applied": ["update.apply"],
+        "tests::m7p::m7p_r1_late_apply_failure_stops_the_start_before_the_business_app": ["update.apply"],
+    },
 }
 
 NATIVE_COMMANDS = {
@@ -1145,6 +1211,24 @@ NATIVE_COMMANDS = {
     "webui": [
         ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::frozen_"],
         ["cargo", "test", "--bin", "xeHentai", "rpc::server::tests::signed_gallery"],
+    ],
+    "update": [
+        ["cargo", "test", "--bin", "xeHentai", "tests::m7::m7_binary_check_requests_native_stable_channel_and_logs_available", "--", "--exact"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m7::m7_binary_explicit_beta_binding_selects_that_channel", "--", "--exact"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m7::m7_binary_beta_without_explicit_binding_fails_without_request", "--", "--exact"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m7::m7_module_same_id_and_rss_channel_change_change_real_requests", "--", "--exact"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m7::m7_module_direct_off_check_requests_and_hints_manually", "--", "--exact"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m7::m7_binary_off_never_loads_the_update_module", "--", "--exact"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m7p::m7p_download_publishes_one_signed_pending_envelope_and_keeps_the_live_tree", "--", "--exact"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m7p::m7p_download_same_update_id_skips_the_package", "--", "--exact"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m7p::m7p_cancelled_download_keeps_the_old_pending_and_a_fresh_run_succeeds", "--", "--exact"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m7p::m7p_next_start_applies_the_resource_candidate_and_runs_the_new_rss", "--", "--exact"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m7p::m7p_next_start_rejects_an_uncompilable_candidate_and_keeps_the_live_tree", "--", "--exact"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m7p::m7p_native_ab_reexec_runs_the_new_image_and_rejects_a_bad_candidate", "--", "--exact"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m7p::m7p_successful_upgrade_leaves_no_rollback_artifacts", "--", "--exact"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m7p::m7p_next_start_discards_a_tampered_pending_and_keeps_the_running_release", "--", "--exact"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m7p::m7p_next_start_drops_a_pending_candidate_that_is_already_applied", "--", "--exact"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m7p::m7p_r1_late_apply_failure_stops_the_start_before_the_business_app", "--", "--exact"],
     ],
     "files": [
         ["cargo", "test", "--bin", "xeHentai", "tests::scan_"],
@@ -1400,16 +1484,26 @@ def clean_env(root):
     return env
 
 
-def run_command(argv, cwd, env, log_path):
+def run_command(argv, cwd, env, log_path, timeout_s=900):
     log(f"$ {' '.join(argv)}")
-    result = subprocess.run(
-        argv,
-        cwd=str(cwd),
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=900,
-    )
+    try:
+        result = subprocess.run(
+            argv,
+            cwd=str(cwd),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired as expired:
+        log_path.write_text(
+            f"argv: {argv}\nexit: timeout after {timeout_s}s\n"
+            f"--- stdout ---\n{expired.stdout or ''}\n"
+            f"--- stderr ---\n{expired.stderr or ''}\n",
+            encoding="utf-8",
+        )
+        raise CompatError(
+            f"command exceeded its {timeout_s}s bound: {' '.join(argv)}")
     log_path.write_text(
         f"argv: {argv}\nexit: {result.returncode}\n--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}\n",
         encoding="utf-8",
@@ -1573,6 +1667,8 @@ def oracle_main(args):
         result = oracle_webui(upstream, request)
     elif args.oracle == "cli":
         result = oracle_cli(upstream, request)
+    elif args.oracle == "update":
+        result = oracle_update(upstream, request)
     else:
         raise CompatError(f"unknown oracle suite {args.oracle}")
     output.write_text(
@@ -4449,9 +4545,1412 @@ def compare_cli(cases, oracle, candidate):
     return diffs
 
 
-def run_oracle(oracle, request, root, upstream, log_path, locale=None, cwd=None):
-    request_path = root / f"oracle-request-{oracle}-{locale or 'default'}.json"
-    output_path = root / f"oracle-{oracle}-{locale or 'default'}.json"
+# ---- B6 update comparator: live frozen-Python oracle, strict comparison ----
+# The five update feature rows (`update.channel/commit/decision/package/apply`)
+# are compared against explicit, independently specified per-side expectations.
+# The Python side is the frozen 43fc reference executed in a fresh child
+# process per subcase; the native side is the real RSS/Updater/startup path
+# observed by `tests::compat_probe`. Registered side deltas (source archive vs
+# signed native package, master/dev vs rss/explicit beta, legacy loader) are
+# written out as expected values on BOTH sides, never as suppressed fields.
+
+UPDATE_CASE_IDS = (
+    "update.channel",
+    "update.commit",
+    "update.decision",
+    "update.package",
+    "update.apply",
+)
+
+UPDATE_ORACLE_REVISION = "43fc55c0c662f195d048becf6276a26ce06b09d9"
+UPDATE_ORACLE_REPO = "/home/wow/rustscript/xehentai-rss"
+UPDATE_ORACLE_DEFAULT = (
+    "/mnt/TEMP/workspace/xehentai-rss/tmp/"
+    "xehentai-pyshape-resume-20261102-89633df7/m6-cli-oracle/oracle"
+)
+
+UPDATE_ID = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+UPDATE_SECOND_ID = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+UPDATE_TS = "2026-10-31T12:34:56Z"
+UPDATE_SECOND_TS = "2026-10-30T01:02:03Z"
+UPDATE_MESSAGE_RAW = "first entry\r\nwith CRLF\r\nthird line"
+UPDATE_MESSAGE = "first entry  with CRLF  third line"
+UPDATE_PENDING_SENTINEL = b"b6 pre-existing pending sentinel, deliberately not a zip\n"
+# Subcases whose side starts from a previously published pending candidate.
+UPDATE_SEEDED_CASES = (
+    "decision.off",
+    "decision.same",
+    "decision.download",
+    "package.reject",
+    "apply.valid",
+    "apply.reject",
+)
+
+# The descriptor must bind exactly the compiling host; these are the current
+# `src/const.rs` values (VERSION_DISPLAY/TARGET/HOST_ABI/SCRIPT_ABI).
+UPDATE_PLATFORM = {
+    "app_version": "2.023-rss",
+    "target": "x86_64-unknown-linux-gnu",
+    "host_abi": 1,
+    "script_abi": 1,
+}
+
+UPDATE_PY_API = (
+    "https://api.github.com/repos/fffonion/xeHentai/commits?sha=%s")
+UPDATE_PY_ARCHIVE = "https://github.com/fffonion/xeHentai/archive/%s.zip"
+UPDATE_PY_PREFIX = "xeHentai-%s/xeHentai"
+UPDATE_NA_PREFIX = "xeHentai-%s/"
+UPDATE_NA_RELEASE = (
+    "%s/fffonion/xeHentai/releases/download/rss-%s/xeHentai-rss.zip")
+UPDATE_NA_COMMITS = "%s/repos/fffonion/xeHentai/commits?sha=%s"
+
+# The native package fixture bodies are shared inputs so both sides observe the
+# same bytes and the descriptor lengths stay independently checkable.
+UPDATE_PACKAGE_BODIES = {
+    "rss/updater/github.rss": "// b6 candidate binding\n",
+    "rss/updater/updater.rss": "// b6 candidate decision\n",
+}
+UPDATE_PACKAGE_FOREIGN = ["foreign.txt", "other/x.txt"]
+
+# Python source archive fixture: prefix members, directories and foreign names.
+UPDATE_SOURCE_ARCHIVE = [
+    ("xeHentai-%s/xeHentai/__init__.py" % UPDATE_ID,
+     "# b6 oracle payload - not product source\n"
+     "M7_ZIP_MARKER = \"b6-zip-init-loaded\"\n"),
+    ("xeHentai-%s/xeHentai/const.py" % UPDATE_ID,
+     "# b6 oracle payload - zip-only const\nM7_ZIP_CONST = 1\n"),
+    ("xeHentai-%s/xeHentai/util/__init__.py" % UPDATE_ID,
+     "# b6 oracle payload util package\n"),
+    ("xeHentai-%s/xeHentai/util/" % UPDATE_ID, ""),
+    ("xeHentai-%s/xeHentai/" % UPDATE_ID, ""),
+    ("xeHentai-%s/README.md" % UPDATE_ID, "outside the python package prefix\n"),
+    ("xeHentai-%s/xeHentaiX/extra.py" % UPDATE_ID,
+     "prefix-lookalike must be excluded\n"),
+    ("other-repo/x.txt", "unrelated repo entry\n"),
+]
+UPDATE_SOURCE_SELECTED = [
+    "xeHentai/__init__.py",
+    "xeHentai/const.py",
+    "xeHentai/util/__init__.py",
+]
+UPDATE_SOURCE_DROPPED = [
+    "xeHentai/%s/xeHentai/util/" % "",
+    "xeHentai/%s/xeHentai/" % "",
+    "xeHentai/%s/README.md" % "",
+    "xeHentai/%s/xeHentaiX/extra.py" % "",
+    "other-repo/x.txt",
+]
+
+
+def update_source_archive_names():
+    """Input archive member names for the Python source-package fixture."""
+    return [name for name, _ in UPDATE_SOURCE_ARCHIVE]
+
+
+def update_source_dropped_names():
+    """Input members the reference's prefix+file rule does not copy."""
+    prefix = ("xeHentai-%s/xeHentai" % UPDATE_ID)
+    dropped = []
+    for name, _ in UPDATE_SOURCE_ARCHIVE:
+        if name.startswith(prefix + "/") and not name.endswith("/"):
+            continue
+        dropped.append(name)
+    return dropped
+
+
+def update_feed_json():
+    """The commits fixture both sides serve: two entries, CR/LF in the first."""
+    return json.dumps([
+        {"sha": UPDATE_ID,
+         "commit": {"author": {"date": UPDATE_TS},
+                    "message": UPDATE_MESSAGE_RAW}},
+        {"sha": UPDATE_SECOND_ID,
+         "commit": {"author": {"date": UPDATE_SECOND_TS},
+                    "message": "second entry"}},
+    ])
+
+
+def _update_event(level, key, text):
+    return {"level": level, "key": key, "text": text}
+
+
+def _update_feed(targets, statuses=None):
+    return {
+        "request_count": len(targets),
+        "methods": ["GET"] * len(targets),
+        "targets": list(targets),
+        "statuses": list(statuses if statuses is not None else [200] * len(targets)),
+    }
+
+
+def update_py_feed(targets):
+    return _update_feed(targets)
+
+
+def update_na_feed(targets):
+    return _update_feed(targets)
+
+
+def _update_py_source(channel):
+    return {
+        "channel": channel,
+        "channel_url": UPDATE_PY_API % channel,
+        "download_link": UPDATE_PY_ARCHIVE % UPDATE_ID,
+        "descriptor_link": None,
+        "signature_link": None,
+        "archive_prefix": UPDATE_PY_PREFIX % UPDATE_ID,
+    }
+
+
+def _update_na_source(origin, channel):
+    download = (UPDATE_NA_RELEASE % (origin, UPDATE_ID)) if channel else ""
+    return {
+        "channel": channel,
+        "channel_url": (UPDATE_NA_COMMITS % (origin, channel)) if channel else "",
+        "download_link": download,
+        "descriptor_link": (download + ".manifest.json") if download else "",
+        "signature_link": (download + ".sig") if download else "",
+        "archive_prefix": (UPDATE_NA_PREFIX % UPDATE_ID) if channel else "",
+    }
+
+
+def _update_commit(update_id, ts, message):
+    return {
+        "type": "UpdateInfo",
+        "update_id": update_id,
+        "update_id_type": "str",
+        "ts": ts,
+        "message": message,
+    }
+
+
+def _update_py_commit():
+    return _update_commit(UPDATE_ID, UPDATE_TS, UPDATE_MESSAGE)
+
+
+def _update_na_commit():
+    return _update_commit(UPDATE_ID, UPDATE_TS, UPDATE_MESSAGE)
+
+
+def _update_missing_commit():
+    return {
+        "type": None,
+        "update_id": None,
+        "update_id_type": None,
+        "ts": None,
+        "message": None,
+    }
+
+
+PY_CHANNEL_RELEASE = _update_event(
+    "DEBG", "UPDATE_CHANNEL", "Update channel is: release")
+PY_CHANNEL_DEV = _update_event(
+    "DEBG", "UPDATE_CHANNEL", "Update channel is: dev")
+PY_AVAILABLE = _update_event(
+    "INFO", "UPDATE_AVAILABLE",
+    'Update available: %s "%s" (%s)' % (UPDATE_TS, UPDATE_MESSAGE, UPDATE_ID))
+PY_MANUAL = _update_event(
+    "INFO", "UPDATE_DOWNLOAD_MANUALLY",
+    "You can download update from https://dl.yooooo.us/share/xeHentai/")
+PY_NO_UPDATE = _update_event(
+    "DEBG", "UPDATE_NO_UPDATE", "Program is up-to-date")
+PY_COMPLETE = _update_event(
+    "INFO", "UPDATE_COMPLETE",
+    "Update is complete, it will take effect on next run")
+
+NA_AVAILABLE = _update_event(
+    "info", "UPDATE_AVAILABLE",
+    'Update available: %s "%s" (%s)' % (UPDATE_TS, UPDATE_MESSAGE, UPDATE_ID))
+NA_MANUAL = _update_event(
+    "info", "UPDATE_DOWNLOAD_MANUALLY",
+    "You can download update from https://dl.yooooo.us/share/xeHentai/")
+NA_NO_UPDATE = _update_event(
+    "debug", "UPDATE_NO_UPDATE", "Program is up-to-date")
+NA_COMPLETE = _update_event(
+    "info", "UPDATE_COMPLETE",
+    "Update is complete, it will take effect on next run")
+# The rejection causes are side-specific and asserted EXACTLY: the reference
+# keeps the unusable source archive, the native format refuses the untrusted
+# detached signature before fetching the payload.
+PY_FAILED = _update_event(
+    "WARN", "UPDATE_FAILED",
+    "Failure when updating program: File is not a zip file")
+NA_FAILED = _update_event(
+    "warning", "UPDATE_FAILED",
+    "Failure when updating program: update package rejected: "
+    "detached signature does not match the descriptor")
+NA_PENDING = _update_event(
+    "debug", "UPDATE_PENDING_ID",
+    "Pending update %s is ready for the next start" % UPDATE_ID)
+
+
+def _update_decision(mode, applied, outcome, events, pending_before,
+                     pending_after, pending_equal):
+    return {
+        "mode": mode,
+        "applied": applied,
+        "outcome": outcome,
+        "events": events,
+        "pending_before": pending_before,
+        "pending_after": pending_after,
+        "pending_equal": pending_equal,
+    }
+
+
+def _update_package(member_names, compress_types, input_members,
+                    input_compress_types, info, selected, dropped,
+                    payload_sha256, info_archive_sha256):
+    return {
+        "member_names": list(member_names),
+        "compress_types": list(compress_types),
+        "input_members": list(input_members),
+        "input_compress_types": list(input_compress_types),
+        "info": info,
+        "selected_entries": list(selected),
+        "dropped_entries": list(dropped),
+        "payload_sha256": payload_sha256,
+        "info_archive_sha256": info_archive_sha256,
+    }
+
+
+def _update_apply(pending_before, pending_after, applied_id, live_changed,
+                  session_equal, module_origin_kind, module_version, stop,
+                  wire_after_apply):
+    return {
+        "pending_before": pending_before,
+        "pending_after": pending_after,
+        "applied_id": applied_id,
+        "live_changed": live_changed,
+        "session_equal": session_equal,
+        "module_origin_kind": module_origin_kind,
+        "module_version": module_version,
+        "stop": stop,
+        "wire_after_apply": wire_after_apply,
+    }
+
+
+def _update_py_package():
+    info = {"v": 1, "update_id": UPDATE_ID}
+    names = ["info.json"] + UPDATE_SOURCE_SELECTED
+    return _update_package(
+        names,
+        [0] * len(names),
+        update_source_archive_names(),
+        [0] * len(update_source_archive_names()),
+        info,
+        UPDATE_SOURCE_SELECTED,
+        update_source_dropped_names(),
+        None,
+        None,
+    )
+
+
+def _update_na_package():
+    bodies = list(UPDATE_PACKAGE_BODIES.items())
+    entries = [{"path": path, "len": len(body.encode("utf-8"))}
+               for path, body in bodies]
+    info = {
+        "v": 1,
+        "update_id": UPDATE_ID,
+        "app_version": UPDATE_PLATFORM["app_version"],
+        "target": UPDATE_PLATFORM["target"],
+        "host_abi": UPDATE_PLATFORM["host_abi"],
+        "script_abi": UPDATE_PLATFORM["script_abi"],
+        "archive_sha256": "<sha256>",
+        "entries": entries,
+        "native_executable": None,
+        "native_build_id": None,
+    }
+    selected = [path for path, _ in bodies]
+    input_members = ["xeHentai-%s/%s" % (UPDATE_ID, path)
+                     for path, _ in bodies]
+    input_members += ["xeHentai-%s/%s" % (UPDATE_ID, UPDATE_PACKAGE_FOREIGN[0]),
+                      UPDATE_PACKAGE_FOREIGN[1]]
+    dropped = ["xeHentai-%s/%s" % (UPDATE_ID, UPDATE_PACKAGE_FOREIGN[0]),
+               UPDATE_PACKAGE_FOREIGN[1]]
+    return _update_package(
+        ["info.json", "info.sig", "payload.zip"],
+        [0, 0, 0],
+        input_members,
+        [0] * len(input_members),
+        info,
+        selected,
+        dropped,
+        "<sha256>",
+        "<sha256>",
+    )
+
+
+def _update_section_schema():
+    """Exact key/type schema per shared section (strict on BOTH sides)."""
+    feed = {"request_count": "int", "methods": "list", "targets": "list",
+            "statuses": "list"}
+    source = {"channel": "str", "channel_url": "str",
+              "download_link": "str", "descriptor_link": "str?",
+              "signature_link": "str?", "archive_prefix": "str"}
+    commit = {"type": "str?", "update_id": "str?", "update_id_type": "str?",
+              "ts": "str?", "message": "str?"}
+    decision = {"mode": "str", "applied": "str?", "outcome": "str",
+                "events": "list", "pending_before": "bool",
+                "pending_after": "bool", "pending_equal": "bool"}
+    package = {"member_names": "list", "compress_types": "list",
+               "input_members": "list", "input_compress_types": "list",
+               "info": "dict", "selected_entries": "list",
+               "dropped_entries": "list", "payload_sha256": "str?",
+               "info_archive_sha256": "str?"}
+    apply_state = {"pending_before": "bool", "pending_after": "bool",
+                   "applied_id": "str?", "live_changed": "bool?",
+                   "session_equal": "bool?", "module_origin_kind": "str?",
+                   "module_version": "version?", "stop": "str?",
+                   "wire_after_apply": "str?"}
+    return {"feed": feed, "source": source, "commit": commit,
+            "decision": decision, "package": package, "apply": apply_state}
+
+
+UPDATE_SECTION_SCHEMA = _update_section_schema()
+
+UPDATE_CASES = (
+    {"case": "channel.stable", "id": "update.channel",
+     "sections": ("feed", "source", "commit")},
+    {"case": "channel.beta", "id": "update.channel",
+     "sections": ("feed", "source", "commit")},
+    {"case": "channel.beta-missing", "id": "update.channel",
+     "sections": ("feed", "source", "commit")},
+    {"case": "commit.first", "id": "update.commit",
+     "sections": ("feed", "source", "commit")},
+    {"case": "decision.off", "id": "update.decision",
+     "sections": ("feed", "decision")},
+    {"case": "decision.same", "id": "update.decision",
+     "sections": ("feed", "decision")},
+    {"case": "decision.download", "id": "update.decision",
+     "sections": ("feed", "decision", "package", "source")},
+    {"case": "package.envelope", "id": "update.package",
+     "sections": ("package", "source")},
+    {"case": "package.reject", "id": "update.package",
+     "sections": ("feed", "decision")},
+    {"case": "apply.valid", "id": "update.apply",
+     "sections": ("apply",)},
+    {"case": "apply.reject", "id": "update.apply",
+     "sections": ("apply",)},
+    {"case": "cli.off", "id": "update.decision",
+     "sections": ("feed", "decision")},
+)
+
+
+def _update_case_spec(case):
+    for spec in UPDATE_CASES:
+        if spec["case"] == case:
+            return spec
+    raise CompatError(f"unknown update subcase {case}")
+
+
+def update_expected_sections(case, side, origin):
+    """Explicit expected observation for one subcase on one side."""
+    if side not in ("python", "native"):
+        raise CompatError(f"unknown update observation side {side}")
+    py = side == "python"
+    if case == "channel.stable":
+        return {
+            "feed": _update_feed(["/commits?sha=master"] if py else
+                                 ["/repos/fffonion/xeHentai/commits?sha=rss"]),
+            "source": _update_py_source("master") if py else
+                      _update_na_source(origin, "rss"),
+            "commit": _update_py_commit() if py else _update_na_commit(),
+        }
+    if case == "channel.beta":
+        return {
+            "feed": _update_feed(["/commits?sha=dev"] if py else
+                                 ["/repos/fffonion/xeHentai/commits?sha=rss-b"]),
+            "source": _update_py_source("dev") if py else
+                      _update_na_source(origin, "rss-b"),
+            "commit": _update_py_commit() if py else _update_na_commit(),
+        }
+    if case == "channel.beta-missing":
+        # Registered delta: the reference falls back to `dev`; the native
+        # binding refuses an unbound beta channel without any request.
+        return {
+            "feed": _update_feed(["/commits?sha=dev"] if py else []),
+            "source": _update_py_source("dev") if py else
+                      _update_na_source(origin, ""),
+            "commit": _update_py_commit() if py else _update_missing_commit(),
+        }
+    if case == "commit.first":
+        return {
+            "feed": _update_feed(["/commits?sha=master"] if py else
+                                 ["/repos/fffonion/xeHentai/commits?sha=rss"]),
+            "source": _update_py_source("master") if py else
+                      _update_na_source(origin, "rss"),
+            "commit": _update_py_commit() if py else _update_na_commit(),
+        }
+    if case == "decision.off":
+        return {
+            "feed": _update_feed(["/commits?sha=master"] if py else
+                                 ["/repos/fffonion/xeHentai/commits?sha=rss"]),
+            "decision": _update_decision(
+                "off", None,
+                "return_value_none" if py else "available",
+                [PY_CHANNEL_RELEASE, PY_AVAILABLE, PY_MANUAL] if py else
+                [NA_AVAILABLE, NA_MANUAL],
+                True, True, True),
+        }
+    if case == "decision.same":
+        return {
+            "feed": _update_feed(["/commits?sha=master"] if py else
+                                 ["/repos/fffonion/xeHentai/commits?sha=rss"]),
+            "decision": _update_decision(
+                "check", UPDATE_ID,
+                "return_value_none" if py else "up_to_date",
+                [PY_CHANNEL_RELEASE, PY_NO_UPDATE] if py else
+                [NA_NO_UPDATE],
+                True, True, True),
+        }
+    if case == "decision.download":
+        targets = (["/commits?sha=master", "/archive/%s.zip" % UPDATE_ID]
+                   if py else _update_na_package_targets())
+        sections = {
+            "feed": _update_feed(targets),
+            "decision": _update_decision(
+                "download", None,
+                "return_value_none" if py else "pending",
+                [PY_CHANNEL_RELEASE, PY_AVAILABLE, PY_COMPLETE] if py else
+                [NA_AVAILABLE, NA_COMPLETE, NA_PENDING],
+                True, True, False),
+            "source": _update_py_source("master") if py else
+                      _update_na_source(origin, "rss"),
+        }
+        sections["package"] = (_update_py_package() if py
+                               else _update_na_package())
+        return sections
+    if case == "package.envelope":
+        return {
+            "package": _update_py_package() if py else _update_na_package(),
+            "source": _update_py_source("master") if py else
+                      _update_na_source(origin, "rss"),
+        }
+    if case == "package.reject":
+        python_targets = ["/commits?sha=master", "/archive/%s.zip" % UPDATE_ID]
+        native_targets = _update_na_package_targets()[:3]
+        return {
+            "feed": _update_feed(python_targets if py else native_targets),
+            "decision": _update_decision(
+                "download", None,
+                "return_value_none" if py else "failed",
+                [PY_CHANNEL_RELEASE, PY_AVAILABLE, PY_FAILED] if py else
+                [NA_AVAILABLE, NA_FAILED],
+                True, True, True),
+        }
+    if case == "apply.valid":
+        if py:
+            return {"apply": _update_apply(
+                True, True, UPDATE_ID, None, True, "pending_zip", 2.023,
+                None, None)}
+        return {"apply": _update_apply(
+            True, False, UPDATE_ID, True, True, "source_tree",
+            UPDATE_PLATFORM["app_version"], None,
+            "/repos/fffonion/xeHentai/commits?sha=rss-b")}
+    if case == "apply.reject":
+        # Registered delta: the legacy loader silently keeps the unusable
+        # archive and applies nothing, while the native startup rejects and
+        # retires the candidate with the live tree and session unchanged.
+        if py:
+            return {"apply": _update_apply(
+                True, True, "", None, True, None, 2.023, None, None)}
+        return {"apply": _update_apply(
+            True, False, None, False, True, None, None, None, None)}
+    if case == "cli.off":
+        return {
+            "feed": _update_feed([]),
+            "decision": _update_decision(
+                "off", None,
+                "cli_gate_skips_module" if py else "no_vm_http",
+                [], False, False, True),
+        }
+    raise CompatError(f"unknown update subcase {case}")
+
+
+def update_expected_observation(case, side, origin):
+    spec = _update_case_spec(case)
+    # Deep copies: the registered constants must never be mutable state that a
+    # caller (or a producer fixture) can alias and then "mutate both sides".
+    sections = copy.deepcopy(update_expected_sections(case, side, origin))
+    if set(sections) != set(spec["sections"]):
+        raise CompatError(
+            f"update expectation {case}/{side} sections {sorted(sections)} "
+            f"!= registered {sorted(spec['sections'])}")
+    return {"side": side, "sections": sections, "evidence": {}}
+
+
+def _update_na_package_targets():
+    payload = "/fffonion/xeHentai/releases/download/rss-%s/xeHentai-rss.zip" % (
+        UPDATE_ID,)
+    return [
+        "/repos/fffonion/xeHentai/commits?sha=rss",
+        payload + ".manifest.json",
+        payload + ".sig",
+        payload,
+    ]
+
+
+def _update_type_ok(value, spec):
+    if spec.endswith("?"):
+        if value is None:
+            return True
+        spec = spec[:-1]
+    return {
+        "str": lambda: type(value) is str,
+        "int": lambda: type(value) is int,
+        "bool": lambda: type(value) is bool,
+        "list": lambda: type(value) is list,
+        "dict": lambda: type(value) is dict,
+        "num": lambda: type(value) in (int, float),
+        # The loaded reference reports a float __version__; the native build
+        # reports its display string. Both are exact scalars, never bools.
+        "version": lambda: type(value) in (str, int, float),
+    }[spec]()
+
+
+def _update_shape_diffs(case, side, observation, where):
+    diffs = []
+    if not isinstance(observation, dict):
+        return [f"{where}: {side} observation is not an object"]
+    if set(observation) != {"side", "sections", "evidence"}:
+        diffs.append(
+            f"{where}: {side} observation keys {sorted(observation)}")
+        return diffs
+    if not isinstance(observation["evidence"], dict):
+        diffs.append(f"{where}: {side} evidence is not an object")
+    if observation["side"] != side:
+        diffs.append(
+            f"{where}: observation side {observation['side']!r} != {side!r}")
+    sections = observation["sections"]
+    if not isinstance(sections, dict):
+        return diffs + [f"{where}: {side} sections is not an object"]
+    required = set(_update_case_spec(case)["sections"])
+    actual = set(sections)
+    for name in sorted(required - actual):
+        diffs.append(f"{where}: {side} section {name} missing")
+    for name in sorted(actual - required):
+        diffs.append(f"{where}: {side} section {name} unexpected")
+    for name in sorted(required & actual):
+        value = sections[name]
+        if not isinstance(value, dict):
+            diffs.append(f"{where}: {side} section {name} is not an object")
+            continue
+        schema = UPDATE_SECTION_SCHEMA[name]
+        keys = set(value)
+        for key in sorted(set(schema) - keys):
+            diffs.append(f"{where}: {side} {name}.{key} missing")
+        for key in sorted(keys - set(schema)):
+            diffs.append(f"{where}: {side} {name}.{key} unexpected")
+        for key in sorted(keys & set(schema)):
+            if not _update_type_ok(value[key], schema[key]):
+                diffs.append(
+                    f"{where}: {side} {name}.{key} has wrong type "
+                    f"{type(value[key]).__name__} for {schema[key]}")
+    return diffs
+
+
+_SHA256_SENTINEL = "<sha256>"
+UPDATE_FAILURE_PREFIX = "Failure when updating program: "
+
+
+def _update_resolve(expected, actual):
+    """Resolve the declared opaque-digest token from the observed value only.
+
+    The token means "a 64-char lowercase SHA-256"; the descriptor binding is
+    checked separately. Any other value is compared literally.
+    """
+    if isinstance(expected, dict) and isinstance(actual, dict):
+        return {key: _update_resolve(expected[key], actual[key])
+                if key in actual else expected[key] for key in expected}
+    if isinstance(expected, list) and isinstance(actual, list):
+        return [_update_resolve(left, right)
+                for left, right in zip(expected, actual)]
+    if (expected == _SHA256_SENTINEL and isinstance(actual, str)
+            and re.fullmatch(r"[0-9a-f]{64}", actual)):
+        return actual
+    return expected
+
+
+def _update_invariant_diffs(case, side, sections):
+    diffs = []
+    if case in ("package.envelope", "decision.download") and side == "native":
+        package = sections["package"]
+        if package["info"]["archive_sha256"] != package["payload_sha256"]:
+            diffs.append(
+                f"update.{case}.native: the signed descriptor digest does not "
+                f"bind the payload bytes")
+    return diffs
+
+
+def compare_update(cases, oracle_cases, candidate_cases, origin):
+    """Strict per-subcase comparison; fills the five catalog rows.
+
+    Both sides first pass the registered section schema (exact keys, exact
+    types), then each side is compared to its explicit expected observation.
+    A side-specific format delta never removes a field from the comparison.
+    """
+    diffs = []
+    results = {case_id: True for case_id in UPDATE_CASE_IDS}
+    for spec in UPDATE_CASES:
+        case = spec["case"]
+        owner = spec["id"]
+        where = f"update.{case}"
+        local = []
+        observations = {}
+        for side, mapping in (("python", oracle_cases),
+                              ("native", candidate_cases)):
+            observation = mapping.get(case) if isinstance(mapping, dict) else None
+            if observation is None:
+                local.append(f"{where}: {side} observation missing")
+                continue
+            local.extend(_update_shape_diffs(case, side, observation, where))
+            observations[side] = observation
+        if len(observations) == 2:
+            for side, observation in observations.items():
+                expected = update_expected_observation(case, side, origin)
+                resolved = _update_resolve(expected["sections"],
+                                           observation["sections"])
+                local.extend(compare(resolved, observation["sections"],
+                                     f"{where}.{side}"))
+                local.extend(_update_invariant_diffs(
+                    case, side, observation["sections"]))
+        diffs.extend(local)
+        results[owner] = results[owner] and not local
+    for spec in UPDATE_CASES:
+        if spec["id"] not in results:
+            diffs.append(f"update: catalog row {spec['id']} not registered")
+    for case_id in UPDATE_CASE_IDS:
+        cases[case_id] = bool(results.get(case_id))
+    return diffs
+
+
+def update_required_native_names():
+    """Map each of the five rows to the native tests that prove it."""
+    required = {case_id: [] for case_id in UPDATE_CASE_IDS}
+    for test_name, case_ids in NATIVE_CASE_MAP["update"].items():
+        for case_id in case_ids:
+            if case_id in required and test_name not in required[case_id]:
+                required[case_id].append(test_name)
+    return required
+
+
+def validate_update_native_proof(native_runs, cases):
+    """Same-round INTERSECTION: native names ok AND the wire/comparator True.
+
+    Never sets a row True. A mapped name that is missing or not `ok` in this
+    round fails its row; a failed wire/comparator leg is never revived by a
+    passing native leg. The received native name set must be exactly the
+    registered map (no zero tests, unexpected or duplicate names).
+    """
+    diffs = []
+    if not native_runs:
+        diffs.append("update native: no native runs received")
+        for case_id in UPDATE_CASE_IDS:
+            cases[case_id] = False
+        return diffs
+    received = {}
+    duplicates = set()
+    run_invalid = False
+    for run in native_runs:
+        results = run.get("results") or {}
+        if not results:
+            diffs.append(f"update native: empty test set in run {run.get('argv')}")
+            run_invalid = True
+        for test_name, status in results.items():
+            if test_name in received:
+                duplicates.add(test_name)
+            received[test_name] = status
+        summary = run.get("summary") or {}
+        if (summary.get("status") != "ok" or summary.get("failed", 1) != 0
+                or not summary.get("passed")):
+            diffs.append(
+                f"update native run not green: {run.get('argv')} {summary}")
+            run_invalid = True
+        if summary.get("ignored", 0) != 0:
+            diffs.append(
+                f"update native run has ignored tests: {run.get('argv')} {summary}")
+            run_invalid = True
+    expected = set(NATIVE_CASE_MAP["update"])
+    missing_names = sorted(expected - set(received))
+    extra_names = sorted(set(received) - expected)
+    if missing_names:
+        diffs.append(f"update native names missing: {missing_names}")
+        for case_id, names in update_required_native_names().items():
+            if any(name in missing_names for name in names):
+                cases[case_id] = False
+    if extra_names:
+        diffs.append(f"update native names extra: {extra_names}")
+        run_invalid = True
+    if duplicates:
+        diffs.append(
+            f"update native names duplicate across runs: {sorted(duplicates)}")
+        run_invalid = True
+    for name in sorted(expected & set(received)):
+        if received[name] != "ok":
+            diffs.append(
+                f"update native {name} status must be ok, got {received[name]!r}")
+    for case_id, names in update_required_native_names().items():
+        for name in names:
+            status = received.get(name)
+            if status != "ok":
+                cases[case_id] = False
+                diffs.append(
+                    f"update native proof {case_id}: {name} is "
+                    f"{status if status is not None else 'missing'} in this round")
+    if run_invalid:
+        for case_id in UPDATE_CASE_IDS:
+            cases[case_id] = False
+    extra_rows = sorted(set(cases) - set(UPDATE_CASE_IDS))
+    if extra_rows:
+        diffs.append(f"update rows extra in the case map: {extra_rows}")
+        for row in extra_rows:
+            cases[row] = False
+    for case_id in UPDATE_CASE_IDS:
+        if case_id not in cases:
+            diffs.append(f"update final {case_id}: missing from the case map")
+            cases[case_id] = False
+        elif cases[case_id] is not True:
+            diffs.append(f"update final {case_id}: must be strictly True")
+    return diffs
+
+
+def update_oracle_verify(oracle_root):
+    """Byte-compare the imported reference tree with the frozen git blobs."""
+    root = Path(oracle_root)
+    if not root.is_dir():
+        raise CompatError(f"update oracle tree missing: {root}")
+    files = sorted(path for path in root.rglob("*")
+                   if path.is_file() and "__pycache__" not in path.parts)
+    unequal = []
+    for path in files:
+        relative = path.relative_to(root).as_posix()
+        result = subprocess.run(
+            ["git", "-C", UPDATE_ORACLE_REPO, "show",
+             f"{UPDATE_ORACLE_REVISION}:{relative}"],
+            capture_output=True,
+        )
+        if result.returncode != 0 or result.stdout != path.read_bytes():
+            unequal.append(relative)
+    if unequal:
+        raise CompatError(
+            f"update oracle source bytes differ from {UPDATE_ORACLE_REVISION}: "
+            f"{unequal}")
+    return {"revision": UPDATE_ORACLE_REVISION, "files": len(files),
+            "method": "git-show-byte-compare"}
+
+
+class _UpdateSourceServer:
+    """Real loopback HTTP source for the frozen reference run."""
+
+    def __init__(self, feed, archive):
+        self.requests = []
+        server = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"
+
+            def do_GET(self):  # noqa: N802 - stdlib handler name
+                if self.path.startswith("/commits"):
+                    status, body = 200, feed.encode("utf-8")
+                elif self.path.startswith("/archive/"):
+                    status, body = 200, archive
+                else:
+                    status, body = 404, b"b6 harness: unknown path"
+                server.requests.append({
+                    "method": "GET", "target": self.path, "status": status,
+                    "headers": sorted(name.lower()
+                                      for name in self.headers.keys()),
+                })
+                self.send_response(status)
+                self.send_header(
+                    "Content-Type",
+                    "application/json" if self.path.startswith("/commits")
+                    else "application/octet-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, fmt, *args):
+                return
+
+        self._server = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), Handler)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(
+            target=self._server.serve_forever, name="b6-update-http",
+            daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(5)
+
+
+def _update_source_archive_bytes():
+    """Deterministic DEFLATED source archive (input format, not observed)."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, body in UPDATE_SOURCE_ARCHIVE:
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            if name.endswith("/"):
+                archive.writestr(info, b"")
+            else:
+                archive.writestr(info, body.encode("utf-8"))
+    return buffer.getvalue()
+
+
+def _update_pending_bytes(info_bytes):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr("xeHentai/__init__.py",
+                         UPDATE_SOURCE_ARCHIVE[0][1].encode("utf-8"))
+        archive.writestr("info.json", info_bytes)
+    return buffer.getvalue()
+
+
+def _update_zip_observation(path):
+    names, compress, info = [], [], None
+    with zipfile.ZipFile(path, "r") as archive:
+        infos = archive.infolist()
+        names = [item.filename for item in infos]
+        compress = [item.compress_type for item in infos]
+        if "info.json" in names:
+            info = json.loads(archive.read("info.json").decode("utf-8"))
+    return names, compress, info
+
+
+def _update_log_events(buffer):
+    """Split real reference logger stdout into keyed events (time removed)."""
+    events = []
+    for line in buffer.splitlines():
+        match = re.match(
+            r"^(DEBG|INFO|WARN|VERB|CRIT) - \[[0-9:]+\] (.*)$", line)
+        if not match:
+            continue
+        level, text = match.group(1), match.group(2)
+        if text in ("Update channel is: release", "Update channel is: dev"):
+            key = "UPDATE_CHANNEL"
+        elif text == ('Update available: %s "%s" (%s)'
+                      % (UPDATE_TS, UPDATE_MESSAGE, UPDATE_ID)):
+            key = "UPDATE_AVAILABLE"
+        elif text == ("You can download update from "
+                      "https://dl.yooooo.us/share/xeHentai/"):
+            key = "UPDATE_DOWNLOAD_MANUALLY"
+        elif text == "Program is up-to-date":
+            key = "UPDATE_NO_UPDATE"
+        elif text == ("Update is complete, it will take effect on next run"):
+            key = "UPDATE_COMPLETE"
+        elif text.startswith("Failure when updating program: "):
+            key = "UPDATE_FAILED"
+        else:
+            key = "UNKNOWN"
+        events.append({"level": level, "key": key, "text": text})
+    return events
+
+
+def oracle_update(upstream, request):
+    """Execute one update subcase with the frozen reference, live.
+
+    Every call runs in its own compat.py child process (fresh imports): the
+    reference modules are imported from the byte-verified frozen tree, the
+    source transport is remapped onto a real loopback HTTP server and the real
+    `requests.Session.get` is still called.
+    """
+    case = request["case"]
+    oracle_root = Path(request.get("oracle_tree") or UPDATE_ORACLE_DEFAULT)
+    verification = update_oracle_verify(oracle_root)
+    case_root = Path.cwd()
+    for name in ("home", "cache", "tmp"):
+        (case_root / name).mkdir(parents=True, exist_ok=True)
+    pending = case_root / "src.zip"
+    if pending.exists():
+        pending.unlink()
+    if request.get("seed_pending"):
+        pending.write_bytes(UPDATE_PENDING_SENTINEL)
+    stage = case_root / "stage"
+    stage.mkdir(exist_ok=True)
+    archive_bytes = (
+        b"PK\x03\x04 this is not a valid zip archive body\n"
+        if case == "package.reject" else _update_source_archive_bytes())
+    feed = update_feed_json()
+    source = _UpdateSourceServer(feed, archive_bytes)
+    transport = []
+    real_get = None
+    session_module = None
+    result = {
+        "side": "python",
+        "sections": {},
+        "evidence": {"oracle_verification": verification},
+    }
+    try:
+        import requests
+
+        session_module = requests
+        real_get = requests.Session.get
+        api_prefix = ("https://api.github.com/repos/fffonion/xeHentai/"
+                      "commits?sha=")
+        zip_prefix = "https://github.com/fffonion/xeHentai/archive/"
+
+        def map_url(url):
+            if url.startswith(api_prefix):
+                return "http://127.0.0.1:%d/commits?sha=%s" % (
+                    source.port, url[len(api_prefix):])
+            if url.startswith(zip_prefix):
+                return "http://127.0.0.1:%d/archive/%s" % (
+                    source.port, url[len(zip_prefix):])
+            return None
+
+        def patched(self, url, **kwargs):
+            mapped = map_url(url)
+            record = {"original_url": url, "mapped_url": mapped}
+            transport.append(record)
+            if mapped is None:
+                raise AssertionError(
+                    "unmapped URL left the controlled source: %r" % (url,))
+            response = real_get(self, mapped, **kwargs)
+            record["status"] = response.status_code
+            record["bytes"] = len(response.content)
+            return response
+
+        requests.Session.get = patched
+
+        sys.path[0] = str(case_root)
+        sys.path.insert(1, str(oracle_root))
+        if case == "channel.stable":
+            from xeHentai.updater.github import GithubUpdater
+
+            info = GithubUpdater(requests.Session()).get_latest_release(False)
+            result["sections"] = {
+                "feed": _update_feed([record["mapped_url"].split(
+                    "127.0.0.1:%d" % source.port, 1)[1]
+                    for record in transport]),
+                "source": _update_py_source("master"),
+                "commit": _update_commit(
+                    info.update_id, info.ts, info.message),
+            }
+        elif case == "channel.beta":
+            from xeHentai.updater.github import GithubUpdater
+
+            info = GithubUpdater(requests.Session()).get_latest_release(True)
+            result["sections"] = {
+                "feed": _update_feed([record["mapped_url"].split(
+                    "127.0.0.1:%d" % source.port, 1)[1]
+                    for record in transport]),
+                "source": _update_py_source("dev"),
+                "commit": _update_commit(
+                    info.update_id, info.ts, info.message),
+            }
+        elif case == "channel.beta-missing":
+            from xeHentai.updater.github import GithubUpdater
+
+            info = GithubUpdater(requests.Session()).get_latest_release(True)
+            result["sections"] = {
+                "feed": _update_feed([record["mapped_url"].split(
+                    "127.0.0.1:%d" % source.port, 1)[1]
+                    for record in transport]),
+                "source": _update_py_source("dev"),
+                "commit": _update_commit(
+                    info.update_id, info.ts, info.message),
+            }
+        elif case == "commit.first":
+            from xeHentai.updater.github import GithubUpdater
+
+            updater = GithubUpdater(requests.Session())
+            info = updater.get_latest_release(False)
+            result["sections"] = {
+                "feed": _update_feed([record["mapped_url"].split(
+                    "127.0.0.1:%d" % source.port, 1)[1]
+                    for record in transport]),
+                "source": _update_py_source("master"),
+                "commit": _update_commit(
+                    info.update_id, info.ts, info.message),
+            }
+        elif case in ("decision.off", "decision.same", "decision.download",
+                      "package.reject"):
+            import xeHentai.updater.github as github_module
+            import xeHentai.updater.updater as updater_module
+            import xeHentai.util.logger as logger_module
+
+            const = __import__("xeHentai.const", fromlist=["const"])
+            mode = ("off" if case == "decision.off" else
+                    "check" if case == "decision.same" else "download")
+            applied = UPDATE_ID if case == "decision.same" else UPDATE_SECOND_ID
+            const.VERSION_UPDATE = applied
+            # The reference captures VERSION_UPDATE by module import; set it
+            # on the updater module as well so the executed body sees it.
+            updater_module.VERSION_UPDATE = applied
+            import contextlib
+            buffer = io.StringIO()
+            before = pending.read_bytes() if pending.exists() else None
+            with contextlib.redirect_stdout(buffer):
+                logger = logger_module.Logger()
+                returned = updater_module.check_update(
+                    logger,
+                    {"auto_update": mode, "update_beta_channel": False})
+            after = pending.read_bytes() if pending.exists() else None
+            targets = [record["mapped_url"].split(
+                "127.0.0.1:%d" % source.port, 1)[1] for record in transport]
+            result["sections"] = {
+                "feed": _update_feed(targets),
+                "decision": _update_decision(
+                    mode, applied if case == "decision.same" else None,
+                    "return_value_none",
+                    _update_log_events(buffer.getvalue()),
+                    before is not None, after is not None,
+                    (before == after) if before is not None else
+                    (after is None)),
+            }
+            if case == "decision.download":
+                names, compress, info = _update_zip_observation(pending)
+                result["sections"]["package"] = _update_package(
+                    names, compress, update_source_archive_names(),
+                    [0] * len(update_source_archive_names()), info,
+                    [name for name in names if name != "info.json"],
+                    update_source_dropped_names(), None, None)
+                result["sections"]["source"] = _update_py_source("master")
+            result["evidence"]["return_value"] = repr(returned)
+        elif case == "package.envelope":
+            from xeHentai.updater.github import GithubUpdater
+            from xeHentai.updater.updater import make_src_update_file
+
+            updater = GithubUpdater(requests.Session())
+            info = updater.get_latest_release(False)
+            with zipfile.ZipFile(io.BytesIO(archive_bytes), "r") as archive:
+                make_src_update_file(
+                    archive, updater.get_src_path_in_archive(info), info)
+            names, compress, written = _update_zip_observation(pending)
+            result["sections"] = {
+                "package": _update_package(
+                    names, compress, update_source_archive_names(),
+                    [0] * len(update_source_archive_names()),
+                    written, [name for name in names if name != "info.json"],
+                    update_source_dropped_names(), None, None),
+                "source": _update_py_source("master"),
+            }
+        elif case == "apply.valid":
+            const = __import__("xeHentai.const", fromlist=["const"])
+            const.VERSION_UPDATE = ""
+            pending.write_bytes(_update_pending_bytes(json.dumps(
+                {"v": const.SRC_UPDATE_VERSION, "update_id": UPDATE_ID}
+            ).encode("utf-8")))
+            import xeH
+            import xeHentai.util.logger as logger_module  # noqa: F401
+
+            before = pending.read_bytes()
+            xeH.load_update()
+            const = __import__("xeHentai.const", fromlist=["const"])
+            package = sys.modules.get("xeHentai")
+            result["sections"] = {"apply": _update_apply(
+                True, pending.exists(),
+                getattr(const, "VERSION_UPDATE", ""),
+                None, True,
+                "pending_zip"
+                if getattr(package, "__file__", "").startswith(str(pending))
+                else None,
+                getattr(const, "VERSION_UPDATE_LOADER", None),
+                None, None)}
+            result["evidence"]["load_observed"] = {
+                "sys_path0_is_pending": sys.path[0] == str(pending),
+                "zip_marker": getattr(package, "M7_ZIP_MARKER", None),
+                "h_json": (case_root / "h.json").exists(),
+            }
+        elif case == "apply.reject":
+            const = __import__("xeHentai.const", fromlist=["const"])
+            const.VERSION_UPDATE = ""
+            pending.write_bytes(b"PK\x03\x04 this is not a valid zip archive\n")
+            import xeH
+            xeH.load_update()
+            const = __import__("xeHentai.const", fromlist=["const"])
+            package = sys.modules.get("xeHentai")
+            result["sections"] = {"apply": _update_apply(
+                True, pending.exists(),
+                getattr(const, "VERSION_UPDATE", ""),
+                None, True,
+                "pending_zip"
+                if getattr(package, "__file__", "").startswith(str(pending))
+                else None,
+                getattr(const, "VERSION_UPDATE_LOADER", None),
+                None, None)}
+            result["evidence"]["load_observed"] = {
+                "sys_path0_is_pending": sys.path[0] == str(pending),
+                "zip_marker": getattr(package, "M7_ZIP_MARKER", None),
+                "h_json": (case_root / "h.json").exists(),
+            }
+        elif case == "cli.off":
+            import socket
+            import signal
+            import threading as threading_module
+            import time
+
+            net_calls = []
+            real_connect = socket.socket.connect
+
+            def guarded_get(self, url, **kwargs):
+                net_calls.append({"via": "requests.Session.get", "url": url})
+                raise RuntimeError(
+                    "network attempted although auto_update=off: %r" % (url,))
+
+            def guarded_connect(self, address):
+                net_calls.append(
+                    {"via": "socket.connect", "address": repr(address)})
+                raise RuntimeError(
+                    "outbound connect attempted although auto_update=off: %r"
+                    % (address,))
+
+            requests.Session.get = guarded_get
+            socket.socket.connect = guarded_connect
+            real_exit = os._exit
+            started_marker = case_root / "cli-started"
+
+            class _Exit(Exception):
+                pass
+
+            observed = {}
+
+            def record_and_exit(code):
+                observed["exit_code_arg"] = code
+                raise _Exit(code)
+
+            os._exit = record_and_exit
+
+            from xeHentai import cli
+            sys.argv = ["xeH", "-l", "eh.log", "-vv", "--auto-update", "off"]
+            result["evidence"]["cli_module_file"] = cli.__file__
+
+            def watchdog():
+                time.sleep(1.5)
+                started_marker.write_text("cli.start resident: SIGINT\n",
+                                          encoding="utf-8")
+                os.kill(os.getpid(), signal.SIGINT)
+
+            threading_module.Thread(
+                target=watchdog, name="b6-watchdog", daemon=True).start()
+            try:
+                cli.start()
+            except _Exit:
+                pass
+            finally:
+                os._exit = real_exit
+                socket.socket.connect = real_connect
+            result["sections"] = {
+                "feed": _update_feed([]),
+                "decision": _update_decision(
+                    "off", None, "cli_gate_skips_module", [], False,
+                    False, True),
+            }
+            result["evidence"]["cli_observed"] = {
+                "net_calls": list(net_calls),
+                "update_module_imported":
+                    "xeHentai.updater.updater" in sys.modules,
+                "started": started_marker.exists(),
+                "exit_code_arg": observed.get("exit_code_arg"),
+            }
+        else:
+            raise CompatError(f"unknown update subcase {case}")
+    finally:
+        requests_mod = sys.modules.get("requests")
+        if requests_mod is not None and real_get is not None:
+            requests_mod.Session.get = real_get
+        source.stop()
+    if not result["sections"]:
+        raise CompatError(f"update oracle {case} produced no observation")
+    return result
+
+
+def _run_update_oracle(suite, request, root, upstream, oracle_root, log_path):
+    del suite
+    request = dict(request)
+    request.setdefault("oracle_tree", str(oracle_root))
+    return run_oracle("update", request, root, upstream, log_path,
+                      cwd=root / "isolated")
+
+
+def _update_self_check(oracle, candidate, native_runs, origin):
+    """Run the production comparator/merge/final path with mutations."""
+    python_cases = oracle["cases"]
+    native_cases = candidate["cases"]
+    checks = []
+
+    def observe(python_cases, native_cases, owner, needle=None):
+        cases = {}
+        diffs = compare_update(cases, python_cases, native_cases, origin)
+        return cases, diffs
+
+    def mutated(case, side, mutate, owner, needle=None):
+        python_copy = copy.deepcopy(python_cases)
+        native_copy = copy.deepcopy(native_cases)
+        target = python_copy if side == "python" else native_copy
+        mutate(target[case]["sections"])
+        cases, diffs = observe(python_copy, native_copy, owner)
+        return (cases.get(owner) is False and bool(diffs)
+                and (needle is None or any(needle in diff for diff in diffs)))
+
+    checks.append(("first-versus-second-commit", mutated(
+        "commit.first", "python",
+        lambda section: section["commit"].__setitem__(
+            "update_id", UPDATE_SECOND_ID),
+        "update.commit", "commit.update_id")))
+    checks.append(("channel-url", mutated(
+        "channel.stable", "native",
+        lambda section: section["source"].__setitem__(
+            "channel_url", section["source"]["channel_url"].replace(
+                "sha=rss", "sha=dev")),
+        "update.channel", "source.channel_url")))
+    checks.append(("mode-outcome", mutated(
+        "decision.off", "native",
+        lambda section: section["decision"].__setitem__(
+            "outcome", "pending"),
+        "update.decision", "decision.outcome")))
+    checks.append(("typed-metadata", mutated(
+        "commit.first", "python",
+        lambda section: section["commit"].__setitem__("update_id_type", 1),
+        "update.commit", "update_id_type")))
+    checks.append(("pending-member", mutated(
+        "package.envelope", "native",
+        lambda section: section["package"].__setitem__(
+            "member_names", ["info.json", "payload.zip"]),
+        "update.package", "member_names")))
+    checks.append(("application-state", mutated(
+        "apply.valid", "native",
+        lambda section: section["apply"].__setitem__("live_changed", False),
+        "update.apply", "live_changed")))
+    checks.append(("error-class", mutated(
+        "apply.reject", "native",
+        lambda section: section["apply"].__setitem__("stop", "ApplyFailed"),
+        "update.apply", "stop")))
+
+    def both_sided(case, mutate, owner, needle=None):
+        python_copy = copy.deepcopy(python_cases)
+        native_copy = copy.deepcopy(native_cases)
+        mutate(python_copy[case]["sections"])
+        mutate(native_copy[case]["sections"])
+        cases, diffs = observe(python_copy, native_copy, owner)
+        return (cases.get(owner) is False and bool(diffs)
+                and (needle is None or any(needle in diff for diff in diffs)))
+
+    checks.append(("both-sided-missing", both_sided(
+        "package.envelope",
+        lambda section: section["package"].pop("input_members", None),
+        "update.package", "input_members")))
+    checks.append(("both-sided-wrong-type", both_sided(
+        "decision.same",
+        lambda section: section["decision"].__setitem__(
+            "pending_before", 1),
+        "update.decision", "pending_before")))
+    checks.append(("both-sided-truthy-type", both_sided(
+        "decision.off",
+        lambda section: section["decision"].__setitem__("mode", True),
+        "update.decision", "decision.mode")))
+    checks.append(("both-sided-falsy-type", both_sided(
+        "decision.same",
+        lambda section: section["decision"].__setitem__(
+            "pending_equal", 0),
+        "update.decision", "pending_equal")))
+
+    def native_guard(build_runs, owner=None, mutate_cases=None):
+        runs = build_runs()
+        cases = _all_update_true(mutate_cases)
+        diffs = validate_update_native_proof(runs, cases)
+        if owner is None:
+            return bool(diffs)
+        return (cases.get(owner) is False and bool(diffs)
+                and any(owner in diff or "native" in diff for diff in diffs))
+
+    mapping = update_required_native_names()
+    statuses = {}
+    for names in mapping.values():
+        for name in names:
+            statuses[name] = "ok"
+
+    def complete_runs():
+        return [{"results": dict(statuses),
+                 "summary": {"status": "ok", "passed": len(statuses),
+                             "failed": 0, "ignored": 0},
+                 "argv": ["cargo", "test"]}]
+
+    victim_case = sorted(mapping)[0]
+    victim = mapping[victim_case][0]
+
+    def missing_runs():
+        results = dict(statuses)
+        results.pop(victim)
+        return [{"results": results,
+                 "summary": {"status": "ok", "passed": len(results),
+                             "failed": 0, "ignored": 0},
+                 "argv": ["cargo", "test"]}]
+
+    def failed_runs():
+        results = dict(statuses)
+        results[victim] = "FAILED"
+        return [{"results": results,
+                 "summary": {"status": "FAILED", "passed": len(results) - 1,
+                             "failed": 1, "ignored": 0},
+                 "argv": ["cargo", "test"]}]
+
+    checks.append(("native-missing-name",
+                   native_guard(missing_runs, victim_case)))
+    checks.append(("native-non-ok", native_guard(failed_runs, victim_case)))
+
+    def false_wire():
+        cases = {case_id: True for case_id in UPDATE_CASE_IDS}
+        cases[victim_case] = False
+        diffs = validate_update_native_proof(complete_runs(), cases)
+        return (cases[victim_case] is False and bool(diffs))
+
+    checks.append(("false-wire-native-ok", false_wire()))
+
+    def missing_case():
+        python_copy = copy.deepcopy(python_cases)
+        native_copy = copy.deepcopy(native_cases)
+        dropped = sorted(native_copy)[0]
+        owner = _update_case_spec(dropped)["id"]
+        native_copy.pop(dropped)
+        cases, diffs = observe(python_copy, native_copy, None)
+        return bool(diffs) and cases.get(owner) is False
+
+    checks.append(("missing-case", missing_case()))
+
+    def unknown_variation():
+        python_copy = copy.deepcopy(python_cases)
+        native_copy = copy.deepcopy(native_cases)
+        python_copy["apply.valid"]["sections"]["apply"]["unknown"] = 1
+        native_copy["apply.valid"]["sections"]["apply"]["unknown"] = 1
+        cases, diffs = observe(python_copy, native_copy, None)
+        return (bool(diffs) and cases.get("update.apply") is False
+                and any("unknown" in diff for diff in diffs))
+
+    checks.append(("request-sequence", mutated(
+        "decision.off", "native",
+        lambda section: section["feed"].__setitem__(
+            "targets", ["/repos/fffonion/xeHentai/commits?sha=dev"]),
+        "update.decision", "feed.targets")))
+    checks.append(("session-state", mutated(
+        "apply.valid", "native",
+        lambda section: section["apply"].__setitem__("session_equal", False),
+        "update.apply", "session_equal")))
+    checks.append(("source-channel", mutated(
+        "channel.beta", "native",
+        lambda section: section["source"].__setitem__("channel", "rss"),
+        "update.channel", "source.channel")))
+    checks.append(("unknown-variation", unknown_variation()))
+    return checks
+
+
+def _all_update_true(overrides=None):
+    cases = {case_id: True for case_id in UPDATE_CASE_IDS}
+    if overrides:
+        cases.update(overrides)
+    return cases
+
+
+def run_oracle(oracle, request, root, upstream, log_path, locale=None, cwd=None,
+               tag=None):
+    label = tag or locale or "default"
+    request_path = root / f"oracle-request-{oracle}-{label}.json"
+    output_path = root / f"oracle-{oracle}-{label}.json"
     write_json(request_path, request)
     command = [
         sys.executable,
@@ -4535,11 +6034,36 @@ def run_native(suite, root, target_dir):
     env["CARGO_TERM_COLOR"] = "never"
     evidence = []
     for index, argv in enumerate(NATIVE_COMMANDS[suite], start=1):
-        log_path = root / f"native-{index}.log"
         # The recorded argv is the ACTUAL launched argv (explicit
         # --target-dir included), not the map template.
         launched = _cargo_target_argv(argv, target_dir)
-        result = run_command(launched, REPO, env, log_path)
+        # A hang inside the pre-existing pd-vm HTTP host-op wait is a known
+        # runtime flake, not a test result. A TIMEOUT therefore gets ONE
+        # bounded retry in a fresh process, with both logs retained and both
+        # attempts recorded; a real non-zero test exit is never retried.
+        attempts = []
+        result = None
+        for attempt in (1, 2):
+            log_path = root / f"native-{index}-attempt-{attempt}.log"
+            try:
+                result = run_command(
+                    launched, REPO, env, log_path, timeout_s=300)
+            except CompatError:
+                attempts.append(
+                    {"attempt": attempt, "log": str(log_path),
+                     "outcome": "timeout"})
+                log(f"native hang (attempt {attempt}), bounded retry: "
+                    f"{' '.join(argv)}")
+                if attempt == 2:
+                    raise CompatError(
+                        f"native tests hung twice for {suite}: "
+                        f"{' '.join(argv)}")
+                continue
+            attempts.append(
+                {"attempt": attempt, "log": str(log_path),
+                 "outcome": "completed", "exit": result.returncode})
+            break
+        log_path = Path(attempts[-1]["log"])
         if result.returncode != 0:
             raise CompatError(f"native tests failed for {suite}: {' '.join(argv)}")
         _, summary = parse_test_results(result.stdout)
@@ -4562,6 +6086,7 @@ def run_native(suite, root, target_dir):
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "log": str(log_path),
+                "attempts": attempts,
             }
         )
     return evidence
@@ -5955,6 +7480,9 @@ def self_check(suite, oracle, candidate, native_runs=None):
         checks.append(("index-marker", not cases.get("webui.pack.index", True)))
     elif suite == "concurrency":
         checks.append(("zero-tests", detect_zero_tests("running 0 tests\n\ntest result: ok. 0 passed")))
+    elif suite == "update":
+        checks.extend(_update_self_check(
+            oracle, candidate, native_runs or [], candidate["origin"]))
     if not checks or not all(detected for _, detected in checks):
         raise CompatError(f"{suite}: comparator self-check failed: {checks}")
     return [{"mutation": name, "detected": detected} for name, detected in checks]
@@ -6026,6 +7554,11 @@ def merge_native_cases(suite, native_runs, cases):
                     cases.setdefault(case_id, True)
                 else:
                     cases[case_id] = False
+    if suite == "update":
+        # Never the generic setdefault OR: the five update rows are an
+        # intersection of this round's comparison result and every mapped
+        # native test name. A passing native leg cannot revive a failed one.
+        return validate_update_native_proof(native_runs, cases)
     if suite != "rpc":
         return []
     return validate_rpc_merged_native_proof(native_runs, cases)
@@ -8949,6 +10482,52 @@ def run_suite(suite, output_root, upstream, target_dir):
             candidate = run_probe("webui", {}, root, target_dir, root / "probe-webui.log")
             cases = {}
             diffs = compare_webui(cases, oracle, candidate)
+        elif suite == "update":
+            # One fresh frozen-reference child per subcase (its own imports,
+            # its own loopback source, its own pending root) plus one native
+            # probe that runs the real Updater/RSS/startup path.
+            oracle_root = root / "oracle-work"
+            candidate_root = root / "candidate-work"
+            oracle_root.mkdir()
+            candidate_root.mkdir()
+            oracle_tree = os.environ.get(
+                "XEH_UPDATE_ORACLE", UPDATE_ORACLE_DEFAULT)
+            oracle_cases = {}
+            for spec in UPDATE_CASES:
+                case = spec["case"]
+                observation = run_oracle(
+                    "update",
+                    {
+                        "case": case,
+                        "oracle_tree": oracle_tree,
+                        "seed_pending": case in UPDATE_SEEDED_CASES,
+                    },
+                    root,
+                    upstream,
+                    root / f"oracle-update-{case}.log",
+                    cwd=oracle_root,
+                    tag=case,
+                )
+                oracle_cases[case] = observation
+            candidate = run_probe(
+                "update",
+                {
+                    "root": str(candidate_root),
+                    "package_bodies": UPDATE_PACKAGE_BODIES,
+                },
+                root,
+                target_dir,
+                root / "probe.log",
+            )
+            candidate_cases = candidate["cases"]
+            cases = {}
+            diffs = compare_update(
+                cases, oracle_cases, candidate_cases, candidate["origin"])
+            oracle = {
+                "cases": oracle_cases,
+                "oracle_tree": (oracle_cases.get("channel.stable") or {}).get(
+                    "evidence", {}).get("oracle_verification"),
+            }
         else:
             oracle = None
             candidate = None
@@ -9080,11 +10659,7 @@ def suite_command(args):
     if not (upstream_path / "xeHentai" / "config.py").is_file():
         raise CompatError(f"invalid upstream tree: {upstream_path}")
 
-    suites = (
-        ["config", "util", "i18n", "worker", "rpc", "gallery", "webui", "task-api", "session", "files", "site", "proxy", "transport", "monitor", "download", "concurrency", "cli"]
-        if args.suite == "all"
-        else [args.suite]
-    )
+    suites = (list(ALL_SUITES) if args.suite == "all" else [args.suite])
     implemented = {
         case["id"] for case in cases_doc["cases"] if case["status"] in ("implemented", "delta")
     }
@@ -9125,26 +10700,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--suite",
-        choices=[
-            "config",
-            "util",
-            "i18n",
-            "worker",
-            "rpc",
-            "gallery",
-            "webui",
-            "task-api",
-            "session",
-            "files",
-            "site",
-            "proxy",
-            "transport",
-            "monitor",
-            "download",
-            "concurrency",
-            "cli",
-            "all",
-        ],
+        choices=list(ALL_SUITES) + ["all"],
     )
     parser.add_argument("--output")
     parser.add_argument("--upstream")
@@ -9152,24 +10708,7 @@ def main(argv=None):
     parser.add_argument("--evidence")
     parser.add_argument(
         "--oracle",
-        choices=[
-            "config",
-            "util",
-            "i18n",
-            "task-api",
-            "session",
-            "session-fixture",
-            "files",
-            "site",
-            "proxy",
-            "transport",
-            "monitor",
-            "download",
-            "rpc",
-            "gallery",
-            "webui",
-            "cli",
-        ],
+        choices=list(ORACLE_SUITES),
     )
     parser.add_argument("--locale")
     parser.add_argument("--input")

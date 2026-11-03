@@ -2956,3 +2956,871 @@ fn m7p_r1_reexec_failure_reports_failed_without_claiming_a_running_version() {
         "the failed exec start claimed an installed/running update: {log}"
     );
 }
+
+// MARK: - B6 update compatibility probe
+//
+// `tests::compat_probe` dispatches the `update` suite here (Unix only: the
+// probe spawns real child processes and uses POSIX signals, exactly like the
+// M7p tests above). Every observation below comes from the REAL production
+// path: `Updater::load` + `check` over the Core HTTP host against an owned
+// loopback source, the real signed package/pending primitives, and the real
+// compiled binary for startup apply/reject and the CLI `off` gate. Nothing is
+// mocked and no second business implementation exists.
+
+fn b6_fresh(root: &Path, name: &str) -> PathBuf {
+    let dir = root.join(name);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).expect("b6 clean install");
+    }
+    std::fs::create_dir_all(&dir).expect("b6 install dir");
+    dir
+}
+
+fn b6_feed(requests: &[Request]) -> serde_json::Value {
+    serde_json::json!({
+        "request_count": requests.len(),
+        "methods": requests.iter().map(|r| r.method.clone()).collect::<Vec<_>>(),
+        "targets": requests.iter().map(|r| r.target.clone())
+            .collect::<Vec<_>>(),
+        "statuses": requests.iter().map(|_| 200).collect::<Vec<_>>(),
+    })
+}
+
+fn b6_events(report: &crate::updater::CheckReport) -> serde_json::Value {
+    serde_json::Value::Array(
+        report
+            .events
+            .iter()
+            .map(|event| {
+                serde_json::json!({
+                    "level": event.level,
+                    "key": event.key,
+                    "text": crate::updater::render_event(
+                        crate::i18n::Locale::EnUs, event),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn b6_commit(info: &crate::updater::UpdateInfo) -> serde_json::Value {
+    serde_json::json!({
+        "type": "UpdateInfo",
+        "update_id": info.update_id,
+        "update_id_type": "str",
+        "ts": info.ts,
+        "message": info.message,
+    })
+}
+
+fn b6_absent_commit() -> serde_json::Value {
+    serde_json::json!({
+        "type": serde_json::Value::Null,
+        "update_id": serde_json::Value::Null,
+        "update_id_type": serde_json::Value::Null,
+        "ts": serde_json::Value::Null,
+        "message": serde_json::Value::Null,
+    })
+}
+
+fn b6_channel_of(target: &str) -> String {
+    target
+        .split_once("sha=")
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or_default()
+}
+
+fn b6_source(info: Option<&crate::updater::UpdateInfo>, commits_url: &str) -> serde_json::Value {
+    match info {
+        Some(info) => serde_json::json!({
+            "channel": b6_channel_of(commits_url),
+            "channel_url": commits_url,
+            "download_link": info.download_link,
+            "descriptor_link": info.descriptor_link,
+            "signature_link": info.signature_link,
+            "archive_prefix": info.archive_prefix,
+        }),
+        None => serde_json::json!({
+            "channel": "",
+            "channel_url": "",
+            "download_link": "",
+            "descriptor_link": "",
+            "signature_link": "",
+            "archive_prefix": "",
+        }),
+    }
+}
+
+fn b6_pending_bytes(install: &Path) -> Option<Vec<u8>> {
+    std::fs::read(pending_path(install)).ok()
+}
+
+/// Private installer area with a pre-existing (previous-run) pending file.
+fn b6_seed_sentinel(install: &Path) -> PathBuf {
+    let pending = install.join(AREA).join("pending");
+    private_dir(&pending);
+    let leaf = pending.join("src.zip");
+    std::fs::write(
+        &leaf,
+        b"b6 pre-existing pending sentinel, deliberately not a zip\n",
+    )
+    .expect("sentinel pending");
+    leaf
+}
+
+fn b6_decision(
+    mode: &str,
+    applied: Option<&str>,
+    outcome: &str,
+    report: Option<&crate::updater::CheckReport>,
+    before: Option<&[u8]>,
+    after: Option<&[u8]>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "mode": mode,
+        "applied": applied,
+        "outcome": outcome,
+        "events": report.map(b6_events).unwrap_or(serde_json::Value::Array(vec![])),
+        "pending_before": before.is_some(),
+        "pending_after": after.is_some(),
+        "pending_equal": before == after,
+    })
+}
+
+fn b6_zip_members(bytes: &[u8]) -> Vec<(String, u16, Vec<u8>)> {
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).expect("b6 zip archive");
+    let mut out = Vec::new();
+    for index in 0..archive.len() {
+        let mut file = archive.by_index(index).expect("b6 zip member");
+        let name = file.name().to_string();
+        let method: u16 = match file.compression() {
+            zip::CompressionMethod::Stored => 0,
+            _ => 8,
+        };
+        let mut body = Vec::new();
+        file.read_to_end(&mut body).expect("b6 zip body");
+        out.push((name, method, body));
+    }
+    out
+}
+
+fn b6_package_bodies(inputs: &serde_json::Value) -> Vec<(String, Vec<u8>)> {
+    let table = inputs["package_bodies"]
+        .as_object()
+        .expect("b6 package bodies");
+    let mut out: Vec<(String, Vec<u8>)> = table
+        .iter()
+        .map(|(path, body)| {
+            (
+                path.clone(),
+                body.as_str().expect("b6 body text").as_bytes().to_vec(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+fn b6_package_probe(
+    value_bodies: &[(String, Vec<u8>)],
+    foreign: &[&str],
+    install: &Path,
+) -> serde_json::Value {
+    let key = signing_key();
+    let pem = public_pem(&key);
+    let prefix = format!("xeHentai-{UPDATE_ID}/");
+    let mut spec = Spec::new(UPDATE_ID);
+    for (path, body) in value_bodies {
+        spec.entries.push((path.clone(), body.len() as u64));
+        spec.members.push((format!("{prefix}{path}"), body.clone()));
+    }
+    for name in foreign {
+        spec.members.push((name.to_string(), b"foreign\n".to_vec()));
+    }
+    let pkg = sign(&key, &spec);
+    seed_pending(
+        install,
+        pkg.info.clone(),
+        pkg.sig.clone(),
+        pkg.payload.clone(),
+    );
+    let members = pending_members(install);
+    let names: Vec<String> = members.iter().map(|m| m.name.clone()).collect();
+    let compress: Vec<u16> = members
+        .iter()
+        .map(|m| if m.stored { 0 } else { 8 })
+        .collect();
+    let payload_members = b6_zip_members(&pkg.payload);
+    let descriptor =
+        crate::updater::descriptor::authenticate(&pkg.info, &pkg.sig, Some(pem.as_str()))
+            .expect("b6 descriptor authenticate");
+    let selected = crate::updater::package::select(&pkg.payload, &descriptor, &prefix)
+        .expect("b6 package select");
+    let selected_paths: Vec<String> = selected.iter().map(|item| item.path.clone()).collect();
+    let selected_members: Vec<String> = selected.iter().map(|item| item.member.clone()).collect();
+    let dropped: Vec<String> = payload_members
+        .iter()
+        .map(|(name, _, _)| name.clone())
+        .filter(|name| !selected_members.contains(name))
+        .collect();
+    let info: serde_json::Value = serde_json::from_slice(&pkg.info).expect("b6 descriptor json");
+    serde_json::json!({
+        "member_names": names,
+        "compress_types": compress,
+        "input_members": payload_members.iter().map(|(n, _, _)| n.clone())
+            .collect::<Vec<_>>(),
+        "input_compress_types": payload_members.iter().map(|(_, m, _)| *m)
+            .collect::<Vec<_>>(),
+        "info": info,
+        "selected_entries": selected_paths,
+        "dropped_entries": dropped,
+        "payload_sha256": crate::updater::descriptor::sha256_hex(&pkg.payload),
+        "info_archive_sha256": descriptor.archive_sha256,
+    })
+}
+
+fn b6_pending_observation(install: &Path) -> serde_json::Value {
+    let members = pending_members(install);
+    let names: Vec<String> = members.iter().map(|m| m.name.clone()).collect();
+    let compress: Vec<u16> = members
+        .iter()
+        .map(|m| if m.stored { 0 } else { 8 })
+        .collect();
+    let payload = members
+        .iter()
+        .find(|m| m.name == "payload.zip")
+        .map(|m| m.body.clone())
+        .expect("b6 pending payload member");
+    let info_member = members
+        .iter()
+        .find(|m| m.name == "info.json")
+        .map(|m| m.body.clone())
+        .expect("b6 pending info member");
+    let payload_members = b6_zip_members(&payload);
+    let descriptor = crate::updater::descriptor::authenticate(
+        &info_member,
+        &members
+            .iter()
+            .find(|m| m.name == "info.sig")
+            .map(|m| m.body.clone())
+            .expect("b6 pending signature member"),
+        Some(public_pem(&signing_key()).as_str()),
+    )
+    .expect("b6 pending descriptor");
+    let prefix = format!("xeHentai-{UPDATE_ID}/");
+    let selected =
+        crate::updater::package::select(&payload, &descriptor, &prefix).expect("b6 pending select");
+    let selected_paths: Vec<String> = selected.iter().map(|item| item.path.clone()).collect();
+    let selected_members: Vec<String> = selected.iter().map(|item| item.member.clone()).collect();
+    let dropped: Vec<String> = payload_members
+        .iter()
+        .map(|(name, _, _)| name.clone())
+        .filter(|name| !selected_members.contains(name))
+        .collect();
+    let info: serde_json::Value = serde_json::from_slice(&info_member).expect("b6 info json");
+    serde_json::json!({
+        "member_names": names,
+        "compress_types": compress,
+        "input_members": payload_members.iter().map(|(n, _, _)| n.clone())
+            .collect::<Vec<_>>(),
+        "input_compress_types": payload_members.iter().map(|(_, m, _)| *m)
+            .collect::<Vec<_>>(),
+        "info": info,
+        "selected_entries": selected_paths,
+        "dropped_entries": dropped,
+        "payload_sha256": crate::updater::descriptor::sha256_hex(&payload),
+        "info_archive_sha256": descriptor.archive_sha256,
+    })
+}
+
+fn b6_check(
+    install: &Path,
+    mode: &str,
+    beta: bool,
+    applied: Option<&str>,
+) -> crate::updater::CheckReport {
+    let mode = mode.to_string();
+    let applied = applied.map(str::to_string);
+    let install = install.to_path_buf();
+    run_local(async move {
+        let mut updater = crate::updater::Updater::load(&install).expect("b6 load updater");
+        updater
+            .check(&mode, beta, applied.as_deref(), "xeHentai/b6")
+            .await
+            .expect("b6 check")
+    })
+}
+
+fn b6_publish_binding(root: &Path, origin: &str, pem: &str, stable: &str, beta: Option<&str>) {
+    publish_rss(root, origin, Some(pem), stable);
+    if let Some(beta) = beta {
+        let path = root.join("rss/updater/github.rss");
+        let source = std::fs::read_to_string(&path).expect("b6 binding");
+        let source = source.replace("beta_channel: null,", &format!("beta_channel: \"{beta}\","));
+        std::fs::write(&path, source).expect("b6 beta binding");
+    }
+}
+
+fn b6_started_version(log: &str) -> Option<String> {
+    let start = log.find("xeHentai ")? + "xeHentai ".len();
+    let rest = &log[start..];
+    let end = rest.find(" started.")?;
+    Some(rest[..end].to_string())
+}
+
+fn b6_state_active(install: &Path) -> Option<String> {
+    let bytes = std::fs::read(install.join(AREA).join("state.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value["active"]["update_id"].as_str().map(str::to_string)
+}
+
+/// The real downloaded package for the apply cases: candidate RSS tree (the
+/// patched binding asks for `rss-b`) plus the executable-free envelope.
+fn b6_candidate_package(origin: &str, pem: &str, broken: bool) -> Pkg {
+    let key = signing_key();
+    let mut files = candidate_rss(origin, Some(pem), "rss-b");
+    if broken {
+        for (path, body) in files.iter_mut() {
+            if path == "rss/updater/github.rss" {
+                *body = b"fn broken( {".to_vec();
+            }
+        }
+    }
+    sign(
+        &key,
+        &Spec::new(UPDATE_ID).with_tree(&format!("xeHentai-{UPDATE_ID}/"), &files),
+    )
+}
+
+/// Copy the already-built plain binary into one installation (the plain
+/// `cargo build` is performed once per probe, not per case).
+fn b6_owned_exe(install: &Path) -> PathBuf {
+    let exe = install.join("xeHentai");
+    std::fs::copy(
+        Path::new(&target_dir()).join("debug").join("xeHentai"),
+        &exe,
+    )
+    .expect("b6 copy default build");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).expect("b6 chmod");
+    }
+    exe
+}
+
+/// A package whose detached signature is made by an untrusted key: the
+/// binding verifies with its own trusted key and must reject it, leaving the
+/// previous pending byte-identical and fetching no payload.
+fn b6_package_reject(
+    root: &Path,
+    server: &Server,
+    bodies: &[(String, Vec<u8>)],
+) -> serde_json::Value {
+    let key = signing_key();
+    let pem = public_pem(&key);
+    let install = b6_fresh(root, "package-reject");
+    let origin = server.origin();
+    publish_rss(&install, &origin, Some(&pem), "rss");
+    b6_seed_sentinel(&install);
+    let before = b6_pending_bytes(&install);
+    let mut spec = Spec::new(UPDATE_ID);
+    for (path, body) in bodies {
+        spec.entries.push((path.clone(), body.len() as u64));
+        spec.members
+            .push((format!("xeHentai-{UPDATE_ID}/{path}"), body.clone()));
+    }
+    // Signed by a key this binding does not trust.
+    let pkg = sign(&other_key(), &spec);
+    serve_package(server, &origin, &pkg);
+    let before_requests = server.requests().len();
+    let report = b6_check(&install, "download", false, None);
+    assert_eq!(
+        report.outcome, "failed",
+        "an untrusted signature must be rejected"
+    );
+    let requests: Vec<Request> = server.requests()[before_requests..].to_vec();
+    let after = b6_pending_bytes(&install);
+    let targets: Vec<serde_json::Value> = requests
+        .iter()
+        .map(|request| serde_json::Value::String(request.target.clone()))
+        .collect();
+    serde_json::json!({
+        "side": "native",
+        "sections": {
+            "feed": b6_feed(&requests),
+            "decision": b6_decision(
+                "download", None, &report.outcome, Some(&report),
+                before.as_deref(), after.as_deref()),
+        },
+        "evidence": {"request_targets": targets},
+    })
+}
+
+fn b6_apply_valid(root: &Path, server: &Server) -> serde_json::Value {
+    let key = signing_key();
+    let pem = public_pem(&key);
+    let install = b6_fresh(root, "apply-valid");
+    let origin = server.origin();
+    publish_rss(&install, &origin, Some(&pem), "rss");
+    let pkg = b6_candidate_package(&origin, &pem, false);
+    serve_package(server, &origin, &pkg);
+    let exe = b6_owned_exe(&install);
+    let live_before = std::fs::read(install.join("rss/updater/github.rss")).expect("live before");
+
+    // Run 1: a real download publishes pending, without applying it.
+    let before_run1 = server.requests().len();
+    let child = ChildRun::spawn(
+        &install,
+        &exe,
+        &["-l", "eh.log", "-vv", "--auto-update", "download"],
+    );
+    assert!(
+        wait_log(&install, "Update is complete"),
+        "no pending publication: {}",
+        log_of(&install)
+    );
+    assert_eq!(child.stop(), 0);
+    let pending_before = pending_path(&install).exists();
+    assert!(
+        pending_before,
+        "the download published no pending candidate"
+    );
+    let session = std::fs::read(install.join("h.json")).expect("b6 session after run 1");
+    let run1_requests = server.requests();
+    let run1: Vec<&str> = run1_requests[before_run1..]
+        .iter()
+        .map(|request| request.target.as_str())
+        .collect();
+    let (payload_target, descriptor_target, signature_target) = package_targets(&origin, UPDATE_ID);
+    assert_eq!(
+        run1,
+        vec![
+            COMMITS_TARGET,
+            descriptor_target.as_str(),
+            signature_target.as_str(),
+            payload_target.as_str()
+        ],
+        "a download is one commits request plus the signed package triple"
+    );
+
+    // Run 2: the next start applies the candidate through the OLD controller,
+    // then the NEW RSS module drives a real request on the candidate channel.
+    server.set(COMMITS_TARGET_B, Route::ok(COMMITS.as_bytes().to_vec()));
+    let before_run2 = server.requests().len();
+    let offset = log_of(&install).len();
+    let child = ChildRun::spawn(
+        &install,
+        &exe,
+        &["-l", "eh.log", "-vv", "--auto-update", "check"],
+    );
+    assert!(
+        wait_log(&install, "files installed"),
+        "the candidate was not applied: {}",
+        log_of(&install)
+    );
+    assert!(
+        m6::wait_for(Duration::from_secs(30), || {
+            server
+                .requests()
+                .iter()
+                .any(|request| request.target == COMMITS_TARGET_B)
+        }),
+        "the new RSS never ran: {}",
+        log_of(&install)
+    );
+    assert_eq!(child.stop(), 0);
+    let log_after = log_of(&install)[offset..].to_string();
+    let live_after = std::fs::read(install.join("rss/updater/github.rss")).expect("live after");
+    let session_after = std::fs::read(install.join("h.json")).expect("session after run 2");
+    let requests = server.requests();
+    let run2: Vec<&str> = requests[before_run2..]
+        .iter()
+        .map(|request| request.target.as_str())
+        .collect();
+    assert_eq!(
+        run2,
+        vec![COMMITS_TARGET_B],
+        "the applied candidate's RSS must drive exactly one new request"
+    );
+    let wire_after = requests.last().map(|r| r.target.clone());
+    serde_json::json!({
+        "pending_before": pending_before,
+        "pending_after": pending_path(&install).exists(),
+        "applied_id": b6_state_active(&install),
+        "live_changed": live_before != live_after,
+        "session_equal": session == session_after,
+        "module_origin_kind": "source_tree",
+        "module_version": b6_started_version(&log_after),
+        "stop": serde_json::Value::Null,
+        "wire_after_apply": wire_after,
+    })
+}
+
+fn b6_apply_reject(root: &Path, server: &Server) -> serde_json::Value {
+    let key = signing_key();
+    let pem = public_pem(&key);
+    let install = b6_fresh(root, "apply-reject");
+    let origin = server.origin();
+    publish_rss(&install, &origin, Some(&pem), "rss");
+    let exe = b6_owned_exe(&install);
+
+    // Run 0: an ordinary start creates the real session file this case snapshots.
+    let child = ChildRun::spawn(
+        &install,
+        &exe,
+        &["-l", "eh.log", "-vv", "--auto-update", "off"],
+    );
+    assert!(
+        wait_log(&install, "started."),
+        "plain start did not run: {}",
+        log_of(&install)
+    );
+    assert_eq!(child.stop(), 0);
+    let session = std::fs::read(install.join("h.json")).expect("b6 session");
+    let live_before = std::fs::read(install.join("rss/updater/github.rss")).expect("live before");
+
+    // Seed a real signed candidate whose RSS module cannot compile.
+    let pkg = b6_candidate_package(&origin, &pem, true);
+    seed_pending(
+        &install,
+        pkg.info.clone(),
+        pkg.sig.clone(),
+        pkg.payload.clone(),
+    );
+    let offset = log_of(&install).len();
+    let child = ChildRun::spawn(
+        &install,
+        &exe,
+        &["-l", "eh.log", "-vv", "--auto-update", "off"],
+    );
+    assert!(
+        wait_log(&install, "Failure when updating program"),
+        "the broken candidate was not rejected: {}",
+        log_of(&install)
+    );
+    assert_eq!(child.stop(), 0);
+    let rejected_log = log_of(&install)[offset..].to_string();
+    assert!(
+        !rejected_log.contains("files installed"),
+        "a rejected candidate was applied: {rejected_log}"
+    );
+    let live_after = std::fs::read(install.join("rss/updater/github.rss")).expect("live after");
+    let session_after = std::fs::read(install.join("h.json")).expect("session after");
+    serde_json::json!({
+        "pending_before": true,
+        "pending_after": pending_path(&install).exists(),
+        "applied_id": b6_state_active(&install),
+        "live_changed": live_before != live_after,
+        "session_equal": session == session_after,
+        "module_origin_kind": serde_json::Value::Null,
+        "module_version": serde_json::Value::Null,
+        "stop": serde_json::Value::Null,
+        "wire_after_apply": serde_json::Value::Null,
+    })
+}
+
+fn b6_cli_off(root: &Path, server: &Server) -> serde_json::Value {
+    let key = signing_key();
+    let pem = public_pem(&key);
+    let install = b6_fresh(root, "cli-off");
+    let origin = server.origin();
+    publish_rss(&install, &origin, Some(&pem), "rss");
+    let exe = b6_owned_exe(&install);
+    let before = server.requests().len();
+    let child = ChildRun::spawn(
+        &install,
+        &exe,
+        &["-l", "eh.log", "-vv", "--auto-update", "off"],
+    );
+    assert!(
+        wait_log(&install, "started."),
+        "the off run never started: {}",
+        log_of(&install)
+    );
+    assert_eq!(child.stop(), 0);
+    let requests = server.requests();
+    let during: Vec<Request> = requests[before..].to_vec();
+    assert!(
+        during.is_empty(),
+        "the CLI off gate performed HTTP: {during:?}"
+    );
+    let log = log_of(&install);
+    assert!(
+        !log.contains("Update channel"),
+        "the CLI off gate loaded the update module: {log}"
+    );
+    serde_json::json!({
+        "feed": b6_feed(&during),
+        "decision": {
+            "mode": "off",
+            "applied": serde_json::Value::Null,
+            "outcome": "no_vm_http",
+            "events": [],
+            "pending_before": false,
+            "pending_after": false,
+            "pending_equal": true,
+        },
+    })
+}
+
+pub(super) fn compat_update(inputs: &serde_json::Value) -> serde_json::Value {
+    let root = PathBuf::from(inputs["root"].as_str().expect("b6 probe root"));
+    std::fs::create_dir_all(&root).expect("b6 probe root");
+    let bodies = b6_package_bodies(inputs);
+    // One plain build per probe; every apply case copies this binary.
+    cargo_build(None);
+    let key = signing_key();
+    let pem = public_pem(&key);
+    let mut cases = serde_json::Map::new();
+
+    // ---- channel / commit: real checks against one owned source ----
+    let stable_install = b6_fresh(&root, "stable");
+    let server = Server::start(vec![]);
+    let origin = server.origin();
+    b6_publish_binding(&stable_install, &origin, &pem, "rss", None);
+    server.set(COMMITS_TARGET, Route::ok(COMMITS.as_bytes().to_vec()));
+    server.set(COMMITS_TARGET_B, Route::ok(COMMITS.as_bytes().to_vec()));
+
+    eprintln!("b6 probe: channel.stable");
+    let stable_report = b6_check(&stable_install, "check", false, None);
+    assert_eq!(
+        stable_report.outcome,
+        "available",
+        "stable check: {:?}",
+        event_keys(&stable_report)
+    );
+    let stable_requests = server.requests();
+    let stable_info = stable_report.update.clone().expect("stable update info");
+    let stable_commits = format!("{origin}{COMMITS_TARGET}");
+    cases.insert(
+        "channel.stable".to_string(),
+        serde_json::json!({
+            "side": "native",
+            "sections": {
+                "feed": b6_feed(&stable_requests),
+                "source": b6_source(Some(&stable_info), &stable_commits),
+                "commit": b6_commit(&stable_info),
+            },
+        }),
+    );
+    cases.insert(
+        "commit.first".to_string(),
+        serde_json::json!({
+            "side": "native",
+            "sections": {
+                "feed": b6_feed(&stable_requests),
+                "source": b6_source(Some(&stable_info), &stable_commits),
+                "commit": b6_commit(&stable_info),
+            },
+        }),
+    );
+
+    // A beta binding selects its own channel; without one the check fails
+    // closed BEFORE any request (registered native delta).
+    let beta_install = b6_fresh(&root, "beta");
+    b6_publish_binding(&beta_install, &origin, &pem, "rss", Some("rss-b"));
+    let before_beta = server.requests().len();
+    let beta_report = b6_check(&beta_install, "check", true, None);
+    assert_eq!(beta_report.outcome, "available");
+    let beta_requests: Vec<Request> = server.requests()[before_beta..].to_vec();
+    let beta_info = beta_report.update.clone().expect("beta update info");
+    let beta_commits = format!("{origin}{COMMITS_TARGET_B}");
+    cases.insert(
+        "channel.beta".to_string(),
+        serde_json::json!({
+            "side": "native",
+            "sections": {
+                "feed": b6_feed(&beta_requests),
+                "source": b6_source(Some(&beta_info), &beta_commits),
+                "commit": b6_commit(&beta_info),
+            },
+        }),
+    );
+
+    let missing_install = b6_fresh(&root, "beta-missing");
+    b6_publish_binding(&missing_install, &origin, &pem, "rss", None);
+    let before_missing = server.requests().len();
+    eprintln!("b6 probe: channel.beta-missing");
+    let missing_report = b6_check(&missing_install, "check", true, None);
+    assert_eq!(
+        missing_report.outcome, "failed",
+        "an unbound beta channel must fail closed"
+    );
+    let missing_requests: Vec<Request> = server.requests()[before_missing..].to_vec();
+    assert!(
+        missing_requests.is_empty(),
+        "an unbound beta channel still made a request: {missing_requests:?}"
+    );
+    cases.insert(
+        "channel.beta-missing".to_string(),
+        serde_json::json!({
+            "side": "native",
+            "sections": {
+                "feed": b6_feed(&missing_requests),
+                "source": b6_source(None, ""),
+                "commit": b6_absent_commit(),
+            },
+        }),
+    );
+
+    // ---- decision: off / same / download with a previous pending present ----
+    let off_install = b6_fresh(&root, "off");
+    b6_publish_binding(&off_install, &origin, &pem, "rss", None);
+    b6_seed_sentinel(&off_install);
+    let before_off = b6_pending_bytes(&off_install);
+    let before_off_requests = server.requests().len();
+    eprintln!("b6 probe: decision.off");
+    let off_report = b6_check(&off_install, "off", false, None);
+    assert_eq!(off_report.outcome, "available", "direct off check");
+    let off_requests: Vec<Request> = server.requests()[before_off_requests..].to_vec();
+    assert_eq!(off_requests.len(), 1, "a direct off check queries once");
+    let after_off = b6_pending_bytes(&off_install);
+    assert!(before_off.is_some(), "the previous pending was not present");
+    cases.insert(
+        "decision.off".to_string(),
+        serde_json::json!({
+            "side": "native",
+            "sections": {
+                "feed": b6_feed(&off_requests),
+                "decision": b6_decision(
+                    "off", None, &off_report.outcome, Some(&off_report),
+                    before_off.as_deref(), after_off.as_deref()),
+            },
+        }),
+    );
+
+    let same_install = b6_fresh(&root, "same");
+    b6_publish_binding(&same_install, &origin, &pem, "rss", None);
+    b6_seed_sentinel(&same_install);
+    let before_same = b6_pending_bytes(&same_install);
+    let before_same_requests = server.requests().len();
+    eprintln!("b6 probe: decision.same");
+    let same_report = b6_check(&same_install, "check", false, Some(UPDATE_ID));
+    assert_eq!(same_report.outcome, "up_to_date");
+    let same_requests: Vec<Request> = server.requests()[before_same_requests..].to_vec();
+    let after_same = b6_pending_bytes(&same_install);
+    cases.insert(
+        "decision.same".to_string(),
+        serde_json::json!({
+            "side": "native",
+            "sections": {
+                "feed": b6_feed(&same_requests),
+                "decision": b6_decision(
+                    "check", Some(UPDATE_ID), &same_report.outcome,
+                    Some(&same_report), before_same.as_deref(),
+                    after_same.as_deref()),
+            },
+        }),
+    );
+
+    let download_install = b6_fresh(&root, "download");
+    b6_publish_binding(&download_install, &origin, &pem, "rss", None);
+    b6_seed_sentinel(&download_install);
+    let before_download = b6_pending_bytes(&download_install);
+    let pkg = sign(
+        &key,
+        &Spec::new(UPDATE_ID).with_tree(&format!("xeHentai-{UPDATE_ID}/"), &bodies),
+    );
+    serve_package(&server, &origin, &pkg);
+    let before_download_requests = server.requests().len();
+    eprintln!("b6 probe: decision.download");
+    let download_report = b6_check(&download_install, "download", false, None);
+    assert_eq!(
+        download_report.outcome,
+        "pending",
+        "download: {:?}",
+        event_keys(&download_report)
+    );
+    let download_requests: Vec<Request> = server.requests()[before_download_requests..].to_vec();
+    let after_download = b6_pending_bytes(&download_install);
+    let download_info = download_report.update.clone().expect("download info");
+    cases.insert(
+        "decision.download".to_string(),
+        serde_json::json!({
+            "side": "native",
+            "sections": {
+                "feed": b6_feed(&download_requests),
+                "decision": b6_decision(
+                    "download", None, &download_report.outcome,
+                    Some(&download_report), before_download.as_deref(),
+                    after_download.as_deref()),
+                "package": b6_pending_observation(&download_install),
+                "source": b6_source(
+                    Some(&download_info),
+                    &format!("{origin}{COMMITS_TARGET}")),
+            },
+        }),
+    );
+
+    // ---- package: the envelope members plus the real selection result ----
+    let package_install = b6_fresh(&root, "package");
+    let foreign_members = [
+        format!("xeHentai-{UPDATE_ID}/foreign.txt"),
+        "other/x.txt".to_string(),
+    ];
+    let foreign_refs: Vec<&str> = foreign_members.iter().map(String::as_str).collect();
+    eprintln!("b6 probe: package.envelope");
+    cases.insert(
+        "package.envelope".to_string(),
+        serde_json::json!({
+            "side": "native",
+            "sections": {
+                "package": b6_package_probe(&bodies, &foreign_refs, &package_install),
+                "source": b6_source(Some(&stable_info), &stable_commits),
+            },
+        }),
+    );
+
+    // ---- apply: real startup apply / real rejection ----
+    eprintln!("b6 probe: package.reject; apply.valid");
+    cases.insert(
+        "package.reject".to_string(),
+        b6_package_reject(&root, &server, &bodies),
+    );
+    cases.insert(
+        "apply.valid".to_string(),
+        serde_json::json!({
+            "side": "native",
+            "sections": {"apply": b6_apply_valid(&root, &server)},
+        }),
+    );
+    eprintln!("b6 probe: apply.reject");
+    cases.insert(
+        "apply.reject".to_string(),
+        serde_json::json!({
+            "side": "native",
+            "sections": {"apply": b6_apply_reject(&root, &server)},
+        }),
+    );
+
+    // ---- CLI off: the gate must not load the module or touch HTTP ----
+    eprintln!("b6 probe: cli.off");
+    cases.insert(
+        "cli.off".to_string(),
+        serde_json::json!({
+            "side": "native",
+            "sections": b6_cli_off(&root, &server),
+        }),
+    );
+
+    // The comparator reads only side+sections; evidence stays raw side data.
+    for value in cases.values_mut() {
+        if let Some(object) = value.as_object_mut() {
+            object.insert("evidence".to_string(), serde_json::json!({}));
+        }
+    }
+
+    serde_json::json!({
+        "suite": "update",
+        "origin": origin,
+        "platform": {
+            "app_version": crate::r#const::VERSION_DISPLAY,
+            "target": crate::r#const::TARGET,
+            "host_abi": crate::r#const::HOST_ABI,
+            "script_abi": crate::r#const::SCRIPT_ABI,
+        },
+        "cases": cases,
+    })
+}

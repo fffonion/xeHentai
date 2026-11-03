@@ -419,6 +419,7 @@ fn compat_probe() {
         "gallery" => compat_gallery(&request["inputs"]),
         "webui" => compat_webui(&request["inputs"]),
         "cli" => compat_cli(&request["inputs"]),
+        "update" => compat_update_probe(&request["inputs"]),
         other => panic!("unknown probe suite {other}"),
     };
     let output = std::env::var("XEH_COMPAT_OUTPUT").expect("probe output");
@@ -427,6 +428,18 @@ fn compat_probe() {
         serde_json::to_string_pretty(&result).expect("probe JSON"),
     )
     .expect("write probe output");
+}
+
+/// Update probe entry: the module is Unix-only (real child processes and POSIX
+/// signals). Off Unix it fails closed instead of pretending to observe.
+#[cfg(unix)]
+fn compat_update_probe(inputs: &serde_json::Value) -> serde_json::Value {
+    m7p::compat_update(inputs)
+}
+
+#[cfg(not(unix))]
+fn compat_update_probe(_inputs: &serde_json::Value) -> serde_json::Value {
+    panic!("the update compatibility probe is not supported on this platform")
 }
 
 /// M6 CLI projection: the reference `argparse.Namespace` shape, produced by the
