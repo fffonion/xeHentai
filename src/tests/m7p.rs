@@ -3813,6 +3813,158 @@ fn m7p_native_backup_gap_keeps_the_record_and_a_restored_backup_completes() {
     assert!(!control_area.join("activation.json").exists());
 }
 
+// MARK: - address r4: unreadable native backup stops before the tree moves
+
+/// A native `previous-exe` that passes owner/regular checks but cannot be
+/// opened (owner mode 000 under a real non-root user) must stop startup BEFORE
+/// any live resource, backup, journal or image changes; restoring readability
+/// lets the SAME record complete on retry.
+#[cfg(unix)]
+#[test]
+fn m7p_native_unreadable_backup_stops_before_the_tree_moves() {
+    assert_ne!(
+        nix::unistd::geteuid().as_raw(),
+        0,
+        "the unreadable-backup proof needs a real non-root user"
+    );
+    let probe = install_dir();
+    let exe_src = probe.path().join("xeHentai");
+    owned_exe(probe.path());
+    let previous_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let session = b"{\"tasks\":{},\"cookies\":{\"nw\":\"1\"}}".to_vec();
+    let candidate_image = b"CANDIDATE-IMAGE-BYTES".to_vec();
+    let previous_image = b"PREVIOUS-IMAGE-BYTES".to_vec();
+
+    let install = install_dir();
+    let pem = public_pem(&signing_key());
+    publish_rss(install.path(), "http://127.0.0.1:9", Some(&pem), "rss");
+    let area = area_path(install.path());
+    let old_binding =
+        std::fs::read(install.path().join("rss/updater/github.rss")).expect("old binding");
+    private_dir(&area.join("backup/rss/updater"));
+    std::fs::write(area.join("backup/rss/updater/github.rss"), &old_binding).expect("backup");
+    let candidate_binding = b"// candidate binding\n".to_vec();
+    std::fs::write(
+        install.path().join("rss/updater/github.rss"),
+        &candidate_binding,
+    )
+    .expect("candidate live");
+    // One candidate-created file: its presence must survive the refusal too.
+    private_dir(&install.path().join("rss/newdir"));
+    std::fs::write(
+        install.path().join("rss/newdir/created.rss"),
+        b"candidate-only",
+    )
+    .expect("candidate new file");
+    write_activation_fixture(
+        install.path(),
+        previous_id,
+        &["rss/updater/github.rss"],
+        &["rss/newdir/created.rss"],
+        Some("native-bin/xeHentai"),
+    );
+    std::fs::write(install.path().join("h.json"), &session).expect("session");
+    let exe = copy_installed_exe(&exe_src, install.path());
+    std::fs::create_dir_all(install.path().join("native-bin")).expect("image dir");
+    std::fs::write(install.path().join("native-bin/xeHentai"), &candidate_image)
+        .expect("live image");
+    let backup_exe = area.join("backup/previous-exe");
+    std::fs::write(&backup_exe, &previous_image).expect("previous backup");
+    set_mode(&backup_exe, 0o000);
+    // The denial is real: the owner cannot open its own mode-000 file.
+    assert!(
+        std::fs::File::open(&backup_exe).is_err(),
+        "mode-000 previous-exe opened: the fixture denies nothing"
+    );
+    let activation_before =
+        std::fs::read(area.join("activation.json")).expect("activation fixture");
+
+    let mut child = ChildRun::spawn(
+        install.path(),
+        &exe,
+        &["-l", "eh.log", "-vv", "--auto-update", "off"],
+    );
+    assert_eq!(
+        prompt_stop_code(&mut child),
+        Some(1),
+        "an unreadable native backup must stop before the App"
+    );
+    let log = log_of(install.path());
+    assert!(
+        !log.contains("started."),
+        "the business App started with an unreadable native backup: {log}"
+    );
+    assert_eq!(
+        std::fs::read(area.join("activation.json")).expect("activation"),
+        activation_before,
+        "the recovery record changed without a readable native backup"
+    );
+    assert!(
+        area.join("backup/rss/updater/github.rss").exists(),
+        "the resource backup was consumed by the failed native restore"
+    );
+    assert_eq!(
+        std::fs::read(install.path().join("rss/updater/github.rss")).expect("live binding"),
+        candidate_binding,
+        "the live tree changed without a readable native backup"
+    );
+    assert_eq!(
+        std::fs::read(install.path().join("native-bin/xeHentai")).expect("live image"),
+        candidate_image,
+        "the live image changed without a readable native backup"
+    );
+    assert_eq!(
+        std::fs::read(install.path().join("rss/newdir/created.rss")).expect("created file"),
+        b"candidate-only",
+        "a candidate-created file changed without a readable native backup"
+    );
+    assert_eq!(
+        std::fs::read(install.path().join("h.json")).expect("session"),
+        session
+    );
+
+    // Restore readability: the SAME record now completes on retry.
+    set_mode(&backup_exe, 0o644);
+    std::fs::write(install.path().join("eh.log"), "").expect("reset log");
+    let child = ChildRun::spawn(
+        install.path(),
+        &exe,
+        &["-l", "eh.log", "-vv", "--auto-update", "off"],
+    );
+    assert!(
+        wait_log(install.path(), &format!("rolled back to {previous_id}")),
+        "the retried recovery did not complete: {}",
+        log_of(install.path())
+    );
+    assert_eq!(child.stop(), 0);
+    assert_eq!(
+        std::fs::read(install.path().join("rss/updater/github.rss")).expect("restored"),
+        old_binding
+    );
+    assert_eq!(
+        std::fs::read(install.path().join("native-bin/xeHentai")).expect("live image"),
+        previous_image,
+        "the previous executable bytes were not restored at the installation path"
+    );
+    assert!(
+        !install.path().join("rss/newdir/created.rss").exists(),
+        "a candidate-created file survived the retried rollback"
+    );
+    assert!(
+        area.join("backup/previous-exe").exists(),
+        "the retry consumed the only previous-executable copy"
+    );
+    assert!(!area.join("activation.json").exists());
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(area.join("state.json")).expect("state"))
+            .expect("state json");
+    assert_eq!(state["active"]["update_id"], previous_id);
+    assert_eq!(
+        std::fs::read(install.path().join("h.json")).expect("session"),
+        session
+    );
+}
+
 // MARK: - address r3: the real task module gates confirmation
 
 #[test]

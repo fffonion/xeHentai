@@ -1250,7 +1250,25 @@ pub fn install_candidate(
 
     if let Err(error) = commit {
         let mut recovery_failed = false;
-        let error = match undo_activation(installation, &backup, &activation, &activation.paths) {
+        // The staged native image is prepared BEFORE the resource undo, on
+        // this path exactly as on the startup path: an unreadable backup
+        // leaves the partly switched tree and the recovery record for the
+        // next start instead of moving more files.
+        let error = match prepare_native_image(
+            installation,
+            &backup,
+            activation.executable.as_deref(),
+            activation.native,
+        )
+        .and_then(|prepared| {
+            undo_activation(
+                installation,
+                &backup,
+                &activation,
+                &activation.paths,
+                prepared,
+            )
+        }) {
             Ok(()) => {
                 // Only a COMPLETE restore retires the one recovery record; a
                 // failure here left the live tree partly switched, so the
@@ -1304,14 +1322,15 @@ pub fn confirm_activation(installation: &Installation) -> Result<Option<Record>,
 /// Undo one provisional activation from its ONE recovery record.
 ///
 /// Restores every previous file from `backup/`, REMOVES every candidate file
-/// this activation created, and writes the previous executable back to the
-/// KNOWN installation path. Every step reports its real failure; a partly
-/// restored tree is never reported as success.
+/// this activation created, and commits the already staged previous
+/// executable image at the KNOWN installation path. Every step reports its
+/// real failure; a partly restored tree is never reported as success.
 fn undo_activation(
     installation: &Installation,
     backup: &Path,
     activation: &Activation,
     paths: &[String],
+    prepared_native: Option<PreparedNativeImage>,
 ) -> Result<(), UpdateError> {
     restore_moved(installation, backup, paths, &activation.created)?;
     for path in &activation.created {
@@ -1328,12 +1347,16 @@ fn undo_activation(
             Err(error) => return Err(UpdateError::io(&live, &error)),
         }
     }
-    restore_executable(
-        installation,
-        backup,
-        activation.executable.as_deref(),
-        activation.native,
-    )
+    match (activation.native, prepared_native) {
+        (true, Some(prepared)) => commit_prepared_native_image(prepared)?,
+        (true, None) => {
+            return Err(UpdateError::install(
+                "a native rollback reached the tree undo without a staged previous executable; the recovery record was kept",
+            ));
+        }
+        (false, _) => {}
+    }
+    Ok(())
 }
 
 /// Put the previous files back. A path that had no previous version is a
@@ -1396,13 +1419,34 @@ fn restore_moved(
     }
 }
 
-/// Require the trusted previous-executable copy a NATIVE rollback restores.
+/// A fully staged previous-executable image, held in a synced temporary file
+/// in the KNOWN destination directory. Staged BEFORE any live resource is
+/// touched, committed (atomically persisted) only after the resource undo
+/// completed. Dropping it cleans the incomplete stage and leaves the original
+/// backup untouched for a retry.
+struct PreparedNativeImage {
+    temp: tempfile::NamedTempFile,
+    destination: PathBuf,
+}
+
+/// Stage the trusted previous-executable copy BEFORE the recovery tree is
+/// mutated: open the backup no-follow, re-validate the OPEN handle, stream
+/// the ENTIRE image into an owned destination-directory temporary file with
+/// the required permissions, and sync it.
 ///
-/// A missing or unreadable backup is a hard failure: the journal and the
-/// backup are retained and nothing is mutated, so a later start retries the
-/// SAME record once the original backup is back. Resource-only activations
-/// never need a native image and return `Ok` without consulting the backup.
-fn require_native_backup(backup: &Path) -> Result<(), UpdateError> {
+/// Any failure returns before live resources, records or backups change; the
+/// dropped stage cleans itself. Resource-only activations need no native
+/// image and return `Ok(None)` without consulting the backup.
+fn prepare_native_image(
+    installation: &Installation,
+    backup: &Path,
+    executable: Option<&str>,
+    native: bool,
+) -> Result<Option<PreparedNativeImage>, UpdateError> {
+    if !native {
+        return Ok(None);
+    }
+    use std::io::Write;
     let backup_exe = backup.join(BACKUP_EXE);
     let metadata = match std::fs::symlink_metadata(&backup_exe) {
         Ok(metadata) => metadata,
@@ -1411,37 +1455,6 @@ fn require_native_backup(backup: &Path) -> Result<(), UpdateError> {
                 "{} is missing; the previous executable cannot be restored",
                 backup_exe.display()
             )));
-        }
-        Err(error) => return Err(UpdateError::io(&backup_exe, &error)),
-    };
-    verify_backup_executable(&backup_exe, &metadata)
-}
-
-/// Put the backed up executable back at the KNOWN installation path.
-///
-/// A copy through a synced temporary file in the destination directory is
-/// atomic and, unlike `self_replace`, does NOT consume `backup/previous-exe`:
-/// a retry after a failed rollback still has the only recovery copy. The
-/// destination is the path recorded in the activation record (never an
-/// arbitrary current process image).
-fn restore_executable(
-    installation: &Installation,
-    backup: &Path,
-    executable: Option<&str>,
-    native: bool,
-) -> Result<(), UpdateError> {
-    use std::io::Write;
-    let backup_exe = backup.join(BACKUP_EXE);
-    let metadata = match std::fs::symlink_metadata(&backup_exe) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if native {
-                return Err(UpdateError::install(format!(
-                    "{} is missing; the previous executable cannot be restored",
-                    backup_exe.display()
-                )));
-            }
-            return Ok(());
         }
         Err(error) => return Err(UpdateError::io(&backup_exe, &error)),
     };
@@ -1467,6 +1480,12 @@ fn restore_executable(
     let mut source = options
         .open(&backup_exe)
         .map_err(|error| UpdateError::io(&backup_exe, &error))?;
+    // Re-validate the OPEN handle, not the path: a swap between the metadata
+    // probe and the open cannot smuggle in an untrusted file.
+    let open_metadata = source
+        .metadata()
+        .map_err(|error| UpdateError::io(&backup_exe, &error))?;
+    verify_backup_executable(&backup_exe, &open_metadata)?;
     let mut temp =
         tempfile::NamedTempFile::new_in(parent).map_err(|error| UpdateError::io(parent, &error))?;
     std::io::copy(&mut source, &mut temp).map_err(|error| UpdateError::io(temp.path(), &error))?;
@@ -1480,7 +1499,19 @@ fn restore_executable(
             .map_err(|error| UpdateError::io(temp.path(), &error))?;
     }
     let _ = temp.flush();
-    match temp.persist(&destination) {
+    Ok(Some(PreparedNativeImage { temp, destination }))
+}
+
+/// Atomically persist an already staged native image at its known
+/// destination. The backup is never reopened after the resource undo, so a
+/// retry still has the only recovery copy. A copy through a synced temporary
+/// file in the destination directory, unlike `self_replace`, does NOT consume
+/// `backup/previous-exe`: a retry after a failed rollback still has the only
+/// recovery copy. The destination is the path recorded in the activation
+/// record (never an arbitrary current process image).
+fn commit_prepared_native_image(prepared: PreparedNativeImage) -> Result<(), UpdateError> {
+    let destination = prepared.destination.clone();
+    match prepared.temp.persist(&destination) {
         Ok(_) => Ok(()),
         Err(error) => Err(UpdateError::io(&destination, &error.error)),
     }
@@ -1518,13 +1549,17 @@ pub fn rollback_activation(installation: &Installation) -> Result<Option<Record>
         }
     }
     // A native rollback restores the previous executable from the backup, so
-    // the required copy is verified BEFORE the recovery tree is mutated: a
-    // missing or untrusted backup keeps the journal, the backup and the live
-    // tree untouched for a later retry.
-    if activation.native {
-        require_native_backup(&backup)?;
-    }
-    undo_activation(installation, &backup, &activation, &paths)?;
+    // the ENTIRE trusted image is staged BEFORE the recovery tree is mutated:
+    // a missing or unreadable backup keeps the journal, the backup and the
+    // live tree untouched for a later retry. Resource-only rollbacks stage
+    // nothing and never consult the backup.
+    let prepared = prepare_native_image(
+        installation,
+        &backup,
+        activation.executable.as_deref(),
+        activation.native,
+    )?;
+    undo_activation(installation, &backup, &activation, &paths, prepared)?;
     installation.write_records(&Records {
         v: STATE_VERSION,
         active: activation.previous.clone(),

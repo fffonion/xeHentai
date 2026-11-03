@@ -13834,6 +13834,9 @@ mod m7 {
         requests: Arc<Mutex<Vec<Request>>>,
         partial: Arc<AtomicUsize>,
         eof: Arc<AtomicBool>,
+        peer_reset: Arc<AtomicBool>,
+        peer_error: Arc<Mutex<Option<String>>>,
+        observer_stopped: Arc<AtomicBool>,
         release: Arc<(Mutex<bool>, Condvar)>,
         stop: Arc<AtomicBool>,
         handle: Option<std::thread::JoinHandle<()>>,
@@ -13859,11 +13862,17 @@ mod m7 {
             let requests = Arc::new(Mutex::new(Vec::new()));
             let partial = Arc::new(AtomicUsize::new(0));
             let eof = Arc::new(AtomicBool::new(false));
+            let peer_reset = Arc::new(AtomicBool::new(false));
+            let peer_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+            let observer_stopped = Arc::new(AtomicBool::new(false));
             let release = Arc::new((Mutex::new(false), Condvar::new()));
             let stop = Arc::new(AtomicBool::new(false));
             let seen = Arc::clone(&requests);
             let flushed = Arc::clone(&partial);
             let peer_eof = Arc::clone(&eof);
+            let peer_rst = Arc::clone(&peer_reset);
+            let peer_err = Arc::clone(&peer_error);
+            let stopped = Arc::clone(&observer_stopped);
             let gate = Arc::clone(&release);
             let stopping = Arc::clone(&stop);
             let handle = std::thread::spawn(move || {
@@ -13877,7 +13886,8 @@ mod m7 {
                                 drop(socket);
                             } else if hold {
                                 serve_held(
-                                    socket, &seen, &flushed, &peer_eof, &gate, &stopping, body,
+                                    socket, &seen, &flushed, &peer_eof, &peer_rst, &peer_err,
+                                    &stopped, &gate, &stopping, body,
                                 );
                             } else {
                                 serve(socket, &seen, status, body);
@@ -13895,6 +13905,9 @@ mod m7 {
                 requests,
                 partial,
                 eof,
+                peer_reset,
+                peer_error,
+                observer_stopped,
                 release,
                 stop,
                 handle: Some(handle),
@@ -13917,6 +13930,34 @@ mod m7 {
         /// The client closed the connection while the body was incomplete.
         pub fn peer_eof(&self) -> bool {
             self.eof.load(Ordering::SeqCst)
+        }
+
+        /// The peer sent an explicitly observed TCP reset while the body was
+        /// incomplete. Like a clean FIN, a reset proves the client went away;
+        /// anything else (deadline, still-open, other I/O error) does not.
+        pub fn peer_reset(&self) -> bool {
+            self.peer_reset.load(Ordering::SeqCst)
+        }
+
+        /// The first non-EOF, non-reset, non-timeout I/O error the held
+        /// observer saw, if any. A set value means the closure state is
+        /// UNKNOWN: the test must fail closed, never count it as a close.
+        pub fn peer_error(&self) -> Option<String> {
+            self.peer_error.lock().unwrap().clone()
+        }
+
+        /// The observer returned because the fixture stopped, not because the
+        /// transport closed. True alongside false EOF/reset means the peer was
+        /// likely still open when observation ended.
+        pub fn observer_stopped(&self) -> bool {
+            self.observer_stopped.load(Ordering::SeqCst)
+        }
+
+        /// Only a clean FIN or an explicitly observed reset counts as closed.
+        /// Timeouts, still-open peers, stop-timeout exits and other errors are
+        /// genuinely open/unknown and must fail the close assertion.
+        pub fn peer_closed(&self) -> bool {
+            self.peer_eof() || self.peer_reset()
         }
 
         pub fn release(&self) {
@@ -14011,6 +14052,9 @@ mod m7 {
         seen: &Arc<Mutex<Vec<Request>>>,
         partial: &Arc<AtomicUsize>,
         eof: &Arc<AtomicBool>,
+        peer_reset: &Arc<AtomicBool>,
+        peer_error: &Arc<Mutex<Option<String>>>,
+        observer_stopped: &Arc<AtomicBool>,
         gate: &Arc<(Mutex<bool>, Condvar)>,
         stop: &Arc<AtomicBool>,
         body: &str,
@@ -14027,7 +14071,11 @@ mod m7 {
             body.len(),
             &body[..split]
         );
-        if socket.write_all(response.as_bytes()).is_err() || socket.flush().is_err() {
+        if let Err(error) = socket
+            .write_all(response.as_bytes())
+            .and_then(|()| socket.flush())
+        {
+            classify_held_error(&error, peer_reset, peer_error);
             return;
         }
         partial.store(split, Ordering::SeqCst);
@@ -14037,6 +14085,7 @@ mod m7 {
         let (lock, cond) = &**gate;
         loop {
             if stop.load(Ordering::SeqCst) {
+                observer_stopped.store(true, Ordering::SeqCst);
                 return;
             }
             if *lock.lock().unwrap() {
@@ -14056,12 +14105,35 @@ mod m7 {
                         error.kind(),
                         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                     ) => {}
-                Err(_) => return,
+                Err(error) => {
+                    classify_held_error(&error, peer_reset, peer_error);
+                    return;
+                }
             }
             let (guard, _) = cond
                 .wait_timeout(lock.lock().unwrap(), Duration::from_millis(10))
                 .unwrap();
             drop(guard);
+        }
+    }
+
+    /// Record HOW the held connection ended: a clean FIN sets EOF, an
+    /// explicit TCP reset sets the reset flag, anything else (including a
+    /// write-side reset) is stored verbatim as an unknown error that must
+    /// fail the close assertion. Timeouts/WouldBlock never reach here: the
+    /// peer is still open and observation continues.
+    fn classify_held_error(
+        error: &std::io::Error,
+        peer_reset: &Arc<AtomicBool>,
+        peer_error: &Arc<Mutex<Option<String>>>,
+    ) {
+        if error.kind() == std::io::ErrorKind::ConnectionReset {
+            peer_reset.store(true, Ordering::SeqCst);
+            return;
+        }
+        let mut slot = peer_error.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(format!("{:?}: {error}", error.kind()));
         }
     }
 
@@ -14408,8 +14480,11 @@ mod m7 {
             "the held update fixture never flushed a partial response body"
         );
         assert!(
-            !update.peer_eof(),
-            "the update request was closed before any cancellation"
+            !update.peer_closed(),
+            "the update request was closed before any cancellation: eof={} reset={} err={:?}",
+            update.peer_eof(),
+            update.peer_reset(),
+            update.peer_error()
         );
         // The gallery task's actual production terminal state: the INFO log
         // emitted by `rename_and_finish` when the task is set FINISHED, plus its
@@ -14444,8 +14519,11 @@ mod m7 {
             "the update body was not still incomplete when the gallery finished"
         );
         assert!(
-            !update.peer_eof(),
-            "the update request must stay open while the gallery task ends"
+            !update.peer_closed(),
+            "the update request must stay open while the gallery task ends: eof={} reset={} err={:?}",
+            update.peer_eof(),
+            update.peer_reset(),
+            update.peer_error()
         );
         assert_eq!(update.requests().len(), 1, "one held commits request");
         // Normal URL-completion auto-exit with the body STILL gated: the exit
@@ -14458,8 +14536,17 @@ mod m7 {
             "the fixture body must never be released to make the app exit"
         );
         assert!(
+            update.peer_closed(),
+            "retiring the owned update task must close the held request: eof={} reset={} err={:?} stopped={}",
             update.peer_eof(),
-            "retiring the owned update task must close the held request"
+            update.peer_reset(),
+            update.peer_error(),
+            update.observer_stopped()
+        );
+        assert_eq!(
+            update.peer_error(),
+            None,
+            "the held close is an unknown transport error, not EOF/reset"
         );
         let finished_log = log(root.path());
         assert!(
@@ -14473,11 +14560,15 @@ mod m7 {
         assert!(!finished_log.contains("Update available"), "{finished_log}");
         assert!(gallery.paths().iter().any(|path| path.contains("/s/")));
         println!(
-            "V1 overlap: body_bytes={} partial_flushed={} released={} peer_eof={} exit={:?} finished_records={}",
+            "V1 overlap: body_bytes={} partial_flushed={} released={} peer_eof={} peer_reset={} peer_error={:?} observer_stopped={} peer_closed={} exit={:?} finished_records={}",
             COMMITS.len(),
             update.partial_flushed(),
             update.partial_flushed() >= COMMITS.len(),
             update.peer_eof(),
+            update.peer_reset(),
+            update.peer_error(),
+            update.observer_stopped(),
+            update.peer_closed(),
             status.code(),
             finished_log.matches(" download finished").count()
         );
@@ -14497,14 +14588,26 @@ mod m7 {
             "the held fixture never flushed a partial response body"
         );
         assert!(
-            !update.peer_eof(),
-            "the update request was closed before the signal"
+            !update.peer_closed(),
+            "the update request was closed before the signal: eof={} reset={} err={:?}",
+            update.peer_eof(),
+            update.peer_reset(),
+            update.peer_error()
         );
         let code = stop(&mut child);
         assert_eq!(code, 0);
         assert!(
-            m6::wait_for(Duration::from_secs(10), || update.peer_eof()),
-            "the cancelled update request kept its connection open"
+            m6::wait_for(Duration::from_secs(10), || update.peer_closed()),
+            "the cancelled update request kept its connection open: eof={} reset={} err={:?} stopped={}",
+            update.peer_eof(),
+            update.peer_reset(),
+            update.peer_error(),
+            update.observer_stopped()
+        );
+        assert_eq!(
+            update.peer_error(),
+            None,
+            "the cancelled close is an unknown transport error, not EOF/reset"
         );
         assert!(
             update.partial_flushed() < COMMITS.len(),
@@ -14514,12 +14617,222 @@ mod m7 {
         assert!(log.contains("cleaning up..."), "{log}");
         assert!(!log.contains("Update available"), "{log}");
         println!(
-            "V1 cancel: body_bytes={} partial_flushed={} released={} peer_eof={} exit={:?}",
+            "V1 cancel: body_bytes={} partial_flushed={} released={} peer_eof={} peer_reset={} peer_error={:?} observer_stopped={} peer_closed={} exit={:?}",
             COMMITS.len(),
             update.partial_flushed(),
             update.partial_flushed() >= COMMITS.len(),
             update.peer_eof(),
+            update.peer_reset(),
+            update.peer_error(),
+            update.observer_stopped(),
+            update.peer_closed(),
             code
+        );
+    }
+
+    /// Raw held client: one real request head, then the caller owns the open
+    /// socket. The server has already flushed a partial body by the time the
+    /// head is readable.
+    fn held_raw_client(port: u16) -> TcpStream {
+        let mut socket = TcpStream::connect(("127.0.0.1", port)).expect("connect the held fixture");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        socket
+            .write_all(b"GET /held HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .expect("held request head");
+        socket
+    }
+
+    /// Read until the real response head is fully on the wire.
+    fn read_held_head(socket: &mut TcpStream) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match socket.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => {
+                    buffer.extend_from_slice(&chunk[..read]);
+                    if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break;
+                }
+                Err(error) => panic!("held fixture read: {error}"),
+            }
+            assert!(buffer.len() <= 64 * 1024, "held head too large");
+        }
+        assert!(
+            buffer.windows(4).any(|window| window == b"\r\n\r\n"),
+            "the held fixture never sent a response head"
+        );
+        buffer
+    }
+
+    /// Deterministic FIN control on the SAME held observer the m7 tests use:
+    /// a raw client reads the head, then closes cleanly. Only EOF may be set.
+    #[test]
+    fn m7_held_observer_records_clean_fin_as_eof_only() {
+        let update = Server::start_holding();
+        let mut client = held_raw_client(update.port);
+        let head = read_held_head(&mut client);
+        assert!(
+            m6::wait_for(Duration::from_secs(20), || update.partial_flushed() > 0),
+            "the held fixture never flushed a partial response body"
+        );
+        assert!(!head.is_empty());
+        assert!(
+            !update.peer_closed(),
+            "the held request closed before the clean FIN"
+        );
+        drop(client);
+        assert!(
+            m6::wait_for(Duration::from_secs(10), || update.peer_eof()),
+            "a clean FIN was not observed as EOF: reset={} err={:?} stopped={}",
+            update.peer_reset(),
+            update.peer_error(),
+            update.observer_stopped()
+        );
+        assert!(!update.peer_reset(), "a clean FIN set the reset flag");
+        assert_eq!(update.peer_error(), None, "a clean FIN stored an error");
+        assert!(
+            update.partial_flushed() < COMMITS.len(),
+            "the control body was released"
+        );
+        println!(
+            "V1 observer-fin: body_bytes={} partial_flushed={} peer_eof={} peer_reset={} peer_error={:?} observer_stopped={} peer_closed={}",
+            COMMITS.len(),
+            update.partial_flushed(),
+            update.peer_eof(),
+            update.peer_reset(),
+            update.peer_error(),
+            update.observer_stopped(),
+            update.peer_closed()
+        );
+    }
+
+    /// Abort a held socket with a real TCP RST (Unix SO_LINGER 0 on close).
+    #[cfg(unix)]
+    fn abort_with_reset(socket: TcpStream) {
+        use std::os::unix::io::AsRawFd;
+        let linger = nix::libc::linger {
+            l_onoff: 1,
+            l_linger: 0,
+        };
+        let result = unsafe {
+            nix::libc::setsockopt(
+                socket.as_raw_fd(),
+                nix::libc::SOL_SOCKET,
+                nix::libc::SO_LINGER,
+                &linger as *const _ as *const nix::libc::c_void,
+                std::mem::size_of::<nix::libc::linger>() as nix::libc::socklen_t,
+            )
+        };
+        assert_eq!(result, 0, "SO_LINGER for the reset control");
+        drop(socket);
+    }
+
+    /// Deterministic reset control on the SAME held observer: a raw client
+    /// reads the head, then RSTs. Only the reset flag may be set — never EOF.
+    #[cfg(unix)]
+    #[test]
+    fn m7_held_observer_records_explicit_reset_only() {
+        let update = Server::start_holding();
+        let mut client = held_raw_client(update.port);
+        read_held_head(&mut client);
+        assert!(
+            m6::wait_for(Duration::from_secs(20), || update.partial_flushed() > 0),
+            "the held fixture never flushed a partial response body"
+        );
+        assert!(
+            !update.peer_closed(),
+            "the held request closed before the reset"
+        );
+        abort_with_reset(client);
+        assert!(
+            m6::wait_for(Duration::from_secs(10), || update.peer_reset()),
+            "an explicit RST was not observed as a reset: eof={} err={:?} stopped={}",
+            update.peer_eof(),
+            update.peer_error(),
+            update.observer_stopped()
+        );
+        assert!(!update.peer_eof(), "an explicit RST set the EOF flag");
+        assert_eq!(update.peer_error(), None, "an explicit RST stored an error");
+        assert!(
+            update.partial_flushed() < COMMITS.len(),
+            "the control body was released"
+        );
+        assert!(
+            update.peer_closed(),
+            "a reset must count as closed: eof={} reset={} err={:?}",
+            update.peer_eof(),
+            update.peer_reset(),
+            update.peer_error()
+        );
+        println!(
+            "V1 observer-rst: body_bytes={} partial_flushed={} peer_eof={} peer_reset={} peer_error={:?} observer_stopped={} peer_closed={}",
+            COMMITS.len(),
+            update.partial_flushed(),
+            update.peer_eof(),
+            update.peer_reset(),
+            update.peer_error(),
+            update.observer_stopped(),
+            update.peer_closed()
+        );
+    }
+
+    /// Deterministic still-open control on the SAME held observer: a raw
+    /// client reads the head and STAYS open. Neither EOF nor reset may be set,
+    /// so the request must NOT count as closed — an open peer is genuinely
+    /// open, never a close.
+    #[test]
+    fn m7_held_observer_open_peer_counts_as_open() {
+        let update = Server::start_holding();
+        let mut client = held_raw_client(update.port);
+        read_held_head(&mut client);
+        assert!(
+            m6::wait_for(Duration::from_secs(20), || update.partial_flushed() > 0),
+            "the held fixture never flushed a partial response body"
+        );
+        std::thread::sleep(Duration::from_secs(1));
+        assert!(
+            !update.peer_closed(),
+            "an open peer counted as closed: eof={} reset={} err={:?}",
+            update.peer_eof(),
+            update.peer_reset(),
+            update.peer_error()
+        );
+        assert_eq!(
+            update.peer_error(),
+            None,
+            "an open peer stored an error: {:?}",
+            update.peer_error()
+        );
+        assert!(
+            update.partial_flushed() > 0 && update.partial_flushed() < COMMITS.len(),
+            "the control body was not still incomplete"
+        );
+        println!(
+            "V1 observer-open: body_bytes={} partial_flushed={} peer_eof={} peer_reset={} peer_error={:?} observer_stopped={} peer_closed={}",
+            COMMITS.len(),
+            update.partial_flushed(),
+            update.peer_eof(),
+            update.peer_reset(),
+            update.peer_error(),
+            update.observer_stopped(),
+            update.peer_closed()
+        );
+        drop(client);
+        assert!(
+            m6::wait_for(Duration::from_secs(10), || update.peer_eof()),
+            "the open control never closed after the clean FIN"
         );
     }
 
