@@ -14549,8 +14549,13 @@ mod m7 {
             update.partial_flushed() < COMMITS.len(),
             "the fixture body must never be released to make the app exit"
         );
+        // Reaping the child does not synchronize with the fixture observer's
+        // next socket read: the exit closes the socket, while the separate
+        // observer thread publishes EOF/reset only on its own poll. Wait on the
+        // SAME real closure through the bounded observation helper instead of
+        // sampling the atomics on the reaping instant.
         assert!(
-            update.peer_closed(),
+            m6::wait_for(Duration::from_secs(3), || update.peer_closed()),
             "retiring the owned update task must close the held request: eof={} reset={} err={:?} stopped={}",
             update.peer_eof(),
             update.peer_reset(),
@@ -14815,7 +14820,17 @@ mod m7 {
             m6::wait_for(Duration::from_secs(20), || update.partial_flushed() > 0),
             "the held fixture never flushed a partial response body"
         );
-        std::thread::sleep(Duration::from_secs(1));
+        // Bounded negative control: while a real client still holds the socket
+        // open, the SAME bounded closure observation must stay false — waiting
+        // for a close can never manufacture one.
+        assert!(
+            !m6::wait_for(Duration::from_secs(1), || update.peer_closed()),
+            "an open peer counted as closed during a bounded close observation: eof={} reset={} err={:?} stopped={}",
+            update.peer_eof(),
+            update.peer_reset(),
+            update.peer_error(),
+            update.observer_stopped()
+        );
         assert!(
             !update.peer_closed(),
             "an open peer counted as closed: eof={} reset={} err={:?}",
