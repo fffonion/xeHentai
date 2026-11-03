@@ -3,13 +3,17 @@
 
 These do not build, start the backend, or launch a browser. They cover the
 guards that must refuse before any child exists (fresh root, target binding,
-explicit executable) plus the bounded retirement of one owned process group
-and the CI pack comparator. Standard library plus the caller's interpreter:
+explicit executable) plus the bounded retirement of one owned process group,
+the real CLI SIGTERM path through main() and the CI pack comparator. Standard
+library plus the caller's interpreter:
 
   python tools/browser/test_run.py -v
 """
 import importlib.util
+import json
 import os
+import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -124,6 +128,169 @@ class RetirementTests(unittest.TestCase):
             for path in sorted(work.rglob("*"), reverse=True):
                 path.unlink() if path.is_file() else path.rmdir()
             work.rmdir()
+
+
+STUB_BACKEND_SOURCE = '''import json, os, signal, socket, sys, time
+
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+listener = socket.socket()
+listener.bind(("127.0.0.1", 0))
+listener.listen(8)
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump({"pid": os.getpid(), "port": listener.getsockname()[1]}, handle)
+time.sleep(300)
+'''
+
+CONTROLLER_SOURCE = '''import json, os, signal, sys
+from pathlib import Path
+
+config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+sys.path.insert(0, config["browser"])
+import run
+
+marker_calls = []
+
+
+def previous(signum, frame):
+    marker_calls.append(signum)
+
+
+signal.signal(signal.SIGTERM, previous)
+
+
+def seed_steps(args, state):
+    run_root = Path(args.run_root)
+    run_root.mkdir(parents=True, exist_ok=True)
+    state["prepared"] = True
+    process, stdout, stderr = run._start_backend(
+        [sys.executable, config["stub"], config["ready"]],
+        run_root, os.environ.copy(),
+        run_root / "backend.stdout.log", run_root / "backend.stderr.log")
+    state["backend"] = {"argv": ["stub-backend"], "process": process,
+                        "streams": (stdout, stderr)}
+
+
+run._steps = seed_steps
+result = {"propagated": None, "handler_restored": None, "returncode": None,
+          "error": None, "marker_calls": marker_calls}
+try:
+    result["returncode"] = run.main([
+        "--run-root", config["run_root"], "--temp-root", config["temp_root"],
+        "--worktree", config["worktree"], "--exe", sys.executable,
+        "--python", sys.executable, "--port", str(config["port"]),
+        "--shutdown-timeout", "1"])
+except BaseException as error:
+    result["propagated"] = (error.code if isinstance(error, SystemExit)
+                            else type(error).__name__)
+    result["error"] = repr(error)
+result["handler_restored"] = signal.getsignal(signal.SIGTERM) is previous
+result["marker_calls"] = marker_calls
+Path(config["result"]).write_text(json.dumps(result), encoding="utf-8")
+print(json.dumps(result))
+'''
+
+
+def wait_for_path(path, timeout=60.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def wait_group_gone(pgid, timeout=40.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        time.sleep(0.05)
+    return False
+
+
+class SignalCleanupTests(unittest.TestCase):
+    """The CLI owns cancellation cleanup: a real SIGTERM during the polite wait."""
+
+    def setUp(self):
+        self.base = temp_base()
+        self.work = Path(tempfile.mkdtemp(prefix="browser-signal-", dir=str(self.base)))
+        self.stub_pid = None
+        self.controller = None
+
+    def tearDown(self):
+        if self.stub_pid is not None:
+            try:
+                os.killpg(self.stub_pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if self.controller is not None and self.controller.poll() is None:
+            self.controller.kill()
+            self.controller.wait(timeout=30)
+
+    def test_sigterm_during_polite_wait_retires_backend_and_propagates(self):
+        scripts = self.work / "fixture"
+        scripts.mkdir()
+        (scripts / "stub_backend.py").write_text(STUB_BACKEND_SOURCE, encoding="utf-8")
+        (scripts / "controller.py").write_text(CONTROLLER_SOURCE, encoding="utf-8")
+        run_root = self.work / "run"
+        ready = run_root / "ready.json"
+        config = {
+            "browser": str(HERE),
+            "stub": str(scripts / "stub_backend.py"),
+            "ready": str(ready),
+            "run_root": str(run_root),
+            "temp_root": str(self.work),
+            "worktree": str(ROOT),
+            "result": str(self.work / "controller-result.json"),
+            "port": 8144,
+        }
+        config_path = self.work / "controller.json"
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        self.controller = subprocess.Popen(
+            [sys.executable, str(scripts / "controller.py"), str(config_path)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            cwd=str(self.work), env=os.environ.copy())
+        self.assertTrue(wait_for_path(ready, timeout=60),
+                        "stub backend never became ready")
+        stub = json.loads(ready.read_text(encoding="utf-8"))
+        self.stub_pid = stub["pid"]
+        self.assertTrue(wait_for_path(run_root / "shutdown", timeout=30),
+                        "production cleanup never wrote the shutdown sentinel")
+        # The stub ignores the sentinel, so the CLI's polite process.wait is
+        # blocked right now; interrupt THAT wait with a real SIGTERM, then send
+        # a second one while the unwind is still retiring the owned group.
+        self.controller.send_signal(signal.SIGTERM)
+        time.sleep(0.3)
+        self.controller.send_signal(signal.SIGTERM)
+        try:
+            stdout, stderr = self.controller.communicate(timeout=120)
+        except subprocess.TimeoutExpired:
+            self.fail("controller did not finish within the finite outer bound")
+        result = json.loads(
+            (self.work / "controller-result.json").read_text(encoding="utf-8"))
+        self.assertIsNone(
+            result["returncode"],
+            f"cancellation was translated into an ordinary result: {result}\n{stdout}\n{stderr}")
+        self.assertEqual(
+            result["propagated"], 143,
+            f"original SIGTERM cancellation did not propagate: {result}\n{stdout}\n{stderr}")
+        self.assertTrue(result["handler_restored"],
+                        f"previous SIGTERM handler was not restored: {result}")
+        receipt = json.loads((run_root / "receipt.json").read_text(encoding="utf-8"))
+        backend = receipt["backend"]
+        self.assertIs(backend["forced_retirement"], True, receipt)
+        self.assertIs(backend["group_alive"], False, receipt)
+        self.assertIs(backend["reaped"], True, receipt)
+        self.assertIsNotNone(backend["exit"], receipt)
+        self.assertEqual(receipt["failures"], [], receipt)
+        self.assertTrue(wait_group_gone(self.stub_pid),
+                        "stub backend group survived the CLI unwind")
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", stub["port"]))
 
 
 class PackCompareTests(unittest.TestCase):

@@ -234,23 +234,45 @@ def _wait_health(base, timeout=60.0):
     raise RunError(f"backend health never matched (last: {last})")
 
 
-def _shutdown_and_reap(run_root, process, streams, timeout):
-    (run_root / "shutdown").write_text("shutdown\n", encoding="utf-8")
-    forced = False
-    code = None
-    try:
-        code = process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        forced = True
-        compat._retire_and_drain(process)
-        code = process.returncode
-    for stream in streams:
+def _shutdown_and_reap(run_root, process, streams, timeout, force=False):
+    """Ask the owned backend to exit, then confirm direct exit and group gone.
+
+    `force` retires the whole owned group without relying on the shutdown
+    sentinel or on a second polite wait; it is used only while the CLI is
+    already unwinding. The streams are closed only after the direct exit and
+    the whole group are confirmed, so an unconfirmed retirement keeps custody.
+    """
+    forced = force
+    retired = True
+    if not forced:
         try:
-            stream.close()
+            (run_root / "shutdown").write_text("shutdown\n", encoding="utf-8")
         except OSError:
-            pass
+            # A failed sentinel write must not be able to block forced
+            # retirement of an owned group.
+            forced = True
+    code = None
+    if not forced:
+        try:
+            code = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            forced = True
+        else:
+            if os.name == "posix" and compat._process_group_alive(process.pid):
+                forced = True
+    if forced:
+        retired, _, _ = compat._retire_and_drain(process)
+        code = process.returncode
     alive = compat._process_group_alive(process.pid) if os.name == "posix" else False
-    return {"exit": code, "forced": forced, "group_alive": alive}
+    confirmed = retired and process.poll() is not None and not alive
+    if confirmed:
+        for stream in streams:
+            try:
+                stream.close()
+            except OSError:
+                pass
+    return {"exit": code, "forced": forced, "group_alive": alive,
+            "confirmed": confirmed}
 
 
 def _remaining_browsers(run_root, exe):
@@ -304,10 +326,14 @@ def _receipt(args, state):
         "python": state.get("python"),
         "chromium": state.get("chromium"),
         "backend": {
+            # Only the recorded scalars are copied: an unconfirmed retirement
+            # keeps live process/stream custody in state, and that custody must
+            # never leak into the JSON receipt or masquerade as a success.
             "argv": backend.get("argv"),
             "exit": backend.get("exit"),
             "forced_retirement": backend.get("forced"),
             "group_alive": backend.get("group_alive"),
+            "reaped": backend.get("reaped") is True,
             "passed": backend.get("passed"),
             "failed": backend.get("failed"),
             "status": backend.get("status"),
@@ -345,23 +371,31 @@ def _write_receipt(args, state):
         json.dumps(_receipt(args, state), indent=1), encoding="utf-8")
 
 
-def _cleanup(args, state):
+def _cleanup(args, state, force=False):
+    """Retire the one owned backend; keep custody until the exit is confirmed.
+
+    `force` is the unwind path's bounded retirement and is not a public mode.
+    Marking the backend reaped and dropping its process/stream references
+    happens only after the direct child has exited AND the whole owned group is
+    gone; otherwise the custody stays and the receipt records the failure.
+    """
     backend = state.get("backend")
     if not backend or state.get("reaped"):
         return
     run_root = Path(args.run_root).resolve()
-    try:
-        result = _shutdown_and_reap(
-            run_root, backend["process"], backend["streams"],
-            args.shutdown_timeout)
-    except BaseException as error:
-        result = {"exit": None, "forced": True, "group_alive": True,
-                  "error": repr(error)}
-    finally:
-        state["reaped"] = True
-    backend.update(result)
-    backend.pop("process", None)
-    backend.pop("streams", None)
+    result = _shutdown_and_reap(
+        run_root, backend["process"], backend.get("streams") or (),
+        args.shutdown_timeout, force=force)
+    for name in ("exit", "forced", "group_alive"):
+        backend[name] = result[name]
+    backend["reaped"] = result["confirmed"]
+    state["reaped"] = result["confirmed"]
+    if result["confirmed"]:
+        backend.pop("process", None)
+        backend.pop("streams", None)
+        return
+    state.setdefault("failures", []).append(
+        "owned backend retirement was not confirmed; process custody retained")
 
 
 def _evaluate(args, state):
@@ -504,23 +538,15 @@ def _steps(args, state):
 
 def _execute(args, state):
     try:
-        try:
-            _steps(args, state)
-        except compat.CommandTimeout as error:
-            state.setdefault("failures", []).append(str(error))
-        except BaseException as error:
-            state["error"] = repr(error)
-            state.setdefault("failures", []).append(f"unexpected error: {error!r}")
-            raise
-        finally:
-            _cleanup(args, state)
-        return _evaluate(args, state)
-    finally:
-        _cleanup(args, state)
-        try:
-            _write_receipt(args, state)
-        except BaseException as error:
-            print(f"receipt write failed: {error!r}", file=sys.stderr)
+        _steps(args, state)
+    except compat.CommandTimeout as error:
+        state.setdefault("failures", []).append(str(error))
+    except BaseException as error:
+        state["error"] = repr(error)
+        state.setdefault("failures", []).append(f"unexpected error: {error!r}")
+        raise
+    _cleanup(args, state)
+    return _evaluate(args, state)
 
 
 def main(argv=None):
@@ -560,24 +586,39 @@ def main(argv=None):
     previous_term = compat._install_sigterm_unwind()
     try:
         try:
-            return _execute(args, state)
-        except RunError as error:
-            print(f"browser-run error: {error}", file=sys.stderr)
-            return 2
-        except BaseException:
+            code = _execute(args, state)
+        except BaseException as error:
+            # This CLI boundary is the single owner of cancellation cleanup:
+            # any step, polite-shutdown or evaluation exception arrives here
+            # with the owned backend still retained. Further signals are
+            # ignored only for this bounded retirement (the accepted compat
+            # helpers), the receipt records the truthful state, and the exact
+            # previous handlers are restored before the ORIGINAL exception is
+            # re-raised bare. Cleanup or logging failures are recorded and
+            # never replace that first exception.
             saved = compat._suspend_cancellation_signals()
             try:
                 try:
-                    _cleanup(args, state)
-                except BaseException:
-                    pass
+                    _cleanup(args, state, force=True)
+                except BaseException as cleanup_error:
+                    state.setdefault("failures", []).append(
+                        f"backend retirement failed: {cleanup_error!r}")
                 try:
                     _write_receipt(args, state)
-                except BaseException:
-                    pass
+                except BaseException as receipt_error:
+                    print(f"receipt write failed: {receipt_error!r}",
+                          file=sys.stderr)
             finally:
                 compat._restore_cancellation_signals(saved)
+            if isinstance(error, RunError):
+                print(f"browser-run error: {error}", file=sys.stderr)
+                return 2
             raise
+        try:
+            _write_receipt(args, state)
+        except BaseException as receipt_error:
+            print(f"receipt write failed: {receipt_error!r}", file=sys.stderr)
+        return code
     finally:
         compat._restore_signal_handler(signal.SIGTERM, previous_term)
 
