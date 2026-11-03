@@ -11,9 +11,22 @@ jobs:
   linux:
     name: Linux runtime gates
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 180
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      TMPDIR: ${{ runner.temp }}
+      XEH_PYTHON: ${{ runner.temp }}/venv/bin/python
+      XEH_UPSTREAM: ${{ runner.temp }}/oracle
+      XEH_UPDATE_ORACLE: ${{ runner.temp }}/oracle
+      XEH_WEBUI_CHECKOUT: ${{ runner.temp }}/webui/dist
+      XEH_BROWSER_REPORT: ${{ runner.temp }}/browser-run/browser-report.json
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: Install Rust 1.99.1
         run: |
           rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
@@ -24,11 +37,54 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Unit tests
         run: cargo test --locked
+      - name: Install Python and browser test dependencies
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$XEH_PYTHON" -m pip install --disable-pip-version-check \
+            pillow==13.0.0 requests==2.34.2 PySocks==1.7.1 playwright==1.64.1
+          "$XEH_PYTHON" -m playwright install --with-deps chromium
+      - name: Fetch fixed Python oracle
+        run: |
+          set -euo pipefail
+          mkdir -p "$XEH_UPSTREAM"
+          curl -fsSL "https://codeload.github.com/fffonion/xeHentai/tar.gz/43fc55c0c662f195d048becf6276a26ce06b09d9" \
+            -o "$RUNNER_TEMP/oracle.tar.gz"
+          tar -xzf "$RUNNER_TEMP/oracle.tar.gz" -C "$XEH_UPSTREAM" --strip-components=1
+          test -f "$XEH_UPSTREAM/xeHentai/config.py"
+          # The update comparator resolves its frozen blobs with
+          # `git -C /home/wow/rustscript/xehentai-rss show <rev>:<path>`.
+          # This job checks out the same public repository with full history,
+          # so expose that checkout at the comparator's fixed path.
+          sudo mkdir -p /home/wow/rustscript
+          sudo ln -sfn "$GITHUB_WORKSPACE" /home/wow/rustscript/xehentai-rss
+      - name: Rebuild the original WebUI pack
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/webui" "$RUNNER_TEMP/npm-cache"
+          curl -fsSL "https://codeload.github.com/fffonion/xeHentai-webui/tar.gz/4e3738ef463fef344e96df613de9a81b4cda4b4e" \
+            -o "$RUNNER_TEMP/webui.tar.gz"
+          tar -xzf "$RUNNER_TEMP/webui.tar.gz" -C "$RUNNER_TEMP/webui" --strip-components=1
+          cd "$RUNNER_TEMP/webui"
+          export NODE_OPTIONS=--openssl-legacy-provider
+          export npm_config_cache="$RUNNER_TEMP/npm-cache"
+          npm install --ignore-scripts --no-audit --no-fund
+          npm install --no-save --ignore-scripts --no-audit --no-fund sass@1.107.1
+          mv node_modules/node-sass node_modules/node-sass-broken
+          mkdir node_modules/node-sass
+          printf "module.exports = require('sass')\n" > node_modules/node-sass/index.js
+          npm run build
+          "$XEH_PYTHON" "$GITHUB_WORKSPACE/tools/browser/compare_webui_pack.py" \
+            --dist dist --candidate "$GITHUB_WORKSPACE/ui" --expected-count 7
       - name: Python tool tests
         run: |
-          python3 tools/test_cases_inventory.py
-          python3 tools/test_update_compat.py
-          python3 tools/test_package_dist.py
+          set -euo pipefail
+          "$XEH_PYTHON" tools/test_cases_inventory.py
+          "$XEH_PYTHON" tools/test_update_compat.py
+          "$XEH_PYTHON" tools/test_package_dist.py
+          "$XEH_PYTHON" tools/test_compat_gallery.py
+          "$XEH_PYTHON" tools/browser/test_verify_webui_49.py
+          "$XEH_PYTHON" tools/browser/test_run.py
       - name: Release build
         run: cargo build --release --locked
       - name: Package and offline smoke
@@ -59,6 +115,36 @@ jobs:
           kill -TERM "$pid"
           wait "$pid"
           trap - EXIT
+      - name: Browser evidence, original UI (49 checks)
+        run: |
+          set -euo pipefail
+          "$XEH_PYTHON" tools/browser/run.py \
+            --run-root "$RUNNER_TEMP/browser-run" \
+            --temp-root "$RUNNER_TEMP" \
+            --worktree "$GITHUB_WORKSPACE" \
+            --port 8010
+      - name: Differential evidence (all suites, two internal rounds)
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/compat-evidence"
+          before_head="$(git rev-parse HEAD)"
+          before_status="$(git status --porcelain)"
+          test -z "$before_status"
+          "$XEH_PYTHON" tools/compat.py --suite all --output "$evidence"
+          after_head="$(git rev-parse HEAD)"
+          after_status="$(git status --porcelain)"
+          test "$before_head" = "$after_head"
+          test -z "$after_status"
+          "$XEH_PYTHON" - "$evidence/manifest.json" "$before_head" <<'PY'
+          import json
+          import sys
+          manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+          assert manifest["head"] == sys.argv[2], (manifest["head"], sys.argv[2])
+          assert manifest["dirty"] is False, manifest["dirty"]
+          assert len(manifest["suites"]) == 18, manifest["suites"]
+          print("manifest bound to", manifest["head"], "dirty", manifest["dirty"])
+          PY
+          "$XEH_PYTHON" tools/compat.py --verify-all --evidence "$evidence"
 
   macos-compile:
     name: macOS compile-only (no runtime verification)

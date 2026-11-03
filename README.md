@@ -106,14 +106,63 @@ python3 tools/test_cases_inventory.py
 python3 tools/test_compat_gallery.py
 python3 tools/test_update_compat.py
 python3 tools/test_package_dist.py
+python3 tools/browser/test_verify_webui_49.py
+python3 tools/browser/test_run.py
 ```
 
 `tools/compat.py` runs the fixed Python reference in isolated roots and compares
 its real output with the Rust entry points. It is a development tool and is not
 shipped. `XEH_UPSTREAM` must point at the pinned Python reference checkout;
-`tools/test_compat_gallery.py` needs the same checkout (and Pillow) and is
-therefore not part of the repository-only CI job. `tools/cases.json` is the
-feature inventory and per-case status.
+`tools/test_compat_gallery.py` needs the same checkout and Pillow.
+`tools/cases.json` is the feature inventory and per-case status.
+
+## Browser verification
+
+`tools/browser/` runs the frozen original WebUI against the real
+`tests::browser_fixture_server` and checks the exact 49 browser checks with an
+independent verifier. The backend serves the frozen UI pack, seeds fixture
+tasks through the existing comparison seam and runs no downloader task loop.
+
+Required inputs:
+
+- a fresh run root inside an owned temporary directory (it must not exist);
+- Chromium for Playwright: pass `--exe` or set `XEH_CHROMIUM`, otherwise the
+  executable is resolved from the installed Playwright package;
+- a Python interpreter with Pillow and Playwright: pass `--python` or set
+  `XEH_PYTHON`;
+- the Cargo target from `CARGO_TARGET_DIR`, or an explicitly matching
+  `--target-dir`.
+
+```shell
+python tools/browser/run.py \
+  --run-root /fresh/browser-run-$(date +%s) \
+  --temp-root /path/to/owned/temp \
+  --worktree . \
+  --port 8010 \
+  --exe /path/to/chromium
+```
+
+The run prepares the fixture, starts the ignored Rust test, waits for
+readiness and health, drives the original UI, runs the independent verifier,
+then shuts the backend down through its sentinel and confirms the owned
+process group is gone. Reports, screenshots, logs and `receipt.json` stay
+under the fresh run root and are not committed.
+
+The verifier and its tests can also run alone:
+
+```shell
+python tools/browser/verify_webui_49.py /fresh/browser-run/browser-report.json --port 8010
+python tools/browser/test_verify_webui_49.py
+python tools/browser/test_run.py
+```
+
+`tools/browser/fixtures/browser-report-accepted-historical-3c28436.json` is a
+historical positive control for the verifier, not current evidence. For the
+differential `webui` suite, set `XEH_WEBUI_CHECKOUT` to an independent build of
+the original WebUI at `4e3738ef463fef344e96df613de9a81b4cda4b4e` and
+`XEH_BROWSER_REPORT` to the report from a browser run.
+`tools/browser/compare_webui_pack.py` byte-compares such a build with `ui/`,
+excluding source maps and `PROVENANCE`.
 
 The dependency `pd-vm` is pinned to the RustScript revision
 `cdb0b798d631cd7ffab6dfed3fe4b69381ed3340`.
@@ -123,8 +172,10 @@ The dependency `pd-vm` is pinned to the RustScript revision
 `.github/workflows/ci.yml` runs on GitHub Actions:
 
 - **Linux**: formatting, strict Clippy, the unit tests, the Python tool tests
-  that use in-repository fixtures, a release build, packaging and a package RPC
-  smoke test.
+  with the pinned oracle and Pillow, a release build, packaging and a package
+  RPC smoke test, a real browser run of the original UI with the independent
+  49-check verifier, and one differential run of all suites (two internal
+  rounds) followed by `--verify-all` bound to the checked-out HEAD.
 - **macOS / Windows**: compilation and strict Clippy only. These jobs are not
   runtime or feature-parity verification.
 

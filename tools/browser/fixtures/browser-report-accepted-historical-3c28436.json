@@ -1,0 +1,915 @@
+{
+ "ok": true,
+ "checks": [
+  {
+   "check": "connect.dialog",
+   "ok": true,
+   "detail": "Configuration\nConnectionBasicAdvanced\nServer\nhttp://\t\n:\nHTTPS\nSecret\nAuto Refres"
+  },
+  {
+   "check": "auth.wrong.disconnected",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "auth.wrong.403",
+   "ok": true,
+   "detail": 10
+  },
+  {
+   "check": "connect.connected",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "tasks.rows",
+   "ok": true,
+   "detail": 3
+  },
+  {
+   "check": "tasks.row.alpha",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "tasks.row.beta",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "tasks.row.gamma",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "tasks.beta.finished-progress",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "config.basic.dir",
+   "ok": true,
+   "detail": [
+    "127.0.0.1",
+    "8010",
+    "s3cret",
+    "5",
+    "/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads",
+    "1",
+    "5",
+    "10",
+    "10",
+    "eh.log"
+   ]
+  },
+  {
+   "check": "config.basic.keys",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "config.hides.rpc",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "config.getConfig.dir",
+   "ok": true,
+   "detail": "/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads"
+  },
+  {
+   "check": "config.getConfig.no-rpc",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "search.title",
+   "ok": true,
+   "detail": 1
+  },
+  {
+   "check": "search.gjname",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "search.tag",
+   "ok": true,
+   "detail": 2
+  },
+  {
+   "check": "filter.tag.japanese",
+   "ok": true,
+   "detail": 1
+  },
+  {
+   "check": "filter.reset",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "filter.closed",
+   "ok": true,
+   "detail": 0
+  },
+  {
+   "check": "pause.alpha.state",
+   "ok": true,
+   "detail": {
+    "alpha0001": 0,
+    "gamma003": 0
+   }
+  },
+  {
+   "check": "pause.alpha.ui-play",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "resume.gamma.state",
+   "ok": true,
+   "detail": {
+    "alpha0001": 0,
+    "gamma003": 1
+   }
+  },
+  {
+   "check": "resume.gamma.ui-play",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "lists.finished",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "lists.unfinished",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "gallery.opened",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "gallery.double.images",
+   "ok": true,
+   "detail": [
+    [
+     "http://127.0.0.1:8010/img/8c5218ee/beta0002/1/1.jpg",
+     64,
+     48,
+     true
+    ],
+    [
+     "http://127.0.0.1:8010/img/fc316d4f/beta0002/2/2.png",
+     48,
+     48,
+     true
+    ]
+   ]
+  },
+  {
+   "check": "gallery.double.formats",
+   "ok": true,
+   "detail": [
+    [
+     "http://127.0.0.1:8010/img/8c5218ee/beta0002/1/1.jpg",
+     64,
+     48,
+     true
+    ],
+    [
+     "http://127.0.0.1:8010/img/fc316d4f/beta0002/2/2.png",
+     48,
+     48,
+     true
+    ]
+   ]
+  },
+  {
+   "check": "gallery.double.checkbox",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "gallery.single.images",
+   "ok": true,
+   "detail": [
+    [
+     "http://127.0.0.1:8010/img/8c5218ee/beta0002/1/1.jpg",
+     64,
+     48,
+     true
+    ]
+   ]
+  },
+  {
+   "check": "gallery.nav.page2",
+   "ok": true,
+   "detail": [
+    [
+     "http://127.0.0.1:8010/img/fc316d4f/beta0002/2/2.png",
+     48,
+     48,
+     true
+    ]
+   ]
+  },
+  {
+   "check": "gallery.last.page",
+   "ok": true,
+   "detail": [
+    [
+     "http://127.0.0.1:8010/img/53ffaee9/beta0002/4/4.webp",
+     40,
+     56,
+     true
+    ]
+   ]
+  },
+  {
+   "check": "gallery.click-last-closes",
+   "ok": true,
+   "detail": {
+    "screen": 1440,
+    "x": 758.5,
+    "zone": "next",
+    "active": "4",
+    "before_visible": true,
+    "after_visible": false
+   }
+  },
+  {
+   "check": "zip.filename",
+   "ok": true,
+   "detail": "beta.zip"
+  },
+  {
+   "check": "zip.entries",
+   "ok": true,
+   "detail": [
+    "1.jpg",
+    "2.png",
+    "3.gif",
+    "4.webp"
+   ]
+  },
+  {
+   "check": "zip.contents",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "zip.comment",
+   "ok": true,
+   "detail": "xeHentai Archiver v2.023\nTitle:beta\nOriginal URL:http://e-hentai.org/g/9002/abcdef0002/"
+  },
+  {
+   "check": "zip.http",
+   "ok": true,
+   "detail": {
+    "url": "http://127.0.0.1:8010/zip/e89ffe21/beta0002/beta.zip",
+    "status": 200,
+    "ctype": "application/zip"
+   }
+  },
+  {
+   "check": "delete.row",
+   "ok": true,
+   "detail": 2
+  },
+  {
+   "check": "delete.backend",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "locale.zh-CN.heading",
+   "ok": true,
+   "detail": "\u7ec5\u58ebWebUI 2.023-rss  0  0 \u00a0\u00a0  0  0  0 B/s\n\t\u597d\u591a\u672c\u5b50\n\t\u8fdb\u5ea6\n\t\t\t\n\t\n\nbet"
+  },
+  {
+   "check": "locale.zh-CN.progress",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "locale.zh-CN.host",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "locale.zh-CN.tasks",
+   "ok": true,
+   "detail": 2
+  },
+  {
+   "check": "locale.zh-TW.heading",
+   "ok": true,
+   "detail": "\u7d33\u58ebWebUI 2.023-rss  0  0 \u00a0\u00a0  0  0  0 B/s\n\t\u597d\u591a\u672c\u5b50\n\t\u9032\u5ea6\n\t\t\t\n\t\n\nbet"
+  },
+  {
+   "check": "locale.zh-TW.progress",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "locale.zh-TW.host",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "locale.zh-TW.tasks",
+   "ok": true,
+   "detail": 2
+  }
+ ],
+ "trace": [
+  {
+   "url": "http://127.0.0.1:8010/ui/",
+   "status": 200,
+   "content_type": "text/html",
+   "content_length": "516",
+   "method": "GET"
+  },
+  {
+   "url": "http://127.0.0.1:8010/static/css/app.6027935ff9f1e3bed9935438c6be1f38.css",
+   "status": 200,
+   "content_type": "text/css",
+   "content_length": "238206",
+   "method": "GET"
+  },
+  {
+   "url": "http://127.0.0.1:8010/static/js/manifest.2ae2e69a05c33dfc65f8.js",
+   "status": 200,
+   "content_type": "application/javascript",
+   "content_length": "857",
+   "method": "GET"
+  },
+  {
+   "url": "http://127.0.0.1:8010/static/js/app.b712f314a32fe45ff793.js",
+   "status": 200,
+   "content_type": "application/javascript",
+   "content_length": "61256",
+   "method": "GET"
+  },
+  {
+   "url": "http://127.0.0.1:8010/static/js/vendor.24bda49bb1d1d931b8b0.js",
+   "status": 200,
+   "content_type": "application/javascript",
+   "content_length": "1300791",
+   "method": "GET"
+  },
+  {
+   "url": "http://127.0.0.1:8010/static/fonts/element-icons.535877f.woff",
+   "status": 200,
+   "content_type": "font/woff",
+   "content_length": "28200",
+   "method": "GET"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 403,
+   "content_type": "application/json-rpc",
+   "content_length": "85",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.listTasks\",\"id\":\"1793617461489\",\"params\":[[\"finished\"],{}]}",
+   "body": "{\"id\":\"1793617461489\",\"jsonrpc\":\"2.0\",\"error\":{\"code\":1200,\"message\":\"Unauthorized\"}}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 403,
+   "content_type": "application/json-rpc",
+   "content_length": "85",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.listTasks\",\"id\":\"1793617461493\",\"params\":[[\"!finished\"],{}]}",
+   "body": "{\"id\":\"1793617461493\",\"jsonrpc\":\"2.0\",\"error\":{\"code\":1200,\"message\":\"Unauthorized\"}}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 403,
+   "content_type": "application/json-rpc",
+   "content_length": "85",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.getInfo\",\"id\":\"1793617461494\",\"params\":[[],{}]}",
+   "body": "{\"id\":\"1793617461494\",\"jsonrpc\":\"2.0\",\"error\":{\"code\":1200,\"message\":\"Unauthorized\"}}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 403,
+   "content_type": "application/json-rpc",
+   "content_length": "85",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.getConfig\",\"id\":\"1793617461494\",\"params\":[[],{}]}",
+   "body": "{\"id\":\"1793617461494\",\"jsonrpc\":\"2.0\",\"error\":{\"code\":1200,\"message\":\"Unauthorized\"}}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 403,
+   "content_type": "application/json-rpc",
+   "content_length": "85",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.getConfig\",\"id\":\"1793617461495\",\"params\":[[],{}]}",
+   "body": "{\"id\":\"1793617461495\",\"jsonrpc\":\"2.0\",\"error\":{\"code\":1200,\"message\":\"Unauthorized\"}}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 403,
+   "content_type": "application/json-rpc",
+   "content_length": "85",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.getConfig\",\"id\":\"1793617462876\",\"params\":[[\"token:wrong\"],{}]}",
+   "body": "{\"id\":\"1793617462876\",\"jsonrpc\":\"2.0\",\"error\":{\"code\":1200,\"message\":\"Unauthorized\"}}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 403,
+   "content_type": "application/json-rpc",
+   "content_length": "85",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.listTasks\",\"id\":\"1793617462876\",\"params\":[[\"token:wrong\",\"finished\"],{}]}",
+   "body": "{\"id\":\"1793617462876\",\"jsonrpc\":\"2.0\",\"error\":{\"code\":1200,\"message\":\"Unauthorized\"}}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 403,
+   "content_type": "application/json-rpc",
+   "content_length": "85",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.listTasks\",\"id\":\"1793617462877\",\"params\":[[\"token:wrong\",\"!finished\"],{}]}",
+   "body": "{\"id\":\"1793617462877\",\"jsonrpc\":\"2.0\",\"error\":{\"code\":1200,\"message\":\"Unauthorized\"}}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 403,
+   "content_type": "application/json-rpc",
+   "content_length": "85",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.getInfo\",\"id\":\"1793617462877\",\"params\":[[\"token:wrong\"],{}]}",
+   "body": "{\"id\":\"1793617462877\",\"jsonrpc\":\"2.0\",\"error\":{\"code\":1200,\"message\":\"Unauthorized\"}}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 403,
+   "content_type": "application/json-rpc",
+   "content_length": "85",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.updateConfig\",\"id\":\"1793617462877\",\"params\":[[\"token:wrong\"],{\"log_verbose\":1}]}",
+   "body": "{\"id\":\"1793617462877\",\"jsonrpc\":\"2.0\",\"error\":{\"code\":1200,\"message\":\"Unauthorized\"}}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/img/8c5218ee/beta0002/1?w=300&_=0",
+   "status": 200,
+   "content_type": "image/jpeg",
+   "content_length": "676",
+   "method": "GET"
+  },
+  {
+   "url": "http://127.0.0.1:8010/img/1041c4b0/alpha0001/1?w=300&_=0",
+   "status": 200,
+   "content_type": "image/jpeg",
+   "content_length": "677",
+   "method": "GET"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "615",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.getConfig\",\"id\":\"1793617464795\",\"params\":[[\"token:s3cret\"],{}]}",
+   "body": "{\"id\":\"1793617464795\",\"jsonrpc\":\"2.0\",\"result\":{\"daemon\":false,\"dir\":\"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads\",\"download_ori\":false,\"jpn_title\":true,\"rename_ori\":false,\"proxy\":[],\"proxy_image\":true,\"proxy_image_only\":false,\"make_archive\":false,\"download_range\":null,\"scan_thread_cnt\":1,\"download_thread_cnt\":5,\"download_timeout\":10,\"ignored_errors\":[],\"log_path\":\"eh.log\",\"log_verbose\":2,\"save_tasks\":false,\"delete_task_files\":false,\"low_speed_threshold\":10,\"auto_update\":\"download\",\"update_beta_channel\":false}}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "775",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.listTasks\",\"id\":\"1793617464796\",\"params\":[[\"token:s3cret\",\"finished\"],{}]}",
+   "body": "{\"id\":\"1793617464796\",\"jsonrpc\":\"2.0\",\"result\":[{\"url\":\"http://e-hentai.org/g/9002/abcdef0002/\",\"gid\":\"9002\",\"sethash\":\"abcdef0002\",\"failcode\":0,\"state\":20,\"guid\":\"beta0002\",\"config\":{\"dir\":\"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads\",\"download_ori\":false,\"jpn_title\":true,\"rename_ori\":false,\"proxy_image\":true,\"proxy_image_only\":false,\"make_archive\":false,\"download_range\":null,\"scan_thread_cnt\":1,\"download_thread_cnt\":5,\"download_timeout\":10,\"ignored_errors\":[],\"delete_task_files\":false,\"low_speed_threshold\":10},\"meta\":{\"title\":\"beta\",\"gnname\":\"Beta Finished\",\"gjname\":\"\u30d9\u30fc\u30bf\u5b8c\u7d50\",\"tags\":[\"artist:probe\",\"language:japanese\",\"full color\"],\"total\":4,\"finished\":4}}]}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "1501",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.listTasks\",\"id\":\"1793617464797\",\"params\":[[\"token:s3cret\",\"!finished\"],{}]}",
+   "body": "{\"id\":\"1793617464797\",\"jsonrpc\":\"2.0\",\"result\":[{\"url\":\"http://e-hentai.org/g/9001/abcdef0001/\",\"gid\":\"9001\",\"sethash\":\"abcdef0001\",\"failcode\":0,\"state\":10,\"guid\":\"alpha0001\",\"config\":{\"dir\":\"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads\",\"download_ori\":false,\"jpn_title\":true,\"rename_ori\":false,\"proxy_image\":true,\"proxy_image_only\":false,\"make_archive\":false,\"download_range\":null,\"scan_thread_cnt\":1,\"download_thread_cnt\":5,\"download_timeout\":10,\"ignored_errors\":[],\"delete_task_files\":false,\"low_speed_threshold\":10},\"meta\":{\"title\":\"alpha\",\"gnname\":\"Alpha Gallery\",\"gjname\":\"\u30a2\u30eb\u30d5\u30a1\u30ae\u30e3\u30e9\u30ea\u30fc\",\"tags\":[\"artist:probe\",\"language:english\",\"female:sole\"],\"total\":13,\"finished\":4}},{\"url\":\"http://e-hentai.org/g/9003/abcdef0003/\",\"gid\":\"9003\",\"sethash\":\"abcdef0003\",\"failcode\":0,\"state\":0,\"guid\":\"gamma003\",\"config\":{\"dir\":\"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads\",\"download_ori\":false,\"jpn_title\":true,\"rename_ori\":false,\"proxy_image\":true,\"proxy_image_only\":false,\"make_archive\":false,\"download_range\":null,\"scan_thread_cnt\":1,\"download_thread_cnt\":5,\"download_timeout\":10,\"ignored_errors\":[],\"delete_task_files\":false,\"low_speed_threshold\":10},\"meta\":{\"title\":\"gamma\",\"gnname\":\"Gamma Paused\",\"gjname\":\"\u30ac\u30f3\u30de\u505c\u6b62\",\"tags\":[\"artist:other\",\"language:chinese\"],\"total\":1,\"finished\":0}}]}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "166",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.getInfo\",\"id\":\"1793617464797\",\"params\":[[\"token:s3cret\"],{}]}",
+   "body": "{\"id\":\"1793617464797\",\"jsonrpc\":\"2.0\",\"result\":{\"version\":\"2.023-rss\",\"threads_zombie\":0,\"threads_running\":0,\"queue_pending\":0,\"queue_finished\":0,\"download_speed\":0}}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "166",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.getInfo\",\"id\":\"1793617466489\",\"params\":[[\"token:s3cret\"],{}]}",
+   "body": "{\"id\":\"1793617466489\",\"jsonrpc\":\"2.0\",\"result\":{\"version\":\"2.023-rss\",\"threads_zombie\":0,\"threads_running\":0,\"queue_pending\":0,\"queue_finished\":0,\"download_speed\":0}}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "775",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.listTasks\",\"id\":\"1793617466490\",\"params\":[[\"token:s3cret\",\"finished\"],{}]}",
+   "body": "{\"id\":\"1793617466490\",\"jsonrpc\":\"2.0\",\"result\":[{\"url\":\"http://e-hentai.org/g/9002/abcdef0002/\",\"gid\":\"9002\",\"sethash\":\"abcdef0002\",\"failcode\":0,\"state\":20,\"guid\":\"beta0002\",\"config\":{\"dir\":\"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads\",\"download_ori\":false,\"jpn_title\":true,\"rename_ori\":false,\"proxy_image\":true,\"proxy_image_only\":false,\"make_archive\":false,\"download_range\":null,\"scan_thread_cnt\":1,\"download_thread_cnt\":5,\"download_timeout\":10,\"ignored_errors\":[],\"delete_task_files\":false,\"low_speed_threshold\":10},\"meta\":{\"title\":\"beta\",\"gnname\":\"Beta Finished\",\"gjname\":\"\u30d9\u30fc\u30bf\u5b8c\u7d50\",\"tags\":[\"artist:probe\",\"language:japanese\",\"full color\"],\"total\":4,\"finished\":4}}]}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "166",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.getInfo\",\"id\":\"1793617467876\",\"params\":[[\"token:s3cret\"],{}]}",
+   "body": "{\"id\":\"1793617467876\",\"jsonrpc\":\"2.0\",\"result\":{\"version\":\"2.023-rss\",\"threads_zombie\":0,\"threads_running\":0,\"queue_pending\":0,\"queue_finished\":0,\"download_speed\":0}}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "775",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.listTasks\",\"id\":\"1793617467877\",\"params\":[[\"token:s3cret\",\"finished\"],{}]}",
+   "body": "{\"id\":\"1793617467877\",\"jsonrpc\":\"2.0\",\"result\":[{\"url\":\"http://e-hentai.org/g/9002/abcdef0002/\",\"gid\":\"9002\",\"sethash\":\"abcdef0002\",\"failcode\":0,\"state\":20,\"guid\":\"beta0002\",\"config\":{\"dir\":\"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads\",\"download_ori\":false,\"jpn_title\":true,\"rename_ori\":false,\"proxy_image\":true,\"proxy_image_only\":false,\"make_archive\":false,\"download_range\":null,\"scan_thread_cnt\":1,\"download_thread_cnt\":5,\"download_timeout\":10,\"ignored_errors\":[],\"delete_task_files\":false,\"low_speed_threshold\":10},\"meta\":{\"title\":\"beta\",\"gnname\":\"Beta Finished\",\"gjname\":\"\u30d9\u30fc\u30bf\u5b8c\u7d50\",\"tags\":[\"artist:probe\",\"language:japanese\",\"full color\"],\"total\":4,\"finished\":4}}]}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "166",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.getInfo\",\"id\":\"1793617469796\",\"params\":[[\"token:s3cret\"],{}]}",
+   "body": "{\"id\":\"1793617469796\",\"jsonrpc\":\"2.0\",\"result\":{\"version\":\"2.023-rss\",\"threads_zombie\":0,\"threads_running\":0,\"queue_pending\":0,\"queue_finished\":0,\"download_speed\":0}}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "775",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.listTasks\",\"id\":\"1793617469797\",\"params\":[[\"token:s3cret\",\"finished\"],{}]}",
+   "body": "{\"id\":\"1793617469797\",\"jsonrpc\":\"2.0\",\"result\":[{\"url\":\"http://e-hentai.org/g/9002/abcdef0002/\",\"gid\":\"9002\",\"sethash\":\"abcdef0002\",\"failcode\":0,\"state\":20,\"guid\":\"beta0002\",\"config\":{\"dir\":\"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads\",\"download_ori\":false,\"jpn_title\":true,\"rename_ori\":false,\"proxy_image\":true,\"proxy_image_only\":false,\"make_archive\":false,\"download_range\":null,\"scan_thread_cnt\":1,\"download_thread_cnt\":5,\"download_timeout\":10,\"ignored_errors\":[],\"delete_task_files\":false,\"low_speed_threshold\":10},\"meta\":{\"title\":\"beta\",\"gnname\":\"Beta Finished\",\"gjname\":\"\u30d9\u30fc\u30bf\u5b8c\u7d50\",\"tags\":[\"artist:probe\",\"language:japanese\",\"full color\"],\"total\":4,\"finished\":4}}]}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "1501",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.listTasks\",\"id\":\"1793617471493\",\"params\":[[\"token:s3cret\",\"!finished\"],{}]}",
+   "body": "{\"id\":\"1793617471493\",\"jsonrpc\":\"2.0\",\"result\":[{\"url\":\"http://e-hentai.org/g/9001/abcdef0001/\",\"gid\":\"9001\",\"sethash\":\"abcdef0001\",\"failcode\":0,\"state\":10,\"guid\":\"alpha0001\",\"config\":{\"dir\":\"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads\",\"download_ori\":false,\"jpn_title\":true,\"rename_ori\":false,\"proxy_image\":true,\"proxy_image_only\":false,\"make_archive\":false,\"download_range\":null,\"scan_thread_cnt\":1,\"download_thread_cnt\":5,\"download_timeout\":10,\"ignored_errors\":[],\"delete_task_files\":false,\"low_speed_threshold\":10},\"meta\":{\"title\":\"alpha\",\"gnname\":\"Alpha Gallery\",\"gjname\":\"\u30a2\u30eb\u30d5\u30a1\u30ae\u30e3\u30e9\u30ea\u30fc\",\"tags\":[\"artist:probe\",\"language:english\",\"female:sole\"],\"total\":13,\"finished\":4}},{\"url\":\"http://e-hentai.org/g/9003/abcdef0003/\",\"gid\":\"9003\",\"sethash\":\"abcdef0003\",\"failcode\":0,\"state\":0,\"guid\":\"gamma003\",\"config\":{\"dir\":\"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads\",\"download_ori\":false,\"jpn_title\":true,\"rename_ori\":false,\"proxy_image\":true,\"proxy_image_only\":false,\"make_archive\":false,\"download_range\":null,\"scan_thread_cnt\":1,\"download_thread_cnt\":5,\"download_timeout\":10,\"ignored_errors\":[],\"delete_task_files\":false,\"low_speed_threshold\":10},\"meta\":{\"title\":\"gamma\",\"gnname\":\"Gamma Paused\",\"gjname\":\"\u30ac\u30f3\u30de\u505c\u6b62\",\"tags\":[\"artist:other\",\"language:chinese\"],\"total\":1,\"finished\":0}}]}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "166",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.getInfo\",\"id\":\"1793617471494\",\"params\":[[\"token:s3cret\"],{}]}",
+   "body": "{\"id\":\"1793617471494\",\"jsonrpc\":\"2.0\",\"result\":{\"version\":\"2.023-rss\",\"threads_zombie\":0,\"threads_running\":0,\"queue_pending\":0,\"queue_finished\":0,\"download_speed\":0}}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "775",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.listTasks\",\"id\":\"1793617471495\",\"params\":[[\"token:s3cret\",\"finished\"],{}]}",
+   "body": "{\"id\":\"1793617471495\",\"jsonrpc\":\"2.0\",\"result\":[{\"url\":\"http://e-hentai.org/g/9002/abcdef0002/\",\"gid\":\"9002\",\"sethash\":\"abcdef0002\",\"failcode\":0,\"state\":20,\"guid\":\"beta0002\",\"config\":{\"dir\":\"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads\",\"download_ori\":false,\"jpn_title\":true,\"rename_ori\":false,\"proxy_image\":true,\"proxy_image_only\":false,\"make_archive\":false,\"download_range\":null,\"scan_thread_cnt\":1,\"download_thread_cnt\":5,\"download_timeout\":10,\"ignored_errors\":[],\"delete_task_files\":false,\"low_speed_threshold\":10},\"meta\":{\"title\":\"beta\",\"gnname\":\"Beta Finished\",\"gjname\":\"\u30d9\u30fc\u30bf\u5b8c\u7d50\",\"tags\":[\"artist:probe\",\"language:japanese\",\"full color\"],\"total\":4,\"finished\":4}}]}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "1501",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.listTasks\",\"id\":\"1793617472876\",\"params\":[[\"token:s3cret\",\"!finished\"],{}]}",
+   "body": "{\"id\":\"1793617472876\",\"jsonrpc\":\"2.0\",\"result\":[{\"url\":\"http://e-hentai.org/g/9001/abcdef0001/\",\"gid\":\"9001\",\"sethash\":\"abcdef0001\",\"failcode\":0,\"state\":10,\"guid\":\"alpha0001\",\"config\":{\"dir\":\"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads\",\"download_ori\":false,\"jpn_title\":true,\"rename_ori\":false,\"proxy_image\":true,\"proxy_image_only\":false,\"make_archive\":false,\"download_range\":null,\"scan_thread_cnt\":1,\"download_thread_cnt\":5,\"download_timeout\":10,\"ignored_errors\":[],\"delete_task_files\":false,\"low_speed_threshold\":10},\"meta\":{\"title\":\"alpha\",\"gnname\":\"Alpha Gallery\",\"gjname\":\"\u30a2\u30eb\u30d5\u30a1\u30ae\u30e3\u30e9\u30ea\u30fc\",\"tags\":[\"artist:probe\",\"language:english\",\"female:sole\"],\"total\":13,\"finished\":4}},{\"url\":\"http://e-hentai.org/g/9003/abcdef0003/\",\"gid\":\"9003\",\"sethash\":\"abcdef0003\",\"failcode\":0,\"state\":0,\"guid\":\"gamma003\",\"config\":{\"dir\":\"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads\",\"download_ori\":false,\"jpn_title\":true,\"rename_ori\":false,\"proxy_image\":true,\"proxy_image_only\":false,\"make_archive\":false,\"download_range\":null,\"scan_thread_cnt\":1,\"download_thread_cnt\":5,\"download_timeout\":10,\"ignored_errors\":[],\"delete_task_files\":false,\"low_speed_threshold\":10},\"meta\":{\"title\":\"gamma\",\"gnname\":\"Gamma Paused\",\"gjname\":\"\u30ac\u30f3\u30de\u505c\u6b62\",\"tags\":[\"artist:other\",\"language:chinese\"],\"total\":1,\"finished\":0}}]}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "166",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.getInfo\",\"id\":\"1793617472878\",\"params\":[[\"token:s3cret\"],{}]}",
+   "body": "{\"id\":\"1793617472878\",\"jsonrpc\":\"2.0\",\"result\":{\"version\":\"2.023-rss\",\"threads_zombie\":0,\"threads_running\":0,\"queue_pending\":0,\"queue_finished\":0,\"download_speed\":0}}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "775",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.listTasks\",\"id\":\"1793617472879\",\"params\":[[\"token:s3cret\",\"finished\"],{}]}",
+   "body": "{\"id\":\"1793617472879\",\"jsonrpc\":\"2.0\",\"result\":[{\"url\":\"http://e-hentai.org/g/9002/abcdef0002/\",\"gid\":\"9002\",\"sethash\":\"abcdef0002\",\"failcode\":0,\"state\":20,\"guid\":\"beta0002\",\"config\":{\"dir\":\"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads\",\"download_ori\":false,\"jpn_title\":true,\"rename_ori\":false,\"proxy_image\":true,\"proxy_image_only\":false,\"make_archive\":false,\"download_range\":null,\"scan_thread_cnt\":1,\"download_thread_cnt\":5,\"download_timeout\":10,\"ignored_errors\":[],\"delete_task_files\":false,\"low_speed_threshold\":10},\"meta\":{\"title\":\"beta\",\"gnname\":\"Beta Finished\",\"gjname\":\"\u30d9\u30fc\u30bf\u5b8c\u7d50\",\"tags\":[\"artist:probe\",\"language:japanese\",\"full color\"],\"total\":4,\"finished\":4}}]}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "50",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.pauseTask\",\"id\":\"1793617473671\",\"params\":[[\"token:s3cret\",\"alpha0001\"],{}]}",
+   "body": "{\"id\":\"1793617473671\",\"jsonrpc\":\"2.0\",\"result\":\"\"}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "1500",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.listTasks\",\"id\":\"1793617473687\",\"params\":[[\"token:s3cret\",\"!finished\"],{}]}",
+   "body": "{\"id\":\"1793617473687\",\"jsonrpc\":\"2.0\",\"result\":[{\"url\":\"http://e-hentai.org/g/9001/abcdef0001/\",\"gid\":\"9001\",\"sethash\":\"abcdef0001\",\"failcode\":0,\"state\":0,\"guid\":\"alpha0001\",\"config\":{\"dir\":\"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads\",\"download_ori\":false,\"jpn_title\":true,\"rename_ori\":false,\"proxy_image\":true,\"proxy_image_only\":false,\"make_archive\":false,\"download_range\":null,\"scan_thread_cnt\":1,\"download_thread_cnt\":5,\"download_timeout\":10,\"ignored_errors\":[],\"delete_task_files\":false,\"low_speed_threshold\":10},\"meta\":{\"title\":\"alpha\",\"gnname\":\"Alpha Gallery\",\"gjname\":\"\u30a2\u30eb\u30d5\u30a1\u30ae\u30e3\u30e9\u30ea\u30fc\",\"tags\":[\"artist:probe\",\"language:english\",\"female:sole\"],\"total\":13,\"finished\":4}},{\"url\":\"http://e-hentai.org/g/9003/abcdef0003/\",\"gid\":\"9003\",\"sethash\":\"abcdef0003\",\"failcode\":0,\"state\":0,\"guid\":\"gamma003\",\"config\":{\"dir\":\"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads\",\"download_ori\":false,\"jpn_title\":true,\"rename_ori\":false,\"proxy_image\":true,\"proxy_image_only\":false,\"make_archive\":false,\"download_range\":null,\"scan_thread_cnt\":1,\"download_thread_cnt\":5,\"download_timeout\":10,\"ignored_errors\":[],\"delete_task_files\":false,\"low_speed_threshold\":10},\"meta\":{\"title\":\"gamma\",\"gnname\":\"Gamma Paused\",\"gjname\":\"\u30ac\u30f3\u30de\u505c\u6b62\",\"tags\":[\"artist:other\",\"language:chinese\"],\"total\":1,\"finished\":0}}]}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "166",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.getInfo\",\"id\":\"1793617473688\",\"params\":[[\"token:s3cret\"],{}]}",
+   "body": "{\"id\":\"1793617473688\",\"jsonrpc\":\"2.0\",\"result\":{\"version\":\"2.023-rss\",\"threads_zombie\":0,\"threads_running\":0,\"queue_pending\":0,\"queue_finished\":0,\"download_speed\":0}}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "50",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.resumeTask\",\"id\":\"1793617474644\",\"params\":[[\"token:s3cret\",\"gamma003\"],{}]}",
+   "body": "{\"id\":\"1793617474644\",\"jsonrpc\":\"2.0\",\"result\":\"\"}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "1500",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.listTasks\",\"id\":\"1793617474655\",\"params\":[[\"token:s3cret\",\"!finished\"],{}]}",
+   "body": "{\"id\":\"1793617474655\",\"jsonrpc\":\"2.0\",\"result\":[{\"url\":\"http://e-hentai.org/g/9001/abcdef0001/\",\"gid\":\"9001\",\"sethash\":\"abcdef0001\",\"failcode\":0,\"state\":0,\"guid\":\"alpha0001\",\"config\":{\"dir\":\"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads\",\"download_ori\":false,\"jpn_title\":true,\"rename_ori\":false,\"proxy_image\":true,\"proxy_image_only\":false,\"make_archive\":false,\"download_range\":null,\"scan_thread_cnt\":1,\"download_thread_cnt\":5,\"download_timeout\":10,\"ignored_errors\":[],\"delete_task_files\":false,\"low_speed_threshold\":10},\"meta\":{\"title\":\"alpha\",\"gnname\":\"Alpha Gallery\",\"gjname\":\"\u30a2\u30eb\u30d5\u30a1\u30ae\u30e3\u30e9\u30ea\u30fc\",\"tags\":[\"artist:probe\",\"language:english\",\"female:sole\"],\"total\":13,\"finished\":4}},{\"url\":\"http://e-hentai.org/g/9003/abcdef0003/\",\"gid\":\"9003\",\"sethash\":\"abcdef0003\",\"failcode\":0,\"state\":1,\"guid\":\"gamma003\",\"config\":{\"dir\":\"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads\",\"download_ori\":false,\"jpn_title\":true,\"rename_ori\":false,\"proxy_image\":true,\"proxy_image_only\":false,\"make_archive\":false,\"download_range\":null,\"scan_thread_cnt\":1,\"download_thread_cnt\":5,\"download_timeout\":10,\"ignored_errors\":[],\"delete_task_files\":false,\"low_speed_threshold\":10},\"meta\":{\"title\":\"gamma\",\"gnname\":\"Gamma Paused\",\"gjname\":\"\u30ac\u30f3\u30de\u505c\u6b62\",\"tags\":[\"artist:other\",\"language:chinese\"],\"total\":1,\"finished\":0}}]}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "166",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.getInfo\",\"id\":\"1793617474655\",\"params\":[[\"token:s3cret\"],{}]}",
+   "body": "{\"id\":\"1793617474655\",\"jsonrpc\":\"2.0\",\"result\":{\"version\":\"2.023-rss\",\"threads_zombie\":0,\"threads_running\":0,\"queue_pending\":0,\"queue_finished\":0,\"download_speed\":0}}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "1500",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.listTasks\",\"id\":\"1793617474796\",\"params\":[[\"token:s3cret\",\"!finished\"],{}]}",
+   "body": "{\"id\":\"1793617474796\",\"jsonrpc\":\"2.0\",\"result\":[{\"url\":\"http://e-hentai.org/g/9001/abcdef0001/\",\"gid\":\"9001\",\"sethash\":\"abcdef0001\",\"failcode\":0,\"state\":0,\"guid\":\"alpha0001\",\"config\":{\"dir\":\"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads\",\"download_ori\":false,\"jpn_title\":true,\"rename_ori\":false,\"proxy_image\":true,\"proxy_image_only\":false,\"make_archive\":false,\"download_range\":null,\"scan_thread_cnt\":1,\"download_thread_cnt\":5,\"download_timeout\":10,\"ignored_errors\":[],\"delete_task_files\":false,\"low_speed_threshold\":10},\"meta\":{\"title\":\"alpha\",\"gnname\":\"Alpha Gallery\",\"gjname\":\"\u30a2\u30eb\u30d5\u30a1\u30ae\u30e3\u30e9\u30ea\u30fc\",\"tags\":[\"artist:probe\",\"language:english\",\"female:sole\"],\"total\":13,\"finished\":4}},{\"url\":\"http://e-hentai.org/g/9003/abcdef0003/\",\"gid\":\"9003\",\"sethash\":\"abcdef0003\",\"failcode\":0,\"state\":1,\"guid\":\"gamma003\",\"config\":{\"dir\":\"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads\",\"download_ori\":false,\"jpn_title\":true,\"rename_ori\":false,\"proxy_image\":true,\"proxy_image_only\":false,\"make_archive\":false,\"download_range\":null,\"scan_thread_cnt\":1,\"download_thread_cnt\":5,\"download_timeout\":10,\"ignored_errors\":[],\"delete_task_files\":false,\"low_speed_threshold\":10},\"meta\":{\"title\":\"gamma\",\"gnname\":\"Gamma Paused\",\"gjname\":\"\u30ac\u30f3\u30de\u505c\u6b62\",\"tags\":[\"artist:other\",\"language:chinese\"],\"total\":1,\"finished\":0}}]}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "166",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.getInfo\",\"id\":\"1793617474797\",\"params\":[[\"token:s3cret\"],{}]}",
+   "body": "{\"id\":\"1793617474797\",\"jsonrpc\":\"2.0\",\"result\":{\"version\":\"2.023-rss\",\"threads_zombie\":0,\"threads_running\":0,\"queue_pending\":0,\"queue_finished\":0,\"download_speed\":0}}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "775",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.listTasks\",\"id\":\"1793617474798\",\"params\":[[\"token:s3cret\",\"finished\"],{}]}",
+   "body": "{\"id\":\"1793617474798\",\"jsonrpc\":\"2.0\",\"result\":[{\"url\":\"http://e-hentai.org/g/9002/abcdef0002/\",\"gid\":\"9002\",\"sethash\":\"abcdef0002\",\"failcode\":0,\"state\":20,\"guid\":\"beta0002\",\"config\":{\"dir\":\"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads\",\"download_ori\":false,\"jpn_title\":true,\"rename_ori\":false,\"proxy_image\":true,\"proxy_image_only\":false,\"make_archive\":false,\"download_range\":null,\"scan_thread_cnt\":1,\"download_thread_cnt\":5,\"download_timeout\":10,\"ignored_errors\":[],\"delete_task_files\":false,\"low_speed_threshold\":10},\"meta\":{\"title\":\"beta\",\"gnname\":\"Beta Finished\",\"gjname\":\"\u30d9\u30fc\u30bf\u5b8c\u7d50\",\"tags\":[\"artist:probe\",\"language:japanese\",\"full color\"],\"total\":4,\"finished\":4}}]}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/img/8c5218ee/beta0002/1/1.jpg",
+   "status": 200,
+   "content_type": "image/jpeg",
+   "content_length": "676",
+   "method": "GET"
+  },
+  {
+   "url": "http://127.0.0.1:8010/img/fc316d4f/beta0002/2/2.png",
+   "status": 200,
+   "content_type": "image/png",
+   "content_length": "131",
+   "method": "GET"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "182",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.getImage\",\"id\":\"1793617475732\",\"params\":[[\"token:s3cret\",\"beta0002\"],{}]}",
+   "body": "{\"id\":\"1793617475732\",\"jsonrpc\":\"2.0\",\"result\":[\"/img/8c5218ee/beta0002/1/1.jpg\",\"/img/fc316d4f/beta0002/2/2.png\",\"/img/b3b4ffc6/beta0002/3/3.gif\",\"/img/53ffaee9/beta0002/4/4.webp\"]}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "166",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.getInfo\",\"id\":\"1793617476494\",\"params\":[[\"token:s3cret\"],{}]}",
+   "body": "{\"id\":\"1793617476494\",\"jsonrpc\":\"2.0\",\"result\":{\"version\":\"2.023-rss\",\"threads_zombie\":0,\"threads_running\":0,\"queue_pending\":0,\"queue_finished\":0,\"download_speed\":0}}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "775",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.listTasks\",\"id\":\"1793617476496\",\"params\":[[\"token:s3cret\",\"finished\"],{}]}",
+   "body": "{\"id\":\"1793617476496\",\"jsonrpc\":\"2.0\",\"result\":[{\"url\":\"http://e-hentai.org/g/9002/abcdef0002/\",\"gid\":\"9002\",\"sethash\":\"abcdef0002\",\"failcode\":0,\"state\":20,\"guid\":\"beta0002\",\"config\":{\"dir\":\"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads\",\"download_ori\":false,\"jpn_title\":true,\"rename_ori\":false,\"proxy_image\":true,\"proxy_image_only\":false,\"make_archive\":false,\"download_range\":null,\"scan_thread_cnt\":1,\"download_thread_cnt\":5,\"download_timeout\":10,\"ignored_errors\":[],\"delete_task_files\":false,\"low_speed_threshold\":10},\"meta\":{\"title\":\"beta\",\"gnname\":\"Beta Finished\",\"gjname\":\"\u30d9\u30fc\u30bf\u5b8c\u7d50\",\"tags\":[\"artist:probe\",\"language:japanese\",\"full color\"],\"total\":4,\"finished\":4}}]}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "166",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.getInfo\",\"id\":\"1793617477878\",\"params\":[[\"token:s3cret\"],{}]}",
+   "body": "{\"id\":\"1793617477878\",\"jsonrpc\":\"2.0\",\"result\":{\"version\":\"2.023-rss\",\"threads_zombie\":0,\"threads_running\":0,\"queue_pending\":0,\"queue_finished\":0,\"download_speed\":0}}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "775",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.listTasks\",\"id\":\"1793617477879\",\"params\":[[\"token:s3cret\",\"finished\"],{}]}",
+   "body": "{\"id\":\"1793617477879\",\"jsonrpc\":\"2.0\",\"result\":[{\"url\":\"http://e-hentai.org/g/9002/abcdef0002/\",\"gid\":\"9002\",\"sethash\":\"abcdef0002\",\"failcode\":0,\"state\":20,\"guid\":\"beta0002\",\"config\":{\"dir\":\"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads\",\"download_ori\":false,\"jpn_title\":true,\"rename_ori\":false,\"proxy_image\":true,\"proxy_image_only\":false,\"make_archive\":false,\"download_range\":null,\"scan_thread_cnt\":1,\"download_thread_cnt\":5,\"download_timeout\":10,\"ignored_errors\":[],\"delete_task_files\":false,\"low_speed_threshold\":10},\"meta\":{\"title\":\"beta\",\"gnname\":\"Beta Finished\",\"gjname\":\"\u30d9\u30fc\u30bf\u5b8c\u7d50\",\"tags\":[\"artist:probe\",\"language:japanese\",\"full color\"],\"total\":4,\"finished\":4}}]}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/img/53ffaee9/beta0002/4/4.webp",
+   "status": 200,
+   "content_type": "image/webp",
+   "content_length": "82",
+   "method": "GET"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "166",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.getInfo\",\"id\":\"1793617479797\",\"params\":[[\"token:s3cret\"],{}]}",
+   "body": "{\"id\":\"1793617479797\",\"jsonrpc\":\"2.0\",\"result\":{\"version\":\"2.023-rss\",\"threads_zombie\":0,\"threads_running\":0,\"queue_pending\":0,\"queue_finished\":0,\"download_speed\":0}}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "775",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.listTasks\",\"id\":\"1793617479799\",\"params\":[[\"token:s3cret\",\"finished\"],{}]}",
+   "body": "{\"id\":\"1793617479799\",\"jsonrpc\":\"2.0\",\"result\":[{\"url\":\"http://e-hentai.org/g/9002/abcdef0002/\",\"gid\":\"9002\",\"sethash\":\"abcdef0002\",\"failcode\":0,\"state\":20,\"guid\":\"beta0002\",\"config\":{\"dir\":\"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads\",\"download_ori\":false,\"jpn_title\":true,\"rename_ori\":false,\"proxy_image\":true,\"proxy_image_only\":false,\"make_archive\":false,\"download_range\":null,\"scan_thread_cnt\":1,\"download_thread_cnt\":5,\"download_timeout\":10,\"ignored_errors\":[],\"delete_task_files\":false,\"low_speed_threshold\":10},\"meta\":{\"title\":\"beta\",\"gnname\":\"Beta Finished\",\"gjname\":\"\u30d9\u30fc\u30bf\u5b8c\u7d50\",\"tags\":[\"artist:probe\",\"language:japanese\",\"full color\"],\"total\":4,\"finished\":4}}]}"
+  },
+  {
+   "source": "download-url",
+   "url": "http://127.0.0.1:8010/zip/e89ffe21/beta0002/beta.zip",
+   "status": 200,
+   "content_type": "application/zip",
+   "content_length": "1450",
+   "browser_download": "beta.zip"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "50",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.delTask\",\"id\":\"1793617480555\",\"params\":[[\"token:s3cret\",\"alpha0001\"],{}]}",
+   "body": "{\"id\":\"1793617480555\",\"jsonrpc\":\"2.0\",\"result\":\"\"}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "760",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.listTasks\",\"id\":\"1793617481498\",\"params\":[[\"token:s3cret\",\"!finished\"],{}]}",
+   "body": "{\"id\":\"1793617481498\",\"jsonrpc\":\"2.0\",\"result\":[{\"url\":\"http://e-hentai.org/g/9003/abcdef0003/\",\"gid\":\"9003\",\"sethash\":\"abcdef0003\",\"failcode\":0,\"state\":1,\"guid\":\"gamma003\",\"config\":{\"dir\":\"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads\",\"download_ori\":false,\"jpn_title\":true,\"rename_ori\":false,\"proxy_image\":true,\"proxy_image_only\":false,\"make_archive\":false,\"download_range\":null,\"scan_thread_cnt\":1,\"download_thread_cnt\":5,\"download_timeout\":10,\"ignored_errors\":[],\"delete_task_files\":false,\"low_speed_threshold\":10},\"meta\":{\"title\":\"gamma\",\"gnname\":\"Gamma Paused\",\"gjname\":\"\u30ac\u30f3\u30de\u505c\u6b62\",\"tags\":[\"artist:other\",\"language:chinese\"],\"total\":1,\"finished\":0}}]}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "166",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.getInfo\",\"id\":\"1793617481500\",\"params\":[[\"token:s3cret\"],{}]}",
+   "body": "{\"id\":\"1793617481500\",\"jsonrpc\":\"2.0\",\"result\":{\"version\":\"2.023-rss\",\"threads_zombie\":0,\"threads_running\":0,\"queue_pending\":0,\"queue_finished\":0,\"download_speed\":0}}"
+  },
+  {
+   "url": "http://127.0.0.1:8010/jsonrpc",
+   "status": 200,
+   "content_type": "application/json-rpc",
+   "content_length": "775",
+   "method": "POST",
+   "post": "{\"jsonrpc\":\"2.0\",\"method\":\"xeH.listTasks\",\"id\":\"1793617481501\",\"params\":[[\"token:s3cret\",\"finished\"],{}]}",
+   "body": "{\"id\":\"1793617481501\",\"jsonrpc\":\"2.0\",\"result\":[{\"url\":\"http://e-hentai.org/g/9002/abcdef0002/\",\"gid\":\"9002\",\"sethash\":\"abcdef0002\",\"failcode\":0,\"state\":20,\"guid\":\"beta0002\",\"config\":{\"dir\":\"/mnt/TEMP/workspace/xehentai-rss/tmp/xehentai-pyshape-20261031-f870b8ca/evidence-m5-current-webui/run-20261102T110418000130Z/backend/downloads\",\"download_ori\":false,\"jpn_title\":true,\"rename_ori\":false,\"proxy_image\":true,\"proxy_image_only\":false,\"make_archive\":false,\"download_range\":null,\"scan_thread_cnt\":1,\"download_thread_cnt\":5,\"download_timeout\":10,\"ignored_errors\":[],\"delete_task_files\":false,\"low_speed_threshold\":10},\"meta\":{\"title\":\"beta\",\"gnname\":\"Beta Finished\",\"gjname\":\"\u30d9\u30fc\u30bf\u5b8c\u7d50\",\"tags\":[\"artist:probe\",\"language:japanese\",\"full color\"],\"total\":4,\"finished\":4}}]}"
+  }
+ ],
+ "click_proof": {
+  "before": {
+   "screen_width": 1440,
+   "screen_height": 1000,
+   "screen_x": 0,
+   "screen_y": 0,
+   "inner_width": 1440,
+   "inner_height": 1000,
+   "device_pixel_ratio": 1,
+   "img_src": "http://127.0.0.1:8010/img/53ffaee9/beta0002/4/4.webp",
+   "img_complete": true,
+   "img_natural": [
+    40,
+    56
+   ],
+   "img_rect": {
+    "x": 720,
+    "y": 42,
+    "width": 40,
+    "height": 56,
+    "top": 42,
+    "left": 720,
+    "right": 760,
+    "bottom": 98
+   },
+   "page_active": "4",
+   "dialog_visible": true,
+   "overlays": [],
+   "element_from_point": {
+    "tag": "IMG",
+    "cls": "is-single-page",
+    "src": "http://127.0.0.1:8010/img/53ffaee9/beta0002/4/4.webp"
+   },
+   "click_xy": [
+    758.5,
+    70.0
+   ],
+   "click_zone": "next"
+  },
+  "after": {
+   "screen_width": 1440,
+   "screen_height": 1000,
+   "screen_x": 0,
+   "screen_y": 0,
+   "inner_width": 1440,
+   "inner_height": 1000,
+   "device_pixel_ratio": 1,
+   "img_src": "http://127.0.0.1:8010/img/53ffaee9/beta0002/4/4.webp",
+   "img_complete": true,
+   "img_natural": [
+    40,
+    56
+   ],
+   "img_rect": {
+    "x": 0,
+    "y": 0,
+    "width": 0,
+    "height": 0,
+    "top": 0,
+    "left": 0,
+    "right": 0,
+    "bottom": 0
+   },
+   "page_active": "4",
+   "dialog_visible": false,
+   "overlays": [],
+   "element_from_point": null
+  }
+ },
+ "meta": {
+  "base": "http://127.0.0.1:8010",
+  "viewport": {
+   "width": 1440,
+   "height": 1000
+  },
+  "screen": {
+   "width": 1440,
+   "height": 1000
+  },
+  "executable": "/home/wow/.cache/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell",
+  "check_count": 49,
+  "trace_count": 58,
+  "generated": "2026-11-02T19:04:50+0800"
+ }
+}
