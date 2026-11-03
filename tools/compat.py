@@ -1615,6 +1615,37 @@ def _restore_signal_handler(signum, previous):
         pass
 
 
+def _suspend_cancellation_signals():
+    """Ignore further SIGINT/SIGTERM while an unwind finishes its cleanup.
+
+    A second Ctrl-C (or SIGTERM unwind) arriving inside the bounded group
+    retirement would otherwise abort the SIGKILL phase and leave the group
+    alive. Only the main thread of a POSIX process may install handlers;
+    elsewhere nothing is changed and no state is returned. Returns the exact
+    handlers that were replaced, so the caller can restore the prior policy.
+    """
+
+    if os.name != "posix":
+        return []
+    saved = []
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        try:
+            previous = signal.getsignal(signum)
+            signal.signal(signum, signal.SIG_IGN)
+        except (ValueError, OSError, RuntimeError, AttributeError):
+            continue
+        saved.append((signum, previous))
+    return saved
+
+
+def _restore_cancellation_signals(saved):
+    for signum, previous in saved:
+        try:
+            signal.signal(signum, previous)
+        except (ValueError, OSError, RuntimeError):
+            pass
+
+
 def run_command(argv, cwd, env, log_path, timeout_s=900):
     """Run one bounded command in its OWN process group/session.
 
@@ -1623,6 +1654,9 @@ def run_command(argv, cwd, env, log_path, timeout_s=900):
     confirmed retired. Any other unwind (Ctrl-C, SystemExit) retires the same
     owned group before the ORIGINAL exception continues propagating; that
     interruption is never translated into a timeout, a success or a retry.
+    This includes the FIRST cancellation arriving during a timed-out command's
+    retirement, and later SIGINT/SIGTERM are ignored only until that bounded
+    retirement and its log are finished.
     """
 
     log(f"$ {' '.join(argv)}")
@@ -1638,31 +1672,42 @@ def run_command(argv, cwd, env, log_path, timeout_s=900):
     timed_out = False
     retired = True
     try:
-        stdout, stderr = process.communicate(timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        retired, stdout, stderr = _retire_and_drain(process)
+        try:
+            stdout, stderr = process.communicate(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            retired, stdout, stderr = _retire_and_drain(process)
     except BaseException:
         # The command leads its own session, so the terminal's interrupt never
-        # reaches it. Retire the whole owned group before re-raising, and let
-        # no cleanup failure replace the exception being handled.
+        # reaches it. This also covers the FIRST cancellation arriving while a
+        # timed-out command is being retired above: that cancellation leaves
+        # the inner timeout branch and lands here, so it never becomes a
+        # timeout or a retry. Retire the whole owned group before re-raising,
+        # and let no cleanup failure replace the exception being handled.
+        # Further SIGINT/SIGTERM are ignored ONLY for this bounded retirement
+        # and logging section; the exact previous handlers are restored in
+        # finally before the original exception continues to propagate.
+        saved = _suspend_cancellation_signals()
         try:
-            retired, _, _ = _retire_and_drain(process)
-        except BaseException:
-            retired = False
-        try:
-            log_path.write_text(
-                f"argv: {argv}\nexit: cancelled\n"
-                f"group_retired: {str(retired).lower()}\n",
-                encoding="utf-8",
-            )
-        except BaseException:
-            pass
-        try:
-            log(f"cancelled (group_retired: {str(retired).lower()}): "
-                f"{' '.join(argv)}")
-        except BaseException:
-            pass
+            try:
+                retired, _, _ = _retire_and_drain(process)
+            except BaseException:
+                retired = False
+            try:
+                log_path.write_text(
+                    f"argv: {argv}\nexit: cancelled\n"
+                    f"group_retired: {str(retired).lower()}\n",
+                    encoding="utf-8",
+                )
+            except BaseException:
+                pass
+            try:
+                log(f"cancelled (group_retired: {str(retired).lower()}): "
+                    f"{' '.join(argv)}")
+            except BaseException:
+                pass
+        finally:
+            _restore_cancellation_signals(saved)
         raise
     if timed_out:
         log_path.write_text(

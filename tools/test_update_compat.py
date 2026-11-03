@@ -568,6 +568,103 @@ finally:
         restore(signal.SIGTERM, previous)
     record("restored", repr(signal.getsignal(signal.SIGTERM)))
 ''',
+    # Binds the port, forks a port-holding grandchild, and deliberately does
+    # NOT exit on SIGTERM: the handler publishes a marker so the parent test
+    # can send its SECOND signal exactly while the controller is inside the
+    # bounded retirement. Only the group SIGKILL can retire this tree.
+    "stubborn_tree.py": r'''
+import os, signal, socket, sys, time
+state = sys.argv[1]
+
+def term_seen(signum, frame):
+    with open(os.path.join(state, "term_seen"), "a") as handle:
+        handle.write("%d\n" % os.getpid())
+
+signal.signal(signal.SIGTERM, term_seen)
+sock = socket.socket()
+sock.bind(("127.0.0.1", 0))
+sock.listen(1)
+child_pid = os.fork()
+if child_pid == 0:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    time.sleep(300)
+    os._exit(0)
+with open(os.path.join(state, "pids"), "w") as handle:
+    handle.write("%d %d %d\n" % (os.getpid(), child_pid, sock.getsockname()[1]))
+with open(os.path.join(state, "starts"), "a") as handle:
+    handle.write("%d\n" % os.getpid())
+open(os.path.join(state, "ready"), "w").write("1")
+while True:
+    time.sleep(1)
+''',
+    # Drives the production run_command over the stubborn tree and records the
+    # exception plus BOTH signal handlers before/after the unwind, so the test
+    # can prove the temporary ignore policy did not leak.
+    "repeat_int_controller.py": r'''
+import os, pathlib, signal, sys
+state, tools = sys.argv[1], sys.argv[2]
+tree = sys.argv[3] if len(sys.argv) > 3 else "hang_tree.py"
+timeout_s = int(os.environ.get("B6_CANCEL_TIMEOUT", "120"))
+sys.path.insert(0, tools)
+import compat
+
+def record(name, payload):
+    with open(os.path.join(state, name), "w") as handle:
+        handle.write(payload)
+
+def handlers():
+    return "SIGINT=%r SIGTERM=%r\n" % (
+        signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM))
+
+record("handlers_before", handlers())
+try:
+    compat.run_command(
+        [sys.executable, os.path.join(state, tree), state],
+        state, dict(os.environ),
+        pathlib.Path(os.path.join(state, "command.log")), timeout_s=timeout_s)
+except BaseException as error:
+    record("exc", "%s %s\n" % (type(error).__name__, error))
+    raise
+else:
+    record("exc", "none\n")
+finally:
+    record("handlers_after", handlers())
+''',
+    # Same, but under the CLI-local SIGTERM-to-unwind helper: the FIRST SIGTERM
+    # must become SystemExit(143) and the SECOND one must not interrupt the
+    # bounded retirement. The production unwind handler itself must be back in
+    # place when run_command returns, and the caller's restore must follow.
+    "repeat_term_controller.py": r'''
+import os, pathlib, signal, sys
+state, tools = sys.argv[1], sys.argv[2]
+tree = sys.argv[3] if len(sys.argv) > 3 else "hang_tree.py"
+sys.path.insert(0, tools)
+import compat
+
+def record(name, payload):
+    with open(os.path.join(state, name), "w") as handle:
+        handle.write(payload)
+
+record("before", repr(signal.getsignal(signal.SIGTERM)))
+record("sigint_before", repr(signal.getsignal(signal.SIGINT)))
+previous = compat._install_sigterm_unwind()
+record("installed", repr(signal.getsignal(signal.SIGTERM)))
+try:
+    try:
+        compat.run_command(
+            [sys.executable, os.path.join(state, tree), state],
+            state, dict(os.environ),
+            pathlib.Path(os.path.join(state, "command.log")), timeout_s=120)
+    except BaseException as error:
+        record("exc", "%s %s\n" % (type(error).__name__, error))
+        raise
+    finally:
+        record("after_run", repr(signal.getsignal(signal.SIGTERM)))
+        record("sigint_after", repr(signal.getsignal(signal.SIGINT)))
+finally:
+    compat._restore_signal_handler(signal.SIGTERM, previous)
+    record("restored", repr(signal.getsignal(signal.SIGTERM)))
+''',
 }
 
 
@@ -654,12 +751,17 @@ def _await_gone(pids, deadline_s=20):
     return all(_gone(pid) for pid in pids)
 
 
-def _start_controller(base, name):
+def _start_controller(base, name, tree="hang_tree.py", extra_env=None):
     _write_group_script(base, "hang_tree.py")
+    if tree != "hang_tree.py":
+        _write_group_script(base, tree)
+    env = dict(os.environ)
+    if extra_env:
+        env.update(extra_env)
     return subprocess.Popen(
         [sys.executable, str(_write_group_script(base, name)), str(base),
-         str(TOOLS)],
-        cwd=str(base), env=dict(os.environ),
+         str(TOOLS), tree],
+        cwd=str(base), env=env,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
 
@@ -681,6 +783,20 @@ def _interrupt_controller(controller, signum):
     os.kill(controller.pid, signum)
     try:
         return controller.communicate(timeout=120)
+    except subprocess.TimeoutExpired:
+        raise AssertionError("the interrupted controller never exited")
+
+
+def _wait_for_retirement(controller, base, deadline_s=60):
+    assert _await_file(base / "term_seen", deadline_s), (
+        "the controller never entered its bounded retirement "
+        "(controller exit: %r)" % (controller.poll(),))
+
+
+def _signal_and_collect(controller, signum, timeout_s=120):
+    os.kill(controller.pid, signum)
+    try:
+        return controller.communicate(timeout=timeout_s)
     except subprocess.TimeoutExpired:
         raise AssertionError("the interrupted controller never exited")
 
@@ -748,6 +864,105 @@ def test_cli_sigterm_unwinds_and_retires_the_owned_group():
         assert restored == before, (
             "the CLI left its SIGTERM policy installed: %r" % restored)
         _assert_group_retired(base, pids, port)
+    finally:
+        _stop_controller(controller)
+        _cleanup_group(base)
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_repeated_sigint_during_retirement_still_retires_the_group():
+    base = Path(tempfile.mkdtemp(prefix="b6-cancel-twice-",
+                                 dir=str(_scratch_base())))
+    controller = None
+    try:
+        controller = _start_controller(base, "repeat_int_controller.py",
+                                       tree="stubborn_tree.py")
+        pids, port = _wait_ready(base, controller)
+        time.sleep(0.3)
+        os.kill(controller.pid, signal.SIGINT)
+        _wait_for_retirement(controller, base)
+        _signal_and_collect(controller, signal.SIGINT)
+        exception = (base / "exc").read_text(encoding="utf-8")
+        assert exception.startswith("KeyboardInterrupt"), (
+            "the repeated interruption replaced the original cancel: %r"
+            % exception)
+        before = (base / "handlers_before").read_text(encoding="utf-8")
+        after = (base / "handlers_after").read_text(encoding="utf-8")
+        assert after == before, (
+            "the bounded retirement left a temporary signal policy: %r -> %r"
+            % (before, after))
+        _assert_group_retired(base, pids, port)
+    finally:
+        _stop_controller(controller)
+        _cleanup_group(base)
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_repeated_sigterm_during_retirement_still_retires_the_group():
+    base = Path(tempfile.mkdtemp(prefix="b6-sigterm-twice-",
+                                 dir=str(_scratch_base())))
+    controller = None
+    try:
+        controller = _start_controller(base, "repeat_term_controller.py",
+                                       tree="stubborn_tree.py")
+        pids, port = _wait_ready(base, controller)
+        time.sleep(0.3)
+        os.kill(controller.pid, signal.SIGTERM)
+        _wait_for_retirement(controller, base)
+        _signal_and_collect(controller, signal.SIGTERM)
+        assert controller.returncode == 128 + signal.SIGTERM, (
+            "SIGTERM did not unwind as the interrupted CLI exit: %r"
+            % (controller.returncode,))
+        exception = (base / "exc").read_text(encoding="utf-8")
+        assert exception.startswith("SystemExit"), (
+            "the repeated SIGTERM replaced the original unwind: %r" % exception)
+        before = (base / "before").read_text(encoding="utf-8")
+        installed = (base / "installed").read_text(encoding="utf-8")
+        after_run = (base / "after_run").read_text(encoding="utf-8")
+        restored = (base / "restored").read_text(encoding="utf-8")
+        assert installed != before, (
+            "SIGTERM still took the default kill path: %r" % installed)
+        assert after_run == installed, (
+            "the critical section did not restore the CLI SIGTERM policy: %r"
+            % after_run)
+        assert restored == before, (
+            "the CLI left its SIGTERM policy installed: %r" % restored)
+        assert (base / "sigint_after").read_text(encoding="utf-8") == (
+            base / "sigint_before").read_text(encoding="utf-8"), (
+                "the critical section did not restore the SIGINT handler")
+        _assert_group_retired(base, pids, port)
+    finally:
+        _stop_controller(controller)
+        _cleanup_group(base)
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_first_sigint_during_timeout_retirement_cancels_without_retry():
+    base = Path(tempfile.mkdtemp(prefix="b6-timeout-cancel-",
+                                 dir=str(_scratch_base())))
+    controller = None
+    try:
+        controller = _start_controller(
+            base, "repeat_int_controller.py", tree="stubborn_tree.py",
+            extra_env={"B6_CANCEL_TIMEOUT": "1"})
+        pids, port = _wait_ready(base, controller)
+        _wait_for_retirement(controller, base)
+        _signal_and_collect(controller, signal.SIGINT)
+        exception = (base / "exc").read_text(encoding="utf-8")
+        assert exception.startswith("KeyboardInterrupt"), (
+            "the first cancel during timeout retirement was not propagated: %r"
+            % exception)
+        before = (base / "handlers_before").read_text(encoding="utf-8")
+        after = (base / "handlers_after").read_text(encoding="utf-8")
+        assert after == before, (
+            "the cancelled timeout retirement leaked a signal policy: %r -> %r"
+            % (before, after))
+        _assert_group_retired(base, pids, port)
+        log_text = (base / "command.log").read_text(encoding="utf-8")
+        assert "exit: cancelled" in log_text, log_text
+        assert "exit: timeout" not in log_text, (
+            "the cancelled timed-out command was reported as a timeout: %r"
+            % log_text)
     finally:
         _stop_controller(controller)
         _cleanup_group(base)
@@ -932,6 +1147,9 @@ TESTS = [
     test_ordinary_nonzero_exit_is_never_retried,
     test_keyboard_interrupt_retires_the_owned_group_then_propagates,
     test_cli_sigterm_unwinds_and_retires_the_owned_group,
+    test_repeated_sigint_during_retirement_still_retires_the_group,
+    test_repeated_sigterm_during_retirement_still_retires_the_group,
+    test_first_sigint_during_timeout_retirement_cancels_without_retry,
     test_update_package_member_bodies_are_exact_and_same_length_edits_fail,
     test_update_rejects_an_extra_subcase_id_present_on_both_sides,
     test_update_apply_reject_uses_the_executed_error_class_and_old_identity,
