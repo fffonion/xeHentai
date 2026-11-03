@@ -25,9 +25,11 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
+import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -1484,31 +1486,173 @@ def clean_env(root):
     return env
 
 
-def run_command(argv, cwd, env, log_path, timeout_s=900):
-    log(f"$ {' '.join(argv)}")
+class CommandTimeout(CompatError):
+    """A bounded command exceeded its timeout.
+
+    `retired` is False only when the owned process group could not be
+    confirmed gone; such a timeout is never retried.
+    """
+
+    def __init__(self, message, retired):
+        super().__init__(message)
+        self.retired = retired
+
+
+def _process_group_alive(pgid):
     try:
-        result = subprocess.run(
-            argv,
-            cwd=str(cwd),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-        )
-    except subprocess.TimeoutExpired as expired:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _retire_process_group(process):
+    """Terminate the WHOLE owned group, reap the direct child, confirm gone.
+
+    A Cargo timeout must not leave a native test grandchild holding a temp
+    directory, lock or port while a retry starts. SIGTERM is bounded; a
+    still-live group is then SIGKILLed, and the group must be gone (including
+    reparented descendants) before this returns True.
+    """
+
+    if os.name != "posix":
+        process.kill()
+        try:
+            process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            return False
+        return True
+    pgid = process.pid  # start_new_session => the child leads its own group
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and _process_group_alive(pgid):
+        time.sleep(0.05)
+    if _process_group_alive(pgid):
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and _process_group_alive(pgid):
+            time.sleep(0.05)
+    try:
+        process.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+        return False
+    return not _process_group_alive(pgid)
+
+
+def run_command(argv, cwd, env, log_path, timeout_s=900):
+    """Run one bounded command in its OWN process group/session.
+
+    On timeout the whole group is terminated and reaped before a
+    CommandTimeout is raised, so a caller may only retry once the group is
+    confirmed retired.
+    """
+
+    log(f"$ {' '.join(argv)}")
+    process = subprocess.Popen(
+        argv,
+        cwd=str(cwd),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=(os.name == "posix"),
+    )
+    timed_out = False
+    retired = True
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        retired = _retire_process_group(process)
+        try:
+            stdout, stderr = process.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            retired = False
+            for stream in (process.stdout, process.stderr):
+                try:
+                    stream.close()
+                except (AttributeError, OSError):
+                    pass
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+            stdout, stderr = "", ""
+    if timed_out:
         log_path.write_text(
             f"argv: {argv}\nexit: timeout after {timeout_s}s\n"
-            f"--- stdout ---\n{expired.stdout or ''}\n"
-            f"--- stderr ---\n{expired.stderr or ''}\n",
+            f"group_retired: {str(retired).lower()}\n"
+            f"--- stdout ---\n{stdout or ''}\n"
+            f"--- stderr ---\n{stderr or ''}\n",
             encoding="utf-8",
         )
-        raise CompatError(
-            f"command exceeded its {timeout_s}s bound: {' '.join(argv)}")
+        if not retired:
+            raise CommandTimeout(
+                f"command exceeded its {timeout_s}s bound and its process "
+                f"group was not retired: {' '.join(argv)}", False)
+        raise CommandTimeout(
+            f"command exceeded its {timeout_s}s bound: {' '.join(argv)}", True)
     log_path.write_text(
-        f"argv: {argv}\nexit: {result.returncode}\n--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}\n",
+        f"argv: {argv}\nexit: {process.returncode}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n",
         encoding="utf-8",
     )
-    return result
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+
+def run_with_timeout_retry(argv, cwd, env, root, index, timeout_s=300):
+    """Run one native command with at most ONE timeout retry.
+
+    The retry is allowed only after the previous attempt's owned process
+    group is confirmed gone; an ordinary non-zero exit is never retried and
+    every attempt (with its log path) is returned for the manifest.
+    """
+
+    attempts = []
+    for attempt in (1, 2):
+        log_path = Path(root) / f"native-{index}-attempt-{attempt}.log"
+        try:
+            result = run_command(argv, cwd, env, log_path, timeout_s=timeout_s)
+        except CommandTimeout as timeout:
+            attempts.append({
+                "attempt": attempt,
+                "log": str(log_path),
+                "outcome": "timeout",
+                "group_retired": timeout.retired,
+            })
+            log(f"native hang (attempt {attempt}), bounded retry: "
+                f"{' '.join(argv)}")
+            if not timeout.retired:
+                raise CompatError(
+                    f"native command timed out and its owned process group "
+                    f"was not retired: {' '.join(argv)}")
+            if attempt == 2:
+                raise CompatError(
+                    f"native tests hung twice: {' '.join(argv)}")
+            continue
+        attempts.append({
+            "attempt": attempt,
+            "log": str(log_path),
+            "outcome": "completed",
+            "exit": result.returncode,
+        })
+        return result, attempts, log_path
+    raise AssertionError("bounded retry loop fell through")
 
 
 def parse_test_results(output):
@@ -4799,7 +4943,7 @@ def _update_decision(mode, applied, outcome, events, pending_before,
 
 def _update_package(member_names, compress_types, input_members,
                     input_compress_types, info, selected, dropped,
-                    payload_sha256, info_archive_sha256):
+                    member_bodies, payload_sha256, info_archive_sha256):
     return {
         "member_names": list(member_names),
         "compress_types": list(compress_types),
@@ -4808,6 +4952,9 @@ def _update_package(member_names, compress_types, input_members,
         "info": info,
         "selected_entries": list(selected),
         "dropped_entries": list(dropped),
+        # Exact controlled member content: member name -> lowercase hex of
+        # the ACTUAL produced bytes. Never a digest stand-in.
+        "member_bodies": dict(member_bodies),
         "payload_sha256": payload_sha256,
         "info_archive_sha256": info_archive_sha256,
     }
@@ -4815,7 +4962,7 @@ def _update_package(member_names, compress_types, input_members,
 
 def _update_apply(pending_before, pending_after, applied_id, live_changed,
                   session_equal, module_origin_kind, module_version, stop,
-                  wire_after_apply):
+                  error_class, wire_after_apply):
     return {
         "pending_before": pending_before,
         "pending_after": pending_after,
@@ -4825,6 +4972,7 @@ def _update_apply(pending_before, pending_after, applied_id, live_changed,
         "module_origin_kind": module_origin_kind,
         "module_version": module_version,
         "stop": stop,
+        "error_class": error_class,
         "wire_after_apply": wire_after_apply,
     }
 
@@ -4840,9 +4988,24 @@ def _update_py_package():
         info,
         UPDATE_SOURCE_SELECTED,
         update_source_dropped_names(),
+        _update_python_member_bodies(),
         None,
         None,
     )
+
+
+def _update_python_member_bodies():
+    """Selected source-package member bytes from the registered fixture.
+
+    The reference copies these members under `xeHentai/<rel>`; the expected
+    content is the fixture declaration, never read back from the producer.
+    """
+    fixture = dict(UPDATE_SOURCE_ARCHIVE)
+    return {
+        path: fixture["xeHentai-%s/%s" % (UPDATE_ID, path)].encode(
+            "utf-8").hex()
+        for path in UPDATE_SOURCE_SELECTED
+    }
 
 
 def _update_na_package():
@@ -4876,6 +5039,7 @@ def _update_na_package():
         info,
         selected,
         dropped,
+        {path: body.encode("utf-8").hex() for path, body in bodies},
         "<sha256>",
         "<sha256>",
     )
@@ -4896,12 +5060,14 @@ def _update_section_schema():
     package = {"member_names": "list", "compress_types": "list",
                "input_members": "list", "input_compress_types": "list",
                "info": "dict", "selected_entries": "list",
-               "dropped_entries": "list", "payload_sha256": "str?",
+               "dropped_entries": "list", "member_bodies": "dict",
+               "payload_sha256": "str?",
                "info_archive_sha256": "str?"}
     apply_state = {"pending_before": "bool", "pending_after": "bool",
                    "applied_id": "str?", "live_changed": "bool?",
                    "session_equal": "bool?", "module_origin_kind": "str?",
                    "module_version": "version?", "stop": "str?",
+                   "error_class": "str?",
                    "wire_after_apply": "str?"}
     return {"feed": feed, "source": source, "commit": commit,
             "decision": decision, "package": package, "apply": apply_state}
@@ -5043,20 +5209,25 @@ def update_expected_sections(case, side, origin):
         if py:
             return {"apply": _update_apply(
                 True, True, UPDATE_ID, None, True, "pending_zip", 2.023,
-                None, None)}
+                None, None, None)}
         return {"apply": _update_apply(
             True, False, UPDATE_ID, True, True, "source_tree",
             UPDATE_PLATFORM["app_version"], None,
+            None,
             "/repos/fffonion/xeHentai/commits?sha=rss-b")}
     if case == "apply.reject":
         # Registered delta: the legacy loader silently keeps the unusable
         # archive and applies nothing, while the native startup rejects and
-        # retires the candidate with the live tree and session unchanged.
+        # retires the candidate with the live tree and session unchanged,
+        # then continues into the ordinary OLD business App. `error_class` is
+        # the executed typed rejection class (Install: candidate preflight),
+        # never a fixed null.
         if py:
             return {"apply": _update_apply(
-                True, True, "", None, True, None, 2.023, None, None)}
+                True, True, "", None, True, None, 2.023, None, None, None)}
         return {"apply": _update_apply(
-            True, False, None, False, True, None, None, None, None)}
+            True, False, None, False, True, "source_tree",
+            UPDATE_PLATFORM["app_version"], None, "Install", None)}
     if case == "cli.off":
         return {
             "feed": _update_feed([]),
@@ -5186,12 +5357,31 @@ def _update_invariant_diffs(case, side, sections):
 def compare_update(cases, oracle_cases, candidate_cases, origin):
     """Strict per-subcase comparison; fills the five catalog rows.
 
-    Both sides first pass the registered section schema (exact keys, exact
-    types), then each side is compared to its explicit expected observation.
-    A side-specific format delta never removes a field from the comparison.
+    Each observed side must carry EXACTLY the registered subcase IDs (an
+    unknown ID is rejected even when both sides agree on it), then both sides
+    pass the registered section schema (exact keys, exact types), and each
+    side is compared to its explicit expected observation. A side-specific
+    format delta never removes a field from the comparison.
     """
     diffs = []
     results = {case_id: True for case_id in UPDATE_CASE_IDS}
+    registered = {spec["case"] for spec in UPDATE_CASES}
+    keyset_bad = False
+    for side, mapping in (("python", oracle_cases),
+                          ("native", candidate_cases)):
+        if not isinstance(mapping, dict):
+            diffs.append(f"update: {side} subcase map is not an object")
+            keyset_bad = True
+            continue
+        actual = set(mapping)
+        missing = sorted(registered - actual)
+        extra = sorted(actual - registered)
+        if missing:
+            diffs.append(f"update: {side} subcase IDs missing: {missing}")
+            keyset_bad = True
+        if extra:
+            diffs.append(f"update: {side} subcase IDs unexpected: {extra}")
+            keyset_bad = True
     for spec in UPDATE_CASES:
         case = spec["case"]
         owner = spec["id"]
@@ -5217,6 +5407,11 @@ def compare_update(cases, oracle_cases, candidate_cases, origin):
                     case, side, observation["sections"]))
         diffs.extend(local)
         results[owner] = results[owner] and not local
+    if keyset_bad:
+        # An unregistered ID has no owner row, so no registered row may stay
+        # green on a side whose observed ID set differs from the registry.
+        for case_id in UPDATE_CASE_IDS:
+            results[case_id] = False
     for spec in UPDATE_CASES:
         if spec["id"] not in results:
             diffs.append(f"update: catalog row {spec['id']} not registered")
@@ -5412,14 +5607,22 @@ def _update_pending_bytes(info_bytes):
 
 
 def _update_zip_observation(path):
-    names, compress, info = [], [], None
+    """Read the produced archive's exact member names, compression, info and
+    bodies (name -> lowercase hex). The bodies are the real bytes, not a
+    digest stand-in."""
+    names, compress, info, bodies = [], [], None, {}
     with zipfile.ZipFile(path, "r") as archive:
         infos = archive.infolist()
         names = [item.filename for item in infos]
         compress = [item.compress_type for item in infos]
-        if "info.json" in names:
-            info = json.loads(archive.read("info.json").decode("utf-8"))
-    return names, compress, info
+        raw = {}
+        for item in infos:
+            body = archive.read(item)
+            raw[item.filename] = body
+            bodies[item.filename] = body.hex()
+        if "info.json" in raw:
+            info = json.loads(raw["info.json"].decode("utf-8"))
+    return names, compress, info, bodies
 
 
 def _update_log_events(buffer):
@@ -5604,12 +5807,14 @@ def oracle_update(upstream, request):
                     (after is None)),
             }
             if case == "decision.download":
-                names, compress, info = _update_zip_observation(pending)
+                names, compress, info, bodies = _update_zip_observation(pending)
                 result["sections"]["package"] = _update_package(
                     names, compress, update_source_archive_names(),
                     [0] * len(update_source_archive_names()), info,
                     [name for name in names if name != "info.json"],
-                    update_source_dropped_names(), None, None)
+                    update_source_dropped_names(),
+                    {name: body for name, body in bodies.items()
+                     if name != "info.json"}, None, None)
                 result["sections"]["source"] = _update_py_source("master")
             result["evidence"]["return_value"] = repr(returned)
         elif case == "package.envelope":
@@ -5621,13 +5826,15 @@ def oracle_update(upstream, request):
             with zipfile.ZipFile(io.BytesIO(archive_bytes), "r") as archive:
                 make_src_update_file(
                     archive, updater.get_src_path_in_archive(info), info)
-            names, compress, written = _update_zip_observation(pending)
+            names, compress, written, bodies = _update_zip_observation(pending)
             result["sections"] = {
                 "package": _update_package(
                     names, compress, update_source_archive_names(),
                     [0] * len(update_source_archive_names()),
                     written, [name for name in names if name != "info.json"],
-                    update_source_dropped_names(), None, None),
+                    update_source_dropped_names(),
+                    {name: body for name, body in bodies.items()
+                     if name != "info.json"}, None, None),
                 "source": _update_py_source("master"),
             }
         elif case == "apply.valid":
@@ -5651,7 +5858,7 @@ def oracle_update(upstream, request):
                 if getattr(package, "__file__", "").startswith(str(pending))
                 else None,
                 getattr(const, "VERSION_UPDATE_LOADER", None),
-                None, None)}
+                None, None, None)}
             result["evidence"]["load_observed"] = {
                 "sys_path0_is_pending": sys.path[0] == str(pending),
                 "zip_marker": getattr(package, "M7_ZIP_MARKER", None),
@@ -5673,7 +5880,7 @@ def oracle_update(upstream, request):
                 if getattr(package, "__file__", "").startswith(str(pending))
                 else None,
                 getattr(const, "VERSION_UPDATE_LOADER", None),
-                None, None)}
+                None, None, None)}
             result["evidence"]["load_observed"] = {
                 "sys_path0_is_pending": sys.path[0] == str(pending),
                 "zip_marker": getattr(package, "M7_ZIP_MARKER", None),
@@ -5819,8 +6026,10 @@ def _update_self_check(oracle, candidate, native_runs, origin):
         "update.apply", "live_changed")))
     checks.append(("error-class", mutated(
         "apply.reject", "native",
-        lambda section: section["apply"].__setitem__("stop", "ApplyFailed"),
-        "update.apply", "stop")))
+        # The REAL captured typed rejection class, not a fixed null/stop.
+        lambda section: section["apply"].__setitem__(
+            "error_class", "Apply"),
+        "update.apply", "apply.error_class")))
 
     def both_sided(case, mutate, owner, needle=None):
         python_copy = copy.deepcopy(python_cases)
@@ -5849,6 +6058,23 @@ def _update_self_check(oracle, candidate, native_runs, origin):
         lambda section: section["decision"].__setitem__(
             "pending_equal", 0),
         "update.decision", "pending_equal")))
+
+    def member_body_same_length():
+        # A same-length CONTENT edit on BOTH sides must still fail: each side
+        # is compared to its own fixture expectation, not merely to its peer.
+        python_copy = copy.deepcopy(python_cases)
+        native_copy = copy.deepcopy(native_cases)
+        for side_cases in (python_copy, native_copy):
+            bodies = side_cases["package.envelope"]["sections"]["package"][
+                "member_bodies"]
+            key = sorted(bodies)[0]
+            value = bodies[key]
+            bodies[key] = ("00" if not value.startswith("00") else "11") + value[2:]
+        cases, diffs = observe(python_copy, native_copy, None)
+        return (cases.get("update.package") is False
+                and any("member_bodies" in diff for diff in diffs))
+
+    checks.append(("member-body-same-length", member_body_same_length()))
 
     def native_guard(build_runs, owner=None, mutate_cases=None):
         runs = build_runs()
@@ -5936,6 +6162,22 @@ def _update_self_check(oracle, candidate, native_runs, origin):
         lambda section: section["source"].__setitem__("channel", "rss"),
         "update.channel", "source.channel")))
     checks.append(("unknown-variation", unknown_variation()))
+
+    def paired_extra_subcase():
+        # Both sides carry the SAME unregistered subcase ID: the exact
+        # registry key-set guard must still reject it.
+        python_copy = copy.deepcopy(python_cases)
+        native_copy = copy.deepcopy(native_cases)
+        python_copy["update.unregistered"] = {
+            "side": "python", "sections": {}, "evidence": {}}
+        native_copy["update.unregistered"] = {
+            "side": "native", "sections": {}, "evidence": {}}
+        cases, diffs = observe(python_copy, native_copy, None)
+        return (all(cases.get(case_id) is False
+                    for case_id in UPDATE_CASE_IDS)
+                and any("unexpected" in diff for diff in diffs))
+
+    checks.append(("paired-extra-subcase", paired_extra_subcase()))
     return checks
 
 
@@ -6037,33 +6279,11 @@ def run_native(suite, root, target_dir):
         # The recorded argv is the ACTUAL launched argv (explicit
         # --target-dir included), not the map template.
         launched = _cargo_target_argv(argv, target_dir)
-        # A hang inside the pre-existing pd-vm HTTP host-op wait is a known
-        # runtime flake, not a test result. A TIMEOUT therefore gets ONE
-        # bounded retry in a fresh process, with both logs retained and both
-        # attempts recorded; a real non-zero test exit is never retried.
-        attempts = []
-        result = None
-        for attempt in (1, 2):
-            log_path = root / f"native-{index}-attempt-{attempt}.log"
-            try:
-                result = run_command(
-                    launched, REPO, env, log_path, timeout_s=300)
-            except CompatError:
-                attempts.append(
-                    {"attempt": attempt, "log": str(log_path),
-                     "outcome": "timeout"})
-                log(f"native hang (attempt {attempt}), bounded retry: "
-                    f"{' '.join(argv)}")
-                if attempt == 2:
-                    raise CompatError(
-                        f"native tests hung twice for {suite}: "
-                        f"{' '.join(argv)}")
-                continue
-            attempts.append(
-                {"attempt": attempt, "log": str(log_path),
-                 "outcome": "completed", "exit": result.returncode})
-            break
-        log_path = Path(attempts[-1]["log"])
+        # A TIMEOUT (never an ordinary non-zero test exit) gets ONE bounded
+        # retry, and only after the first attempt's whole owned process group
+        # is confirmed retired. Both attempt logs and records are kept.
+        result, attempts, log_path = run_with_timeout_retry(
+            launched, REPO, env, root, index, timeout_s=300)
         if result.returncode != 0:
             raise CompatError(f"native tests failed for {suite}: {' '.join(argv)}")
         _, summary = parse_test_results(result.stdout)
@@ -10539,7 +10759,8 @@ def run_suite(suite, output_root, upstream, target_dir):
         for run in native_runs:
             results, summary = require_native(run, suite)
             ready_native.append({"results": results, "summary": summary, "argv": run["argv"],
-                                 "stdout": run["stdout"]})
+                                 "stdout": run["stdout"], "log": run.get("log"),
+                                 "attempts": run.get("attempts", [])})
         diffs.extend(merge_native_cases(suite, ready_native, cases))
         if suite == "gallery":
             # Exact native/final publication inventory on the existing
@@ -10565,6 +10786,8 @@ def run_suite(suite, output_root, upstream, target_dir):
                     "argv": run["argv"],
                     "summary": run["summary"],
                     "tests": run["results"],
+                    "log": run.get("log"),
+                    "attempts": run.get("attempts", []),
                 }
                 for run in ready_native
             ],

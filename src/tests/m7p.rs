@@ -637,6 +637,15 @@ impl ChildRun {
         }
     }
 
+    /// True while the production process is still running (a normal,
+    /// resident App rather than an exited/rejected start).
+    fn running(&mut self) -> bool {
+        match self.child.as_mut() {
+            Some(child) => matches!(child.try_wait(), Ok(None)),
+            None => false,
+        }
+    }
+
     /// First SIGINT: the production graceful stop, which must retire the whole
     /// run (including an already re-executed image) and return 0.
     fn stop(mut self) -> i32 {
@@ -3122,6 +3131,26 @@ fn b6_package_bodies(inputs: &serde_json::Value) -> Vec<(String, Vec<u8>)> {
     out
 }
 
+/// Exact controlled content of every SELECTED member, read from the real
+/// archive bytes and keyed by its install-relative selected path.
+fn b6_selected_member_bodies(
+    members: &[(String, u16, Vec<u8>)],
+    selected: &[crate::updater::package::SelectedEntry],
+) -> serde_json::Map<String, serde_json::Value> {
+    let bodies: std::collections::BTreeMap<&str, &[u8]> = members
+        .iter()
+        .map(|(name, _, body)| (name.as_str(), body.as_slice()))
+        .collect();
+    let mut out = serde_json::Map::new();
+    for item in selected {
+        let body = bodies
+            .get(item.member.as_str())
+            .expect("b6 selected member body");
+        out.insert(item.path.clone(), serde_json::Value::String(b6_hex(body)));
+    }
+    out
+}
+
 fn b6_package_probe(
     value_bodies: &[(String, Vec<u8>)],
     foreign: &[&str],
@@ -3165,6 +3194,7 @@ fn b6_package_probe(
         .filter(|name| !selected_members.contains(name))
         .collect();
     let info: serde_json::Value = serde_json::from_slice(&pkg.info).expect("b6 descriptor json");
+    let member_bodies = b6_selected_member_bodies(&payload_members, &selected);
     serde_json::json!({
         "member_names": names,
         "compress_types": compress,
@@ -3175,6 +3205,7 @@ fn b6_package_probe(
         "info": info,
         "selected_entries": selected_paths,
         "dropped_entries": dropped,
+        "member_bodies": member_bodies,
         "payload_sha256": crate::updater::descriptor::sha256_hex(&pkg.payload),
         "info_archive_sha256": descriptor.archive_sha256,
     })
@@ -3219,6 +3250,7 @@ fn b6_pending_observation(install: &Path) -> serde_json::Value {
         .filter(|name| !selected_members.contains(name))
         .collect();
     let info: serde_json::Value = serde_json::from_slice(&info_member).expect("b6 info json");
+    let member_bodies = b6_selected_member_bodies(&payload_members, &selected);
     serde_json::json!({
         "member_names": names,
         "compress_types": compress,
@@ -3229,6 +3261,7 @@ fn b6_pending_observation(install: &Path) -> serde_json::Value {
         "info": info,
         "selected_entries": selected_paths,
         "dropped_entries": dropped,
+        "member_bodies": member_bodies,
         "payload_sha256": crate::updater::descriptor::sha256_hex(&payload),
         "info_archive_sha256": descriptor.archive_sha256,
     })
@@ -3267,6 +3300,60 @@ fn b6_started_version(log: &str) -> Option<String> {
     let rest = &log[start..];
     let end = rest.find(" started.")?;
     Some(rest[..end].to_string())
+}
+
+/// Exact lowercase hex of the ACTUAL member bytes (reversible test JSON).
+fn b6_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+/// The exact executed rejection detail rendered by the typed error's own
+/// Display (the same string `main` logs), taken from the real run's log.
+fn b6_rejection_detail(log: &str) -> Option<String> {
+    const PREFIX: &str = "Failure when updating program: ";
+    let start = log.rfind(PREFIX)? + PREFIX.len();
+    Some(log[start..].lines().next().unwrap_or("").trim().to_string())
+}
+
+/// Map the executed typed error's rendered form to its `UpdateError`
+/// variant. The class is read from the real rejection message, never from a
+/// scenario label or a fixed field.
+fn b6_error_class(detail: &str) -> Option<&'static str> {
+    const PREFIXES: [(&str, &str); 5] = [
+        ("update package rejected: ", "Package"),
+        ("update installation failed: ", "Install"),
+        ("update application failed: ", "Apply"),
+        ("update source binding error: ", "Binding"),
+        ("update installation is busy: ", "Busy"),
+    ];
+    const MARKERS: [(&str, &str); 4] = [
+        (" compile error: ", "Compile"),
+        (" host binding error: ", "Bind"),
+        (" runtime error: ", "Runtime"),
+        (" shape error: ", "Shape"),
+    ];
+    for (prefix, class) in PREFIXES {
+        if detail.starts_with(prefix) {
+            return Some(class);
+        }
+    }
+    for (marker, class) in MARKERS {
+        if detail.contains(marker) {
+            return Some(class);
+        }
+    }
+    None
+}
+
+fn b6_wait_log_after(install: &Path, offset: usize, needle: &str) -> bool {
+    m6::wait_for(Duration::from_secs(30), || {
+        let log = log_of(install);
+        log.len() >= offset && log[offset..].contains(needle)
+    })
 }
 
 fn b6_state_active(install: &Path) -> Option<String> {
@@ -3454,6 +3541,7 @@ fn b6_apply_valid(root: &Path, server: &Server) -> serde_json::Value {
         "module_origin_kind": "source_tree",
         "module_version": b6_started_version(&log_after),
         "stop": serde_json::Value::Null,
+        "error_class": serde_json::Value::Null,
         "wire_after_apply": wire_after,
     })
 }
@@ -3465,6 +3553,7 @@ fn b6_apply_reject(root: &Path, server: &Server) -> serde_json::Value {
     let origin = server.origin();
     publish_rss(&install, &origin, Some(&pem), "rss");
     let exe = b6_owned_exe(&install);
+    let expected_old_version = crate::r#const::version_label();
 
     // Run 0: an ordinary start creates the real session file this case snapshots.
     let child = ChildRun::spawn(
@@ -3478,8 +3567,16 @@ fn b6_apply_reject(root: &Path, server: &Server) -> serde_json::Value {
         log_of(&install)
     );
     assert_eq!(child.stop(), 0);
+    // The baseline old identity comes from the SAME real binary's ordinary
+    // start, not from an assumption.
+    let baseline_version = b6_started_version(&log_of(&install)).expect("baseline start identity");
+    assert_eq!(
+        baseline_version, expected_old_version,
+        "plain start reported an unexpected identity"
+    );
     let session = std::fs::read(install.join("h.json")).expect("b6 session");
     let live_before = std::fs::read(install.join("rss/updater/github.rss")).expect("live before");
+    let applied_before = b6_state_active(&install);
 
     // Seed a real signed candidate whose RSS module cannot compile.
     let pkg = b6_candidate_package(&origin, &pem, true);
@@ -3490,7 +3587,7 @@ fn b6_apply_reject(root: &Path, server: &Server) -> serde_json::Value {
         pkg.payload.clone(),
     );
     let offset = log_of(&install).len();
-    let child = ChildRun::spawn(
+    let mut child = ChildRun::spawn(
         &install,
         &exe,
         &["-l", "eh.log", "-vv", "--auto-update", "off"],
@@ -3500,23 +3597,72 @@ fn b6_apply_reject(root: &Path, server: &Server) -> serde_json::Value {
         "the broken candidate was not rejected: {}",
         log_of(&install)
     );
-    assert_eq!(child.stop(), 0);
+    // A preparation rejection must NOT stop the ordinary start: the SAME
+    // still-resident process must go on to start the OLD business App.
+    assert!(
+        b6_wait_log_after(&install, offset, "started."),
+        "the old release did not continue into the App after the rejection: {}",
+        log_of(&install)
+    );
+    assert!(child.running(), "the rejected start was not resident");
     let rejected_log = log_of(&install)[offset..].to_string();
     assert!(
         !rejected_log.contains("files installed"),
         "a rejected candidate was applied: {rejected_log}"
     );
+    // Capture the ACTUAL executed typed rejection: class and detail come from
+    // the real process's rendered error, never from the scenario label.
+    let detail =
+        b6_rejection_detail(&rejected_log).expect("no executed rejection detail in the old log");
+    let error_class = b6_error_class(&detail).expect("unknown executed error class");
+    assert_eq!(
+        error_class, "Install",
+        "the rejection was not a preparation (install) rejection: {detail}"
+    );
+    assert!(
+        detail.contains("compile error") && detail.contains("github.rss"),
+        "the intended broken candidate error was not observed: {detail}"
+    );
+    assert!(
+        detail.contains("preflight updater"),
+        "the rejection did not come from the candidate preflight: {detail}"
+    );
+    // A harness/argument failure (the test binary refusing to start the
+    // preflight) is NOT the intended candidate rejection.
+    for harness in [
+        "cannot run the candidate preflight",
+        "preflight configuration",
+        "preflight app",
+    ] {
+        assert!(
+            !detail.contains(harness),
+            "a preflight argument/harness failure was accepted as the candidate error: {detail}"
+        );
+    }
+    let old_version = b6_started_version(&rejected_log);
+    assert_eq!(
+        old_version.as_deref(),
+        Some(baseline_version.as_str()),
+        "the old release identity changed after the rejection"
+    );
+    assert_eq!(child.stop(), 0);
     let live_after = std::fs::read(install.join("rss/updater/github.rss")).expect("live after");
     let session_after = std::fs::read(install.join("h.json")).expect("session after");
+    let applied_after = b6_state_active(&install);
+    assert_eq!(
+        applied_after, applied_before,
+        "the applied identity changed after a preparation rejection"
+    );
     serde_json::json!({
         "pending_before": true,
         "pending_after": pending_path(&install).exists(),
-        "applied_id": b6_state_active(&install),
+        "applied_id": applied_after,
         "live_changed": live_before != live_after,
         "session_equal": session == session_after,
-        "module_origin_kind": serde_json::Value::Null,
-        "module_version": serde_json::Value::Null,
+        "module_origin_kind": "source_tree",
+        "module_version": old_version,
         "stop": serde_json::Value::Null,
+        "error_class": error_class,
         "wire_after_apply": serde_json::Value::Null,
     })
 }

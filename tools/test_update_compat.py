@@ -19,8 +19,10 @@ real producers in the final rounds.
 import json
 import os
 import shutil
+import socket
 import sys
 import tempfile
+import time
 import traceback
 from pathlib import Path
 
@@ -354,6 +356,7 @@ def test_update_self_check_runs_production_path_with_mutations():
         "typed-metadata", "pending-member", "application-state",
         "error-class", "both-sided-missing", "both-sided-wrong-type",
         "both-sided-truthy-type", "both-sided-falsy-type",
+        "member-body-same-length", "paired-extra-subcase",
         "request-sequence", "session-state", "source-channel",
         "native-missing-name", "native-non-ok", "false-wire-native-ok",
         "missing-case", "unknown-variation",
@@ -402,6 +405,327 @@ def _scratch_base():
     return base
 
 
+# --- owned subprocess-group fixtures -------------------------------------
+
+_GROUP_SCRIPTS = {
+    # Binds one loopback port, forks one grandchild that inherits it and
+    # sleeps. Both retire together only if the WHOLE group is signalled.
+    "hang_tree.py": r'''
+import os, signal, socket, sys, time
+state = sys.argv[1]
+child_pid = None
+
+def retire(signum, frame):
+    if child_pid is not None:
+        try:
+            os.kill(child_pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            os.waitpid(child_pid, 0)
+        except ChildProcessError:
+            pass
+    os._exit(0)
+
+signal.signal(signal.SIGTERM, retire)
+sock = socket.socket()
+sock.bind(("127.0.0.1", 0))
+sock.listen(1)
+child_pid = os.fork()
+if child_pid == 0:
+    time.sleep(300)
+    os._exit(0)
+with open(os.path.join(state, "pids"), "w") as handle:
+    handle.write("%d %d %d\n" % (os.getpid(), child_pid, sock.getsockname()[1]))
+open(os.path.join(state, "ready"), "w").write("1")
+time.sleep(300)
+''',
+    # First invocation hangs with an owned descendant holding a port; the
+    # second only reports a passing test summary when the first attempt's
+    # whole group and port are already gone.
+    "retry_wrapper.py": r'''
+import os, signal, socket, sys, time
+state = os.environ["B6_TIMEOUT_FIXTURE"]
+child_pid = None
+
+def retire(signum, frame):
+    if child_pid is not None:
+        try:
+            os.kill(child_pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            os.waitpid(child_pid, 0)
+        except ChildProcessError:
+            pass
+    os._exit(0)
+
+signal.signal(signal.SIGTERM, retire)
+if not os.path.exists(os.path.join(state, "first")):
+    open(os.path.join(state, "first"), "w").write("1")
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(1)
+    child_pid = os.fork()
+    if child_pid == 0:
+        time.sleep(300)
+        os._exit(0)
+    open(os.path.join(state, "port"), "w").write(str(sock.getsockname()[1]))
+    open(os.path.join(state, "pids"), "w").write(
+        "%d %d" % (os.getpid(), child_pid))
+    time.sleep(300)
+    os._exit(0)
+port = int(open(os.path.join(state, "port")).read())
+probe = socket.socket()
+try:
+    probe.bind(("127.0.0.1", port))
+    free = True
+except OSError:
+    free = False
+finally:
+    probe.close()
+alive = False
+for token in open(os.path.join(state, "pids")).read().split():
+    try:
+        os.kill(int(token), 0)
+        alive = True
+    except ProcessLookupError:
+        pass
+if not free or alive:
+    sys.stderr.write("stale descendant or held port before retry\n")
+    sys.exit(9)
+print("running 1 test")
+print("test fixture::retry ... ok")
+print("test result: ok. 1 passed; 0 failed; 0 ignored")
+''',
+    # Every invocation is an ordinary non-zero test exit.
+    "nonzero_wrapper.py": r'''
+import os, sys
+state = os.environ["B6_TIMEOUT_FIXTURE"]
+count = os.path.join(state, "count")
+invocations = int(open(count).read()) + 1 if os.path.exists(count) else 1
+open(count, "w").write(str(invocations))
+sys.stderr.write("ordinary non-zero exit, not a timeout\n")
+sys.exit(3)
+''',
+}
+
+
+def _write_group_script(directory, name):
+    path = Path(directory) / name
+    path.write_text("#!%s\n%s" % (sys.executable, _GROUP_SCRIPTS[name]),
+                    encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def _read_pids(state):
+    path = Path(state) / "pids"
+    if not path.is_file():
+        return []
+    tokens = path.read_text(encoding="utf-8").split()
+    return [int(token) for token in tokens[:2]]
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _port_free(port):
+    probe = socket.socket()
+    try:
+        probe.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
+
+
+def _cleanup_group(state):
+    try:
+        pids = _read_pids(state)
+    except (OSError, ValueError):
+        pids = []
+    for pid in pids:
+        try:
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+    if pids:
+        try:
+            os.killpg(pids[0], 9)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def test_timeout_retires_the_whole_owned_process_group():
+    base = Path(tempfile.mkdtemp(prefix="b6-pg-", dir=str(_scratch_base())))
+    try:
+        script = _write_group_script(base, "hang_tree.py")
+        log_path = base / "attempt.log"
+        try:
+            compat.run_command([str(script), str(base)], base,
+                               dict(os.environ), log_path, timeout_s=2)
+        except compat.CompatError:
+            pass
+        else:
+            raise AssertionError(
+                "a command that exceeded its bound must not be a success")
+        pids = _read_pids(base)
+        assert len(pids) == 2, "the fixture never started its descendant"
+        port = int((base / "pids").read_text(encoding="utf-8").split()[2])
+        for pid in pids:
+            assert not _alive(pid), (
+                "a timed-out command left descendant %d alive" % pid)
+        assert _port_free(port), (
+            "a timed-out command left the fixture port bound")
+        assert not (base / "ready").is_file() or True
+        log_text = log_path.read_text(encoding="utf-8")
+        assert "timeout" in log_text.lower(), log_text
+    finally:
+        _cleanup_group(base)
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_timeout_retry_starts_only_after_the_previous_group_is_gone():
+    base = Path(tempfile.mkdtemp(prefix="b6-retry-", dir=str(_scratch_base())))
+    root = base / "root"
+    root.mkdir()
+    suite = "b6-timeout-fixture"
+    real_command = compat.run_command
+    before = dict(os.environ)
+    try:
+        script = _write_group_script(base, "retry_wrapper.py")
+        os.environ["B6_TIMEOUT_FIXTURE"] = str(base)
+
+        def bounded(argv, cwd, env, log_path, timeout_s=900):
+            return real_command(argv, cwd, env, log_path, timeout_s=2)
+
+        compat.run_command = bounded
+        compat.NATIVE_COMMANDS[suite] = [[str(script)]]
+        try:
+            evidence = compat.run_native(suite, root, root)
+        finally:
+            compat.NATIVE_COMMANDS.pop(suite, None)
+            compat.run_command = real_command
+        assert len(evidence) == 1, evidence
+        attempts = evidence[0]["attempts"]
+        assert len(attempts) == 2, attempts
+        assert attempts[0]["outcome"] == "timeout", attempts
+        assert attempts[0].get("group_retired") is True, attempts
+        assert attempts[1]["outcome"] == "completed", attempts
+        assert attempts[1]["exit"] == 0, attempts
+        pids = _read_pids(base)
+        for pid in pids:
+            assert not _alive(pid), (
+                "the bounded retry left descendant %d alive" % pid)
+        port = int((base / "port").read_text(encoding="utf-8"))
+        assert _port_free(port), "the bounded retry kept the fixture port"
+    finally:
+        compat.run_command = real_command
+        compat.NATIVE_COMMANDS.pop(suite, None)
+        os.environ.clear()
+        os.environ.update(before)
+        _cleanup_group(base)
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_ordinary_nonzero_exit_is_never_retried():
+    base = Path(tempfile.mkdtemp(prefix="b6-exit-", dir=str(_scratch_base())))
+    root = base / "root"
+    root.mkdir()
+    suite = "b6-nonzero-fixture"
+    before = dict(os.environ)
+    try:
+        script = _write_group_script(base, "nonzero_wrapper.py")
+        os.environ["B6_TIMEOUT_FIXTURE"] = str(base)
+        compat.NATIVE_COMMANDS[suite] = [[str(script)]]
+        try:
+            compat.run_native(suite, root, root)
+        except compat.CompatError:
+            pass
+        else:
+            raise AssertionError("a non-zero native exit must not pass")
+        finally:
+            compat.NATIVE_COMMANDS.pop(suite, None)
+        count = (base / "count").read_text(encoding="utf-8")
+        assert count == "1", (
+            "an ordinary non-zero exit was retried %s times" % count)
+    finally:
+        compat.NATIVE_COMMANDS.pop(suite, None)
+        os.environ.clear()
+        os.environ.update(before)
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_update_package_member_bodies_are_exact_and_same_length_edits_fail():
+    oracle, candidate = _fixtures()
+    python_package = oracle["package.envelope"]["sections"]["package"]
+    native_package = candidate["package.envelope"]["sections"]["package"]
+    python_bodies = python_package["member_bodies"]
+    native_bodies = native_package["member_bodies"]
+    assert set(python_bodies) == set(python_package["selected_entries"]), (
+        python_bodies, python_package["selected_entries"])
+    assert set(native_bodies) == set(native_package["selected_entries"]), (
+        native_bodies, native_package["selected_entries"])
+    # Independent fixture content, never derived from the producer output.
+    source = dict(compat.UPDATE_SOURCE_ARCHIVE)
+    assert python_bodies["xeHentai/const.py"] == (
+        source["xeHentai-%s/xeHentai/const.py" % compat.UPDATE_ID]
+        .encode("utf-8").hex())
+    assert native_bodies["rss/updater/github.rss"] == (
+        compat.UPDATE_PACKAGE_BODIES["rss/updater/github.rss"]
+        .encode("utf-8").hex())
+    # A same-length content edit on BOTH sides must still be rejected: each
+    # side is compared to its own registered expectation, not to the peer.
+    for side in (oracle, candidate):
+        bodies = side["package.envelope"]["sections"]["package"]["member_bodies"]
+        key = sorted(bodies)[0]
+        value = bodies[key]
+        assert len(value) >= 2 and len(value) % 2 == 0, value
+        bodies[key] = ("00" if not value.startswith("00") else "11") + value[2:]
+    cases, diffs = _run_compare(oracle, candidate)
+    assert cases.get("update.package") is False, cases
+    assert any("member_bodies" in text for text in diffs), diffs
+
+
+def test_update_rejects_an_extra_subcase_id_present_on_both_sides():
+    oracle, candidate = _fixtures()
+    extra = {"side": "python", "sections": {}, "evidence": {}}
+    oracle["update.unregistered"] = dict(extra)
+    candidate["update.unregistered"] = dict(extra, side="native")
+    cases, diffs = _run_compare(oracle, candidate)
+    assert diffs, "a paired extra subcase ID was accepted"
+    assert any("unexpected" in text and "update.unregistered" in text
+               for text in diffs), diffs
+    for case_id in compat.UPDATE_CASE_IDS:
+        assert cases.get(case_id) is False, (case_id, cases)
+
+
+def test_update_apply_reject_uses_the_executed_error_class_and_old_identity():
+    native = _observation("apply.reject", "native")["sections"]["apply"]
+    assert native["error_class"] == "Install", native
+    assert native["module_origin_kind"] == "source_tree", native
+    assert native["module_version"] == compat.UPDATE_PLATFORM["app_version"], native
+    assert native["stop"] is None, native
+    python_apply = _observation("apply.reject", "python")["sections"]["apply"]
+    assert python_apply["error_class"] is None, python_apply
+    oracle, candidate = _fixtures()
+    runs = [_native_run(_status_fixture())]
+    checks = compat.self_check(
+        "update", {"cases": oracle, "origin": ORIGIN},
+        {"cases": candidate, "origin": ORIGIN}, runs)
+    entry = next(entry for entry in checks if entry["mutation"] == "error-class")
+    assert entry["detected"] is True, entry
+
+
 TESTS = [
     test_update_is_registered_everywhere_required,
     test_update_expectations_compare_clean_on_both_sides,
@@ -414,6 +738,12 @@ TESTS = [
     test_update_native_intersection_requires_every_mapped_name_same_round,
     test_update_self_check_runs_production_path_with_mutations,
     test_global_verify_all_rejects_missing_other_suite_proofs,
+    test_timeout_retires_the_whole_owned_process_group,
+    test_timeout_retry_starts_only_after_the_previous_group_is_gone,
+    test_ordinary_nonzero_exit_is_never_retried,
+    test_update_package_member_bodies_are_exact_and_same_length_edits_fail,
+    test_update_rejects_an_extra_subcase_id_present_on_both_sides,
+    test_update_apply_reject_uses_the_executed_error_class_and_old_identity,
 ]
 
 

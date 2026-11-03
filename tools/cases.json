@@ -2568,7 +2568,7 @@
       "suite": "update",
       "inputs": [],
       "assertions": [
-        "legacy source package is STORE info.json plus the selected xeHentai/ members; the native envelope is STORE info.json/info.sig/payload.zip with raw member order and bytes preserved",
+        "legacy source package is STORE info.json plus the selected xeHentai/ members; the native envelope is STORE info.json/info.sig/payload.zip with raw member order and bytes preserved; every selected member's exact produced bytes are compared to the registered fixture content, so a same-length content edit fails on either or both sides",
         "native selection installs only descriptor-listed entries under xeHentai-<id>/ and drops directories/foreign members; signature/digest/target/ABI rejection is a native-format assertion",
         "real RSS decision changes requests and pending files",
         "signed native package is verified and published as one pending envelope",
@@ -2586,7 +2586,8 @@
       "inputs": [],
       "assertions": [
         "python load_update installs the pending zip as the module origin/version; native startup applies the complete candidate and the applied id comes from the install's active record",
-        "a preparation rejection leaves the live tree, applied id and session unchanged; the legacy unsafe loader outcome is recorded as the approved security/format delta",
+        "a preparation rejection records the executed typed rejection class and continues into the ordinary old-version App with the live tree, applied id and session unchanged; the legacy unsafe loader outcome is recorded as the approved security/format delta",
+        "the observed subcase ID set must equal the registered set on both sides; an unregistered ID is rejected even when both sides agree on it",
         "real RSS decision changes requests and pending files",
         "signed native package is verified and published as one pending envelope",
         "next start validates/preflights the complete candidate and applies it, with real resource and native A/B",
