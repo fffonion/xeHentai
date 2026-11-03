@@ -30,8 +30,8 @@ pub fn open(start: &fs::File, path: &Path, options: &OpenOptions) -> io::Result<
 /// Perform an `openat`-like operation that additionally accepts symlink
 /// targets written as host-absolute paths under `absolute_prefix`.
 ///
-/// This is a spike-only extension of the mature resolver on the two supported
-/// confined hosts (Linux and macOS): after a component-wise strip of
+/// This is a spike-only extension of the mature resolver on the supported
+/// confined hosts (Linux, macOS and Windows): after a component-wise strip of
 /// `absolute_prefix`, the remainder is resolved from the original captured
 /// `start` descriptor. `start` remains the only root authority; the prefix is a
 /// text selector, never a new root.
@@ -39,11 +39,13 @@ pub fn open(start: &fs::File, path: &Path, options: &OpenOptions) -> io::Result<
 /// On Linux the symlink literal and its filesystem type are read from one
 /// `O_PATH|O_NOFOLLOW` descriptor. macOS has no `O_PATH`, so it reads the
 /// literal by name from the captured directory and expands it there: the same
-/// confinement, but not the Linux same-descriptor read property.
+/// confinement, but not the Linux same-descriptor read property. Windows reads
+/// the name-based link and expands it under the captured start; it has neither
+/// `O_PATH` nor the Linux same-descriptor literal property.
 ///
 /// The default `open` entry point never sets this policy and keeps the
 /// historical beneath-root behavior.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[doc(hidden)]
 #[inline]
 pub fn open_with_absolute_prefix(

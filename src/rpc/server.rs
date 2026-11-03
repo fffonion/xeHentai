@@ -2153,17 +2153,17 @@ mod tests {
             RequestAction::Ready(response) => assert_eq!(response.status, 403),
             other => panic!("expected ready refusal, got {other:?}"),
         }
-        // Serving the signed URL returns the exact file bytes on the
-        // confined Linux/macOS backend; Windows denies via the explicit
-        // Unsupported stub before any ambient open.
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        // Serving the signed URL returns the exact file bytes on the confined
+        // Linux/macOS/Windows backend; targets outside it deny via the
+        // explicit Unsupported stub before any ambient open.
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         {
             let (status, mime, bytes) = serve_media_bytes(app, None, first);
             assert_eq!(status, 200);
             assert_eq!(mime.as_deref(), Some("image/jpeg"));
             assert_eq!(bytes, png);
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         {
             let (status, _, _) = serve_media_bytes(app, None, first);
             assert_eq!(
@@ -2210,15 +2210,15 @@ mod tests {
             RequestAction::Ready(response) => assert_eq!(response.status, 403),
             other => panic!("expected a refusal, got {other:?}"),
         }
-        // The confined Linux/macOS backend serves the payload; Windows denies
-        // via the explicit Unsupported stub before any ambient open.
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        // The confined Linux/macOS/Windows backend serves the payload;
+        // unported targets deny via the explicit Unsupported stub.
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         {
             let (status, _, bytes) = serve_media_bytes(app, Some("s3cret".to_string()), first);
             assert_eq!(status, 200);
             assert_eq!(bytes, png);
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         {
             let (status, _, _) = serve_media_bytes(app, Some("s3cret".to_string()), first);
             assert_eq!(
@@ -2266,18 +2266,18 @@ mod tests {
         assert_ne!(hash_link(None, "guid1/1"), hash_link(None, "guid1/2"));
         assert_ne!(hash_link(Some("s"), "guid1/1"), hash_link(None, "guid1/1"));
         // A valid /img signature serves the exact file bytes on the confined
-        // Linux/macOS backend; a valid /zip signature streams the built
-        // archive bytes. Windows denies both via the explicit Unsupported
-        // stub.
+        // Linux/macOS/Windows backend; a valid /zip signature streams the
+        // built archive bytes. Unported targets deny both via the explicit
+        // Unsupported stub.
         let image_path = format!("/img/{}/{guid}/1", hash_link(None, &format!("{guid}/1")));
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         {
             let (status, mime, bytes) = serve_media_bytes(app, None, &image_path);
             assert_eq!(status, 200);
             assert_eq!(mime.as_deref(), Some("image/jpeg"));
             assert_eq!(bytes, png);
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         {
             let (status, _, _) = serve_media_bytes(app, None, &image_path);
             assert_eq!(
@@ -2286,7 +2286,7 @@ mod tests {
             );
         }
         // A valid /zip signature streams the built archive bytes.
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         {
             let mut app = test_app();
             let zip_guid = task_with_image(&mut app, "1.jpg", &png_bytes(8, 8));
@@ -2296,7 +2296,7 @@ mod tests {
             assert_eq!(mime.as_deref(), Some("application/zip"));
             assert!(bytes.starts_with(b"PK"));
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         {
             let mut app = test_app();
             let zip_guid = task_with_image(&mut app, "1.jpg", &png_bytes(8, 8));
@@ -4562,10 +4562,9 @@ mod tests {
 
     /// Unported-platform scope: every gallery payload read is an explicit
     /// `Unsupported` denial before any ambient open. There is no portable
-    /// fallback; the Windows functional port stays an M8 item. Linux and macOS
-    /// do not compile this branch: their confined backend is asserted by the
-    /// tests above.
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    /// fallback. Linux, macOS and Windows do not compile this branch: their
+    /// confined backend is asserted by the tests above.
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     #[test]
     fn gallery_unported_platform_reports_unsupported() {
         let mut app = test_app();

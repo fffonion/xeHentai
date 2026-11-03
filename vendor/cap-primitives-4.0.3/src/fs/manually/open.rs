@@ -65,7 +65,7 @@ struct Context<'start> {
 
     /// Optional host-absolute symlink prefix. `None` keeps the historical
     /// name-based expansion and absolute-literal escape for every caller.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     absolute_prefix: Option<PathBuf>,
 
     #[cfg(racy_asserts)]
@@ -135,7 +135,7 @@ impl<'start> Context<'start> {
 
             reuse: PathBuf::new(),
 
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
             absolute_prefix: _options.absolute_prefix.clone(),
 
             #[cfg(racy_asserts)]
@@ -396,7 +396,7 @@ impl<'start> Context<'start> {
     /// directory handle (and its canonical-path component) until `base` is the
     /// caller-provided root again. Never resets the symlink hop count or the
     /// trailing dot/slash flags, and never jumps to the host root.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     fn reset_to_captured_start(&mut self) {
         while let Some(dir) = self.dirs.pop() {
             self.base = dir;
@@ -414,11 +414,15 @@ impl<'start> Context<'start> {
         // Opt-in host-absolute prefix: component-wise strip, then reset to the
         // original captured start and resolve the remainder beneath it. The
         // literal is never normalized and `..` keeps its verbatim meaning.
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        //
+        // This arm runs before the Windows `..` pre-normalization below: a
+        // prefixed literal is resolved from the captured start, so Windows'
+        // own lexical normalization must not be applied to it first.
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         if let Some(prefix) = &self.absolute_prefix {
             if destination.is_absolute() {
-                let remainder = match destination.strip_prefix(prefix) {
-                    Ok(remainder) if !remainder.as_os_str().is_empty() => remainder.to_path_buf(),
+                let remainder = match strip_absolute_prefix(&destination, prefix) {
+                    Some(remainder) if !remainder.as_os_str().is_empty() => remainder,
                     // Outside, the prefix itself, or a non-component prefix:
                     // fail closed before any lookup of the literal.
                     _ => return Err(errors::escape_attempt()),
@@ -654,6 +658,37 @@ pub(crate) fn stat(start: &fs::File, path: &Path, follow: FollowSymlinks) -> io:
 fn should_emulate_o_path(use_options: &OpenOptions) -> bool {
     (use_options.ext.custom_flags & (OFlags::PATH.bits() as i32)) == (OFlags::PATH.bits() as i32)
         && use_options.follow == FollowSymlinks::Yes
+}
+
+/// Component-wise strip of the opt-in host-absolute prefix.
+///
+/// On Windows a canonical spelling (what the product captures as its prefix)
+/// carries the `\\?\` verbatim marker, while a link literal written by the
+/// user typically does not, or vice versa. One leading verbatim marker on
+/// either side is therefore ignored before the component comparison. Nothing
+/// else is normalized: no case folding, no `..` rewrite, no string-prefix
+/// shortcut, so a non-component or differently-cased prefix still fails
+/// closed.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn strip_absolute_prefix(destination: &Path, prefix: &Path) -> Option<PathBuf> {
+    destination.strip_prefix(prefix).ok().map(Path::to_path_buf)
+}
+
+#[cfg(windows)]
+fn strip_absolute_prefix(destination: &Path, prefix: &Path) -> Option<PathBuf> {
+    if let Ok(remainder) = destination.strip_prefix(prefix) {
+        return Some(remainder.to_path_buf());
+    }
+    fn without_verbatim(path: &Path) -> Option<PathBuf> {
+        let text = path.as_os_str().to_str()?;
+        text.strip_prefix(r"\\?\").map(PathBuf::from)
+    }
+    let destination = without_verbatim(destination).unwrap_or_else(|| destination.to_path_buf());
+    let prefix = without_verbatim(prefix).unwrap_or_else(|| prefix.to_path_buf());
+    destination
+        .strip_prefix(&prefix)
+        .ok()
+        .map(Path::to_path_buf)
 }
 
 /// Selective mainline magic-link gate, evaluated on the same `O_PATH|O_NOFOLLOW`

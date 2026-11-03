@@ -35,7 +35,7 @@ pub struct OpenOptions {
     /// Optional host-absolute symlink prefix for the spike-only
     /// `open_with_absolute_prefix` entry point. `None` (the default) preserves
     /// the historical beneath-root semantics for every existing caller.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     pub(crate) absolute_prefix: Option<std::path::PathBuf>,
 
     #[cfg(any(unix, windows, target_os = "vxworks"))]
@@ -65,7 +65,7 @@ impl OpenOptions {
             readdir_required: false,
             follow: FollowSymlinks::Yes,
 
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
             absolute_prefix: None,
 
             #[cfg(any(unix, windows, target_os = "vxworks"))]

@@ -45,17 +45,18 @@ sha2 = "0.10"
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "pkcs8", "pem"] }
 hex = "0.4"
 self-replace = "1.5"
+# The confined gallery/archive opens use the reviewed `cap-primitives` 4.0.3
+# resolver on all supported hosts (Linux, macOS, Windows). Its Unix and
+# Windows backends are both reached through this one dependency; `rustix` and
+# `nix` below stay Unix-only because only the Unix backend needs raw
+# `openat`/`fcntl` and the POSIX daemon.
+cap-primitives = "=4.0.3"
 
-# The confined gallery/archive opens are a Unix backend: `rustix::fs` is only
-# compiled on Unix targets, and `src/task/file_ops.rs` keeps the whole backend
-# behind `cfg(unix)` with an explicit `Unsupported` denial elsewhere.
-# `cap-primitives` 4.0.3 is the accepted mature resolver source, adopted as the
-# reviewed vendor tree below (see `[patch.crates-io]`); the reviewed
-# `open_with_absolute_prefix` entry is Linux-only, so the product uses it behind
-# the same `cfg` with an explicit `Unsupported` denial on other targets.
+# Only the Unix leaf/entry primitives (`rustix::fs` `openat`/`fcntl`, and the
+# `nix` daemon/PTY bindings) are Unix-only; `src/task/file_ops.rs` keeps them
+# behind `cfg(unix)` and uses the resolver's own relative open on Windows.
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs", "thread"] }
-cap-primitives = "=4.0.3"
 # POSIX daemon startup and the real-PTY lifecycle tests use the mature nix
 # bindings; the product only needs `fork`/`_exit` and standard descriptors.
 nix = { version = "0.31", features = ["process", "signal", "term", "fs", "user"] }
@@ -63,8 +64,9 @@ nix = { version = "0.31", features = ["process", "signal", "term", "fs", "user"]
 # The adopted dependency is the reviewed 4.0.3 source tree in `vendor/`, not a
 # rewritten or fetcher-substituted manifest: `Cargo.toml`, `Cargo.toml.orig`,
 # licenses and version are the original published bytes plus the accepted
-# Linux-only absolute-prefix policy. Path wiring here (rather than editing the
-# vendor manifest's optional dependencies) keeps the vendor tree intact.
+# absolute-prefix policy, extended to the three supported confined hosts.
+# Path wiring here (rather than editing the vendor manifest's optional
+# dependencies) keeps the vendor tree intact.
 [patch.crates-io]
 cap-primitives = { path = "vendor/cap-primitives-4.0.3" }
 

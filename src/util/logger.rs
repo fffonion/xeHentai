@@ -72,8 +72,10 @@ impl Logger {
         self.logf = None;
     }
 
-    /// The `(device, inode)` identity of the log file this logger actually
-    /// holds open, or `None` when no log file is open.
+    /// The identity of the log file this logger actually holds open, or `None`
+    /// when no log file is open. It is `(device, inode)` on Unix and
+    /// `(volume serial number, file index)` on Windows, matching the gallery
+    /// reader's `FileId`.
     ///
     /// The descriptor is only borrowed for its metadata: ownership, output
     /// format and lifetime stay exactly as before. A metadata failure is
@@ -91,11 +93,33 @@ impl Logger {
         }
     }
 
-    #[cfg(not(unix))]
+    /// Windows identity comes from the same pinned `cap_primitives` handle
+    /// metadata the gallery reader uses: `Metadata::from_file` plus the
+    /// doc-hidden `_WindowsByHandle` accessors. Both halves must be present;
+    /// a half-known identity is an error, never a fabricated zero.
+    #[cfg(windows)]
+    pub(crate) fn held_file_identity(&self) -> std::io::Result<Option<(u64, u64)>> {
+        use cap_primitives::fs::_WindowsByHandle as _;
+        match &self.logf {
+            None => Ok(None),
+            Some(file) => {
+                let metadata = cap_primitives::fs::Metadata::from_file(file)?;
+                match (metadata.volume_serial_number(), metadata.file_index()) {
+                    (Some(volume), Some(index)) => Ok(Some((u64::from(volume), index))),
+                    _ => Err(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "the held log file identity is unavailable",
+                    )),
+                }
+            }
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
     pub(crate) fn held_file_identity(&self) -> std::io::Result<Option<(u64, u64)>> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "the held log file identity is only available on unix targets",
+            "the held log file identity is not available on this target",
         ))
     }
 

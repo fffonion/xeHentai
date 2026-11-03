@@ -15,9 +15,9 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use regex::Regex;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use cap_primitives::fs as capfs;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 use cap_primitives::fs::OpenOptionsExt as _;
 
 use super::{FidKey, RenameError, Task, TaskError};
@@ -371,10 +371,11 @@ pub fn path_within(root: &Path, candidate: &Path) -> bool {
     candidate.starts_with(root)
 }
 
-/// An FD-identity snapshot of a directory: the device and inode the path
-/// resolved to when the snapshot was taken. Compared against the actually
-/// opened directory FD, so a parent swap between snapshot and open fails
-/// closed instead of serving the replacement.
+/// An identity snapshot of a directory: the `(device, inode)` pair the path
+/// resolved to when the snapshot was taken on Unix, or the `(volume serial
+/// number, file index)` pair on Windows. Compared against the actually opened
+/// directory handle, so a parent swap between snapshot and open fails closed
+/// instead of serving the replacement.
 pub type DirIdentity = (u64, u64);
 
 /// A frozen, non-opening observation of one directory path.
@@ -383,16 +384,19 @@ pub type DirIdentity = (u64, u64);
 /// `Missing` is a genuine `NotFound`, and `Unavailable` is every other
 /// outcome: an existing non-directory (FIFO, socket, regular file, device), a
 /// permission or probe error, or a target outside the confined backend
-/// (Linux and macOS).
+/// (Linux, macOS and Windows).
 /// Only `Present` can authorize an open, and that open must still
 /// match the recorded identity. A `Missing`/`Unavailable` observation can
 /// never be promoted to `Present`, not even after a wait or a later
 /// filesystem change inside the same request.
 ///
-/// The observation itself is `stat`-based filesystem I/O. It never opens the
-/// path (so a FIFO cannot stall it), but it is still I/O with no universal
-/// latency bound (network filesystems, cold caches, device servers); it is
-/// not a pure function and must not be described as one.
+/// The observation itself is filesystem I/O. On Unix it is a name-based
+/// `stat`, so it never opens the path (a FIFO cannot stall it). On Windows a
+/// directory identity is only available from a handle, so one metadata-only
+/// directory handle is opened and no entries or bytes are read. Either way it
+/// is I/O with no universal latency bound (network filesystems, cold caches,
+/// device servers); it is not a pure function and must not be described as
+/// one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DirectoryObservation {
     Present(DirIdentity),
@@ -404,8 +408,9 @@ pub enum DirectoryObservation {
 ///
 /// Only a real `NotFound` is `Missing`; an existing non-directory (including a
 /// FIFO, socket or regular file) and every other probe error are
-/// `Unavailable`. On non-Unix targets this is `Unavailable(Unsupported)`
-/// BEFORE any filesystem operation: there is no ambient fallback read.
+/// `Unavailable`. On targets outside the confined backend this is
+/// `Unavailable(Unsupported)` BEFORE any filesystem operation: there is no
+/// ambient fallback read.
 pub fn observe_directory(path: &Path) -> DirectoryObservation {
     #[cfg(unix)]
     {
@@ -421,7 +426,37 @@ pub fn observe_directory(path: &Path) -> DirectoryObservation {
             Err(error) => DirectoryObservation::Unavailable(error.kind()),
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // A Windows directory identity is only available from a handle, so the
+        // observation opens one metadata-only directory handle (no entries or
+        // bytes are read). `fs::metadata` first keeps the existing
+        // "existing non-directory" class instead of reporting an open error.
+        match fs::metadata(path) {
+            Ok(metadata) if metadata.is_dir() => {
+                match capfs::open_ambient_dir(path, cap_primitives::ambient_authority()) {
+                    Ok(dir) => match capfs::Metadata::from_file(&dir) {
+                        Ok(metadata) => match windows_file_id(&metadata) {
+                            Ok(id) => DirectoryObservation::Present(id),
+                            Err(kind) => DirectoryObservation::Unavailable(kind),
+                        },
+                        Err(error) => DirectoryObservation::Unavailable(error.kind()),
+                    },
+                    // Gone between the two probes: the snapshot grants nothing.
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        DirectoryObservation::Missing
+                    }
+                    Err(error) => DirectoryObservation::Unavailable(error.kind()),
+                }
+            }
+            Ok(_) => DirectoryObservation::Unavailable(std::io::ErrorKind::NotADirectory),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                DirectoryObservation::Missing
+            }
+            Err(error) => DirectoryObservation::Unavailable(error.kind()),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
         DirectoryObservation::Unavailable(std::io::ErrorKind::Unsupported)
@@ -555,7 +590,62 @@ fn observe_identity(path: &Path) -> Result<Option<PrivateObject>, std::io::Error
     }
 }
 
-#[cfg(not(unix))]
+/// Resolve a private spelling through the captured parent directory on
+/// Windows, where a metadata identity is only available from a handle. The
+/// mature resolver's `stat` opens a metadata-only handle (`access_mode(0)`),
+/// so no payload byte is read and the resolver still starts from the parent
+/// descriptor rather than re-authorizing a pathname.
+///
+/// Name-based links on Windows are expanded by the resolver; the resulting
+/// target identity is the same confinement, not the Linux same-descriptor
+/// literal property.
+#[cfg(windows)]
+fn observe_identity(path: &Path) -> Result<Option<PrivateObject>, std::io::ErrorKind> {
+    let link = match windows_stat_identity(path, capfs::FollowSymlinks::No) {
+        Ok(metadata) => metadata,
+        Err(std::io::ErrorKind::NotFound) => return Ok(None),
+        Err(kind) => return Err(kind),
+    };
+    if !link.file_type().is_symlink() {
+        return Ok(Some(PrivateObject {
+            target: Some(windows_file_id(&link)?),
+            link: None,
+        }));
+    }
+    let link_id = windows_file_id(&link)?;
+    match windows_stat_identity(path, capfs::FollowSymlinks::Yes) {
+        Ok(target) => Ok(Some(PrivateObject {
+            target: Some(windows_file_id(&target)?),
+            link: Some(link_id),
+        })),
+        // The spelling exists but its referent is genuinely absent: no target
+        // to protect, only the link node as an extra.
+        Err(std::io::ErrorKind::NotFound) => Ok(Some(PrivateObject {
+            target: None,
+            link: Some(link_id),
+        })),
+        Err(kind) => Err(kind),
+    }
+}
+
+#[cfg(windows)]
+fn windows_stat_identity(
+    path: &Path,
+    follow: capfs::FollowSymlinks,
+) -> Result<capfs::Metadata, std::io::ErrorKind> {
+    let parent = path.parent().ok_or(std::io::ErrorKind::InvalidInput)?;
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    let name = path.file_name().ok_or(std::io::ErrorKind::InvalidInput)?;
+    let dir = capfs::open_ambient_dir(parent, cap_primitives::ambient_authority())
+        .map_err(|error| error.kind())?;
+    capfs::stat(&dir, Path::new(name), follow).map_err(|error| error.kind())
+}
+
+#[cfg(not(any(unix, windows)))]
 fn observe_identity(_path: &Path) -> Result<Option<PrivateObject>, std::io::ErrorKind> {
     Err(std::io::ErrorKind::Unsupported)
 }
@@ -857,7 +947,7 @@ impl PrivatePolicy {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[derive(Clone, Debug)]
 /// Frozen read authority for exactly one gallery.
 ///
@@ -874,7 +964,7 @@ pub struct GalleryGrant {
     private: PrivatePolicy,
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 impl GalleryGrant {
     /// Sealed to the owning task module: a grant is only minted by
     /// [`TaskFiles::grant`] from the fixed authorized root, the validated
@@ -1090,7 +1180,7 @@ impl GalleryGrant {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 /// The captured descriptors behind one [`GalleryGrant`].
 struct Rooted {
     parent: File,
@@ -1098,7 +1188,7 @@ struct Rooted {
     gallery_spelling: PathBuf,
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 /// A captured gallery directory for descriptor-relative enumeration.
 pub struct CapturedGalleryDir {
     dir: File,
@@ -1106,14 +1196,14 @@ pub struct CapturedGalleryDir {
     private: PrivatePolicy,
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 /// What one archive entry descriptor turned out to be.
 pub enum OpenedEntry {
     Directory,
     File(File),
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 impl CapturedGalleryDir {
     /// Entry names as raw `OsString` bytes, sorted bytewise. `.`/`..` are
     /// filtered by the resolver.
@@ -1134,7 +1224,10 @@ impl CapturedGalleryDir {
         names.sort_by(|left, right| left.as_encoded_bytes().cmp(right.as_encoded_bytes()));
         Ok(names)
     }
+}
 
+#[cfg(unix)]
+impl CapturedGalleryDir {
     /// Open exactly one enumerated leaf relative to the captured descriptor.
     ///
     /// A symlink is an existing `UnsafePath` error (never skipped or followed),
@@ -1196,6 +1289,80 @@ impl CapturedGalleryDir {
     }
 }
 
+#[cfg(windows)]
+impl CapturedGalleryDir {
+    /// Open exactly one enumerated leaf relative to the captured descriptor.
+    ///
+    /// Windows has no `openat`/`O_NOFOLLOW`: the same mature resolver's
+    /// relative `open` with `FollowSymlinks::No` is used instead. It refuses
+    /// reserved device names, and a symlink entry is denied from its own
+    /// descriptor without ever being followed or read. The descriptor's type
+    /// and private identity are re-checked from that handle before any byte is
+    /// returned.
+    pub fn open_entry(&self, name: &OsStr) -> Result<OpenedEntry, TaskError> {
+        check_leaf(name)?;
+        let full = self.spelling.join(name);
+        let mut options = capfs::OpenOptions::new();
+        options
+            .read(true)
+            ._cap_fs_ext_follow(capfs::FollowSymlinks::No);
+        let file = match capfs::open(&self.dir, Path::new(name), &options) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(TaskError::Io {
+                    path: full,
+                    source: error,
+                });
+            }
+            Err(file_error) => {
+                // A directory cannot be opened with a file-only access mode on
+                // Windows. Probe it with the same mature resolver's directory
+                // open, still relative to the captured handle and still
+                // no-follow; anything that is not a directory keeps the
+                // original error.
+                return match capfs::open_dir_nofollow(&self.dir, Path::new(name)) {
+                    Ok(dir) => {
+                        let metadata = windows_descriptor_metadata(&dir, &full)?;
+                        if metadata.file_type().is_symlink() {
+                            return Err(TaskError::UnsafePath {
+                                path: full,
+                                reason: "refusing to archive a symlink entry",
+                            });
+                        }
+                        Ok(OpenedEntry::Directory)
+                    }
+                    Err(_) => Err(TaskError::Io {
+                        path: full,
+                        source: file_error,
+                    }),
+                };
+            }
+        };
+        let metadata = windows_descriptor_metadata(&file, &full)?;
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            return Err(TaskError::UnsafePath {
+                path: full,
+                reason: "refusing to archive a symlink entry",
+            });
+        }
+        if file_type.is_dir() {
+            // A directory reached through a leaf open has no payload bytes;
+            // the caller reports it as a directory and never reads it.
+            return Ok(OpenedEntry::Directory);
+        }
+        if !file_type.is_file() {
+            return Err(TaskError::UnsafePath {
+                path: full,
+                reason: "archive entry is not a regular file",
+            });
+        }
+        self.private
+            .deny(windows_identity_or_io(&metadata, &full)?, &full)?;
+        Ok(OpenedEntry::File(file))
+    }
+}
+
 /// A validated single path component as an `OsStr`, taken from the task record
 /// or from a descriptor-relative enumeration. Never a multi-component path.
 fn check_leaf(leaf: &OsStr) -> Result<(), TaskError> {
@@ -1215,10 +1382,14 @@ fn check_leaf(leaf: &OsStr) -> Result<(), TaskError> {
     Ok(())
 }
 
-/// Read-only, non-blocking open options for every payload descriptor. O_NONBLOCK
-/// only exists to keep a FIFO from stalling the open; it is cleared from the
-/// returned descriptor after the regular-file and private-identity verdicts.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+/// Read-only open options for every payload descriptor.
+///
+/// On Unix `O_NONBLOCK` only exists to keep a FIFO from stalling the open; it
+/// is cleared from the returned descriptor after the regular-file and
+/// private-identity verdicts. Windows has no FIFO-at-path semantics and its
+/// `OpenOptionsExt` has no non-blocking flag, so the leaf is simply read-only
+/// and there is nothing to clear.
+#[cfg(unix)]
 fn leaf_options() -> capfs::OpenOptions {
     let mut options = capfs::OpenOptions::new();
     options
@@ -1227,8 +1398,15 @@ fn leaf_options() -> capfs::OpenOptions {
     options
 }
 
+#[cfg(windows)]
+fn leaf_options() -> capfs::OpenOptions {
+    let mut options = capfs::OpenOptions::new();
+    options.read(true);
+    options
+}
+
 /// Identity and regularity of an opened descriptor, taken from that descriptor.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 fn descriptor_verdict(file: &File, path: &Path) -> Result<(FileId, bool), TaskError> {
     use std::os::unix::fs::MetadataExt;
     let metadata = file.metadata().map_err(|source| TaskError::Io {
@@ -1242,7 +1420,17 @@ fn descriptor_verdict(file: &File, path: &Path) -> Result<(FileId, bool), TaskEr
     ))
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(windows)]
+fn descriptor_verdict(file: &File, path: &Path) -> Result<(FileId, bool), TaskError> {
+    let metadata = windows_descriptor_metadata(file, path)?;
+    let file_type = metadata.file_type();
+    Ok((
+        windows_identity_or_io(&metadata, path)?,
+        !file_type.is_symlink() && file_type.is_file(),
+    ))
+}
+
+#[cfg(unix)]
 fn descriptor_identity(file: &File, path: &Path) -> Result<FileId, TaskError> {
     use std::os::unix::fs::MetadataExt;
     let metadata = file.metadata().map_err(|source| TaskError::Io {
@@ -1252,9 +1440,46 @@ fn descriptor_identity(file: &File, path: &Path) -> Result<FileId, TaskError> {
     Ok((metadata.dev(), metadata.ino()))
 }
 
+#[cfg(windows)]
+fn descriptor_identity(file: &File, path: &Path) -> Result<FileId, TaskError> {
+    let metadata = windows_descriptor_metadata(file, path)?;
+    windows_identity_or_io(&metadata, path)
+}
+
+#[cfg(windows)]
+fn windows_descriptor_metadata(file: &File, path: &Path) -> Result<capfs::Metadata, TaskError> {
+    capfs::Metadata::from_file(file).map_err(|source| TaskError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// The product `FileId` on Windows: `(volume serial number, file index)`.
+///
+/// The pair comes from the existing pinned `cap_primitives` handle metadata
+/// (`Metadata::from_file` plus the doc-hidden `_WindowsByHandle` accessors),
+/// which fills both halves on stable via the mature `winx` file information.
+/// A missing half is an unobservable identity, never an invented zero.
+#[cfg(windows)]
+fn windows_file_id(metadata: &capfs::Metadata) -> Result<FileId, std::io::ErrorKind> {
+    use cap_primitives::fs::_WindowsByHandle as _;
+    match (metadata.volume_serial_number(), metadata.file_index()) {
+        (Some(volume), Some(index)) => Ok((u64::from(volume), index)),
+        _ => Err(std::io::ErrorKind::Unsupported),
+    }
+}
+
+#[cfg(windows)]
+fn windows_identity_or_io(metadata: &capfs::Metadata, path: &Path) -> Result<FileId, TaskError> {
+    windows_file_id(metadata).map_err(|kind| TaskError::Io {
+        path: path.to_path_buf(),
+        source: std::io::Error::new(kind, "the Windows file identity is unavailable"),
+    })
+}
+
 /// Clear `O_NONBLOCK` (set only to avoid hangs while opening) so the
 /// returned file has ordinary blocking semantics for the streaming reader.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 fn clear_nonblock(file: File, path: &Path) -> Result<File, TaskError> {
     rustix::fs::fcntl_setfl(&file, rustix::fs::OFlags::empty()).map_err(|error| TaskError::Io {
         path: path.to_path_buf(),
@@ -1263,7 +1488,14 @@ fn clear_nonblock(file: File, path: &Path) -> Result<File, TaskError> {
     Ok(file)
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+/// Windows has no `O_NONBLOCK` to clear: the leaf was opened for ordinary
+/// blocking reads and keeps exactly those semantics.
+#[cfg(windows)]
+fn clear_nonblock(file: File, _path: &Path) -> Result<File, TaskError> {
+    Ok(file)
+}
+
+#[cfg(unix)]
 /// Diagnosis for a denied gallery leaf. The variant is a label; the contract is
 /// "denied, no bytes, no fallback".
 fn leaf_denial_reason(error: &std::io::Error) -> &'static str {
@@ -1284,7 +1516,19 @@ fn leaf_denial_reason(error: &std::io::Error) -> &'static str {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(windows)]
+/// Windows diagnoses by `ErrorKind`: the Windows error codes have no stable
+/// `rustix` mapping. The label is still only a diagnosis; every arm denies.
+fn leaf_denial_reason(error: &std::io::Error) -> &'static str {
+    match error.kind() {
+        std::io::ErrorKind::IsADirectory | std::io::ErrorKind::NotADirectory => {
+            "gallery target is not a regular file"
+        }
+        _ => "gallery target is not available to this request",
+    }
+}
+
+#[cfg(unix)]
 fn root_denial_reason(error: &std::io::Error) -> &'static str {
     match error.raw_os_error() {
         Some(code) if code == rustix_errno(rustix::io::Errno::LOOP) => {
@@ -1294,7 +1538,12 @@ fn root_denial_reason(error: &std::io::Error) -> &'static str {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(windows)]
+fn root_denial_reason(_error: &std::io::Error) -> &'static str {
+    "trusted download root is not an available directory"
+}
+
+#[cfg(unix)]
 fn capture_denial_reason(error: &std::io::Error) -> &'static str {
     match error.raw_os_error() {
         Some(code) if code == rustix_errno(rustix::io::Errno::NOTDIR) => {
@@ -1305,7 +1554,12 @@ fn capture_denial_reason(error: &std::io::Error) -> &'static str {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(windows)]
+fn capture_denial_reason(_error: &std::io::Error) -> &'static str {
+    "gallery root is not an available directory for this request"
+}
+
+#[cfg(unix)]
 fn rustix_errno(errno: rustix::io::Errno) -> i32 {
     errno.raw_os_error()
 }
@@ -1313,12 +1567,12 @@ fn rustix_errno(errno: rustix::io::Errno) -> i32 {
 // ---------------------------------------------------------------------------
 // Non-Linux/macOS surface: every payload read is an explicit `Unsupported`
 // denial BEFORE any ambient open. There is no portable fallback, no ambient
-// re-open and no forged cross-platform PASS; the Windows functional port stays
-// an M8 item. Other Unix targets take this surface too, because the accepted
-// resolver's absolute-prefix entry only covers the two supported hosts.
+// re-open and no forged cross-platform PASS. Targets other than
+// Linux/macOS/Windows take this surface, because the accepted resolver's
+// absolute-prefix entry only covers those three hosts.
 // ---------------------------------------------------------------------------
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct GalleryGrant {
@@ -1329,7 +1583,7 @@ pub struct GalleryGrant {
     private: PrivatePolicy,
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 impl GalleryGrant {
     pub(super) fn new(
         root: PathBuf,
@@ -1384,7 +1638,7 @@ impl GalleryGrant {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 #[allow(dead_code)]
 pub struct CapturedGalleryDir {
     dir: File,
@@ -1392,14 +1646,14 @@ pub struct CapturedGalleryDir {
     private: PrivatePolicy,
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 #[allow(dead_code)]
 pub enum OpenedEntry {
     Directory,
     File(File),
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 impl CapturedGalleryDir {
     pub fn names(&self) -> Result<Vec<OsString>, TaskError> {
         Err(unavailable_denial(
@@ -1468,6 +1722,11 @@ pub(crate) fn run_preopen_seam(root: &Path, name: &str) {
             let _ = fs::remove_file(&path);
             #[cfg(unix)]
             let _ = std::os::unix::fs::symlink(&target, &path);
+            // Creating a symlink needs a privilege Windows runners do not
+            // have, and every test that arms this seam is Unix-only; the
+            // binding stays part of the recorded swap but is unused here.
+            #[cfg(not(unix))]
+            let _ = &target;
         }
         Some(PreopenSwap::RootLink(target)) => {
             let backup = root.with_extension("seambak");
@@ -1475,6 +1734,8 @@ pub(crate) fn run_preopen_seam(root: &Path, name: &str) {
             if fs::rename(root, &backup).is_ok() {
                 #[cfg(unix)]
                 let _ = std::os::unix::fs::symlink(&target, root);
+                #[cfg(not(unix))]
+                let _ = &target;
             }
         }
     }

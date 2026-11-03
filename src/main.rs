@@ -154,12 +154,14 @@ where
             let _ = app.logger_mut().warning(&message);
         }
         match daemon_fork() {
+            #[cfg(unix)]
             Daemon::Parent(child) => {
                 let message = i18n::render(locale, "XEH_DAEMON_START", &[&child.to_string()])
                     .unwrap_or_else(|| format!("daemon start at PID {child}"));
                 let _ = app.logger_mut().info(&message);
                 return 0;
             }
+            #[cfg(unix)]
             Daemon::Child => {}
             Daemon::Unsupported(name) => {
                 let message = i18n::render(locale, "XEH_PLATFORM_NO_DAEMON", &[name])
@@ -167,6 +169,7 @@ where
                 let _ = app.logger_mut().error(&message);
                 return 0;
             }
+            #[cfg(unix)]
             Daemon::Failed(error) => {
                 eprintln!("xeHentai: cannot fork daemon: {error}");
                 return 1;
@@ -666,12 +669,17 @@ fn config_patch(opts: &Opts) -> Map<String, Value> {
 // MARK: - POSIX daemon
 
 enum Daemon {
+    // The POSIX fork lifecycle constructs these three; Windows reports the
+    // localized "not supported" message through `Unsupported` instead.
+    #[cfg(unix)]
     Parent(i32),
+    #[cfg(unix)]
     Child,
     // Only the non-Unix `daemon_fork` constructs this; the POSIX path reports
     // the localized "not supported" message through `Failed` instead.
     #[allow(dead_code)]
     Unsupported(&'static str),
+    #[cfg(unix)]
     Failed(String),
 }
 

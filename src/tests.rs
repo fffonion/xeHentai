@@ -2622,11 +2622,12 @@ fn session_save_failure_keeps_the_previous_session() {
     app.add_task(GALLERY_URL, serde_json::Map::new()).unwrap();
     let previous = "{\"tasks\": {}, \"cookies\": {\"nw\": \"1\"}}";
     fs::write(root.path().join("h.json"), previous).unwrap();
-    let mut permissions = fs::metadata(root.path()).unwrap().permissions();
+    let permissions = fs::metadata(root.path()).unwrap().permissions();
     let original = permissions.clone();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let mut permissions = permissions;
         permissions.set_mode(0o500);
         fs::set_permissions(root.path(), permissions).unwrap();
         let (code, _) = app.save_session();
@@ -2942,32 +2943,37 @@ fn session_boundary_checks_use_components_and_canonical_paths() {
         b"",
     )
     .unwrap();
-    let mut variants: Vec<(&str, String)> = vec![
-        (
-            "prefix01",
-            root.path()
-                .join("ext")
-                .join("downloads-evil")
-                .to_string_lossy()
-                .into_owned(),
-        ),
-        ("dotdot01", "../outside".to_string()),
-        ("abs00001", "/definitely/not/authorized".to_string()),
-        (
-            "legal001",
-            root.path()
-                .join("ext")
-                .join("downloads")
-                .join("sub")
-                .to_string_lossy()
-                .into_owned(),
-        ),
-    ];
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(&outside, base.join("link")).unwrap();
-        variants.insert(2, ("link0001", "link".to_string()));
-    }
+    let variants: Vec<(&str, String)> = {
+        let variants = vec![
+            (
+                "prefix01",
+                root.path()
+                    .join("ext")
+                    .join("downloads-evil")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            ("dotdot01", "../outside".to_string()),
+            ("abs00001", "/definitely/not/authorized".to_string()),
+            (
+                "legal001",
+                root.path()
+                    .join("ext")
+                    .join("downloads")
+                    .join("sub")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        ];
+        #[cfg(unix)]
+        let variants = {
+            let mut variants = variants;
+            std::os::unix::fs::symlink(&outside, base.join("link")).unwrap();
+            variants.insert(2, ("link0001", "link".to_string()));
+            variants
+        };
+        variants
+    };
     #[cfg(not(unix))]
     let _ = &outside;
 
@@ -3015,9 +3021,10 @@ fn session_boundary_checks_use_components_and_canonical_paths() {
         *loaded.queue(),
         std::collections::VecDeque::from([base_guid.clone(), "legal001".into()])
     );
-    let mut rejected = vec!["prefix01", "dotdot01", "abs00001"];
     #[cfg(unix)]
-    rejected.push("link0001");
+    let rejected = vec!["prefix01", "dotdot01", "abs00001", "link0001"];
+    #[cfg(not(unix))]
+    let rejected = vec!["prefix01", "dotdot01", "abs00001"];
     for rejected in &rejected {
         assert!(
             loaded.task(rejected).is_none(),
@@ -3823,12 +3830,13 @@ fn archive_uses_store_sorted_entries_and_the_reference_comment() {
 #[test]
 fn archive_failure_keeps_images_and_releases_the_lock() {
     let root = tempfile::tempdir().expect("root");
-    let mut task = prepared_task(root.path(), "guid0001", "badarchive", 1, |_| {});
+    let task = prepared_task(root.path(), "guid0001", "badarchive", 1, |_| {});
     let gallery = task.get_fpath().unwrap();
     fs::create_dir_all(&gallery).unwrap();
     fs::write(gallery.join("1.jpg"), b"data").unwrap();
     #[cfg(unix)]
     {
+        let mut task = task;
         std::os::unix::fs::symlink("/etc/hostname", gallery.join("link.jpg")).unwrap();
         let error = task.make_archive(true).expect_err("symlink refused");
         assert!(
@@ -3890,11 +3898,13 @@ fn path_traversal_symlinks_and_empty_titles_are_refused() {
         task.get_fpath(),
         Err(crate::task::TaskError::UnsafePath { .. })
     ));
-    let task = prepared_task(root.path(), "guid0002", "safe", 1, |_| {});
     let downloads = root.path().join("downloads");
     fs::create_dir_all(&downloads).unwrap();
     #[cfg(unix)]
     {
+        // The gallery symlink refusal is proven on Unix, where `symlink(2)`
+        // needs no extra privilege; the task only exists for that probe.
+        let task = prepared_task(root.path(), "guid0002", "safe", 1, |_| {});
         std::os::unix::fs::symlink("/etc", downloads.join("safe")).unwrap();
         assert!(matches!(
             task.get_fpath(),
@@ -12631,10 +12641,14 @@ mod m6 {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
-    use std::process::{Child, Command, Stdio};
+    #[cfg(unix)]
+    use std::process::Child;
+    use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, OnceLock};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    #[cfg(unix)]
+    use std::time::Instant;
 
     const MANIFEST: &str = env!("CARGO_MANIFEST_DIR");
 
@@ -12759,6 +12773,9 @@ mod m6 {
         }
     }
 
+    /// Unix-only: every caller drives a POSIX signal/PTY or daemon child. The
+    /// Windows lifecycle is not exercised by these helpers.
+    #[cfg(unix)]
     pub(super) fn wait_exit(
         child: &mut Child,
         timeout: Duration,
@@ -12775,6 +12792,7 @@ mod m6 {
         }
     }
 
+    #[cfg(unix)]
     pub(super) fn wait_for<F: FnMut() -> bool>(timeout: Duration, mut check: F) -> bool {
         let deadline = Instant::now() + timeout;
         loop {

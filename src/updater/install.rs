@@ -424,6 +424,7 @@ impl Drop for InstallLock {
 /// Pure so the owner/mode predicate can be proven without chown: the effective
 /// uid must own the directory and group/other bits must be absent. An
 /// owner-only read-only mode is allowed and simply fails later writes.
+#[cfg(unix)]
 pub(crate) fn private_dir_verdict(uid: u32, mode: u32, euid: u32) -> Result<(), String> {
     if uid != euid {
         return Err(format!("owned by uid {uid}, not the effective uid {euid}"));
