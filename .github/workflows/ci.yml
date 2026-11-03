@@ -14,13 +14,22 @@ jobs:
     timeout-minutes: 180
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
-      TMPDIR: ${{ runner.temp }}
-      XEH_PYTHON: ${{ runner.temp }}/venv/bin/python
-      XEH_UPSTREAM: ${{ runner.temp }}/oracle
-      XEH_UPDATE_ORACLE: ${{ runner.temp }}/oracle
-      XEH_WEBUI_CHECKOUT: ${{ runner.temp }}/webui/dist
-      XEH_BROWSER_REPORT: ${{ runner.temp }}/browser-run/browser-report.json
     steps:
+      # The runner context is not available in job-level env, so the six
+      # runtime paths derived from it are initialized here (once, as the first
+      # step) through GITHUB_ENV. Every later step receives the same values the
+      # job env used to carry, and the gate commands below are unchanged.
+      - name: Initialize runner runtime paths
+        run: |
+          set -euo pipefail
+          {
+            printf 'TMPDIR=%s\n' "$RUNNER_TEMP"
+            printf 'XEH_PYTHON=%s\n' "$RUNNER_TEMP/venv/bin/python"
+            printf 'XEH_UPSTREAM=%s\n' "$RUNNER_TEMP/oracle"
+            printf 'XEH_UPDATE_ORACLE=%s\n' "$RUNNER_TEMP/oracle"
+            printf 'XEH_WEBUI_CHECKOUT=%s\n' "$RUNNER_TEMP/webui/dist"
+            printf 'XEH_BROWSER_REPORT=%s\n' "$RUNNER_TEMP/browser-run/browser-report.json"
+          } >> "$GITHUB_ENV"
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
