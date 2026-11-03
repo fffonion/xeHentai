@@ -1300,7 +1300,8 @@ fn target_dir() -> String {
 fn cargo_build(build_id: Option<&str>) {
     let mut command = std::process::Command::new(env!("CARGO"));
     command
-        .args(["build", "--jobs", "2"])
+        .args(["build", "--jobs", "2", "--target-dir"])
+        .arg(target_dir())
         .current_dir(MANIFEST)
         .env("CARGO_TARGET_DIR", target_dir());
     match build_id {
@@ -2654,6 +2655,178 @@ fn m7p_non_signal_stop_joins_the_held_stage_job() {
     assert!(pending_path(install.path()).exists());
 }
 
+// MARK: - address r3: untrusted recovery state stops before the App
+
+/// Copy an already built production image into a fresh install without
+/// triggering another nested build.
+fn copy_installed_exe(exe_src: &Path, install: &Path) -> PathBuf {
+    let exe = install.join("xeHentai");
+    std::fs::copy(exe_src, &exe).expect("copy the production image");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    exe
+}
+
+/// A startup that stops before the App exits promptly on its own. A run that
+/// instead builds the resident business App stays alive: the bounded wait
+/// then yields `None` and the caller fails without hanging the suite (the
+/// owned child is reaped by `ChildRun`'s drop).
+fn prompt_stop_code(child: &mut ChildRun) -> Option<i32> {
+    let exited = m6::wait_for(Duration::from_secs(15), || {
+        child
+            .child
+            .as_mut()
+            .expect("child")
+            .try_wait()
+            .expect("try_wait")
+            .is_some()
+    });
+    let code = child
+        .child
+        .as_mut()
+        .expect("child")
+        .try_wait()
+        .expect("try_wait")
+        .and_then(|status| status.code());
+    child.child.take();
+    assert!(
+        exited,
+        "the startup entered the resident App instead of stopping before it"
+    );
+    code
+}
+
+#[test]
+fn m7p_untrusted_activation_record_stops_before_the_business_app() {
+    let probe = install_dir();
+    let exe_src = probe.path().join("xeHentai");
+    owned_exe(probe.path());
+    let session = b"{\"tasks\":{},\"cookies\":{\"nw\":\"1\"}}".to_vec();
+
+    for kind in [
+        "corrupt",
+        "wrong-version",
+        "dangling-symlink",
+        "unreadable",
+        "area-symlink",
+    ] {
+        let install = install_dir();
+        let pem = public_pem(&signing_key());
+        publish_rss(install.path(), "http://127.0.0.1:9", Some(&pem), "rss");
+        let area = area_path(install.path());
+        let old_binding =
+            std::fs::read(install.path().join("rss/updater/github.rss")).expect("old binding");
+        private_dir(&area.join("backup/rss/updater"));
+        std::fs::write(area.join("backup/rss/updater/github.rss"), &old_binding).expect("backup");
+        let candidate_binding = b"// candidate binding\n".to_vec();
+        std::fs::write(
+            install.path().join("rss/updater/github.rss"),
+            &candidate_binding,
+        )
+        .expect("candidate live");
+        write_activation_fixture(
+            install.path(),
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            &["rss/updater/github.rss"],
+            &[],
+            None,
+        );
+        std::fs::write(install.path().join("h.json"), &session).expect("session");
+        let activation = area.join("activation.json");
+        let activation_before = std::fs::read(&activation).expect("activation fixture");
+        match kind {
+            "corrupt" => {
+                std::fs::write(&activation, b"not json{{{").expect("corrupt record");
+            }
+            "wrong-version" => {
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(&activation_before).expect("fixture json");
+                value["v"] = serde_json::json!(2);
+                std::fs::write(&activation, serde_json::to_vec(&value).expect("json"))
+                    .expect("version record");
+            }
+            "dangling-symlink" => {
+                std::fs::remove_file(&activation).expect("remove record");
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(area.join("no-such-record.json"), &activation)
+                    .expect("dangling marker");
+                #[cfg(not(unix))]
+                std::fs::write(&activation, b"not json{{{").expect("corrupt record");
+            }
+            "unreadable" => {
+                #[cfg(unix)]
+                set_mode(&activation, 0o000);
+            }
+            "area-symlink" => {
+                let real = install.path().join("area-real");
+                std::fs::rename(&area, &real).expect("move area aside");
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&real, &area).expect("area symlink");
+                #[cfg(not(unix))]
+                std::fs::create_dir_all(&area).expect("area dir");
+            }
+            _ => unreachable!(),
+        }
+        if kind == "unreadable" && cfg!(not(unix)) {
+            continue;
+        }
+        let exe = copy_installed_exe(&exe_src, install.path());
+        let mut child = ChildRun::spawn(
+            install.path(),
+            &exe,
+            &["-l", "eh.log", "-vv", "--auto-update", "off"],
+        );
+        assert_eq!(
+            prompt_stop_code(&mut child),
+            Some(1),
+            "an untrusted recovery record ({kind}) must stop before the App"
+        );
+        let log = log_of(install.path());
+        assert!(
+            !log.contains("started."),
+            "the business App started on an untrusted tree ({kind}): {log}"
+        );
+        assert!(
+            !log.contains("was applied"),
+            "an untrusted activation was confirmed ({kind}): {log}"
+        );
+        assert!(
+            !log.contains("is running"),
+            "tasks ran on an untrusted tree ({kind}): {log}"
+        );
+        assert_eq!(
+            std::fs::read(install.path().join("h.json")).expect("session"),
+            session,
+            "the user session bytes changed ({kind})"
+        );
+        if kind == "area-symlink" {
+            continue;
+        }
+        if kind == "unreadable" {
+            #[cfg(unix)]
+            set_mode(&activation, 0o644);
+        }
+        if kind != "dangling-symlink" {
+            assert!(
+                area.join("activation.json").exists(),
+                "the untrusted record was retired ({kind})"
+            );
+        }
+        assert!(
+            area.join("backup/rss/updater/github.rss").exists(),
+            "the backup was consumed or dropped ({kind})"
+        );
+        assert_eq!(
+            std::fs::read(install.path().join("rss/updater/github.rss")).expect("live binding"),
+            candidate_binding,
+            "the live tree was partly restored without a trusted record ({kind})"
+        );
+    }
+}
+
 // MARK: - address r2: exact rollback tree and recovery retention
 
 fn private_dir(path: &Path) {
@@ -3429,5 +3602,493 @@ fn m7p_exec_failure_rolls_back_under_the_held_lock_and_keeps_the_backup() {
             .join("backup/previous-exe")
             .exists(),
         "the only previous-executable copy was consumed by the rollback"
+    );
+}
+
+// MARK: - address r3: native backup gap keeps a retryable record
+
+/// A native provisional record whose candidate IS the running image: startup
+/// stays provisional instead of rolling back, so the run reaches confirmation
+/// and the real task modules.
+fn write_native_provisional_fixture(
+    install: &Path,
+    previous_id: &str,
+    paths: &[&str],
+    created: &[&str],
+    executable: &str,
+) {
+    let area = install.join(AREA);
+    private_dir(&area);
+    let previous = serde_json::json!({
+        "update_id": previous_id,
+        "build_id": crate::r#const::BUILD_ID,
+        "native": true,
+        "applied_at": "2026-11-02T00:00:00+08:00"
+    });
+    std::fs::write(
+        area.join("activation.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "v": 1,
+            "candidate": {
+                "update_id": "cccccccccccccccccccccccccccccccccccccccc",
+                "build_id": crate::r#const::BUILD_ID,
+                "native": true,
+                "applied_at": "2026-11-03T00:00:00+08:00"
+            },
+            "previous": previous,
+            "paths": paths,
+            "created": created,
+            "executable": executable,
+            "native": true
+        }))
+        .expect("activation json"),
+    )
+    .expect("activation");
+}
+
+#[test]
+fn m7p_native_backup_gap_keeps_the_record_and_a_restored_backup_completes() {
+    let probe = install_dir();
+    let exe_src = probe.path().join("xeHentai");
+    owned_exe(probe.path());
+    let previous_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let session = b"{\"tasks\":{},\"cookies\":{\"nw\":\"1\"}}".to_vec();
+    let image = b"NATIVE-IMAGE-SENTINEL".to_vec();
+
+    // Case one: a native activation whose only previous-executable copy is
+    // missing. The startup must stop with the record and backup retained, and
+    // the live tree untouched; putting the original backup back lets the SAME
+    // record complete on retry.
+    let install = install_dir();
+    let pem = public_pem(&signing_key());
+    publish_rss(install.path(), "http://127.0.0.1:9", Some(&pem), "rss");
+    let area = area_path(install.path());
+    let old_binding =
+        std::fs::read(install.path().join("rss/updater/github.rss")).expect("old binding");
+    private_dir(&area.join("backup/rss/updater"));
+    std::fs::write(area.join("backup/rss/updater/github.rss"), &old_binding).expect("backup");
+    let candidate_binding = b"// candidate binding\n".to_vec();
+    std::fs::write(
+        install.path().join("rss/updater/github.rss"),
+        &candidate_binding,
+    )
+    .expect("candidate live");
+    write_activation_fixture(
+        install.path(),
+        previous_id,
+        &["rss/updater/github.rss"],
+        &[],
+        Some("native-bin/xeHentai"),
+    );
+    std::fs::write(install.path().join("h.json"), &session).expect("session");
+    let exe = copy_installed_exe(&exe_src, install.path());
+    // The sentinel must land AFTER the production copy: the installed image
+    // under test is these exact bytes, not the copied build.
+    std::fs::create_dir_all(install.path().join("native-bin")).expect("image dir");
+    std::fs::write(install.path().join("native-bin/xeHentai"), &image).expect("live image");
+    let activation_before =
+        std::fs::read(area.join("activation.json")).expect("activation fixture");
+    assert!(
+        !area.join("backup/previous-exe").exists(),
+        "the fixture must start without a previous-executable copy"
+    );
+    let mut child = ChildRun::spawn(
+        install.path(),
+        &exe,
+        &["-l", "eh.log", "-vv", "--auto-update", "off"],
+    );
+    assert_eq!(
+        prompt_stop_code(&mut child),
+        Some(1),
+        "a native rollback without its trusted executable backup must stop"
+    );
+    let log = log_of(install.path());
+    assert!(
+        !log.contains("started."),
+        "the business App started without a trusted native backup: {log}"
+    );
+    assert_eq!(
+        std::fs::read(area.join("activation.json")).expect("activation"),
+        activation_before,
+        "the recovery record was retired or rewritten without a trusted backup"
+    );
+    assert!(
+        area.join("backup/rss/updater/github.rss").exists(),
+        "the resource backup was consumed by the failed native restore"
+    );
+    assert_eq!(
+        std::fs::read(install.path().join("rss/updater/github.rss")).expect("live binding"),
+        candidate_binding,
+        "the live tree changed without a trusted native backup"
+    );
+    assert_eq!(
+        std::fs::read(install.path().join("native-bin/xeHentai")).expect("live image"),
+        image,
+        "the live image changed without a trusted native backup"
+    );
+    assert_eq!(
+        std::fs::read(install.path().join("h.json")).expect("session"),
+        session
+    );
+
+    // The original backup copy returns: the SAME record now completes.
+    std::fs::write(area.join("backup/previous-exe"), &image).expect("original backup");
+    std::fs::write(install.path().join("eh.log"), "").expect("reset log");
+    let child = ChildRun::spawn(
+        install.path(),
+        &exe,
+        &["-l", "eh.log", "-vv", "--auto-update", "off"],
+    );
+    assert!(
+        wait_log(install.path(), &format!("rolled back to {previous_id}")),
+        "the retried recovery did not complete: {}",
+        log_of(install.path())
+    );
+    assert_eq!(child.stop(), 0);
+    assert_eq!(
+        std::fs::read(install.path().join("rss/updater/github.rss")).expect("restored"),
+        old_binding
+    );
+    assert_eq!(
+        std::fs::read(install.path().join("native-bin/xeHentai")).expect("live image"),
+        image,
+        "the previous executable bytes were not restored at the installation path"
+    );
+    assert!(
+        area.join("backup/previous-exe").exists(),
+        "the retry consumed the only previous-executable copy"
+    );
+    assert!(!area.join("activation.json").exists());
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(area.join("state.json")).expect("state"))
+            .expect("state json");
+    assert_eq!(state["active"]["update_id"], previous_id);
+    assert_eq!(
+        std::fs::read(install.path().join("h.json")).expect("session"),
+        session
+    );
+
+    // Control: a resource-only activation needs no native backup and still
+    // rolls back through the same path.
+    let control = install_dir();
+    publish_rss(control.path(), "http://127.0.0.1:9", Some(&pem), "rss");
+    let control_area = area_path(control.path());
+    let control_old =
+        std::fs::read(control.path().join("rss/updater/github.rss")).expect("old binding");
+    private_dir(&control_area.join("backup/rss/updater"));
+    std::fs::write(
+        control_area.join("backup/rss/updater/github.rss"),
+        &control_old,
+    )
+    .expect("backup");
+    std::fs::write(
+        control.path().join("rss/updater/github.rss"),
+        b"// candidate binding\n",
+    )
+    .expect("candidate live");
+    write_activation_fixture(
+        control.path(),
+        previous_id,
+        &["rss/updater/github.rss"],
+        &[],
+        None,
+    );
+    std::fs::write(control.path().join("h.json"), &session).expect("session");
+    let control_exe = copy_installed_exe(&exe_src, control.path());
+    let child = ChildRun::spawn(
+        control.path(),
+        &control_exe,
+        &["-l", "eh.log", "-vv", "--auto-update", "off"],
+    );
+    assert!(
+        wait_log(control.path(), &format!("rolled back to {previous_id}")),
+        "a resource-only rollback must not require a native backup: {}",
+        log_of(control.path())
+    );
+    assert_eq!(child.stop(), 0);
+    assert_eq!(
+        std::fs::read(control.path().join("rss/updater/github.rss")).expect("restored"),
+        control_old
+    );
+    assert!(!control_area.join("activation.json").exists());
+}
+
+// MARK: - address r3: the real task module gates confirmation
+
+#[test]
+fn m7p_provisional_task_module_failure_rolls_back_before_confirm() {
+    let probe = install_dir();
+    let exe_src = probe.path().join("xeHentai");
+    owned_exe(probe.path());
+    let previous_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let session = b"{\"tasks\":{},\"cookies\":{\"nw\":\"1\"}}".to_vec();
+    let image = b"NATIVE-IMAGE-SENTINEL".to_vec();
+
+    // The installed tree is mid-switch with a native provisional record for
+    // the RUNNING image, but the live task module went bad after the private
+    // preflight: preparing the real task filters must fail and roll the
+    // previous release back instead of confirming it.
+    let install = install_dir();
+    let pem = public_pem(&signing_key());
+    publish_rss(install.path(), "http://127.0.0.1:9", Some(&pem), "rss");
+    let gallery = m6::Gallery::start(4);
+    let area = area_path(install.path());
+    let old_binding =
+        std::fs::read(install.path().join("rss/updater/github.rss")).expect("old binding");
+    private_dir(&area.join("backup/rss/updater"));
+    std::fs::write(area.join("backup/rss/updater/github.rss"), &old_binding).expect("backup");
+    // The live binding stays a loadable updater module (only a comment is
+    // added), so confirmation itself can succeed: the failure under test is
+    // the task module, not the updater binding.
+    let mut candidate_binding = old_binding.clone();
+    candidate_binding.extend_from_slice(b"\n// candidate tree\n");
+    std::fs::write(
+        install.path().join("rss/updater/github.rss"),
+        &candidate_binding,
+    )
+    .expect("candidate live");
+    std::fs::write(
+        install.path().join("rss/filters/match.rss"),
+        b"this is not rss(((",
+    )
+    .expect("broken live task module");
+    let broken_module =
+        std::fs::read(install.path().join("rss/filters/match.rss")).expect("broken module");
+    write_native_provisional_fixture(
+        install.path(),
+        previous_id,
+        &["rss/updater/github.rss"],
+        &[],
+        "native-bin/xeHentai",
+    );
+    std::fs::write(install.path().join("h.json"), &session).expect("session");
+    let exe = copy_installed_exe(&exe_src, install.path());
+    std::fs::create_dir_all(install.path().join("native-bin")).expect("image dir");
+    std::fs::write(install.path().join("native-bin/xeHentai"), &image).expect("live image");
+    std::fs::write(area.join("backup/previous-exe"), &image).expect("executable backup");
+    let mut child = ChildRun::spawn(
+        install.path(),
+        &exe,
+        &[
+            "-l",
+            "eh.log",
+            "-vv",
+            "-p",
+            &gallery.proxy(),
+            "-d",
+            install.path().join("dl").to_string_lossy().as_ref(),
+            "--auto-update",
+            "off",
+            "http://e-hentai.org/g/1/aaaa",
+        ],
+    );
+    assert_eq!(
+        prompt_stop_code(&mut child),
+        Some(1),
+        "a broken real task module must roll back instead of confirming"
+    );
+    let log = log_of(install.path());
+    assert!(
+        !log.contains("was applied"),
+        "the broken provisional release was confirmed: {log}"
+    );
+    assert!(
+        !log.contains("started."),
+        "the business App started with a broken task module: {log}"
+    );
+    assert!(
+        gallery.paths().is_empty(),
+        "business traffic ran with a broken task module: {:?}",
+        gallery.paths()
+    );
+    assert_eq!(
+        std::fs::read(install.path().join("rss/updater/github.rss")).expect("restored"),
+        old_binding,
+        "the previous resource tree was not restored"
+    );
+    assert_eq!(
+        std::fs::read(install.path().join("rss/filters/match.rss")).expect("module"),
+        broken_module,
+        "files outside the activation record must be left alone"
+    );
+    assert!(!area.join("activation.json").exists());
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(area.join("state.json")).expect("state"))
+            .expect("state json");
+    assert_eq!(state["active"]["update_id"], previous_id);
+    assert_eq!(
+        std::fs::read(install.path().join("h.json")).expect("session"),
+        session
+    );
+}
+
+// MARK: - address r3: the prepared run never reopens the live module
+
+/// Child side of the prepared-snapshot proof. It runs the real startup with a
+/// native provisional record for the running image, then a real gallery URL
+/// run. The prepared-snapshot barrier removes the live task module AFTER the
+/// real compile/bind/resolve and BEFORE confirmation: the first producer and
+/// all scan/download workers must still complete real gallery work from the
+/// retained bytes.
+#[test]
+fn m7p_provisional_prepared_snapshot_child() {
+    let Some(install) = std::env::var_os("XEH_M7P_PREPARED_CHILD") else {
+        return;
+    };
+    let install = PathBuf::from(install);
+    let root = install.clone();
+    crate::filters::test_hooks::set_prepared(Some(Box::new(move |path: &Path| {
+        if path != root.as_path() {
+            return;
+        }
+        std::fs::remove_file(path.join("rss/filters/match.rss")).expect("remove live module");
+    })));
+    let gallery = m6::Gallery::start(4);
+    let proxy = gallery.proxy();
+    let dl = install.join("dl").to_string_lossy().into_owned();
+    let code = crate::run_with_args(
+        &install,
+        [
+            "xeHentai",
+            "-l",
+            "eh.log",
+            "-vv",
+            "-p",
+            proxy.as_str(),
+            "-d",
+            dl.as_str(),
+            "--auto-update",
+            "off",
+            "http://e-hentai.org/g/1/aaaa",
+        ],
+    );
+    crate::filters::test_hooks::set_prepared(None);
+    assert_eq!(
+        code,
+        0,
+        "the prepared run must finish: {}",
+        log_of(&install)
+    );
+    let files = m6::image_files(&install.join("dl"));
+    assert_eq!(
+        files.len(),
+        4,
+        "the prepared run downloaded no images: {files:?}"
+    );
+    let paths = gallery.paths();
+    assert!(
+        paths
+            .iter()
+            .any(|path| path.contains("e-hentai.org/g/1/aaaa") && !path.contains("?p=")),
+        "metadata request missing: {paths:?}"
+    );
+    assert!(
+        paths.iter().any(|path| path.contains("/s/")),
+        "image pages not requested: {paths:?}"
+    );
+    assert_eq!(
+        paths
+            .iter()
+            .filter(|path| path.contains("img.test"))
+            .count(),
+        4,
+        "image requests: {paths:?}"
+    );
+}
+
+#[test]
+fn m7p_provisional_run_uses_the_prepared_snapshot_after_the_live_file_is_gone() {
+    let Some(child_exe) = std::env::current_exe().ok() else {
+        return;
+    };
+    let previous_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let session = b"{\"tasks\":{},\"cookies\":{\"nw\":\"1\"}}".to_vec();
+    let image = b"NATIVE-IMAGE-SENTINEL".to_vec();
+    let install = install_dir();
+    let pem = public_pem(&signing_key());
+    publish_rss(install.path(), "http://127.0.0.1:9", Some(&pem), "rss");
+    let area = area_path(install.path());
+    let old_binding =
+        std::fs::read(install.path().join("rss/updater/github.rss")).expect("old binding");
+    private_dir(&area.join("backup/rss/updater"));
+    std::fs::write(area.join("backup/rss/updater/github.rss"), &old_binding).expect("backup");
+    // The live tree is fully loadable, including a good task module: the only
+    // damage happens inside the prepared-snapshot barrier, after preparation.
+    let mut candidate_binding = old_binding.clone();
+    candidate_binding.extend_from_slice(b"\n// candidate tree\n");
+    std::fs::write(
+        install.path().join("rss/updater/github.rss"),
+        &candidate_binding,
+    )
+    .expect("candidate live");
+    let good_module =
+        std::fs::read(install.path().join("rss/filters/match.rss")).expect("good module");
+    assert!(!good_module.is_empty());
+    write_native_provisional_fixture(
+        install.path(),
+        previous_id,
+        &["rss/updater/github.rss"],
+        &[],
+        "native-bin/xeHentai",
+    );
+    std::fs::write(install.path().join("h.json"), &session).expect("session");
+    std::fs::create_dir_all(install.path().join("native-bin")).expect("image dir");
+    std::fs::write(install.path().join("native-bin/xeHentai"), &image).expect("live image");
+    std::fs::write(area.join("backup/previous-exe"), &image).expect("executable backup");
+    std::fs::create_dir_all(install.path().join("home")).unwrap();
+    std::fs::create_dir_all(install.path().join("tmp")).unwrap();
+    std::fs::create_dir_all(install.path().join("cache")).unwrap();
+    let mut child = std::process::Command::new(child_exe)
+        .current_dir(install.path())
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", install.path().join("home"))
+        .env("TMPDIR", install.path().join("tmp"))
+        .env("XDG_CACHE_HOME", install.path().join("cache"))
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env("XEH_M7P_PREPARED_CHILD", install.path())
+        .args([
+            "--exact",
+            "tests::m7p::m7p_provisional_prepared_snapshot_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn the prepared-snapshot process");
+    let status = m6::wait_exit(&mut child, Duration::from_secs(120)).expect("child exit");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "the prepared run did not complete: {}",
+        log_of(install.path())
+    );
+    let log = log_of(install.path());
+    assert!(
+        log.contains("was applied"),
+        "the provisional release was never confirmed: {log}"
+    );
+    assert!(log.contains("started."), "{log}");
+    assert!(
+        !install.path().join("rss/filters/match.rss").exists(),
+        "the live module file survived the barrier that removed it after preparation"
+    );
+    assert!(
+        !area.join("activation.json").exists(),
+        "the provisional record was not retired by confirmation"
+    );
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(area.join("state.json")).expect("state"))
+            .expect("state json");
+    assert_eq!(
+        state["active"]["update_id"],
+        "cccccccccccccccccccccccccccccccccccccccc"
+    );
+    assert_eq!(
+        std::fs::read(install.path().join("h.json")).expect("session"),
+        session
     );
 }

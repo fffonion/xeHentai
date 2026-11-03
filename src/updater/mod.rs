@@ -1104,9 +1104,11 @@ fn plain_rollback_event(detail: &str, previous_id: &str) -> LogEvent {
 pub fn startup(install_root: &Path) -> StartupReport {
     let installation = install::Installation::new(install_root);
     // Never trust an existing area with a foreign owner or a shared-writable
-    // mode, before reading, recovery or any write.
+    // mode, before reading, recovery or any write. An unreadable or
+    // untrustworthy area may hide a recovery record, so the startup stops
+    // instead of running the App on a possibly mid-switch tree.
     if let Err(error) = installation.verify_private_area() {
-        return StartupReport::failed(error.to_string());
+        return StartupReport::stopped(error.to_string(), StartupStop::RecoveryFailed);
     }
     // The pending SUBDIRECTORY and its leaf are validated before they are
     // probed, read or deleted. A missing subdirectory is simply "no pending"
@@ -1117,8 +1119,15 @@ pub fn startup(install_root: &Path) -> StartupReport {
             return StartupReport::stopped(error.to_string(), StartupStop::RecoveryFailed);
         }
     };
-    let activation_present = installation.has_activation();
-    if !activation_present && !pending_present {
+    // Only a genuine absence means "no activation": any other inspection
+    // error leaves the recovery state untrusted and stops the startup.
+    let pre_activation_present = match installation.activation_present() {
+        Ok(present) => present,
+        Err(error) => {
+            return StartupReport::stopped(error.to_string(), StartupStop::RecoveryFailed);
+        }
+    };
+    if !pre_activation_present && !pending_present {
         return StartupReport::new("none", Vec::new());
     }
 
@@ -1134,17 +1143,30 @@ pub fn startup(install_root: &Path) -> StartupReport {
             Err(error @ UpdateError::Busy(_)) => {
                 return StartupReport::stopped(error.to_string(), StartupStop::Busy);
             }
-            Err(error) => return StartupReport::failed(error.to_string()),
+            Err(error) => {
+                return StartupReport::stopped(error.to_string(), StartupStop::RecoveryFailed);
+            }
         },
-        Err(error) => return StartupReport::failed(error.to_string()),
+        Err(error) => {
+            // The private handoff descriptor cannot be trusted against the
+            // real lock file while a recovery record may exist.
+            return StartupReport::stopped(error.to_string(), StartupStop::RecoveryFailed);
+        }
     };
 
-    if activation_present {
-        let activation = match installation.activation() {
-            Ok(Some(activation)) => activation,
-            Ok(None) => return StartupReport::new("none", Vec::new()),
-            Err(error) => return StartupReport::failed(error.to_string()),
-        };
+    // The authoritative recovery state is re-read UNDER the held transaction
+    // lock, never taken from the pre-lock probe: an unreadable or otherwise
+    // untrusted marker stops before the App, with the transaction still held
+    // so no concurrent starter can enter the same installation mid-state.
+    let activation = match installation.activation() {
+        Ok(activation) => activation,
+        Err(error) => {
+            let mut report = StartupReport::stopped(error.to_string(), StartupStop::RecoveryFailed);
+            report.lock = Some(lock);
+            return report;
+        }
+    };
+    if let Some(activation) = activation {
         let candidate = activation.candidate.clone();
         if candidate.native && candidate.build_id == crate::r#const::BUILD_ID {
             // The replaced image is the one running. That proves the image

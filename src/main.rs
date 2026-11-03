@@ -283,15 +283,36 @@ async fn application(
     }
     let active_interactive = opts.interactive && !opts.daemon;
     let needs_login = opts.username.is_some() && opts.key.is_some() && !app.has_login();
+    // The CURRENT run's task module is prepared BEFORE the provisional
+    // identity is confirmed, and its ownership moves into the real Runtime:
+    // a genuine module initialization failure still has the recovery record
+    // to roll back, and no worker later reopens the mutable live module.
+    // An ordinary non-provisional run keeps its existing lazy loading.
+    let task_module_needed = needs_login || active_interactive || !opts.urls.is_empty();
+    let mut prepared: Option<filters::PreparedTaskFilters> = None;
+    if provisional.is_some() && task_module_needed {
+        match filters::PreparedTaskFilters::prepare(resource) {
+            Ok(snapshot) => prepared = Some(snapshot),
+            Err(error) => {
+                let detail = format!("task filter module initialization failed: {error}");
+                log_rollback_provisional(&mut app, locale, resource, &detail);
+                eprintln!("xeHentai: filter error: {error}");
+                return 1;
+            }
+        }
+    }
     // An active interactive run always needs the filters module (the login
     // prompt uses it when logged out, and the download prompts need it even
     // when a valid cookie was restored); credential login needs it too.
     //
-    // This is the CURRENT RUN's required module, so it loads BEFORE the
-    // provisional identity is confirmed: a real module initialization failure
-    // still has the recovery record to roll back.
+    // A prepared run draws its login instance from the SAME prepared source;
+    // otherwise this is the existing live load.
     let mut filters = if needs_login || active_interactive {
-        match filters::Filters::load(resource) {
+        let loaded = match prepared.as_ref() {
+            Some(snapshot) => snapshot.worker(),
+            None => filters::Filters::load(resource),
+        };
+        match loaded {
             Ok(filters) => Some(filters),
             Err(error) => {
                 if provisional.is_some() {
@@ -403,6 +424,9 @@ async fn application(
         let _ = app.add_task(url, Map::new());
     }
     let runtime = core::Runtime::new(app, resource.to_path_buf());
+    if let Some(snapshot) = prepared {
+        runtime.set_prepared_task_filters(snapshot);
+    }
     run_supervised(runtime, urls, locale, resource.to_path_buf(), prepared_rpc).await
 }
 

@@ -167,18 +167,35 @@ impl Installation {
     }
 
     /// True while an activation has not been confirmed by the real new image.
-    pub fn has_activation(&self) -> bool {
-        self.activation_path().exists()
+    ///
+    /// Fallible: only a genuine absence (`NotFound`) means "no activation".
+    /// Any other metadata error, or a marker that is not a real
+    /// installer-owned regular file, is untrusted recovery state and must
+    /// stop the startup before the App, never read as absent.
+    pub fn activation_present(&self) -> Result<bool, UpdateError> {
+        let path = self.activation_path();
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(UpdateError::io(&path, &error)),
+        };
+        verify_activation_leaf(&path, &metadata)?;
+        Ok(true)
     }
 
     /// The provisional record, if one is present.
     pub fn activation(&self) -> Result<Option<Activation>, UpdateError> {
         let path = self.activation_path();
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(UpdateError::io(&path, &error)),
         };
+        // The marker is inspected before it is read: a symlink could point
+        // anywhere outside the private area, so it is rejected here and the
+        // read itself refuses to follow a final symlink.
+        verify_activation_leaf(&path, &metadata)?;
+        let bytes = read_private_leaf(&path)?;
         let activation: Activation = serde_json::from_slice(&bytes)
             .map_err(|error| UpdateError::install(format!("activation record: {error}")))?;
         if activation.v != ACTIVATION_VERSION {
@@ -383,9 +400,30 @@ fn private_dir_verdict_metadata(
 /// point anywhere outside the private area, so it is rejected BEFORE the read
 /// or delete rather than resolved.
 fn verify_pending_leaf(path: &Path, metadata: &std::fs::Metadata) -> Result<(), UpdateError> {
+    verify_owned_regular_leaf(path, metadata, "the pending update envelope")
+}
+
+/// An activation marker must be a real installer-owned regular file, for the
+/// same reason as a pending leaf: a symlink could point anywhere, and a
+/// foreign-owned or non-regular marker is untrusted recovery state.
+fn verify_activation_leaf(path: &Path, metadata: &std::fs::Metadata) -> Result<(), UpdateError> {
+    verify_owned_regular_leaf(path, metadata, "the activation record")
+}
+
+/// The previous-executable backup a native rollback restores must be a real
+/// installer-owned regular file. Resource-only activations never consult it.
+fn verify_backup_executable(path: &Path, metadata: &std::fs::Metadata) -> Result<(), UpdateError> {
+    verify_owned_regular_leaf(path, metadata, "the previous executable backup")
+}
+
+fn verify_owned_regular_leaf(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    what: &str,
+) -> Result<(), UpdateError> {
     if metadata.file_type().is_symlink() {
         return Err(UpdateError::install(format!(
-            "{} is a symlink; the pending update envelope must be a regular installer-owned file",
+            "{} is a symlink; {what} must be a regular installer-owned file",
             path.display()
         )));
     }
@@ -1290,7 +1328,12 @@ fn undo_activation(
             Err(error) => return Err(UpdateError::io(&live, &error)),
         }
     }
-    restore_executable(installation, backup, activation.executable.as_deref())
+    restore_executable(
+        installation,
+        backup,
+        activation.executable.as_deref(),
+        activation.native,
+    )
 }
 
 /// Put the previous files back. A path that had no previous version is a
@@ -1353,6 +1396,27 @@ fn restore_moved(
     }
 }
 
+/// Require the trusted previous-executable copy a NATIVE rollback restores.
+///
+/// A missing or unreadable backup is a hard failure: the journal and the
+/// backup are retained and nothing is mutated, so a later start retries the
+/// SAME record once the original backup is back. Resource-only activations
+/// never need a native image and return `Ok` without consulting the backup.
+fn require_native_backup(backup: &Path) -> Result<(), UpdateError> {
+    let backup_exe = backup.join(BACKUP_EXE);
+    let metadata = match std::fs::symlink_metadata(&backup_exe) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(UpdateError::install(format!(
+                "{} is missing; the previous executable cannot be restored",
+                backup_exe.display()
+            )));
+        }
+        Err(error) => return Err(UpdateError::io(&backup_exe, &error)),
+    };
+    verify_backup_executable(&backup_exe, &metadata)
+}
+
 /// Put the backed up executable back at the KNOWN installation path.
 ///
 /// A copy through a synced temporary file in the destination directory is
@@ -1364,12 +1428,24 @@ fn restore_executable(
     installation: &Installation,
     backup: &Path,
     executable: Option<&str>,
+    native: bool,
 ) -> Result<(), UpdateError> {
     use std::io::Write;
     let backup_exe = backup.join(BACKUP_EXE);
-    if std::fs::symlink_metadata(&backup_exe).is_err() {
-        return Ok(());
-    }
+    let metadata = match std::fs::symlink_metadata(&backup_exe) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if native {
+                return Err(UpdateError::install(format!(
+                    "{} is missing; the previous executable cannot be restored",
+                    backup_exe.display()
+                )));
+            }
+            return Ok(());
+        }
+        Err(error) => return Err(UpdateError::io(&backup_exe, &error)),
+    };
+    verify_backup_executable(&backup_exe, &metadata)?;
     let destination = match executable {
         Some(relative) => installation.root().join(relative),
         None => std::env::current_exe().map_err(|error| {
@@ -1381,8 +1457,16 @@ fn restore_executable(
     let parent = destination.parent().ok_or_else(|| {
         UpdateError::install(format!("{} has no parent directory", destination.display()))
     })?;
-    let mut source =
-        std::fs::File::open(&backup_exe).map_err(|error| UpdateError::io(&backup_exe, &error))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_NOFOLLOW);
+    }
+    let mut source = options
+        .open(&backup_exe)
+        .map_err(|error| UpdateError::io(&backup_exe, &error))?;
     let mut temp =
         tempfile::NamedTempFile::new_in(parent).map_err(|error| UpdateError::io(parent, &error))?;
     std::io::copy(&mut source, &mut temp).map_err(|error| UpdateError::io(temp.path(), &error))?;
@@ -1432,6 +1516,13 @@ pub fn rollback_activation(installation: &Installation) -> Result<Option<Record>
                 paths.push(spelled);
             }
         }
+    }
+    // A native rollback restores the previous executable from the backup, so
+    // the required copy is verified BEFORE the recovery tree is mutated: a
+    // missing or untrusted backup keeps the journal, the backup and the live
+    // tree untouched for a later retry.
+    if activation.native {
+        require_native_backup(&backup)?;
     }
     undo_activation(installation, &backup, &activation, &paths)?;
     installation.write_records(&Records {
