@@ -1130,6 +1130,80 @@ def test_update_apply_reject_uses_the_executed_error_class_and_old_identity():
     assert entry["detected"] is True, entry
 
 
+def test_update_oracle_verify_reads_the_module_project_repository():
+    """The frozen blobs come from this module's project, never a host path.
+
+    The control tree is written from the real pinned blobs of the current
+    project repository and git still runs for real; the only wrapper refuses a
+    `git -C` target outside the module project root, i.e. exactly what a
+    machine without a developer-home checkout could not provide.
+    """
+    module_root = Path(compat.__file__).resolve().parent.parent
+    real_run = compat.subprocess.run
+    top = real_run(["git", "-C", str(module_root), "rev-parse",
+                    "--show-toplevel"], capture_output=True, text=True)
+    assert top.returncode == 0, top.stderr
+    assert Path(top.stdout.strip()).resolve() == module_root, (
+        top.stdout, module_root)
+    pinned = ("xeHentai/config.py", "xeHentai/const.py")
+    blobs = {}
+    for relative in pinned:
+        result = real_run(
+            ["git", "-C", str(module_root), "show",
+             f"{compat.UPDATE_ORACLE_REVISION}:{relative}"],
+            capture_output=True)
+        assert result.returncode == 0, (relative, result.stderr)
+        assert result.stdout, relative
+        blobs[relative] = result.stdout
+
+    def guard(argv, *args, **kwargs):
+        command = list(argv) if isinstance(argv, (list, tuple)) else []
+        if command and Path(str(command[0])).name == "git" and "-C" in command:
+            target = Path(str(command[command.index("-C") + 1])).resolve()
+            assert target == module_root, (
+                "git addressed a repository outside the module project "
+                f"root: {target}")
+        return real_run(argv, *args, **kwargs)
+
+    oracle = Path(tempfile.mkdtemp(
+        prefix="b6-oracle-repo-", dir=str(_scratch_base())))
+    try:
+        for relative, body in blobs.items():
+            path = oracle / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(body)
+        compat.subprocess.run = guard
+        try:
+            result = compat.update_oracle_verify(oracle)
+            assert result["revision"] == compat.UPDATE_ORACLE_REVISION, result
+            assert result["files"] == len(blobs), result
+            assert result["method"] == "git-show-byte-compare", result
+            # A same-path byte edit is still a strict mismatch.
+            edited = oracle / pinned[0]
+            original = edited.read_bytes()
+            edited.write_bytes(original[:-1] + bytes([original[-1] ^ 0x01]))
+            try:
+                compat.update_oracle_verify(oracle)
+            except compat.CompatError as error:
+                assert pinned[0] in str(error), error
+            else:
+                raise AssertionError("a wrong oracle byte was accepted")
+            edited.write_bytes(original)
+            # A path the pinned commit does not contain fails closed.
+            extra = oracle / "xeHentai" / "portable-control-missing.py"
+            extra.write_bytes(b"\x00\xff not a pinned blob\n")
+            try:
+                compat.update_oracle_verify(oracle)
+            except compat.CompatError as error:
+                assert extra.name in str(error), error
+            else:
+                raise AssertionError("a missing pinned blob was accepted")
+        finally:
+            compat.subprocess.run = real_run
+    finally:
+        shutil.rmtree(oracle, ignore_errors=True)
+
+
 TESTS = [
     test_update_is_registered_everywhere_required,
     test_update_expectations_compare_clean_on_both_sides,
@@ -1153,6 +1227,7 @@ TESTS = [
     test_update_package_member_bodies_are_exact_and_same_length_edits_fail,
     test_update_rejects_an_extra_subcase_id_present_on_both_sides,
     test_update_apply_reject_uses_the_executed_error_class_and_old_identity,
+    test_update_oracle_verify_reads_the_module_project_repository,
 ]
 
 

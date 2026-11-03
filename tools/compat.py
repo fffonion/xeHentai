@@ -4822,7 +4822,10 @@ UPDATE_CASE_IDS = (
 )
 
 UPDATE_ORACLE_REVISION = "43fc55c0c662f195d048becf6276a26ce06b09d9"
-UPDATE_ORACLE_REPO = "/home/wow/rustscript/xehentai-rss"
+# The frozen blobs are read from this tool's own project repository: `git show`
+# resolves them in a linked worktree and in a full-history CI checkout alike,
+# so no machine-specific checkout path is involved.
+UPDATE_ORACLE_REPO = str(REPO)
 UPDATE_ORACLE_DEFAULT = (
     "/mnt/TEMP/workspace/xehentai-rss/tmp/"
     "xehentai-pyshape-resume-20261102-89633df7/m6-cli-oracle/oracle"

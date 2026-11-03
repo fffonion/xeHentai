@@ -52,12 +52,6 @@ jobs:
             -o "$RUNNER_TEMP/oracle.tar.gz"
           tar -xzf "$RUNNER_TEMP/oracle.tar.gz" -C "$XEH_UPSTREAM" --strip-components=1
           test -f "$XEH_UPSTREAM/xeHentai/config.py"
-          # The update comparator resolves its frozen blobs with
-          # `git -C /home/wow/rustscript/xehentai-rss show <rev>:<path>`.
-          # This job checks out the same public repository with full history,
-          # so expose that checkout at the comparator's fixed path.
-          sudo mkdir -p /home/wow/rustscript
-          sudo ln -sfn "$GITHUB_WORKSPACE" /home/wow/rustscript/xehentai-rss
       - name: Rebuild the original WebUI pack
         run: |
           set -euo pipefail
