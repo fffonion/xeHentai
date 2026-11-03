@@ -46,9 +46,7 @@ UPDATE_AVAILABLE: '发现可用的更新: 发布于 %{0} "%{1}" (%{2})'
 UPDATE_CHANNEL: '更新渠道为: %{0}'
 UPDATE_COMPLETE: 更新完成，请重新启动程序应用更新
 UPDATE_APPLIED: '更新 %{0} 已应用，本次启动运行新版本'
-UPDATE_CONFIRMED: '更新 %{0} 正在运行'
 UPDATE_PENDING_ID: '待用更新 %{0} 已准备好，下次启动生效'
-UPDATE_ROLLBACK: '更新失败（%{0}），已回退到 %{1}'
 UPDATE_DEV_CHANNEL: 测试版
 UPDATE_DOWNLOAD_MANUALLY: 可以从 https://dl.yooooo.us/share/xeHentai/ 下载更新
 UPDATE_DOWNLOAD_UNSUPPORTED: 更新检查已完成，但此版本不下载或安装更新包

@@ -46,9 +46,7 @@ UPDATE_AVAILABLE: 'Update available: %{0} "%{1}" (%{2})'
 UPDATE_CHANNEL: 'Update channel is: %{0}'
 UPDATE_COMPLETE: Update is complete, it will take effect on next run
 UPDATE_APPLIED: 'Update %{0} was applied; this start runs the new version'
-UPDATE_CONFIRMED: 'Update %{0} is running'
 UPDATE_PENDING_ID: 'Pending update %{0} is ready for the next start'
-UPDATE_ROLLBACK: 'Update failed (%{0}); rolled back to %{1}'
 UPDATE_DEV_CHANNEL: dev
 UPDATE_DOWNLOAD_MANUALLY: You can download update from https://dl.yooooo.us/share/xeHentai/
 UPDATE_DOWNLOAD_UNSUPPORTED: Update check completed, but this build does not download or install packages

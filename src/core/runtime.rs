@@ -23,9 +23,7 @@ use super::{
     is_runnable_state, run_download,
 };
 use crate::r#const as consts;
-use crate::filters::{
-    Filters, ImageOutcome, MetadataOutcome, PageOutcome, PageResponse, PreparedTaskFilters,
-};
+use crate::filters::{Filters, ImageOutcome, MetadataOutcome, PageOutcome, PageResponse};
 use crate::task::{
     ArchiveSnapshot, CommittedArchive, PreparedArchive, commit_prepared, discard_prepared,
     prepare_archive_snapshot, remove_detached,
@@ -126,11 +124,6 @@ pub(crate) enum ArchiveCommit {
 pub(crate) struct RuntimeInner {
     pub app: std::cell::RefCell<App>,
     resource_root: PathBuf,
-    /// The prepared task module for THIS run, transferred from the startup
-    /// before confirmation. When present, every filters instance in this
-    /// runtime comes from the same prepared bytes and no worker reopens the
-    /// mutable live module file.
-    prepared: std::cell::RefCell<Option<PreparedTaskFilters>>,
     clock: Arc<dyn HttpClock>,
     threads: std::cell::RefCell<Vec<Vec<Slot>>>,
     cancels: std::cell::RefCell<BTreeMap<String, watch::Sender<bool>>>,
@@ -491,7 +484,6 @@ impl Runtime {
         let inner = RuntimeInner {
             app: std::cell::RefCell::new(app),
             resource_root,
-            prepared: std::cell::RefCell::new(None),
             clock,
             threads: std::cell::RefCell::new((0..20).map(|_| Vec::new()).collect()),
             cancels: std::cell::RefCell::new(BTreeMap::new()),
@@ -509,13 +501,6 @@ impl Runtime {
         AppHandle {
             inner: Rc::clone(&self.inner),
         }
-    }
-
-    /// Take ownership of the task module the startup prepared before
-    /// confirmation. This runtime's filters instances then all come from the
-    /// same prepared source instead of the mutable live module file.
-    pub fn set_prepared_task_filters(&self, prepared: PreparedTaskFilters) {
-        self.inner.prepared.replace(Some(prepared));
     }
 
     /// Spawn the task loop on the caller's `LocalSet` and return its join
@@ -1277,7 +1262,7 @@ impl AppHandle {
                 "rpc_port {port} is out of range"
             )));
         }
-        let prepared = crate::rpc::server::prepare(
+        crate::rpc::server::serve(
             &interface,
             port as u16,
             &base_dir,
@@ -1285,19 +1270,10 @@ impl AppHandle {
             clock,
             secret,
             static_origin,
+            shutdown,
+            self.clone(),
         )
-        .await?;
-        self.serve_prepared_rpc(prepared, shutdown).await
-    }
-
-    /// Serve an RPC server that startup already prepared (bound listener and
-    /// loaded dispatcher/filters) before it confirmed the update identity.
-    pub async fn serve_prepared_rpc(
-        &self,
-        prepared: crate::rpc::server::PreparedRpc,
-        shutdown: watch::Receiver<bool>,
-    ) -> Result<(), crate::rpc::ServerError> {
-        crate::rpc::server::serve_prepared(prepared, shutdown, self.clone()).await
+        .await
     }
 
     /// Test-only view of the per-state handle collection. Used to prove the
@@ -1657,20 +1633,8 @@ impl App {
     }
 }
 
-/// One filters VM for a worker of this run. A prepared runtime consumes the
-/// retained first instance for the first actual producer and builds every
-/// later instance from the SAME prepared bytes, so no worker reopens the
-/// mutable live module file after confirmation. An unprepared runtime keeps
-/// the existing per-worker live load.
+/// One filters VM for a worker of this run: the existing per-worker live load.
 fn task_filters(inner: &RuntimeInner) -> Result<Filters, AppError> {
-    if let Some(prepared) = inner.prepared.borrow_mut().as_mut() {
-        if let Some(first) = prepared.take_first() {
-            return Ok(first);
-        }
-        return prepared
-            .worker()
-            .map_err(|error| AppError::Filter(error.to_string()));
-    }
     Filters::load(&inner.resource_root).map_err(|error| AppError::Filter(error.to_string()))
 }
 

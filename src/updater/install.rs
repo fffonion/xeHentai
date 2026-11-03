@@ -1,4 +1,4 @@
-//! The installer-owned update area, activation and rollback.
+//! The installer-owned update area and candidate application.
 //!
 //! Everything here is a native installation primitive: the RSS business
 //! modules decide *whether* a pending candidate should be applied, while this
@@ -10,23 +10,19 @@
 //!
 //! ```text
 //! .xehentai-update/                    private (0700), symlink-free
-//!   lock                               per-install cross-process transaction lock
+//!   lock                               per-install cross-process write lock
 //!   pending/src.zip                    one atomically published envelope
 //!   staging/<random>/                  complete candidate tree, private
 //!   preflight/                         private state for the candidate run
-//!   backup/                            the single previous usable release
-//!   state.json                         confirmed active + previous records (atomic)
-//!   activation.json                    ONE provisional activation/recovery record
+//!   state.json                         the single applied identity (atomic)
 //! ```
 //!
-//! Activation order: materialize the signed entries into a fresh staging tree,
-//! preflight the real candidate with the same host's minimal private update
-//! mode, persist ONE provisional activation record (complete previous snapshot)
-//! BEFORE any live mutation, move the previous files aside, install the new
-//! ones, and (for a native package) replace the executable and re-execute it.
-//! The candidate stays provisional until the real Config/App/session and the
-//! required startup modules have initialized in the new image; only then is the
-//! active record published. Any failure restores the previous files and record.
+//! There is no rollback state. Download only publishes the pending envelope;
+//! the next start materializes the COMPLETE candidate into staging, runs the
+//! real private preflight and only then replaces the selected live files. A
+//! candidate that fails any preparation step is discarded and the running
+//! release keeps running unchanged. The applied identity is published only
+//! after the replacement really succeeded.
 //! `h.json`, `config.rss`, `eh.log` and the legacy cookie file are never
 //! package entries and never touched.
 
@@ -43,22 +39,17 @@ use super::package::{self, SelectedEntry};
 
 pub const AREA_DIR: &str = ".xehentai-update";
 pub const STATE_FILE: &str = "state.json";
-pub const ACTIVATION_FILE: &str = "activation.json";
 pub const LOCK_FILE: &str = "lock";
 pub const PENDING_DIR: &str = "pending";
 pub const STAGING_DIR: &str = "staging";
-pub const BACKUP_DIR: &str = "backup";
 pub const PREFLIGHT_DIR: &str = "preflight";
 pub const STATE_VERSION: i64 = 1;
-pub const ACTIVATION_VERSION: i64 = 1;
-/// Environment spelling used ONLY by the private native-installer exec path to
-/// hand the owned lock descriptor to the replacement image.
-pub const LOCK_HANDOFF_ENV: &str = "XEHENTAI_UPDATE_LOCK_FD";
 /// The candidate preflight is a real process; this bound only stops a wedged
 /// child, it is not a policy timeout.
 const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(180);
 
-/// One applied release identity.
+/// The one applied release identity. It is also the only source of the
+/// same-update-id decision; it is never inferred from files.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Record {
@@ -68,13 +59,12 @@ pub struct Record {
     pub applied_at: String,
 }
 
-/// The single active record plus at most one previous usable release.
+/// The installer state: exactly one applied identity, no history.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Records {
     pub v: i64,
     pub active: Option<Record>,
-    pub previous: Option<Record>,
 }
 
 impl Default for Records {
@@ -82,39 +72,8 @@ impl Default for Records {
         Self {
             v: STATE_VERSION,
             active: None,
-            previous: None,
         }
     }
-}
-
-/// The ONE provisional activation record.
-///
-/// It is written atomically BEFORE the first live resource/native mutation and
-/// carries everything recovery needs: the candidate identity, the complete
-/// previous record, and every install-relative file this activation may have
-/// moved aside. `state.json` is not touched until the real new image has
-/// initialized, so a crash at any point leaves a recoverable provisional
-/// record rather than a half-confirmed release.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Activation {
-    pub v: i64,
-    pub candidate: Record,
-    pub previous: Option<Record>,
-    /// Install-relative files moved into `backup/` by this activation.
-    pub paths: Vec<String>,
-    /// Install-relative candidate resources that did NOT exist on the live
-    /// tree before this activation. A rollback removes them again; every
-    /// other path is restored from `backup/`. An older record without this
-    /// field simply has no candidate-new files.
-    #[serde(default)]
-    pub created: Vec<String>,
-    /// Install-relative path of the executable this activation replaced, so a
-    /// recovery writes the previous image back to the KNOWN installation path
-    /// instead of guessing from the current process.
-    #[serde(default)]
-    pub executable: Option<String>,
-    pub native: bool,
 }
 
 /// The installation the running executable and its resources live in.
@@ -146,10 +105,6 @@ impl Installation {
         self.area().join(STATE_FILE)
     }
 
-    fn activation_path(&self) -> PathBuf {
-        self.area().join(ACTIVATION_FILE)
-    }
-
     fn lock_path(&self) -> PathBuf {
         self.area().join(LOCK_FILE)
     }
@@ -162,70 +117,8 @@ impl Installation {
         self.area().join(PREFLIGHT_DIR)
     }
 
-    fn backup_root(&self) -> PathBuf {
-        self.area().join(BACKUP_DIR)
-    }
-
-    /// True while an activation has not been confirmed by the real new image.
-    ///
-    /// Fallible: only a genuine absence (`NotFound`) means "no activation".
-    /// Any other metadata error, or a marker that is not a real
-    /// installer-owned regular file, is untrusted recovery state and must
-    /// stop the startup before the App, never read as absent.
-    pub fn activation_present(&self) -> Result<bool, UpdateError> {
-        let path = self.activation_path();
-        let metadata = match std::fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(UpdateError::io(&path, &error)),
-        };
-        verify_activation_leaf(&path, &metadata)?;
-        Ok(true)
-    }
-
-    /// The provisional record, if one is present.
-    pub fn activation(&self) -> Result<Option<Activation>, UpdateError> {
-        let path = self.activation_path();
-        let metadata = match std::fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(UpdateError::io(&path, &error)),
-        };
-        // The marker is inspected before it is read: a symlink could point
-        // anywhere outside the private area, so it is rejected here and the
-        // read itself refuses to follow a final symlink.
-        verify_activation_leaf(&path, &metadata)?;
-        let bytes = read_private_leaf(&path)?;
-        let activation: Activation = serde_json::from_slice(&bytes)
-            .map_err(|error| UpdateError::install(format!("activation record: {error}")))?;
-        if activation.v != ACTIVATION_VERSION {
-            return Err(UpdateError::install(format!(
-                "activation record version {} is not {ACTIVATION_VERSION}",
-                activation.v
-            )));
-        }
-        Ok(Some(activation))
-    }
-
-    fn write_activation(&self, activation: &Activation) -> Result<(), UpdateError> {
-        let area = self.area();
-        ensure_private_dir(&area)?;
-        let bytes = serde_json::to_vec(activation)
-            .map_err(|error| UpdateError::install(format!("activation record: {error}")))?;
-        write_atomic(&area, &self.activation_path(), &bytes)
-    }
-
-    fn clear_activation(&self) -> Result<(), UpdateError> {
-        let path = self.activation_path();
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(UpdateError::io(&path, &error)),
-        }
-    }
-
-    /// Verify an EXISTING update area before it is trusted for a read,
-    /// recovery or write. A missing area is not an error here.
+    /// Verify an EXISTING update area before it is trusted for a read or a
+    /// write. A missing area is not an error here.
     pub fn verify_private_area(&self) -> Result<(), UpdateError> {
         match std::fs::symlink_metadata(self.area()) {
             Ok(metadata) => verify_private_dir_metadata(self.area().as_path(), &metadata),
@@ -319,8 +212,7 @@ impl Installation {
         Ok(records)
     }
 
-    /// The update id the running build was activated from, if any. This is the
-    /// only source of the same-id decision; it is never inferred from files.
+    /// The update id the running build was applied from, if any.
     pub fn applied_update_id(&self) -> Option<String> {
         self.records()
             .ok()
@@ -403,19 +295,6 @@ fn verify_pending_leaf(path: &Path, metadata: &std::fs::Metadata) -> Result<(), 
     verify_owned_regular_leaf(path, metadata, "the pending update envelope")
 }
 
-/// An activation marker must be a real installer-owned regular file, for the
-/// same reason as a pending leaf: a symlink could point anywhere, and a
-/// foreign-owned or non-regular marker is untrusted recovery state.
-fn verify_activation_leaf(path: &Path, metadata: &std::fs::Metadata) -> Result<(), UpdateError> {
-    verify_owned_regular_leaf(path, metadata, "the activation record")
-}
-
-/// The previous-executable backup a native rollback restores must be a real
-/// installer-owned regular file. Resource-only activations never consult it.
-fn verify_backup_executable(path: &Path, metadata: &std::fs::Metadata) -> Result<(), UpdateError> {
-    verify_owned_regular_leaf(path, metadata, "the previous executable backup")
-}
-
 fn verify_owned_regular_leaf(
     path: &Path,
     metadata: &std::fs::Metadata,
@@ -469,19 +348,18 @@ fn read_private_leaf(path: &Path) -> Result<Vec<u8>, UpdateError> {
     Ok(bytes)
 }
 
-/// One held cross-process transaction lock for this installation.
+/// One held cross-process write lock for this installation.
 ///
 /// The lock lives on an ordinary file in the private update area and covers
-/// the startup read/apply/discard/recovery path through real App confirmation,
-/// the final pending publication, and any rollback. It is a real filesystem
-/// lock, never an in-process mutex: two xeHentai processes in one installation
-/// serialize here.
+/// the final pending publication and the startup application. It is a real
+/// filesystem lock, never an in-process mutex: two xeHentai processes in one
+/// installation serialize here.
 pub struct InstallLock {
     file: std::fs::File,
 }
 
 impl InstallLock {
-    /// Take the transaction lock without waiting. A concurrent owner yields a
+    /// Take the write lock without waiting. A concurrent owner yields a
     /// bounded explicit failure; no shared file is touched.
     pub fn acquire(installation: &Installation) -> Result<Self, UpdateError> {
         ensure_private_dir(&installation.area())?;
@@ -494,10 +372,10 @@ impl InstallLock {
             .open(&path)
             .map_err(|error| UpdateError::io(&path, &error))?;
         // `flock` on Unix, not a POSIX record lock: the lock must belong to the
-        // open file DESCRIPTION so it survives the real exec and is shared by
-        // the daemon child after fork. Closing the parent's descriptor must not
-        // release the child's lock (a POSIX F_SETLK lock would be dropped by
-        // any close in the owning process, and is not inherited across fork).
+        // open file DESCRIPTION so it is shared by a daemon child after fork.
+        // Closing the parent's descriptor must not release the child's lock (a
+        // POSIX F_SETLK lock would be dropped by any close in the owning
+        // process, and is not inherited across fork).
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd;
@@ -526,88 +404,6 @@ impl InstallLock {
             }
         }
     }
-
-    /// Adopt the owned descriptor the private native installer handed across
-    /// the real exec. The descriptor is validated against the real lock file
-    /// (same device/inode, regular file), then close-on-exec is restored and
-    /// the private environment spelling is cleared so ordinary children never
-    /// inherit it.
-    #[cfg(unix)]
-    pub fn adopt_handoff(installation: &Installation) -> Result<Option<Self>, UpdateError> {
-        let Some(text) = std::env::var_os(LOCK_HANDOFF_ENV) else {
-            return Ok(None);
-        };
-        // Clear the handoff spelling before anything else can spawn.
-        unsafe { std::env::remove_var(LOCK_HANDOFF_ENV) };
-        let fd: i32 = text
-            .to_string_lossy()
-            .parse()
-            .map_err(|_| UpdateError::install("invalid inherited update lock descriptor"))?;
-        use std::os::fd::{BorrowedFd, FromRawFd, RawFd};
-        let borrowed: BorrowedFd<'_> = unsafe { BorrowedFd::borrow_raw(fd as RawFd) };
-        let stat = nix::sys::stat::fstat(borrowed)
-            .map_err(|error| UpdateError::install(format!("inherited lock descriptor: {error}")))?;
-        let path = installation.lock_path();
-        let metadata = std::fs::metadata(&path).map_err(|error| UpdateError::io(&path, &error))?;
-        use std::os::unix::fs::MetadataExt;
-        if !metadata.is_file()
-            || metadata.dev() != stat.st_dev as u64
-            || metadata.ino() != stat.st_ino as u64
-        {
-            return Err(UpdateError::install(
-                "inherited update lock descriptor does not match this installation's lock file",
-            ));
-        }
-        set_cloexec(borrowed, true)?;
-        let file = unsafe { std::fs::File::from_raw_fd(fd as RawFd) };
-        Ok(Some(Self { file }))
-    }
-
-    #[cfg(not(unix))]
-    pub fn adopt_handoff(_installation: &Installation) -> Result<Option<Self>, UpdateError> {
-        Ok(None)
-    }
-
-    /// Make this exact owned descriptor survive the private exec and publish
-    /// its number for the replacement image.
-    #[cfg(unix)]
-    fn prepare_exec(&self) -> Result<(), UpdateError> {
-        use std::os::fd::AsFd;
-        set_cloexec(self.file.as_fd(), false)?;
-        let fd = {
-            use std::os::fd::AsRawFd;
-            self.file.as_raw_fd()
-        };
-        unsafe { std::env::set_var(LOCK_HANDOFF_ENV, fd.to_string()) };
-        Ok(())
-    }
-
-    #[cfg(not(unix))]
-    fn prepare_exec(&self) -> Result<(), UpdateError> {
-        Ok(())
-    }
-
-    /// Test-only: the owned descriptor number for the real fork handoff proof.
-    /// The caller is Unix-only, so the helper must not reference Unix-only
-    /// descriptor APIs on a Windows test build.
-    #[cfg(all(test, unix))]
-    pub(crate) fn raw_fd_for_test(&self) -> i32 {
-        use std::os::fd::AsRawFd;
-        self.file.as_raw_fd()
-    }
-}
-
-#[cfg(unix)]
-fn set_cloexec<Fd: std::os::fd::AsFd>(fd: Fd, close: bool) -> Result<(), UpdateError> {
-    use nix::fcntl::{FcntlArg, FdFlag, fcntl};
-    let flags = if close {
-        FdFlag::FD_CLOEXEC
-    } else {
-        FdFlag::empty()
-    };
-    fcntl(fd, FcntlArg::F_SETFD(flags))
-        .map(|_| ())
-        .map_err(|error| UpdateError::install(format!("update lock descriptor flags: {error}")))
 }
 
 // Closing the only remaining owned descriptor releases the lock. There is
@@ -648,8 +444,8 @@ pub(crate) fn private_dir_verdict(uid: u32, mode: u32, euid: u32) -> Result<(), 
 /// never redirect installer writes. A directory this call creates is 0700. An
 /// EXISTING directory is never chmodded: it is trusted only when the effective
 /// uid owns it and no group/other permission bit is set. Anything else is a
-/// hard rejection, because a shared-writable area could replace the previous
-/// executable or rollback files.
+/// hard rejection, because a shared-writable area could redirect a live
+/// replacement.
 pub fn ensure_private_dir(path: &Path) -> Result<(), UpdateError> {
     // Walk to the nearest existing ancestor, collecting every missing
     // component. Only components THIS call creates are tightened; a
@@ -955,38 +751,25 @@ impl Drop for CancelOnDrop {
     }
 }
 
-/// Test-only hooks for the deterministic pre-commit barrier.
+/// Test-only hooks for the deterministic pre-commit and join barriers.
 #[cfg(test)]
 pub mod test_hooks {
     #![allow(dead_code)]
     use std::path::Path;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex, OnceLock};
 
     pub type Hook = Box<dyn Fn(&Path) + Send + Sync>;
 
     static HOOK: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
-    static ROLLBACK_HOOK: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
     pub type JoinHook = Box<dyn Fn() + Send + Sync>;
     static JOIN_HOOK: OnceLock<Mutex<Option<JoinHook>>> = OnceLock::new();
-    static EXEC_FAULT: AtomicBool = AtomicBool::new(false);
 
     fn cell() -> &'static Mutex<Option<Hook>> {
         HOOK.get_or_init(|| Mutex::new(None))
     }
 
-    fn rollback_cell() -> &'static Mutex<Option<Hook>> {
-        ROLLBACK_HOOK.get_or_init(|| Mutex::new(None))
-    }
-
     pub fn set(hook: Option<Hook>) {
         *cell().lock().unwrap_or_else(|error| error.into_inner()) = hook;
-    }
-
-    pub fn set_rollback(hook: Option<Hook>) {
-        *rollback_cell()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = hook;
     }
 
     fn join_cell() -> &'static Mutex<Option<JoinHook>> {
@@ -1011,29 +794,8 @@ pub mod test_hooks {
         }
     }
 
-    /// Test-only: make the next real exec fail with `EACCES` by removing the
-    /// execute bits from the installed image immediately before `execv`.
-    pub fn set_exec_permission_fault(fault: bool) {
-        EXEC_FAULT.store(fault, Ordering::SeqCst);
-    }
-
-    pub fn exec_permission_fault() -> bool {
-        EXEC_FAULT.load(Ordering::SeqCst)
-    }
-
     pub fn publish_boundary(path: &Path) {
         let guard = cell().lock().unwrap_or_else(|error| error.into_inner());
-        if let Some(hook) = guard.as_ref() {
-            hook(path);
-        }
-    }
-
-    /// Test-only barrier at the START of a real rollback, after the transaction
-    /// lock was taken and before any file is restored.
-    pub fn rollback_boundary(path: &Path) {
-        let guard = rollback_cell()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         if let Some(hook) = guard.as_ref() {
             hook(path);
         }
@@ -1047,70 +809,46 @@ pub struct Candidate {
     pub prefix: String,
 }
 
-/// One installed but not yet confirmed release.
+/// One installed release: whether the caller must re-execute the installed
+/// image. The applied record was already published by the installer.
 pub struct Committed {
-    pub record: Record,
-    /// True when the caller must re-execute the installed image.
     pub reexec: bool,
 }
 
-/// Why a candidate did not become the live release. `rolled_back` means live
-/// files had already moved and were restored, so the caller logs a rollback
-/// rather than a plain rejection.
-pub struct ActivationFailure {
-    pub error: UpdateError,
-    pub rolled_back: bool,
-    /// The previous release could NOT be completely restored (or its recovery
-    /// record could not be retired). The caller must keep the recovery state
-    /// and stop instead of running the business App on a mixed tree.
-    pub recovery_failed: bool,
-}
-
-impl ActivationFailure {
-    fn before_install(error: UpdateError) -> Self {
-        Self {
-            error,
-            rolled_back: false,
-            recovery_failed: false,
-        }
-    }
-}
-
-/// Install one validated candidate provisionally.
+/// Prepare and then apply one validated candidate.
 ///
-/// The single provisional record is persisted before the first live mutation;
-/// `state.json` stays on the previous release until [`confirm_activation`].
+/// Everything that can reject the candidate — complete materialization into a
+/// private staging tree and the real private preflight — happens BEFORE any
+/// live file is touched, so a failure there leaves the running release
+/// completely unchanged. Only a fully prepared candidate replaces the selected
+/// files; the applied record is written only after that replacement succeeded.
+/// A real replacement I/O error is returned as a real error (the tree may be
+/// partly updated), never as success.
 pub fn install_candidate(
     installation: &Installation,
     candidate: &Candidate,
-    applied_update_id: &str,
-) -> Result<Committed, ActivationFailure> {
+) -> Result<Committed, UpdateError> {
     let area = installation.area();
-    ensure_private_dir(&area).map_err(ActivationFailure::before_install)?;
-    ensure_private_dir(&installation.staging_root()).map_err(ActivationFailure::before_install)?;
-    ensure_private_dir(&installation.preflight_root())
-        .map_err(ActivationFailure::before_install)?;
+    ensure_private_dir(&area)?;
+    ensure_private_dir(&installation.staging_root())?;
+    ensure_private_dir(&installation.preflight_root())?;
 
     let staging = tempfile::Builder::new()
         .prefix("candidate-")
         .tempdir_in(installation.staging_root())
-        .map_err(|error| UpdateError::io(&installation.staging_root(), &error))
-        .map_err(ActivationFailure::before_install)?;
+        .map_err(|error| UpdateError::io(&installation.staging_root(), &error))?;
     let selected = package::materialize(
         &candidate.payload,
         &candidate.descriptor,
         &candidate.prefix,
         staging.path(),
-    )
-    .map_err(ActivationFailure::before_install)?;
+    )?;
 
-    let exe_path = std::env::current_exe()
-        .map_err(|error| {
-            UpdateError::install(format!(
-                "the running executable path is unavailable: {error}"
-            ))
-        })
-        .map_err(ActivationFailure::before_install)?;
+    let exe_path = std::env::current_exe().map_err(|error| {
+        UpdateError::install(format!(
+            "the running executable path is unavailable: {error}"
+        ))
+    })?;
     let native = candidate.descriptor.native_executable.clone();
     let preflight_exe = match &native {
         Some(entry) => {
@@ -1119,8 +857,7 @@ pub fn install_candidate(
             {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
-                    .map_err(|error| UpdateError::io(&staged, &error))
-                    .map_err(ActivationFailure::before_install)?;
+                    .map_err(|error| UpdateError::io(&staged, &error))?;
             }
             staged
         }
@@ -1131,43 +868,35 @@ pub fn install_candidate(
     if native.is_some() {
         // Honest platform boundary: native self replacement plus re-execution
         // is only verified on Unix. A resource-only candidate stays available.
-        return Err(ActivationFailure::before_install(UpdateError::install(
+        return Err(UpdateError::install(
             "native executable replacement is not verified on this platform; the candidate was rejected",
-        )));
+        ));
     }
 
     preflight(
         &preflight_exe,
         staging.path(),
         &installation.preflight_root(),
-    )
-    .map_err(ActivationFailure::before_install)?;
+    )?;
 
-    // Commit: previous files aside, candidates in, optional executable replace.
-    let backup = installation.backup_root();
-    let previous_record = installation
-        .records()
-        .map_err(ActivationFailure::before_install)?
-        .active
-        .clone();
-
-    // A single previous usable release is kept; the older backup is dropped
-    // only once the new candidate is ready to be committed.
-    if backup.exists() {
-        ensure_private_dir(&backup).map_err(ActivationFailure::before_install)?;
-        std::fs::remove_dir_all(&backup)
-            .map_err(|error| UpdateError::io(&backup, &error))
-            .map_err(ActivationFailure::before_install)?;
-    }
-    ensure_private_dir(&backup).map_err(ActivationFailure::before_install)?;
-    if native.is_some() {
-        backup_executable(installation).map_err(ActivationFailure::before_install)?;
-    }
-
+    // The candidate is complete and preflighted; only now are live files
+    // replaced. There is no undo: a real I/O failure below is reported.
     let resources: Vec<&SelectedEntry> = selected
         .iter()
         .filter(|entry| Some(&entry.path) != native.as_ref())
         .collect();
+    for entry in &resources {
+        let staged = staging.path().join(&entry.path);
+        let live = installation.root().join(&entry.path);
+        replace_file(&live, &staged)?;
+    }
+    if let Some(entry) = &native {
+        // The running image keeps its inode; the path now refers to the
+        // candidate bytes. Re-execution below loads the real new image.
+        let staged = staging.path().join(entry);
+        self_replace::self_replace(&staged)
+            .map_err(|error| UpdateError::install(format!("self replacement: {error}")))?;
+    }
 
     let build_id = candidate
         .descriptor
@@ -1175,441 +904,42 @@ pub fn install_candidate(
         .clone()
         .unwrap_or_else(|| crate::r#const::BUILD_ID.to_string());
     let record = Record {
-        update_id: applied_update_id.to_string(),
+        update_id: candidate.descriptor.update_id.clone(),
         build_id,
         native: native.is_some(),
         applied_at: crate::util::logger::now_gmt8().to_rfc3339(),
     };
-
-    // ONE provisional activation/recovery record BEFORE the first live change.
-    // It records, for every candidate resource path, whether the entry already
-    // existed on the live tree: a rollback restores the old ones from `backup/`
-    // and REMOVES the ones this activation created.
-    let mut created: Vec<String> = Vec::new();
-    for entry in &resources {
-        let live = installation.root().join(&entry.path);
-        match std::fs::symlink_metadata(&live) {
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                created.push(entry.path.clone());
-            }
-            Err(error) => {
-                return Err(ActivationFailure::before_install(UpdateError::io(
-                    &live, &error,
-                )));
-            }
-        }
-    }
-    let activation = Activation {
-        v: ACTIVATION_VERSION,
-        candidate: record.clone(),
-        previous: previous_record.clone(),
-        paths: resources.iter().map(|entry| entry.path.clone()).collect(),
-        created: created.clone(),
-        executable: native.clone(),
-        native: native.is_some(),
-    };
-    installation
-        .write_activation(&activation)
-        .map_err(ActivationFailure::before_install)?;
-
-    let mut moved: Vec<String> = Vec::new();
-
-    let commit = (|| -> Result<(), UpdateError> {
-        for entry in &resources {
-            let live = installation.root().join(&entry.path);
-            let aside = backup.join(&entry.path);
-            if let Some(parent) = aside.parent() {
-                // Backup subdirectories are installer state too: create them
-                // privately (0700) rather than inheriting the umask.
-                ensure_private_dir(parent)?;
-            }
-            match std::fs::rename(&live, &aside) {
-                Ok(()) => moved.push(entry.path.clone()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(UpdateError::io(&live, &error)),
-            }
-        }
-        for entry in &resources {
-            let staged = staging.path().join(&entry.path);
-            let live = installation.root().join(&entry.path);
-            if let Some(parent) = live.parent() {
-                std::fs::create_dir_all(parent).map_err(|error| UpdateError::io(parent, &error))?;
-            }
-            std::fs::rename(&staged, &live).map_err(|error| UpdateError::io(&live, &error))?;
-        }
-        if let Some(entry) = &native {
-            // The running image keeps its inode; the path now refers to the
-            // candidate bytes. Re-execution below loads the real new image.
-            let staged = staging.path().join(entry);
-            self_replace::self_replace(&staged)
-                .map_err(|error| UpdateError::install(format!("self replacement: {error}")))?;
-        }
-        Ok(())
-    })();
-
-    if let Err(error) = commit {
-        let mut recovery_failed = false;
-        // The staged native image is prepared BEFORE the resource undo, on
-        // this path exactly as on the startup path: an unreadable backup
-        // leaves the partly switched tree and the recovery record for the
-        // next start instead of moving more files.
-        let error = match prepare_native_image(
-            installation,
-            &backup,
-            activation.executable.as_deref(),
-            activation.native,
-        )
-        .and_then(|prepared| {
-            undo_activation(
-                installation,
-                &backup,
-                &activation,
-                &activation.paths,
-                prepared,
-            )
-        }) {
-            Ok(()) => {
-                // Only a COMPLETE restore retires the one recovery record; a
-                // failure here left the live tree partly switched, so the
-                // record must survive for the next start to retry.
-                match installation.clear_activation() {
-                    Ok(()) => error,
-                    Err(clear) => {
-                        recovery_failed = true;
-                        UpdateError::install(format!(
-                            "{error}; the previous release was restored but the recovery record could not be retired: {clear}"
-                        ))
-                    }
-                }
-            }
-            Err(restore) => {
-                recovery_failed = true;
-                UpdateError::install(format!(
-                    "{error}; restoring the previous release failed: {restore}; the recovery record and backup were kept for the next start"
-                ))
-            }
-        };
-        return Err(ActivationFailure {
-            error,
-            rolled_back: !moved.is_empty(),
-            recovery_failed,
-        });
-    }
+    installation.write_records(&Records {
+        v: STATE_VERSION,
+        active: Some(record.clone()),
+    })?;
 
     Ok(Committed {
-        record,
         reexec: native.is_some(),
     })
 }
 
-/// Publish the confirmed identity. Called by the real startup owner ONLY after
-/// the new image's Config/App/session and required modules initialized.
-pub fn confirm_activation(installation: &Installation) -> Result<Option<Record>, UpdateError> {
-    installation.verify_private_area()?;
-    let Some(activation) = installation.activation()? else {
-        return Ok(None);
-    };
-    installation.write_records(&Records {
-        v: STATE_VERSION,
-        active: Some(activation.candidate.clone()),
-        previous: activation.previous,
-    })?;
-    installation.clear_activation()?;
-    Ok(Some(activation.candidate))
-}
-
-/// Undo one provisional activation from its ONE recovery record.
-///
-/// Restores every previous file from `backup/`, REMOVES every candidate file
-/// this activation created, and commits the already staged previous
-/// executable image at the KNOWN installation path. Every step reports its
-/// real failure; a partly restored tree is never reported as success.
-fn undo_activation(
-    installation: &Installation,
-    backup: &Path,
-    activation: &Activation,
-    paths: &[String],
-    prepared_native: Option<PreparedNativeImage>,
-) -> Result<(), UpdateError> {
-    restore_moved(installation, backup, paths, &activation.created)?;
-    for path in &activation.created {
-        let live = installation.root().join(path);
-        match std::fs::symlink_metadata(&live) {
-            Ok(metadata) if metadata.is_dir() => {
-                return Err(UpdateError::install(format!(
-                    "cannot remove the candidate-created {}: it is a directory",
-                    live.display()
-                )));
-            }
-            Ok(_) => std::fs::remove_file(&live).map_err(|error| UpdateError::io(&live, &error))?,
+/// Replace one live file with the prepared staged copy via the same
+/// filesystem. On Unix `rename` replaces the destination atomically; other
+/// platforms remove the destination first because their rename refuses an
+/// existing target.
+fn replace_file(live: &Path, staged: &Path) -> Result<(), UpdateError> {
+    if let Some(parent) = live.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| UpdateError::io(parent, &error))?;
+    }
+    #[cfg(unix)]
+    {
+        std::fs::rename(staged, live).map_err(|error| UpdateError::io(live, &error))
+    }
+    #[cfg(not(unix))]
+    {
+        match std::fs::remove_file(live) {
+            Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(UpdateError::io(&live, &error)),
+            Err(error) => return Err(UpdateError::io(live, &error)),
         }
+        std::fs::rename(staged, live).map_err(|error| UpdateError::io(live, &error))
     }
-    match (activation.native, prepared_native) {
-        (true, Some(prepared)) => commit_prepared_native_image(prepared)?,
-        (true, None) => {
-            return Err(UpdateError::install(
-                "a native rollback reached the tree undo without a staged previous executable; the recovery record was kept",
-            ));
-        }
-        (false, _) => {}
-    }
-    Ok(())
-}
-
-/// Put the previous files back. A path that had no previous version is a
-/// candidate-created file and has no backup to restore; a path that HAD one is
-/// an unrecoverable gap if neither the live file nor its backup exists.
-fn restore_moved(
-    installation: &Installation,
-    backup: &Path,
-    moved: &[String],
-    created: &[String],
-) -> Result<(), UpdateError> {
-    let mut failure = None;
-    for path in moved {
-        let live = installation.root().join(path);
-        let aside = backup.join(path);
-        match std::fs::symlink_metadata(&aside) {
-            Ok(metadata) => {
-                if metadata.is_dir() {
-                    failure.get_or_insert_with(|| {
-                        UpdateError::install(format!(
-                            "{} inside the backup is a directory, not a previous file",
-                            aside.display()
-                        ))
-                    });
-                    continue;
-                }
-                if let Some(parent) = live.parent()
-                    && let Err(error) = std::fs::create_dir_all(parent)
-                {
-                    failure.get_or_insert_with(|| UpdateError::io(parent, &error));
-                    continue;
-                }
-                if let Err(error) = std::fs::rename(&aside, &live) {
-                    failure.get_or_insert_with(|| UpdateError::io(&live, &error));
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                // No backup: either the candidate created this path (and the
-                // removal pass retires it), or the previous file is simply
-                // still live. Anything else is a real, reported gap.
-                if !created.iter().any(|created| created == path)
-                    && std::fs::symlink_metadata(&live).is_err()
-                {
-                    failure.get_or_insert_with(|| {
-                        UpdateError::install(format!(
-                            "{} has neither a live file nor a backup copy",
-                            live.display()
-                        ))
-                    });
-                }
-            }
-            Err(error) => {
-                failure.get_or_insert_with(|| UpdateError::io(&aside, &error));
-            }
-        }
-    }
-    match failure {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
-}
-
-/// A fully staged previous-executable image, held in a synced temporary file
-/// in the KNOWN destination directory. Staged BEFORE any live resource is
-/// touched, committed (atomically persisted) only after the resource undo
-/// completed. Dropping it cleans the incomplete stage and leaves the original
-/// backup untouched for a retry.
-struct PreparedNativeImage {
-    temp: tempfile::NamedTempFile,
-    destination: PathBuf,
-}
-
-/// Stage the trusted previous-executable copy BEFORE the recovery tree is
-/// mutated: open the backup no-follow, re-validate the OPEN handle, stream
-/// the ENTIRE image into an owned destination-directory temporary file with
-/// the required permissions, and sync it.
-///
-/// Any failure returns before live resources, records or backups change; the
-/// dropped stage cleans itself. Resource-only activations need no native
-/// image and return `Ok(None)` without consulting the backup.
-fn prepare_native_image(
-    installation: &Installation,
-    backup: &Path,
-    executable: Option<&str>,
-    native: bool,
-) -> Result<Option<PreparedNativeImage>, UpdateError> {
-    if !native {
-        return Ok(None);
-    }
-    use std::io::Write;
-    let backup_exe = backup.join(BACKUP_EXE);
-    let metadata = match std::fs::symlink_metadata(&backup_exe) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(UpdateError::install(format!(
-                "{} is missing; the previous executable cannot be restored",
-                backup_exe.display()
-            )));
-        }
-        Err(error) => return Err(UpdateError::io(&backup_exe, &error)),
-    };
-    verify_backup_executable(&backup_exe, &metadata)?;
-    let destination = match executable {
-        Some(relative) => installation.root().join(relative),
-        None => std::env::current_exe().map_err(|error| {
-            UpdateError::install(format!(
-                "the installation executable path is unavailable: {error}"
-            ))
-        })?,
-    };
-    let parent = destination.parent().ok_or_else(|| {
-        UpdateError::install(format!("{} has no parent directory", destination.display()))
-    })?;
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(nix::libc::O_NOFOLLOW);
-    }
-    let mut source = options
-        .open(&backup_exe)
-        .map_err(|error| UpdateError::io(&backup_exe, &error))?;
-    // Re-validate the OPEN handle, not the path: a swap between the metadata
-    // probe and the open cannot smuggle in an untrusted file.
-    let open_metadata = source
-        .metadata()
-        .map_err(|error| UpdateError::io(&backup_exe, &error))?;
-    verify_backup_executable(&backup_exe, &open_metadata)?;
-    let mut temp =
-        tempfile::NamedTempFile::new_in(parent).map_err(|error| UpdateError::io(parent, &error))?;
-    std::io::copy(&mut source, &mut temp).map_err(|error| UpdateError::io(temp.path(), &error))?;
-    temp.as_file()
-        .sync_all()
-        .map_err(|error| UpdateError::io(temp.path(), &error))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o755))
-            .map_err(|error| UpdateError::io(temp.path(), &error))?;
-    }
-    let _ = temp.flush();
-    Ok(Some(PreparedNativeImage { temp, destination }))
-}
-
-/// Atomically persist an already staged native image at its known
-/// destination. The backup is never reopened after the resource undo, so a
-/// retry still has the only recovery copy. A copy through a synced temporary
-/// file in the destination directory, unlike `self_replace`, does NOT consume
-/// `backup/previous-exe`: a retry after a failed rollback still has the only
-/// recovery copy. The destination is the path recorded in the activation
-/// record (never an arbitrary current process image).
-fn commit_prepared_native_image(prepared: PreparedNativeImage) -> Result<(), UpdateError> {
-    let destination = prepared.destination.clone();
-    match prepared.temp.persist(&destination) {
-        Ok(_) => Ok(()),
-        Err(error) => Err(UpdateError::io(&destination, &error.error)),
-    }
-}
-
-/// Name of the previous executable copy inside the backup directory.
-const BACKUP_EXE: &str = "previous-exe";
-
-/// Undo a provisional activation: put every backed up file back over the live
-/// tree, restore the previous executable and record, and retire the
-/// provisional record. Only installer-owned files are touched.
-pub fn rollback_activation(installation: &Installation) -> Result<Option<Record>, UpdateError> {
-    installation.verify_private_area()?;
-    let Some(activation) = installation.activation()? else {
-        return Ok(None);
-    };
-    #[cfg(test)]
-    test_hooks::rollback_boundary(installation.root());
-    let backup = installation.backup_root();
-    // Every path the record lists, plus any previous file a crash actually
-    // moved into the backup, is restored from the same complete snapshot.
-    let mut paths: Vec<String> = activation.paths.clone();
-    if backup.exists() {
-        ensure_private_dir(&backup)?;
-        let mut files: Vec<PathBuf> = Vec::new();
-        collect_files(&backup, &backup, &mut files)?;
-        for relative in files {
-            if relative.file_name().is_some_and(|name| name == BACKUP_EXE) {
-                continue;
-            }
-            let spelled = relative.to_string_lossy().replace('\\', "/");
-            if !paths.contains(&spelled) {
-                paths.push(spelled);
-            }
-        }
-    }
-    // A native rollback restores the previous executable from the backup, so
-    // the ENTIRE trusted image is staged BEFORE the recovery tree is mutated:
-    // a missing or unreadable backup keeps the journal, the backup and the
-    // live tree untouched for a later retry. Resource-only rollbacks stage
-    // nothing and never consult the backup.
-    let prepared = prepare_native_image(
-        installation,
-        &backup,
-        activation.executable.as_deref(),
-        activation.native,
-    )?;
-    undo_activation(installation, &backup, &activation, &paths, prepared)?;
-    installation.write_records(&Records {
-        v: STATE_VERSION,
-        active: activation.previous.clone(),
-        previous: None,
-    })?;
-    // The recovery record is retired only after EVERY resource, native image
-    // and state record was actually restored.
-    installation.clear_activation()?;
-    installation.discard_pending()?;
-    Ok(activation.previous)
-}
-
-fn collect_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), UpdateError> {
-    let entries = std::fs::read_dir(dir).map_err(|error| UpdateError::io(dir, &error))?;
-    for entry in entries {
-        let entry = entry.map_err(|error| UpdateError::io(dir, &error))?;
-        let path = entry.path();
-        let metadata =
-            std::fs::symlink_metadata(&path).map_err(|error| UpdateError::io(&path, &error))?;
-        if metadata.file_type().is_symlink() {
-            return Err(UpdateError::install(format!(
-                "{} inside the backup is a symlink",
-                path.display()
-            )));
-        }
-        if metadata.is_dir() {
-            ensure_private_dir(&path)?;
-            collect_files(root, &path, out)?;
-        } else {
-            let relative = path
-                .strip_prefix(root)
-                .map_err(|_| UpdateError::install("backup path outside the backup root"))?
-                .to_path_buf();
-            out.push(relative);
-        }
-    }
-    Ok(())
-}
-
-/// Copy the current executable into the backup directory so a rollback can put
-/// it back. Called only for native candidates, and only on a copy of the
-/// installation (never Cargo's shared artifact).
-pub fn backup_executable(installation: &Installation) -> Result<(), UpdateError> {
-    let backup = installation.backup_root();
-    ensure_private_dir(&backup)?;
-    let exe = std::env::current_exe()
-        .map_err(|error| UpdateError::install(format!("executable path: {error}")))?;
-    let target = backup.join(BACKUP_EXE);
-    std::fs::copy(&exe, &target).map_err(|error| UpdateError::io(&target, &error))?;
-    Ok(())
 }
 
 /// Run the candidate through the same host's minimal private update mode: the
@@ -1630,8 +960,8 @@ fn preflight(exe: &Path, resources: &Path, preflight_root: &Path) -> Result<(), 
         .arg(resources)
         .arg(&state)
         .current_dir(&state)
-        // `env_clear` also removes the native lock handoff spelling: the
-        // private preflight never reacquires or inherits the parent's lock.
+        // `env_clear` keeps the private preflight independent of the parent:
+        // it never inherits the update area or a user configuration spelling.
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", state.join("home"))
@@ -1704,10 +1034,9 @@ pub fn preflight_request(argv: &[std::ffi::OsString]) -> Option<(PathBuf, PathBu
     Some((PathBuf::from(&argv[2]), PathBuf::from(&argv[3])))
 }
 
-/// Re-execute the installed image in place, carrying the owned installation
-/// lock across the exec when one is held. Returns only if the platform has no
-/// verified path, which the caller reports as a failed activation.
-pub fn reexec(exe: &Path, lock: Option<&InstallLock>) -> UpdateError {
+/// Re-execute the installed image in place. Returns only if the platform has
+/// no verified path, which the caller reports as a failed update.
+pub fn reexec(exe: &Path) -> UpdateError {
     #[cfg(unix)]
     {
         use std::ffi::CString;
@@ -1726,24 +1055,14 @@ pub fn reexec(exe: &Path, lock: Option<&InstallLock>) -> UpdateError {
                 Err(_) => return UpdateError::install("argument is not a valid exec argument"),
             }
         }
-        if let Some(lock) = lock
-            && let Err(error) = lock.prepare_exec()
-        {
-            return error;
-        }
-        // Test-only fault, compiled out of production: the REAL exec then
-        // fails with EACCES instead of entering the new image.
-        #[cfg(test)]
-        if test_hooks::exec_permission_fault() {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(exe, std::fs::Permissions::from_mode(0o000));
-        }
+        // The owned lock descriptor is close-on-exec, so the lock is released
+        // when the replacement image really starts; there is no handoff state.
         let error = nix::unistd::execv(&args[0], &args).unwrap_err();
         UpdateError::install(format!("re-executing the installed update: {error}"))
     }
     #[cfg(not(unix))]
     {
-        let _ = (exe, lock);
+        let _ = exe;
         UpdateError::install("re-execution is not verified on this platform")
     }
 }

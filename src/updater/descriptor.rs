@@ -15,7 +15,7 @@
 //!   * `entries` is the complete list of install-relative files with their
 //!     exact lengths, and no entry may name user state or an ambiguous path;
 //!   * a native executable entry is only meaningful together with the
-//!     compiled build identifier it must report after activation.
+//!     compiled build identifier it must report after the update is applied.
 
 use std::path::Component;
 

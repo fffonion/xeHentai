@@ -2,7 +2,7 @@
 """Durable feature-inventory integrity tests for the production loader.
 
 Under test is the production entry point ``compat.load_cases()`` with the
-real ``tools/cases.json``. The catalog is a closed inventory: 377 unique
+real ``tools/cases.json``. The catalog is a closed inventory: 376 unique
 feature rows after the six known duplicate IDs were consolidated into one
 row per ID, keeping BOTH original assertion legs. These tests pin the
 post-consolidation counts, the literal identifiers, and the retained
@@ -45,13 +45,13 @@ DUPLICATE_IDS = (
 WIRE_SOURCE = "xeHentai/rpc.py do_POST/do_GET wire contract"
 NATIVE_SOURCE = "xeHentai/rpc.py unit contract"
 RPC_TARGET = "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss"
-EXPECTED_UNIQUE_ROWS = 377
+EXPECTED_UNIQUE_ROWS = 376
 EXPECTED_RPC_UNIQUE = 106
-EXPECTED_IMPLEMENTED = 357
+EXPECTED_IMPLEMENTED = 362
 EXPECTED_DELTA = 14
-EXPECTED_UNIMPLEMENTED = 6
+EXPECTED_UNIMPLEMENTED = 0
 CLI_IMPLEMENTED = 30
-UPDATE_UNIMPLEMENTED = 6
+UPDATE_ROWS = 5
 
 
 def wire_assertion(case_id):
@@ -155,21 +155,23 @@ def test_six_merged_ids_keep_both_original_legs():
         assert row["assertions"] == expected, row["assertions"]
 
 
-def test_implemented_cli_rows_and_unimplemented_update_rows():
-    """The CLI 30 are implemented and verified; update 6 stay unimplemented.
+def test_implemented_cli_and_update_rows():
+    """The CLI 30 and the five update rows are implemented and verified.
 
-    M6 replaced the foundation exit with the real CLI + download lifecycle, so
-    the CLI rows now carry the compared assertion. The updater rows stay
-    unimplemented until M7 integrates a real updater (never a placeholder).
+    The update catalog no longer carries update.rollback (the canceled
+    feature); its remaining rows name complete-candidate preparation and a
+    rejected-candidate result instead of a shared rollback requirement.
     """
     document = compat.load_cases()
-    for suite, expected in (("update", UPDATE_UNIMPLEMENTED),):
+    for suite, expected in (("update", UPDATE_ROWS),):
         rows = [row for row in document["cases"] if row["suite"] == suite]
         assert len(rows) == expected, (suite, len(rows))
         assert len({row["id"] for row in rows}) == expected, suite
         for row in rows:
-            assert row["status"] == "unimplemented", row
-            assert row["delta"] is None, row
+            assert row["status"] == "implemented", row
+            assert row["delta"], row
+            assert not any("rollback" in text.lower() for text in row["assertions"]), row
+    assert "update.rollback" not in {row["id"] for row in document["cases"]}
     cli_rows = [row for row in document["cases"] if row["suite"] == "cli"]
     assert len(cli_rows) == CLI_IMPLEMENTED, len(cli_rows)
     assert len({row["id"] for row in cli_rows}) == CLI_IMPLEMENTED
@@ -182,7 +184,7 @@ def test_implemented_cli_rows_and_unimplemented_update_rows():
         statuses[row["status"]] = statuses.get(row["status"], 0) + 1
     assert statuses.get("implemented") == EXPECTED_IMPLEMENTED, statuses
     assert statuses.get("delta") == EXPECTED_DELTA, statuses
-    assert statuses.get("unimplemented") == EXPECTED_UNIMPLEMENTED, statuses
+    assert statuses.get("unimplemented", 0) == EXPECTED_UNIMPLEMENTED, statuses
 
 
 def test_duplicate_id_is_rejected_before_any_case_map():
@@ -344,7 +346,7 @@ def test_rpc_native_filters_select_every_required_mapped_name():
 TESTS = [
     test_current_catalog_ids_are_unique_and_strict,
     test_six_merged_ids_keep_both_original_legs,
-    test_implemented_cli_rows_and_unimplemented_update_rows,
+    test_implemented_cli_and_update_rows,
     test_duplicate_id_is_rejected_before_any_case_map,
     test_missing_cases_collection_is_rejected,
     test_non_list_cases_collection_is_rejected,

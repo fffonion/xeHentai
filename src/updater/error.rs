@@ -4,11 +4,11 @@
 //!
 //! `Package` is every rejection of a downloaded package (signature, digest,
 //! schema, target/ABI, entry list, archive safety). `Install` is every
-//! rejection of an activation attempt (staging, candidate preflight,
-//! replacement, re-execution, rollback). The distinction matters: a `Package`
-//! rejection never touches the live installation, while an `Install` rejection
-//! is what the startup controller reports before restoring the previous
-//! release.
+//! rejection of a candidate application attempt (staging, candidate preflight,
+//! replacement, re-execution). The distinction matters: a `Package` rejection
+//! never touches the live installation, while an `Install` rejection is what
+//! the startup controller reports before any live file changes (or, for a real
+//! replacement I/O failure, as the actual error it is).
 
 use std::path::PathBuf;
 

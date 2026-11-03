@@ -5,12 +5,13 @@ use http;
 //
 // This module owns the mode decision (off/check/download), the same-update-id
 // comparison, what gets logged for each outcome, the buffered commits request,
-// and the start-time apply/stale/rollback decisions. The Rust owner supplies
-// the typed binding/request plan from `github.rss`, the transport policy, the
-// package primitives and the logger sink, and enforces the signature, digest,
-// ABI, path, platform and rollback safety whatever these decisions ask for.
+// and the start-time apply/stale decision. The Rust owner supplies the typed
+// binding/request plan from `github.rss`, the transport policy, the package
+// primitives and the logger sink, and enforces the signature, digest, ABI,
+// path, platform and preparation safety whatever these decisions ask for.
 // A `download` decision selects the signed package download; ONLY the native
-// installer publishes pending, and only the next start applies it.
+// installer publishes pending, and only the next start applies it. A failed
+// candidate is dropped and the running release stays as it is.
 
 struct LogEvent {
     level: string,
@@ -209,30 +210,6 @@ pub fn upd_startup(
     }
     let decision = {
         outcome: outcome,
-        events: events,
-    };
-    decision
-}
-
-/// The running image reported the new compiled identity after re-execution:
-/// the activation is confirmed, so the marker is retired.
-pub fn upd_confirmed(update_id: string) -> StartupDecision {
-    let mut events: [LogEvent] = [];
-    events[events.length] = event("info", "UPDATE_CONFIRMED", [update_id]);
-    let decision = {
-        outcome: "confirmed",
-        events: events,
-    };
-    decision
-}
-
-/// Activation failed: the previous release and the user's own state are what
-/// remains, and the log says so instead of reporting a completed update.
-pub fn upd_rollback(detail: string, previous_update_id: string) -> StartupDecision {
-    let mut events: [LogEvent] = [];
-    events[events.length] = event("warning", "UPDATE_ROLLBACK", [detail, previous_update_id]);
-    let decision = {
-        outcome: "rolled_back",
         events: events,
     };
     decision
