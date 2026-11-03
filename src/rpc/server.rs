@@ -1696,8 +1696,34 @@ where
 
 /// Bind an owned listener. Bind errors are real: the server is never marked
 /// started without a listener.
+///
+/// IP literals keep their exact former bind behavior, so explicit `127.0.0.1`,
+/// `::1` and other literals are unchanged. A host name is resolved once and
+/// the first IPv4 answer is used, because the reference (`rpc.py` ->
+/// stdlib `HTTPServer`) resolves the default `localhost` interface on an
+/// AF_INET socket; a dual-stack resolver that answers `::1` first must not
+/// strand IPv4 clients. A name with no IPv4 answer keeps the former
+/// first-resolved-address behavior, and an empty answer is an ordinary bind
+/// error instead of a silent start. One lookup, one bind attempt: no second
+/// listener and no family fallback after the chosen address fails.
 pub async fn bind(interface: &str, port: u16) -> Result<TcpListener, std::io::Error> {
-    TcpListener::bind((interface, port)).await
+    if interface.parse::<std::net::IpAddr>().is_ok() {
+        return TcpListener::bind((interface, port)).await;
+    }
+    let mut first = None;
+    for addr in tokio::net::lookup_host((interface, port)).await? {
+        if addr.is_ipv4() {
+            return TcpListener::bind(addr).await;
+        }
+        first.get_or_insert(addr);
+    }
+    match first {
+        Some(addr) => TcpListener::bind(addr).await,
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "could not resolve to any addresses",
+        )),
+    }
 }
 
 /// TEST-ONLY accept-fault seam: after `accepts` real accepts on `port`, the
@@ -5451,6 +5477,154 @@ mod tests {
             assert!(text.starts_with("HTTP/1.0 200 OK"), "{text}");
             assert!(text.contains("\"id\":\"tcp\""), "{text}");
         });
+    }
+
+    /// The default interface is a host name (`config.rs` default `localhost`).
+    /// The reference resolves it on an AF_INET socket, so the production bind
+    /// must expose IPv4 loopback and serve a real 127.0.0.1 connection. This
+    /// host's ordinary resolver is IPv4-only, so this portable assertion also
+    /// passes pre-fix; the deterministic IPv6-first reproduction is the
+    /// controlled child below.
+    #[test]
+    fn hostname_bind_serves_ipv4_loopback_and_drains() {
+        block_on(async {
+            let listener = bind("localhost", 0).await.expect("bind localhost");
+            let addr = listener.local_addr().expect("addr");
+            assert!(
+                addr.is_ipv4(),
+                "host name must bind IPv4 loopback, bound {addr}"
+            );
+            let port = addr.port();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (accepted, connected) = tokio::join!(
+                listener.accept(),
+                tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)),
+            );
+            let (mut server_side, peer) = accepted.expect("accept 127.0.0.1");
+            let mut client = connected.expect("connect 127.0.0.1");
+            assert!(peer.is_ipv4(), "unexpected peer {peer}");
+            client.write_all(b"ping").await.expect("write");
+            let mut buf = [0u8; 4];
+            server_side.read_exact(&mut buf).await.expect("read");
+            assert_eq!(&buf, b"ping");
+            drop((client, server_side, listener));
+            // Owned drain: the bound port is released for a fresh listener.
+            let again = bind("127.0.0.1", port).await.expect("rebind after drain");
+            drop(again);
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    const HOSTNAME_IPV6_FIRST_CHILD: &str = "rpc::server::tests::hostname_bind_ipv6_first_child";
+
+    /// Controlled-input child: run only through
+    /// [`hostname_bind_prefers_ipv4_with_ipv6_first_resolver`], which compiles
+    /// `tools/fixtures/rpc-localhost-ipv6-first.c` and LD_PRELOADs it here, so
+    /// the ordinary AF_UNSPEC lookup answers `::1` before `127.0.0.1`.
+    #[test]
+    #[ignore = "spawned with the controlled resolver fixture by the hostname bind driver"]
+    #[cfg(target_os = "linux")]
+    fn hostname_bind_ipv6_first_child() {
+        use std::net::ToSocketAddrs;
+        block_on(async {
+            let resolved: Vec<std::net::SocketAddr> = ("localhost", 0u16)
+                .to_socket_addrs()
+                .expect("fixture resolution")
+                .collect();
+            let order: Vec<String> = resolved.iter().map(|addr| addr.to_string()).collect();
+            println!("hostname ipv6-first child sees {order:?}");
+            assert!(
+                resolved.len() >= 2 && resolved[0].is_ipv6(),
+                "controlled resolver input is not in effect: {order:?}"
+            );
+            assert!(resolved.iter().any(|addr| addr.is_ipv4()));
+            let listener = bind("localhost", 0).await.expect("bind localhost");
+            let addr = listener.local_addr().expect("addr");
+            println!("hostname ipv6-first child bound {addr}");
+            assert!(addr.is_ipv4(), "host name bound {addr}, not IPv4 loopback");
+            let port = addr.port();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (accepted, connected) = tokio::join!(
+                listener.accept(),
+                tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)),
+            );
+            let (mut server_side, peer) = accepted.expect("accept 127.0.0.1");
+            let mut client = connected.expect("connect 127.0.0.1");
+            assert!(peer.is_ipv4(), "unexpected peer {peer}");
+            client.write_all(b"ok").await.expect("write");
+            let mut buf = [0u8; 2];
+            server_side.read_exact(&mut buf).await.expect("read");
+            assert_eq!(&buf, b"ok");
+            println!("hostname ipv6-first child accepted a real 127.0.0.1 peer");
+        });
+    }
+
+    /// Deterministic RED/GREEN driver for the default-hostname bind: same
+    /// binary, same production `bind`, controlled resolver input only inside
+    /// this bounded child (never the parallel harness).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn hostname_bind_prefers_ipv4_with_ipv6_first_resolver() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tools/fixtures/rpc-localhost-ipv6-first.c");
+        assert!(source.is_file(), "missing resolver fixture {source:?}");
+        let preload = fixture.path().join("rpc-localhost-ipv6-first.so");
+        let compiled = std::process::Command::new("cc")
+            .args(["-shared", "-fPIC", "-O2", "-o"])
+            .arg(&preload)
+            .arg(&source)
+            .arg("-ldl")
+            .status()
+            .expect("cc for the resolver fixture");
+        assert!(compiled.success(), "fixture compile failed: {compiled:?}");
+        let out_path = fixture.path().join("child.stdout");
+        let err_path = fixture.path().join("child.stderr");
+        let exclusive = |path: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .expect("exclusive child stream file")
+        };
+        let mut child = std::process::Command::new(std::env::current_exe().expect("current_exe"))
+            .arg("--exact")
+            .arg(HOSTNAME_IPV6_FIRST_CHILD)
+            .arg("--ignored")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env("LD_PRELOAD", &preload)
+            .stdin(std::process::Stdio::null())
+            .stdout(exclusive(&out_path))
+            .stderr(exclusive(&err_path))
+            .spawn()
+            .expect("spawn bounded hostname child");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut finished = None;
+        while std::time::Instant::now() < deadline {
+            if let Some(status) = child.try_wait().expect("try_wait") {
+                finished = Some(status);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let timed_out = finished.is_none();
+        if timed_out {
+            let _ = child.kill();
+        }
+        // Reap FIRST, then read the exclusive outputs on every path.
+        let status = child.wait().expect("reap bounded hostname child");
+        let out = std::fs::read_to_string(&out_path).unwrap_or_default();
+        let err = std::fs::read_to_string(&err_path).unwrap_or_default();
+        println!("hostname ipv6-first child stdout:\n{out}");
+        assert!(
+            !timed_out,
+            "hostname child timed out\n--- child stdout ---\n{out}\n--- child stderr ---\n{err}"
+        );
+        assert!(
+            status.success(),
+            "hostname child failed with {status:?}\n--- child stdout ---\n{out}\n--- child stderr ---\n{err}"
+        );
     }
 
     #[test]
