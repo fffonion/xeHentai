@@ -62,6 +62,11 @@ its real output with the Rust entry points. It is a development tool and is not
 shipped. See `tools/cases.json` for the feature inventory and per-case status.
 The comparator refuses `--verify-all` while any case remains unimplemented.
 
+Five `update.*` rows stay `unimplemented`: their runtime behavior and focused
+native tests exist, but the comparative B6 producer/oracle/native map and its
+two-round paired proof are still pending, so the inventory does not certify
+them.
+
 ## Layout
 
 - `src/` — Rust host code (`main.rs`, `const.rs`, `config.rs`, `i18n.rs`,

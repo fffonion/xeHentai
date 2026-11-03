@@ -1379,7 +1379,7 @@ fn m7p_next_start_applies_the_resource_candidate_and_runs_the_new_rss() {
     let log = log_of(install.path());
     assert!(log.contains("xeHentai 2.023-rss started."), "{log}");
     assert!(
-        !log.contains("was applied"),
+        !log.contains("files installed"),
         "a download must not apply: {log}"
     );
     assert_eq!(child.stop(), 0);
@@ -1405,7 +1405,7 @@ fn m7p_next_start_applies_the_resource_candidate_and_runs_the_new_rss() {
         &["-l", "eh.log", "-vv", "--auto-update", "check"],
     );
     assert!(
-        wait_log(install.path(), "was applied"),
+        wait_log(install.path(), "files installed"),
         "the next start never applied the candidate: {}",
         log_of(install.path())
     );
@@ -1501,7 +1501,7 @@ fn m7p_successful_upgrade_leaves_no_rollback_artifacts() {
         &["-l", "eh.log", "-vv", "--auto-update", "off"],
     );
     assert!(
-        wait_log(install.path(), "was applied"),
+        wait_log(install.path(), "files installed"),
         "the candidate was not applied: {}",
         log_of(install.path())
     );
@@ -1589,7 +1589,7 @@ fn m7p_next_start_rejects_an_uncompilable_candidate_and_keeps_the_live_tree() {
     );
     assert_eq!(child.stop(), 0);
     let log = log_of(install.path());
-    assert!(!log.contains("was applied"), "{log}");
+    assert!(!log.contains("files installed"), "{log}");
     assert!(!log.contains("Update is complete"), "{log}");
     assert_eq!(
         std::fs::read(install.path().join("rss/updater/github.rss")).expect("live"),
@@ -1625,7 +1625,7 @@ fn m7p_next_start_rejects_an_uncompilable_candidate_and_keeps_the_live_tree() {
         &["-l", "eh.log", "-vv", "--auto-update", "check"],
     );
     assert!(
-        wait_log(install.path(), "was applied"),
+        wait_log(install.path(), "files installed"),
         "the fresh candidate did not apply: {}",
         log_of(install.path())
     );
@@ -1684,7 +1684,7 @@ fn m7p_next_start_discards_a_tampered_pending_and_keeps_the_running_release() {
     );
     assert_eq!(child.stop(), 0);
     let log = log_of(install.path());
-    assert!(!log.contains("was applied"), "{log}");
+    assert!(!log.contains("files installed"), "{log}");
     assert_eq!(
         std::fs::read(install.path().join("rss/updater/github.rss")).expect("live"),
         live_before,
@@ -1730,7 +1730,7 @@ fn m7p_next_start_drops_a_pending_candidate_that_is_already_applied() {
         &exe,
         &["-l", "eh.log", "-vv", "--auto-update", "off"],
     );
-    assert!(wait_log(install.path(), "was applied"));
+    assert!(wait_log(install.path(), "files installed"));
     assert_eq!(child.stop(), 0);
     let applied = std::fs::read(install.path().join("rss/updater/github.rss")).expect("binding");
 
@@ -1890,7 +1890,7 @@ fn m7p_native_ab_reexec_runs_the_new_image_and_rejects_a_bad_candidate() {
     );
     assert_eq!(child.stop(), 0);
     let log = log_of(install.path());
-    assert!(log.contains("was applied"), "{log}");
+    assert!(log.contains("files installed"), "{log}");
     assert_eq!(
         std::fs::read(&exe).expect("live exe"),
         binary_b,
@@ -1938,7 +1938,7 @@ fn m7p_native_ab_reexec_runs_the_new_image_and_rejects_a_bad_candidate() {
     );
     assert_eq!(child.stop(), 0);
     let log = log_of(install.path())[offset..].to_string();
-    assert!(!log.contains("was applied"), "{log}");
+    assert!(!log.contains("files installed"), "{log}");
     assert!(!log.contains("is running"), "{log}");
     assert!(
         log.contains(&format!("xeHentai 2.023-rss+{build_b} started.")),
@@ -2787,4 +2787,172 @@ fn m7p_startup_refuses_a_symlinked_pending_leaf_before_reading_it() {
     );
     assert!(!area_path(install.path()).join("activation.json").exists());
     assert!(!area_path(install.path()).join("state.json").exists());
+}
+
+// MARK: - address r1: apply-phase failure and truthful installed-files event
+
+/// One live target of a signed entry is an incompatible type (a directory), so
+/// a LATER `rename(2)` in the real apply loop fails with EISDIR after earlier
+/// files were really replaced. On the old source that ordinary error is treated
+/// like a preparation rejection: pending is discarded and the start continues
+/// into the business App on the mixed tree. The corrected behavior stops THIS
+/// start with a nonzero status before App/session/tasks, keeps the pending
+/// candidate and writes no applied identity and no completion event.
+#[test]
+fn m7p_r1_late_apply_failure_stops_the_start_before_the_business_app() {
+    use std::os::unix::fs::MetadataExt as _;
+    let key = signing_key();
+    let pem = public_pem(&key);
+    let server = Server::start(vec![]);
+    let origin = server.origin();
+    let mut files = candidate_rss(&origin, Some(&pem), "rss-b");
+    // A signed resource the business modules never load: refusing exactly this
+    // path can only come from the apply loop, not from module loading.
+    let probe = "rss/update-probe/apply-target.bin";
+    files.push((probe.to_string(), b"probe\n".to_vec()));
+    let pkg = sign(
+        &key,
+        &Spec::new(UPDATE_ID).with_tree(&format!("xeHentai-{UPDATE_ID}/"), &files),
+    );
+    let install = install_dir();
+    publish_rss(install.path(), &origin, Some(&pem), "rss");
+    let exe = owned_exe(install.path());
+    let first_live = install.path().join("rss/filters/match.rss");
+    let first_inode = std::fs::metadata(&first_live).expect("first live").ino();
+    let last_live = install.path().join("rss/updater/updater.rss");
+    // The live target of the LAST signed entry is a directory.
+    let sabotage = install.path().join(probe);
+    std::fs::create_dir_all(sabotage.parent().expect("probe parent")).expect("probe dir");
+    std::fs::create_dir(&sabotage).expect("probe leaf");
+    let seeded = seed_pending(
+        install.path(),
+        pkg.info.clone(),
+        pkg.sig.clone(),
+        pkg.payload.clone(),
+    );
+
+    let mut child = ChildRun::spawn(
+        install.path(),
+        &exe,
+        &["-l", "eh.log", "-vv", "--auto-update", "off"],
+    );
+    let exit = m6::wait_exit(
+        child.child.as_mut().expect("child"),
+        Duration::from_secs(30),
+    );
+    drop(child);
+    let log = log_of(install.path());
+    let code = exit.and_then(|status| status.code());
+    assert_eq!(
+        code,
+        Some(1),
+        "a failed live apply must stop this start with a nonzero status before the business App \
+         (None means it kept running); log: {log}"
+    );
+    assert!(
+        !log.contains("started."),
+        "the business App started on a mixed tree: {log}"
+    );
+    assert!(
+        log.contains("Failure when updating program") && log.contains("update application failed"),
+        "the real apply error was not reported: {log}"
+    );
+    assert!(
+        log.contains("Is a directory"),
+        "the report does not carry the real replacement error: {log}"
+    );
+    // The earlier replacements really happened, so this is a mixed tree.
+    let first_after = std::fs::metadata(&first_live)
+        .expect("first live after")
+        .ino();
+    assert_ne!(
+        first_inode, first_after,
+        "the first live replacement never happened"
+    );
+    let expected_last = files
+        .iter()
+        .find(|(path, _)| path == "rss/updater/updater.rss")
+        .map(|(_, body)| body.clone())
+        .expect("candidate updater module");
+    assert_eq!(
+        std::fs::read(&last_live).expect("last live after"),
+        expected_last,
+        "the last replacement before the failure never happened"
+    );
+    assert!(
+        std::fs::read(pending_path(install.path())).expect("pending kept") == seeded,
+        "the pending candidate was consumed on an apply failure"
+    );
+    assert!(
+        !area_path(install.path()).join("state.json").exists(),
+        "an applied identity was published on an apply failure"
+    );
+    assert!(
+        !install.path().join("h.json").exists(),
+        "the session was written on an apply failure"
+    );
+    assert!(
+        !log.contains("Update is complete") && !log.contains("files installed"),
+        "the failed apply published a completion event: {log}"
+    );
+}
+
+/// The installed-files event states exactly what happened before the native
+/// image is started. It must not claim that this start already runs the new
+/// version; the real new process's own version log is the only proof of that.
+#[test]
+fn m7p_r1_installed_files_event_is_neutral_in_every_locale() {
+    use crate::i18n::{self, Locale};
+    let cases = [
+        (Locale::EnUs, "Update files installed: rss-b6"),
+        (Locale::ZhHans, "更新文件已安装: rss-b6"),
+        (Locale::ZhHant, "更新檔案已安裝: rss-b6"),
+    ];
+    for (locale, expected) in cases {
+        let text = i18n::render(locale, "UPDATE_APPLIED", &["rss-b6"]).expect("UPDATE_APPLIED");
+        assert_eq!(text, expected, "{locale:?}");
+        assert!(
+            !text.contains("runs the new version")
+                && !text.contains("运行新版本")
+                && !text.contains("執行新版本"),
+            "{locale:?} still claims the new program runs: {text}"
+        );
+    }
+}
+
+/// The real main branch that starts an installed native image. Here the copied
+/// TEMP image is revoked AFTER file application, so the real `execv` reports
+/// the real OS error. The start must report `UPDATE_FAILED`, exit nonzero and
+/// never claim the new version is running. Only an independent copied TEMP
+/// executable is involved: the Cargo test binary is never self-replaced or
+/// executed, and no production fault flag exists.
+#[test]
+fn m7p_r1_reexec_failure_reports_failed_without_claiming_a_running_version() {
+    use crate::i18n::Locale;
+    let install = install_dir();
+    let exe = install.path().join("installed-candidate");
+    std::fs::copy(m6::binary(), &exe).expect("copy the installed TEMP image");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    // Revoke the installed image after the files are installed: the real exec
+    // now fails for a real OS reason.
+    std::fs::remove_file(&exe).expect("revoke the installed image");
+    let mut logger = crate::util::logger::Logger::new();
+    logger
+        .set_logfile(&install.path().join("eh.log"))
+        .expect("open the log file");
+    let code = crate::reexec_installed(Locale::EnUs, &mut logger, &exe);
+    assert_eq!(code, 1, "a failed exec must exit nonzero");
+    let log = log_of(install.path());
+    assert!(
+        log.contains("Failure when updating program") && log.contains("No such file or directory"),
+        "the real exec error was not reported: {log}"
+    );
+    assert!(
+        !log.contains("runs the new version") && !log.contains("files installed"),
+        "the failed exec start claimed an installed/running update: {log}"
+    );
 }

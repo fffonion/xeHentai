@@ -45,7 +45,7 @@ THREAD_UNCAUGHT_EXCEPTION: '紳士-%{0} 未捕獲的異常
 UPDATE_AVAILABLE: '發現可用的更新: 發布於 %{0} "%{1}" (%{2})'
 UPDATE_CHANNEL: '更新渠道為: %{0}'
 UPDATE_COMPLETE: 更新完成，請重新啟動程序應用更新
-UPDATE_APPLIED: '更新 %{0} 已套用，本次啟動執行新版本'
+UPDATE_APPLIED: '更新檔案已安裝: %{0}'
 UPDATE_PENDING_ID: '待用更新 %{0} 已準備好，下次啟動生效'
 UPDATE_DEV_CHANNEL: 測試版
 UPDATE_DOWNLOAD_MANUALLY: 可以從 https://dl.yooooo.us/share/xeHentai/ 下載更新

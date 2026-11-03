@@ -1013,11 +1013,14 @@ pub struct StartupReport {
 
 /// A fail-closed startup outcome. `Busy` is retryable (another process is
 /// publishing or applying an update to this installation); `Untrusted` means
-/// the installer area itself is not the private state this process needs.
+/// the installer area itself is not the private state this process needs;
+/// `ApplyFailed` means the live replacement began and then failed, so the
+/// installed tree may be mixed and this start must not run the App on it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartupStop {
     Busy,
     Untrusted,
+    ApplyFailed,
 }
 
 impl StartupReport {
@@ -1044,6 +1047,20 @@ impl StartupReport {
         report.stop = Some(stop);
         report
     }
+    /// A stop whose detail is a real error (logged at error level) rather than
+    /// a warning-level rejection note.
+    fn stopped_error(detail: impl Into<String>, stop: StartupStop) -> Self {
+        let mut report = Self::new(
+            "failed",
+            vec![LogEvent {
+                level: "error".into(),
+                key: "UPDATE_FAILED".into(),
+                args: vec![detail.into()],
+            }],
+        );
+        report.stop = Some(stop);
+        report
+    }
 }
 
 /// The startup controller, called by `main` BEFORE the business App exists.
@@ -1054,7 +1071,10 @@ impl StartupReport {
 /// apply/stale, while this function enforces the native safety: signature,
 /// digest, ABI/target, entry list, complete staging and the private preflight
 /// all happen BEFORE any live file is replaced. A rejected candidate is
-/// discarded and the current release keeps running exactly as it was.
+/// discarded and the current release keeps running exactly as it was. A
+/// failure after the first live replacement may leave a mixed tree, so it
+/// stops this start (`StartupStop::ApplyFailed`) and keeps the pending
+/// candidate for a later ordinary launch instead of continuing into the App.
 pub fn startup(install_root: &Path) -> StartupReport {
     let installation = install::Installation::new(install_root);
     // Never trust an existing area with a foreign owner or a shared-writable
@@ -1176,11 +1196,21 @@ pub fn startup(install_root: &Path) -> StartupReport {
                     }
                     report
                 }
+                Err(error) if error.is_apply() => {
+                    // The live replacement already began, so the tree may be
+                    // mixed (some files new, some old). Stop THIS start before
+                    // the business App, its session and any task, report the
+                    // real error and publish no applied identity. The pending
+                    // candidate is deliberately kept (it is the ordinary
+                    // pending candidate, not a recovery record) so a later
+                    // ordinary launch cannot silently treat a mixed tree as
+                    // healthy.
+                    StartupReport::stopped_error(error.to_string(), StartupStop::ApplyFailed)
+                }
                 Err(error) => {
-                    // A rejection happened before any live change; a real
-                    // replacement I/O error is reported as the error it is.
-                    // Either way the candidate is retired and this start
-                    // continues with the session and files it already has.
+                    // A preparation rejection: nothing live changed, so the
+                    // candidate is retired and this start continues with the
+                    // unchanged release and user session.
                     let _ = installation.discard_pending();
                     StartupReport::new(
                         "failed",

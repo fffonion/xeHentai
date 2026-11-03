@@ -820,10 +820,11 @@ pub struct Committed {
 /// Everything that can reject the candidate — complete materialization into a
 /// private staging tree and the real private preflight — happens BEFORE any
 /// live file is touched, so a failure there leaves the running release
-/// completely unchanged. Only a fully prepared candidate replaces the selected
-/// files; the applied record is written only after that replacement succeeded.
-/// A real replacement I/O error is returned as a real error (the tree may be
-/// partly updated), never as success.
+/// completely unchanged and is an ordinary `Install` rejection. Only a fully
+/// prepared candidate replaces the selected files; the applied record is
+/// written only after that replacement succeeded. Any failure from the first
+/// live mutation on is tagged as an `Apply` failure (the tree may be mixed),
+/// which the startup controller must stop on rather than continue past.
 pub fn install_candidate(
     installation: &Installation,
     candidate: &Candidate,
@@ -880,39 +881,46 @@ pub fn install_candidate(
     )?;
 
     // The candidate is complete and preflighted; only now are live files
-    // replaced. There is no undo: a real I/O failure below is reported.
+    // replaced. This is the apply phase: from the first replacement on, a
+    // failure means the live tree may already be mixed, so it must stop this
+    // start instead of being reported as a candidate rejection. There is no
+    // undo, journal or recovery record.
     let resources: Vec<&SelectedEntry> = selected
         .iter()
         .filter(|entry| Some(&entry.path) != native.as_ref())
         .collect();
-    for entry in &resources {
-        let staged = staging.path().join(&entry.path);
-        let live = installation.root().join(&entry.path);
-        replace_file(&live, &staged)?;
-    }
-    if let Some(entry) = &native {
-        // The running image keeps its inode; the path now refers to the
-        // candidate bytes. Re-execution below loads the real new image.
-        let staged = staging.path().join(entry);
-        self_replace::self_replace(&staged)
-            .map_err(|error| UpdateError::install(format!("self replacement: {error}")))?;
-    }
+    let apply = || -> Result<(), UpdateError> {
+        for entry in &resources {
+            let staged = staging.path().join(&entry.path);
+            let live = installation.root().join(&entry.path);
+            replace_file(&live, &staged)?;
+        }
+        if let Some(entry) = &native {
+            // The running image keeps its inode; the path now refers to the
+            // candidate bytes. Re-execution below loads the real new image.
+            let staged = staging.path().join(entry);
+            self_replace::self_replace(&staged)
+                .map_err(|error| UpdateError::install(format!("self replacement: {error}")))?;
+        }
 
-    let build_id = candidate
-        .descriptor
-        .native_build_id
-        .clone()
-        .unwrap_or_else(|| crate::r#const::BUILD_ID.to_string());
-    let record = Record {
-        update_id: candidate.descriptor.update_id.clone(),
-        build_id,
-        native: native.is_some(),
-        applied_at: crate::util::logger::now_gmt8().to_rfc3339(),
+        let build_id = candidate
+            .descriptor
+            .native_build_id
+            .clone()
+            .unwrap_or_else(|| crate::r#const::BUILD_ID.to_string());
+        let record = Record {
+            update_id: candidate.descriptor.update_id.clone(),
+            build_id,
+            native: native.is_some(),
+            applied_at: crate::util::logger::now_gmt8().to_rfc3339(),
+        };
+        installation.write_records(&Records {
+            v: STATE_VERSION,
+            active: Some(record),
+        })?;
+        Ok(())
     };
-    installation.write_records(&Records {
-        v: STATE_VERSION,
-        active: Some(record.clone()),
-    })?;
+    apply().map_err(UpdateError::during_apply)?;
 
     Ok(Committed {
         reexec: native.is_some(),

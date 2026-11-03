@@ -2523,8 +2523,8 @@
         "next start validates/preflights the complete candidate and applies it, with real resource and native A/B",
         "a rejected candidate leaves the live tree, applied id and session unchanged"
       ],
-      "status": "implemented",
-      "delta": "Native channel: the stable channel is 'rss' and an explicitly bound beta channel drives the real commits request; the Python master/dev archive mapping is replaced by design (plan 9.2.4/9.2.5) and never falls back to dev. The download asset names are derived in rss/updater/github.rss and keep one fixed convention: the payload URL plus '.manifest.json' and '.sig' sidecars."
+      "status": "unimplemented",
+      "delta": "Native channel: the stable channel is 'rss' and an explicitly bound beta channel drives the real commits request; the Python master/dev archive mapping is replaced by design (plan 9.2.4/9.2.5) and never falls back to dev. The download asset names are derived in rss/updater/github.rss and keep one fixed convention: the payload URL plus '.manifest.json' and '.sig' sidecars. Runtime behavior exists and has focused native tests, but the comparative B6 producer/oracle/native map and the two-round paired proof remain pending, so this row stays unimplemented."
     },
     {
       "id": "update.commit",
@@ -2538,8 +2538,8 @@
         "next start validates/preflights the complete candidate and applies it, with real resource and native A/B",
         "a rejected candidate leaves the live tree, applied id and session unchanged"
       ],
-      "status": "implemented",
-      "delta": "First-entry selection, the named commit fields and the CR/LF-to-space message rewrite stay byte-identical to the reference. The module additionally derives the signed descriptor/signature links and the 'xeHentai-<update_id>/' payload prefix, and a commit missing a required field fails strict typed decode instead of producing a partial UpdateInfo (recorded representation difference)."
+      "status": "unimplemented",
+      "delta": "First-entry selection, the named commit fields and the CR/LF-to-space message rewrite stay byte-identical to the reference. The module additionally derives the signed descriptor/signature links and the 'xeHentai-<update_id>/' payload prefix, and a commit missing a required field fails strict typed decode instead of producing a partial UpdateInfo (recorded representation difference). Runtime behavior exists and has focused native tests, but the comparative B6 producer/oracle/native map and the two-round paired proof remain pending, so this row stays unimplemented."
     },
     {
       "id": "update.decision",
@@ -2553,8 +2553,8 @@
         "next start validates/preflights the complete candidate and applies it, with real resource and native A/B",
         "a rejected candidate leaves the live tree, applied id and session unchanged"
       ],
-      "status": "implemented",
-      "delta": "off/check/download and the same-update-id comparison run through the real RSS VM. 'off' is still suppressed by the CLI caller only, while a direct off check queries once and hints manual download. 'download' now performs the signed package fetch through the same Core HTTP host and publishes one pending envelope; a same update id skips the descriptor, signature and payload requests; the applied id comes from the installer's own active record, never from a version string."
+      "status": "unimplemented",
+      "delta": "off/check/download and the same-update-id comparison run through the real RSS VM. 'off' is still suppressed by the CLI caller only, while a direct off check queries once and hints manual download. 'download' now performs the signed package fetch through the same Core HTTP host and publishes one pending envelope; a same update id skips the descriptor, signature and payload requests; the applied id comes from the installer's own active record, never from a version string. Runtime behavior exists and has focused native tests, but the comparative B6 producer/oracle/native map and the two-round paired proof remain pending, so this row stays unimplemented."
     },
     {
       "id": "update.package",
@@ -2568,8 +2568,8 @@
         "next start validates/preflights the complete candidate and applies it, with real resource and native A/B",
         "a rejected candidate leaves the live tree, applied id and session unchanged"
       ],
-      "status": "implemented",
-      "delta": "Native v1 signed descriptor (v/update_id/app_version/target/host_abi/script_abi/archive_sha256/entries/native_executable/native_build_id) with a detached Ed25519 signature over the exact descriptor bytes and a SHA-256 of the whole payload ZIP. Pending is ONE atomically published STORE envelope 'src.zip' holding exactly info.json (the signed bytes), info.sig and payload.zip (the original archive). This is an explicit format migration, not the Python source-injection archive: the reference prefix rules are preserved and compared explicitly (only members under 'xeHentai-<update_id>/' that the signed descriptor lists are materialized; directories and foreign entries are dropped), but entries are named install-relative with signed lengths and the format is not byte-compared to the Python code zip. Reading uses zip's enclosed_name plus real copy counts, and rejects traversal, absolute/backslash-ambiguous names, duplicates, symlinks, reserved user-state paths and archive expansion. Where Python accepted v=999 and kept unusable packages, the native format rejects ABI/target/version mismatches and retires rejected candidates."
+      "status": "unimplemented",
+      "delta": "Native v1 signed descriptor (v/update_id/app_version/target/host_abi/script_abi/archive_sha256/entries/native_executable/native_build_id) with a detached Ed25519 signature over the exact descriptor bytes and a SHA-256 of the whole payload ZIP. Pending is ONE atomically published STORE envelope 'src.zip' holding exactly info.json (the signed bytes), info.sig and payload.zip (the original archive). This is an explicit format migration, not the Python source-injection archive: the reference prefix rules are preserved and compared explicitly (only members under 'xeHentai-<update_id>/' that the signed descriptor lists are materialized; directories and foreign entries are dropped), but entries are named install-relative with signed lengths and the format is not byte-compared to the Python code zip. Reading uses zip's enclosed_name plus real copy counts, and rejects traversal, absolute/backslash-ambiguous names, duplicates, symlinks, reserved user-state paths and archive expansion. Where Python accepted v=999 and kept unusable packages, the native format rejects ABI/target/version mismatches and retires rejected candidates. Runtime behavior exists and has focused native tests, but the comparative B6 producer/oracle/native map and the two-round paired proof remain pending, so this row stays unimplemented."
     },
     {
       "id": "update.apply",
@@ -2583,8 +2583,8 @@
         "next start validates/preflights the complete candidate and applies it, with real resource and native A/B",
         "a rejected candidate leaves the live tree, applied id and session unchanged"
       ],
-      "status": "implemented",
-      "delta": "Download publishes pending only; the running App/Task/VM and its reported identity stay on the old build and a cancelled or failed download leaves the previous pending byte-identical. The next start calls the OLD release's rss/updater/updater.rss startup controller before the business App exists, validates the envelope, materializes the COMPLETE candidate into private staging and preflights it with the same host's private '--update-preflight' mode (real configuration/App/module loading against private state, no user config/session/network) BEFORE any live file is replaced. Only a fully prepared candidate replaces exactly the listed files; a native package uses self-replace and really re-executes the installed image. No backup, activation journal, confirmation or rollback state exists: the applied record is written only after the replacement succeeded, and a rejected candidate is discarded while the running release and user session stay unchanged. Resource-only A/B is proved by a changed real request from the new RSS; native A/B by two sequential real builds whose compiled XEH_BUILD_ID appears in the existing version label. Windows native replacement is UNVERIFIED and fails closed; formal M7/M8 stay partial."
+      "status": "unimplemented",
+      "delta": "Download publishes pending only; the running App/Task/VM and its reported identity stay on the old build and a cancelled or failed download leaves the previous pending byte-identical. The next start calls the OLD release's rss/updater/updater.rss startup controller before the business App exists, validates the envelope, materializes the COMPLETE candidate into private staging and preflights it with the same host's private '--update-preflight' mode (real configuration/App/module loading against private state, no user config/session/network) BEFORE any live file is replaced. Only a fully prepared candidate replaces exactly the listed files; a native package uses self-replace and really re-executes the installed image. No backup, activation journal, confirmation or rollback state exists: the applied record is written only after the replacement succeeded, and a rejected candidate is discarded while the running release and user session stay unchanged. Resource-only A/B is proved by a changed real request from the new RSS; native A/B by two sequential real builds whose compiled XEH_BUILD_ID appears in the existing version label. Windows native replacement is UNVERIFIED and fails closed; formal M7/M8 stay partial. Runtime behavior exists and has focused native tests, but the comparative B6 producer/oracle/native map and the two-round paired proof remain pending, so this row stays unimplemented."
     },
     {
       "id": "webui.static",

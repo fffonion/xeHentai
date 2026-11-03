@@ -95,9 +95,10 @@ where
     // The trusted startup controller runs here: before the business App, its
     // session and its modules exist. It decides (through the OLD release's
     // rss/updater modules) whether a pending candidate is applied, and the
-    // native owner enforces the signature, digest, ABI, path, preflight,
-    // replacement and rollback rules. An ordinary start with nothing pending
-    // loads no updater module at all.
+    // native owner enforces the signature, digest, ABI, path, preflight and
+    // replacement rules. A failure after the first live replacement stops this
+    // start instead of running the App on a mixed tree. An ordinary start with
+    // nothing pending loads no updater module at all.
     let install_root = resource_root(root);
     // The CLI patch (`-l`, `--verbose`, `--auto-update`) is applied by
     // `update_config` after the business App exists, so the activation lines
@@ -114,32 +115,28 @@ where
     for event in &startup.events {
         log_event(&mut logger, locale, event);
     }
-    // A startup transaction that could not complete safely (another process
-    // owns the switch, or the previous release could not be restored) must NOT
-    // construct the business App, open the session or start any task.
+    // A startup transaction that could not complete safely must NOT construct
+    // the business App, open the session or start any task: another process
+    // owns the switch, the installer state is not trusted, or the live
+    // replacement failed after it began (the tree may then be mixed and stays
+    // pending for a later ordinary launch).
     if let Some(stop) = startup.stop {
-        let code = match stop {
-            updater::StartupStop::Busy => EXIT_UPDATE_BUSY,
-            updater::StartupStop::Untrusted => 1,
+        let (code, reason) = match stop {
+            updater::StartupStop::Busy => (
+                EXIT_UPDATE_BUSY,
+                "another process is updating this installation",
+            ),
+            updater::StartupStop::Untrusted => (1, "its installer state is not trusted"),
+            updater::StartupStop::ApplyFailed => (
+                1,
+                "the pending update failed while its files were being installed",
+            ),
         };
-        eprintln!(
-            "xeHentai: update startup stopped ({stop:?}); another process is updating this installation or its installer state is not trusted"
-        );
+        eprintln!("xeHentai: update startup stopped ({stop:?}): {reason}");
         return code;
     }
     if let Some(exe) = startup.reexec {
-        // The candidate image is installed and must really run. A platform
-        // that cannot replace/exec the image reports that real failure; the
-        // applied files are NOT reported as a completed update and there is no
-        // rollback.
-        let failure = updater::install::reexec(&exe);
-        logger
-            .error(
-                &i18n::render(locale, "UPDATE_FAILED", &[&failure.to_string()])
-                    .unwrap_or_else(|| failure.to_string()),
-            )
-            .ok();
-        return 1;
+        return reexec_installed(locale, &mut logger, &exe);
     }
     let mut app = match App::new(loaded.config, logger, root, &filepath) {
         Ok(app) => app,
@@ -177,6 +174,25 @@ where
         }
     }
     run_application(app, root, &opts, locale)
+}
+
+/// Start the installed native image.
+///
+/// Installing the update files and starting the new process are distinct
+/// observed outcomes: the installed-files event already logged by the caller
+/// says exactly that, while only the new process's own version log proves that
+/// the new version runs. A real exec failure is reported here and this start
+/// exits nonzero; the installed files are not reported as a completed update
+/// and there is no rollback or confirmation state.
+pub(crate) fn reexec_installed(locale: Locale, logger: &mut Logger, exe: &Path) -> i32 {
+    let failure = updater::install::reexec(exe);
+    logger
+        .error(
+            &i18n::render(locale, "UPDATE_FAILED", &[&failure.to_string()])
+                .unwrap_or_else(|| failure.to_string()),
+        )
+        .ok();
+    1
 }
 
 /// Resolve `rss/` and `locales/` from the program directory when the release

@@ -47,9 +47,9 @@ NATIVE_SOURCE = "xeHentai/rpc.py unit contract"
 RPC_TARGET = "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss"
 EXPECTED_UNIQUE_ROWS = 376
 EXPECTED_RPC_UNIQUE = 106
-EXPECTED_IMPLEMENTED = 362
+EXPECTED_IMPLEMENTED = 357
 EXPECTED_DELTA = 14
-EXPECTED_UNIMPLEMENTED = 0
+EXPECTED_UNIMPLEMENTED = 5
 CLI_IMPLEMENTED = 30
 UPDATE_ROWS = 5
 
@@ -155,22 +155,24 @@ def test_six_merged_ids_keep_both_original_legs():
         assert row["assertions"] == expected, row["assertions"]
 
 
-def test_implemented_cli_and_update_rows():
-    """The CLI 30 and the five update rows are implemented and verified.
+def test_cli_rows_are_implemented_and_update_rows_stay_pending():
+    """The CLI 30 are implemented; the five remaining update rows are pending.
 
-    The update catalog no longer carries update.rollback (the canceled
-    feature); its remaining rows name complete-candidate preparation and a
-    rejected-candidate result instead of a shared rollback requirement.
+    The update runtime exists and has focused native tests, but the comparative
+    B6 producer/oracle/native map and the two-round paired proof are deferred,
+    so the catalog keeps those rows ``unimplemented`` instead of certifying
+    them. Nothing asserted here stands in for B6 evidence. update.rollback
+    stays absent (the canceled feature).
     """
     document = compat.load_cases()
-    for suite, expected in (("update", UPDATE_ROWS),):
-        rows = [row for row in document["cases"] if row["suite"] == suite]
-        assert len(rows) == expected, (suite, len(rows))
-        assert len({row["id"] for row in rows}) == expected, suite
-        for row in rows:
-            assert row["status"] == "implemented", row
-            assert row["delta"], row
-            assert not any("rollback" in text.lower() for text in row["assertions"]), row
+    rows = [row for row in document["cases"] if row["suite"] == "update"]
+    assert len(rows) == UPDATE_ROWS, len(rows)
+    assert len({row["id"] for row in rows}) == UPDATE_ROWS, len(rows)
+    for row in rows:
+        assert row["status"] == "unimplemented", row
+        assert row["delta"], row
+        assert "B6" in row["delta"] and "pending" in row["delta"], row
+        assert not any("rollback" in text.lower() for text in row["assertions"]), row
     assert "update.rollback" not in {row["id"] for row in document["cases"]}
     cli_rows = [row for row in document["cases"] if row["suite"] == "cli"]
     assert len(cli_rows) == CLI_IMPLEMENTED, len(cli_rows)
@@ -346,7 +348,7 @@ def test_rpc_native_filters_select_every_required_mapped_name():
 TESTS = [
     test_current_catalog_ids_are_unique_and_strict,
     test_six_merged_ids_keep_both_original_legs,
-    test_implemented_cli_and_update_rows,
+    test_cli_rows_are_implemented_and_update_rows_stay_pending,
     test_duplicate_id_is_rejected_before_any_case_map,
     test_missing_cases_collection_is_rejected,
     test_non_list_cases_collection_is_rejected,

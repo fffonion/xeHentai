@@ -4,11 +4,12 @@
 //!
 //! `Package` is every rejection of a downloaded package (signature, digest,
 //! schema, target/ABI, entry list, archive safety). `Install` is every
-//! rejection of a candidate application attempt (staging, candidate preflight,
-//! replacement, re-execution). The distinction matters: a `Package` rejection
-//! never touches the live installation, while an `Install` rejection is what
-//! the startup controller reports before any live file changes (or, for a real
-//! replacement I/O failure, as the actual error it is).
+//! rejection of a candidate application attempt BEFORE any live file changes
+//! (staging, candidate preflight). `Apply` is a failure AFTER the first live
+//! mutation began: the installed tree may then be mixed, so the caller must
+//! stop instead of treating it like a rejection. The distinction matters: a
+//! `Package`/`Install` rejection never touches the live installation, while an
+//! `Apply` failure is a real error of a switch that already started.
 
 use std::path::PathBuf;
 
@@ -37,6 +38,9 @@ pub enum UpdateError {
     Binding(String),
     Package(String),
     Install(String),
+    /// A live replacement (or the applied record after it) failed. Some files
+    /// may already be new, so this is not a candidate rejection.
+    Apply(String),
     /// Another process owns the per-install transaction lock. A startup that
     /// sees this must stop with a retryable outcome instead of running the
     /// business App on a tree that is mid-switch.
@@ -54,6 +58,7 @@ impl std::fmt::Display for UpdateError {
             Self::Binding(message) => write!(f, "update source binding error: {message}"),
             Self::Package(message) => write!(f, "update package rejected: {message}"),
             Self::Install(message) => write!(f, "update installation failed: {message}"),
+            Self::Apply(message) => write!(f, "update application failed: {message}"),
             Self::Busy(message) => write!(f, "update installation is busy: {message}"),
         }
     }
@@ -68,6 +73,21 @@ impl UpdateError {
 
     pub fn install(message: impl Into<String>) -> Self {
         Self::Install(message.into())
+    }
+
+    /// Tag a failure raised after the first live mutation. The phase, not the
+    /// underlying variant, decides how startup reacts, so the original
+    /// message (including its path) is kept.
+    pub fn during_apply(self) -> Self {
+        match self {
+            Self::Apply(message) => Self::Apply(message),
+            other => Self::Apply(other.to_string()),
+        }
+    }
+
+    /// True only when live files may already have changed.
+    pub fn is_apply(&self) -> bool {
+        matches!(self, Self::Apply(_))
     }
 
     pub fn io(path: impl Into<PathBuf>, error: &std::io::Error) -> Self {
