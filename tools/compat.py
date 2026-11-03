@@ -1555,12 +1555,74 @@ def _retire_process_group(process):
     return not _process_group_alive(pgid)
 
 
+def _retire_and_drain(process):
+    """Retire the whole owned group, then drain/close its pipes with bounds.
+
+    Shared by the timeout path and the cancellation path so both retire the
+    group the same way. A failed drain is reported as an unretired group
+    rather than raised into a caller that is already unwinding.
+    """
+
+    retired = _retire_process_group(process)
+    try:
+        stdout, stderr = process.communicate(timeout=30)
+        return retired, stdout or "", stderr or ""
+    except subprocess.TimeoutExpired:
+        for stream in (process.stdout, process.stderr):
+            try:
+                stream.close()
+            except (AttributeError, OSError):
+                pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        return False, "", ""
+    except (OSError, ValueError):
+        return retired, "", ""
+
+
+def _install_sigterm_unwind():
+    """Turn an ordinary CLI SIGTERM into a Python unwind.
+
+    Python's default SIGTERM ends the process without unwinding any frame,
+    which left a command's separated group (and its resources) alive. The CLI
+    installs this only around its own work and restores the previous handler
+    afterwards, so an importing caller's signal policy is untouched. Returns
+    the previous handler, or None when nothing was installed.
+    """
+
+    if os.name != "posix":
+        return None
+    try:
+        previous = signal.getsignal(signal.SIGTERM)
+
+        def unwind(signum, frame):
+            raise SystemExit(128 + signum)
+
+        signal.signal(signal.SIGTERM, unwind)
+    except (ValueError, OSError, RuntimeError):
+        return None
+    return previous
+
+
+def _restore_signal_handler(signum, previous):
+    if previous is None:
+        return
+    try:
+        signal.signal(signum, previous)
+    except (ValueError, OSError, RuntimeError):
+        pass
+
+
 def run_command(argv, cwd, env, log_path, timeout_s=900):
     """Run one bounded command in its OWN process group/session.
 
     On timeout the whole group is terminated and reaped before a
     CommandTimeout is raised, so a caller may only retry once the group is
-    confirmed retired.
+    confirmed retired. Any other unwind (Ctrl-C, SystemExit) retires the same
+    owned group before the ORIGINAL exception continues propagating; that
+    interruption is never translated into a timeout, a success or a retry.
     """
 
     log(f"$ {' '.join(argv)}")
@@ -1579,21 +1641,29 @@ def run_command(argv, cwd, env, log_path, timeout_s=900):
         stdout, stderr = process.communicate(timeout=timeout_s)
     except subprocess.TimeoutExpired:
         timed_out = True
-        retired = _retire_process_group(process)
+        retired, stdout, stderr = _retire_and_drain(process)
+    except BaseException:
+        # The command leads its own session, so the terminal's interrupt never
+        # reaches it. Retire the whole owned group before re-raising, and let
+        # no cleanup failure replace the exception being handled.
         try:
-            stdout, stderr = process.communicate(timeout=30)
-        except subprocess.TimeoutExpired:
+            retired, _, _ = _retire_and_drain(process)
+        except BaseException:
             retired = False
-            for stream in (process.stdout, process.stderr):
-                try:
-                    stream.close()
-                except (AttributeError, OSError):
-                    pass
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                pass
-            stdout, stderr = "", ""
+        try:
+            log_path.write_text(
+                f"argv: {argv}\nexit: cancelled\n"
+                f"group_retired: {str(retired).lower()}\n",
+                encoding="utf-8",
+            )
+        except BaseException:
+            pass
+        try:
+            log(f"cancelled (group_retired: {str(retired).lower()}): "
+                f"{' '.join(argv)}")
+        except BaseException:
+            pass
+        raise
     if timed_out:
         log_path.write_text(
             f"argv: {argv}\nexit: timeout after {timeout_s}s\n"
@@ -10937,24 +11007,28 @@ def main(argv=None):
     parser.add_argument("--input")
     args = parser.parse_args(argv)
 
+    previous_term = _install_sigterm_unwind()
     try:
-        if args.oracle:
-            if not args.input or not args.output:
-                raise CompatError("--oracle needs --input and --output")
-            oracle_main(args)
-            return 0
-        if args.verify_all:
-            if not args.evidence:
-                raise CompatError("--verify-all needs --evidence")
-            return verify_all(args.evidence)
-        if not args.suite:
-            raise CompatError("--suite is required")
-        if not args.output:
-            raise CompatError("--output is required")
-        return suite_command(args)
-    except CompatError as error:
-        print(f"compat error: {error}", file=sys.stderr)
-        return 2
+        try:
+            if args.oracle:
+                if not args.input or not args.output:
+                    raise CompatError("--oracle needs --input and --output")
+                oracle_main(args)
+                return 0
+            if args.verify_all:
+                if not args.evidence:
+                    raise CompatError("--verify-all needs --evidence")
+                return verify_all(args.evidence)
+            if not args.suite:
+                raise CompatError("--suite is required")
+            if not args.output:
+                raise CompatError("--output is required")
+            return suite_command(args)
+        except CompatError as error:
+            print(f"compat error: {error}", file=sys.stderr)
+            return 2
+    finally:
+        _restore_signal_handler(signal.SIGTERM, previous_term)
 
 
 if __name__ == "__main__":

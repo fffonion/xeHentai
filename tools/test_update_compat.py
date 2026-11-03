@@ -19,7 +19,9 @@ real producers in the final rounds.
 import json
 import os
 import shutil
+import signal
 import socket
+import subprocess
 import sys
 import tempfile
 import time
@@ -437,6 +439,8 @@ if child_pid == 0:
     os._exit(0)
 with open(os.path.join(state, "pids"), "w") as handle:
     handle.write("%d %d %d\n" % (os.getpid(), child_pid, sock.getsockname()[1]))
+with open(os.path.join(state, "starts"), "a") as handle:
+    handle.write("%d\n" % os.getpid())
 open(os.path.join(state, "ready"), "w").write("1")
 time.sleep(300)
 ''',
@@ -508,6 +512,62 @@ open(count, "w").write(str(invocations))
 sys.stderr.write("ordinary non-zero exit, not a timeout\n")
 sys.exit(3)
 ''',
+    # Drives the PRODUCTION run_command over the hang tree and reports which
+    # exception actually unwound. The parent signals only THIS controller, so
+    # the fixture's own session never sees the interrupt.
+    "cancel_controller.py": r'''
+import os, pathlib, sys
+state, tools = sys.argv[1], sys.argv[2]
+sys.path.insert(0, tools)
+import compat
+
+def record(name, payload):
+    with open(os.path.join(state, name), "w") as handle:
+        handle.write(payload)
+
+try:
+    compat.run_command(
+        [sys.executable, os.path.join(state, "hang_tree.py"), state],
+        state, dict(os.environ),
+        pathlib.Path(os.path.join(state, "command.log")), timeout_s=120)
+except BaseException as error:
+    record("exc", "%s %s\n" % (type(error).__name__, error))
+    raise
+else:
+    record("exc", "none\n")
+''',
+    # Same command, but under the CLI-local SIGTERM-to-unwind helper: an
+    # ordinary SIGTERM must become SystemExit(143) only AFTER the owned group
+    # is retired, and the previous handler must be restored.
+    "sigterm_controller.py": r'''
+import os, pathlib, signal, sys
+state, tools = sys.argv[1], sys.argv[2]
+sys.path.insert(0, tools)
+import compat
+
+def record(name, payload):
+    with open(os.path.join(state, name), "w") as handle:
+        handle.write(payload)
+
+before = repr(signal.getsignal(signal.SIGTERM))
+install = getattr(compat, "_install_sigterm_unwind", None)
+restore = getattr(compat, "_restore_signal_handler", None)
+previous = install() if install is not None else None
+record("before", before)
+try:
+    record("installed", repr(signal.getsignal(signal.SIGTERM)))
+    compat.run_command(
+        [sys.executable, os.path.join(state, "hang_tree.py"), state],
+        state, dict(os.environ),
+        pathlib.Path(os.path.join(state, "command.log")), timeout_s=120)
+except BaseException as error:
+    record("exc", "%s %s\n" % (type(error).__name__, error))
+    raise
+finally:
+    if restore is not None:
+        restore(signal.SIGTERM, previous)
+    record("restored", repr(signal.getsignal(signal.SIGTERM)))
+''',
 }
 
 
@@ -563,6 +623,135 @@ def _cleanup_group(state):
             os.killpg(pids[0], 9)
         except (ProcessLookupError, PermissionError):
             pass
+
+
+def _gone(pid):
+    """A zombie holds no port or file; os.kill(pid, 0) alone would say alive."""
+    try:
+        stat = Path("/proc/%d/stat" % pid).read_text(encoding="utf-8")
+    except OSError:
+        return True
+    fields = stat.rsplit(")", 1)[-1].split()
+    return not fields or fields[0] in ("Z", "X")
+
+
+def _await_file(path, deadline_s=60):
+    path = Path(path)
+    deadline = time.monotonic() + deadline_s
+    while time.monotonic() < deadline:
+        if path.is_file() and path.stat().st_size:
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def _await_gone(pids, deadline_s=20):
+    deadline = time.monotonic() + deadline_s
+    while time.monotonic() < deadline:
+        if all(_gone(pid) for pid in pids):
+            return True
+        time.sleep(0.05)
+    return all(_gone(pid) for pid in pids)
+
+
+def _start_controller(base, name):
+    _write_group_script(base, "hang_tree.py")
+    return subprocess.Popen(
+        [sys.executable, str(_write_group_script(base, name)), str(base),
+         str(TOOLS)],
+        cwd=str(base), env=dict(os.environ),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+
+
+def _wait_ready(base, controller):
+    assert _await_file(base / "ready"), (
+        "the controlled command never reached its ready handshake "
+        "(controller exit: %r)" % (controller.poll(),))
+    pids = _read_pids(base)
+    assert len(pids) == 2, pids
+    port = int((base / "pids").read_text(encoding="utf-8").split()[2])
+    return pids, port
+
+
+def _interrupt_controller(controller, signum):
+    # The handshake proves the child owns the port; the short settle leaves
+    # the controller blocked inside the production communicate() call.
+    time.sleep(0.3)
+    os.kill(controller.pid, signum)
+    try:
+        return controller.communicate(timeout=120)
+    except subprocess.TimeoutExpired:
+        raise AssertionError("the interrupted controller never exited")
+
+
+def _stop_controller(controller):
+    if controller is None or controller.poll() is not None:
+        return
+    controller.kill()
+    try:
+        controller.communicate(timeout=30)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _assert_group_retired(base, pids, port):
+    assert _await_gone(pids), (
+        "the interruption left the owned group alive: %r" % (pids,))
+    for pid in pids:
+        assert _gone(pid), "descendant %d survived the cancellation" % pid
+    assert _port_free(port), "the cancelled command kept the fixture port bound"
+    starts = (base / "starts").read_text(encoding="utf-8").split()
+    assert starts == [str(pids[0])], (
+        "cancellation relaunched the command instead of retiring it: %r"
+        % (starts,))
+    log_text = (base / "command.log").read_text(encoding="utf-8")
+    assert "cancelled" in log_text, log_text
+    assert "group_retired: true" in log_text, log_text
+
+
+def test_keyboard_interrupt_retires_the_owned_group_then_propagates():
+    base = Path(tempfile.mkdtemp(prefix="b6-cancel-", dir=str(_scratch_base())))
+    controller = None
+    try:
+        controller = _start_controller(base, "cancel_controller.py")
+        pids, port = _wait_ready(base, controller)
+        _interrupt_controller(controller, signal.SIGINT)
+        exception = (base / "exc").read_text(encoding="utf-8")
+        assert exception.startswith("KeyboardInterrupt"), (
+            "the original interruption was not preserved: %r" % exception)
+        _assert_group_retired(base, pids, port)
+    finally:
+        _stop_controller(controller)
+        _cleanup_group(base)
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_cli_sigterm_unwinds_and_retires_the_owned_group():
+    base = Path(tempfile.mkdtemp(prefix="b6-sigterm-", dir=str(_scratch_base())))
+    controller = None
+    try:
+        controller = _start_controller(base, "sigterm_controller.py")
+        pids, port = _wait_ready(base, controller)
+        _interrupt_controller(controller, signal.SIGTERM)
+        assert controller.returncode == 128 + signal.SIGTERM, (
+            "SIGTERM did not unwind as the interrupted CLI exit: %r"
+            % (controller.returncode,))
+        exception = (base / "exc").read_text(encoding="utf-8")
+        assert exception.startswith("SystemExit"), (
+            "the SIGTERM unwind did not keep SystemExit: %r" % exception)
+        before = (base / "before").read_text(encoding="utf-8")
+        installed = (base / "installed").read_text(encoding="utf-8")
+        restored = (base / "restored").read_text(encoding="utf-8")
+        assert installed != before, (
+            "SIGTERM still took the default kill path: %r" % installed)
+        assert restored == before, (
+            "the CLI left its SIGTERM policy installed: %r" % restored)
+        _assert_group_retired(base, pids, port)
+    finally:
+        _stop_controller(controller)
+        _cleanup_group(base)
+        shutil.rmtree(base, ignore_errors=True)
 
 
 def test_timeout_retires_the_whole_owned_process_group():
@@ -741,6 +930,8 @@ TESTS = [
     test_timeout_retires_the_whole_owned_process_group,
     test_timeout_retry_starts_only_after_the_previous_group_is_gone,
     test_ordinary_nonzero_exit_is_never_retried,
+    test_keyboard_interrupt_retires_the_owned_group_then_propagates,
+    test_cli_sigterm_unwinds_and_retires_the_owned_group,
     test_update_package_member_bodies_are_exact_and_same_length_edits_fail,
     test_update_rejects_an_extra_subcase_id_present_on_both_sides,
     test_update_apply_reject_uses_the_executed_error_class_and_old_identity,
