@@ -1251,7 +1251,6 @@ impl AppHandle {
         shutdown: watch::Receiver<bool>,
         static_origin: String,
     ) -> Result<(), crate::rpc::ServerError> {
-        use crate::rpc::server::{SharedRpc, bind, serve_until_closed};
         let (interface, port, secret, base_dir, resource_root, clock) = self
             .inner
             .app
@@ -1265,15 +1264,27 @@ impl AppHandle {
                 "rpc_port {port} is out of range"
             )));
         }
-        let listener = bind(&interface, port as u16).await?;
-        let shared = Rc::new(std::cell::RefCell::new(SharedRpc::new(
-            &resource_root,
+        let prepared = crate::rpc::server::prepare(
+            &interface,
+            port as u16,
             &base_dir,
+            &resource_root,
             clock,
             secret,
-            static_origin.clone(),
-        )?));
-        serve_until_closed(listener, shutdown, self.clone(), shared, static_origin).await
+            static_origin,
+        )
+        .await?;
+        self.serve_prepared_rpc(prepared, shutdown).await
+    }
+
+    /// Serve an RPC server that startup already prepared (bound listener and
+    /// loaded dispatcher/filters) before it confirmed the update identity.
+    pub async fn serve_prepared_rpc(
+        &self,
+        prepared: crate::rpc::server::PreparedRpc,
+        shutdown: watch::Receiver<bool>,
+    ) -> Result<(), crate::rpc::ServerError> {
+        crate::rpc::server::serve_prepared(prepared, shutdown, self.clone()).await
     }
 
     /// Test-only view of the per-state handle collection. Used to prove the

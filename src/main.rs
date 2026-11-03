@@ -32,6 +32,10 @@ use core::App;
 use i18n::Locale;
 use util::logger::Logger;
 
+/// Retryable exit status for a startup refused because another process owns
+/// the installation transaction (`EX_TEMPFAIL`). The App is never built.
+const EXIT_UPDATE_BUSY: i32 = 75;
+
 fn main() {
     let root = std::env::current_dir().unwrap_or_else(|_| ".".into());
     std::process::exit(run(&root));
@@ -110,13 +114,27 @@ where
     for event in &startup.events {
         log_event(&mut logger, locale, event);
     }
+    // A startup transaction that could not complete safely (another process
+    // owns the switch, or the previous release could not be restored) must NOT
+    // construct the business App, open the session or start any task.
+    if let Some(stop) = startup.stop {
+        let code = match stop {
+            updater::StartupStop::Busy => EXIT_UPDATE_BUSY,
+            updater::StartupStop::RecoveryFailed => 1,
+        };
+        eprintln!(
+            "xeHentai: update startup stopped ({stop:?}); retry after the other process finishes or after restoring the previous release"
+        );
+        return code;
+    }
     let provisional = startup.provisional.clone();
     let startup_lock = startup.lock;
     if let Some(exe) = startup.reexec {
         // The candidate executable is installed and must really run. If the
-        // platform cannot replace the image, restore the previous release.
+        // platform cannot replace the image, restore the previous release
+        // WHILE STILL HOLDING the transaction lock: another process must not
+        // enter the same installation between the exec failure and the undo.
         let failure = updater::install::reexec(&exe, startup_lock.as_ref());
-        drop(startup_lock);
         let installation = updater::install::Installation::new(&install_root);
         match updater::install::rollback_activation(&installation) {
             Ok(previous) => {
@@ -133,6 +151,8 @@ where
                     .ok();
             }
             Err(error) => {
+                // The recovery record and backup stay in place; a later start
+                // retries the undo before anything else runs.
                 logger
                     .error(&format!(
                         "{failure}; restoring the previous release: {error}"
@@ -140,6 +160,7 @@ where
                     .ok();
             }
         }
+        drop(startup_lock);
         return 1;
     }
     let mut app = match App::new(loaded.config, logger, root, &filepath) {
@@ -255,25 +276,62 @@ async fn application(
     if let Err(error) = app.update_config(config_patch(opts)) {
         if provisional.is_some() {
             let detail = format!("configuration update failed: {error}");
-            match updater::rollback_provisional(resource, &detail) {
-                Ok(events) => {
-                    for event in &events {
-                        log_event(app.logger_mut(), locale, event);
-                    }
-                }
-                Err(rollback) => {
-                    let _ = app.logger_mut().error(&format!(
-                        "{detail}; restoring the previous release: {rollback}"
-                    ));
-                }
-            }
+            log_rollback_provisional(&mut app, locale, resource, &detail);
         }
         eprintln!("xeHentai: configuration error: {error}");
         return 1;
     }
+    let active_interactive = opts.interactive && !opts.daemon;
+    let needs_login = opts.username.is_some() && opts.key.is_some() && !app.has_login();
+    // An active interactive run always needs the filters module (the login
+    // prompt uses it when logged out, and the download prompts need it even
+    // when a valid cookie was restored); credential login needs it too.
+    //
+    // This is the CURRENT RUN's required module, so it loads BEFORE the
+    // provisional identity is confirmed: a real module initialization failure
+    // still has the recovery record to roll back.
+    let mut filters = if needs_login || active_interactive {
+        match filters::Filters::load(resource) {
+            Ok(filters) => Some(filters),
+            Err(error) => {
+                if provisional.is_some() {
+                    let detail = format!("filter module initialization failed: {error}");
+                    log_rollback_provisional(&mut app, locale, resource, &detail);
+                }
+                eprintln!("xeHentai: filter error: {error}");
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
+    // While a candidate is provisional, the optional RPC server binds its real
+    // listener and loads its real dispatcher/filters BEFORE confirmation; the
+    // exact prepared server is then served by this run, never constructed a
+    // second time. An ordinary start keeps its existing lazy start.
+    let prepared_rpc = if provisional.is_some() && app.cfg.rpc_port.is_some() {
+        match app
+            .prepare_rpc(resource, rpc::PRODUCTION_STATIC_ORIGIN.to_string())
+            .await
+        {
+            Ok(prepared) => Some(prepared),
+            Err(error) => {
+                if provisional.is_some() {
+                    let detail = format!("RPC initialization failed: {error}");
+                    log_rollback_provisional(&mut app, locale, resource, &detail);
+                }
+                eprintln!("xeHentai: RPC server error: {error}");
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
     // The provisional update becomes the confirmed active release only here:
-    // the REAL Config/App/session exists and the trusted business modules load
-    // from the installed tree. A failure rolls the previous release back.
+    // the REAL Config/App/session exists, this run's filters and RPC server are
+    // bound, and `confirm_provisional` loads the trusted modules and computes
+    // every completion event BEFORE publishing the active record. A failure at
+    // any of those steps rolls the previous release back.
     if provisional.is_some() {
         match updater::confirm_provisional(resource) {
             Ok(events) => {
@@ -283,18 +341,7 @@ async fn application(
             }
             Err(error) => {
                 let detail = error.to_string();
-                match updater::rollback_provisional(resource, &detail) {
-                    Ok(events) => {
-                        for event in &events {
-                            log_event(app.logger_mut(), locale, event);
-                        }
-                    }
-                    Err(rollback) => {
-                        let _ = app.logger_mut().error(&format!(
-                            "{detail}; restoring the previous release: {rollback}"
-                        ));
-                    }
-                }
+                log_rollback_provisional(&mut app, locale, resource, &detail);
                 return 1;
             }
         }
@@ -310,22 +357,6 @@ async fn application(
         app.set_cookie(cookie);
     }
     let mut urls = opts.urls.clone();
-    let active_interactive = opts.interactive && !opts.daemon;
-    let needs_login = opts.username.is_some() && opts.key.is_some() && !app.has_login();
-    // An active interactive run always needs the filters module (the login
-    // prompt uses it when logged out, and the download prompts need it even
-    // when a valid cookie was restored); credential login needs it too.
-    let mut filters = if needs_login || active_interactive {
-        match filters::Filters::load(resource) {
-            Ok(filters) => Some(filters),
-            Err(error) => {
-                eprintln!("xeHentai: filter error: {error}");
-                return 1;
-            }
-        }
-    } else {
-        None
-    };
     if needs_login && let Some(active) = filters.as_mut() {
         let username = opts.username.clone().unwrap_or_default();
         let key = opts.key.clone().unwrap_or_default();
@@ -372,7 +403,24 @@ async fn application(
         let _ = app.add_task(url, Map::new());
     }
     let runtime = core::Runtime::new(app, resource.to_path_buf());
-    run_supervised(runtime, urls, locale, resource.to_path_buf()).await
+    run_supervised(runtime, urls, locale, resource.to_path_buf(), prepared_rpc).await
+}
+
+/// Roll back an unconfirmed candidate and log the real outcome through the
+/// existing logger. Never claims completion.
+fn log_rollback_provisional(app: &mut App, locale: Locale, resource: &Path, detail: &str) {
+    match updater::rollback_provisional(resource, detail) {
+        Ok(events) => {
+            for event in &events {
+                log_event(app.logger_mut(), locale, event);
+            }
+        }
+        Err(rollback) => {
+            let _ = app.logger_mut().error(&format!(
+                "{detail}; restoring the previous release: {rollback}"
+            ));
+        }
+    }
 }
 
 /// The supervised real run: task loop, optional RPC server, URL-completion
@@ -382,6 +430,7 @@ async fn run_supervised(
     urls: Vec<String>,
     locale: Locale,
     resource: PathBuf,
+    prepared_rpc: Option<rpc::server::PreparedRpc>,
 ) -> i32 {
     let (task_loop, handle) = runtime.spawn();
     // The reference `cli.start` starts the updater as a daemon thread before
@@ -391,16 +440,18 @@ async fn run_supervised(
     // keeps so the graceful drain can join it after an abort.
     let publisher = updater::install::Publisher::new();
     let update_task = spawn_update_check(handle.clone(), resource, locale, publisher.clone());
-    let rpc_enabled = handle.borrow_app(|app| app.cfg.rpc_port.is_some());
+    let configured_rpc = handle.borrow_app(|app| app.cfg.rpc_port.is_some());
+    let rpc_enabled = prepared_rpc.is_some() || configured_rpc;
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let rpc = if rpc_enabled {
-        Some(handle.serve_rpc(shutdown_rx, rpc::PRODUCTION_STATIC_ORIGIN.to_string()))
-    } else {
-        None
-    };
+    let rpc_handle = handle.clone();
     let rpc_future = async move {
-        match rpc {
-            Some(future) => Some(future.await),
+        match prepared_rpc {
+            Some(prepared) => Some(rpc_handle.serve_prepared_rpc(prepared, shutdown_rx).await),
+            None if configured_rpc => Some(
+                rpc_handle
+                    .serve_rpc(shutdown_rx, rpc::PRODUCTION_STATIC_ORIGIN.to_string())
+                    .await,
+            ),
             None => std::future::pending::<Option<Result<(), rpc::ServerError>>>().await,
         }
     };
@@ -447,6 +498,12 @@ async fn run_supervised(
         let _ = task.await;
     }
     let _ = shutdown_tx.send(true);
+    // EVERY normal stop joins the ONE owned blocking publication job before the
+    // supervisor returns, so no staging/persist work outlives the process
+    // return or a fresh run. For a signal stop the first interrupt is the
+    // graceful drain and a second one is the bounded exit; for the other stop
+    // reasons the first interrupt is counted and a second one stays bounded.
+    join_publication(&publisher, &stopped, &mut interrupt, &mut terminate).await;
     match stopped {
         Stop::AutoExit => {
             handle.borrow_app_mut(|app| app.request_exit(r#const::XEH_STATE_SOFT_EXIT));
@@ -469,10 +526,6 @@ async fn run_supervised(
             // work) and must leave without a Tokio runtime drop.
             let drain = async {
                 handle.shutdown().await;
-                // Join the real blocking publication job (if any) so the
-                // drain never claims retirement while it is still staging or
-                // committing. The second-signal arm below stays selectable.
-                publisher.retire().await;
             };
             tokio::pin!(drain);
             tokio::select! {
@@ -514,6 +567,45 @@ enum Stop {
     Signal,
     LoopFinished,
     RpcDone,
+}
+
+/// Join the ONE owned blocking publication job on every normal stop reason.
+///
+/// The job is owned by the updater task, so aborting that task only marks the
+/// job cancelled; this is the one place a normal stop awaits the real blocking
+/// work. A signal stop keeps its reference behaviour (first interrupt drains,
+/// second exits immediately, selectable while the join waits). For the other
+/// stop reasons the first interrupt is counted and a second one still exits
+/// boundedly, so the shutdown is never held open by an unbounded wait.
+async fn join_publication(
+    publisher: &updater::install::Publisher,
+    stopped: &Stop,
+    interrupt: &mut SignalStream,
+    terminate: &mut Option<SignalStream>,
+) {
+    #[cfg(test)]
+    crate::updater::install::test_hooks::join_boundary();
+    let retire = publisher.retire();
+    tokio::pin!(retire);
+    let signal_stop = matches!(stopped, Stop::Signal);
+    let mut signals = 0usize;
+    loop {
+        tokio::select! {
+            _ = &mut retire => return,
+            _ = interrupt.recv() => {
+                signals += 1;
+                if signal_stop || signals >= 2 {
+                    std::process::exit(0);
+                }
+            }
+            _ = terminate_signal(terminate.as_mut()) => {
+                signals += 1;
+                if signal_stop || signals >= 2 {
+                    std::process::exit(0);
+                }
+            }
+        }
+    }
 }
 
 fn has_active_task(app: &App) -> bool {

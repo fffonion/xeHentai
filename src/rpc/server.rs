@@ -1784,6 +1784,61 @@ async fn accept_one(
     listener.accept().await
 }
 
+/// One fully constructed RPC server (bound listener + loaded dispatcher and
+/// login filters) that is not serving yet.
+///
+/// Splitting construction from serving lets startup finish every fallible
+/// module/listener step BEFORE the update identity is confirmed, and then hand
+/// this exact server to the run instead of loading it a second time.
+pub struct PreparedRpc {
+    listener: TcpListener,
+    shared: Rc<RefCell<SharedRpc>>,
+    static_origin: String,
+}
+
+/// Bind the configured listener and load the real RPC dispatcher/filters from
+/// the installed resource tree. Every step is fallible and happens before any
+/// caller publishes an update identity.
+pub async fn prepare(
+    interface: &str,
+    port: u16,
+    cache_dir: &std::path::Path,
+    resource_root: &std::path::Path,
+    clock: Arc<dyn HttpClock>,
+    secret: Option<String>,
+    static_origin: String,
+) -> Result<PreparedRpc, ServerError> {
+    let listener = bind(interface, port).await?;
+    let shared = Rc::new(std::cell::RefCell::new(SharedRpc::new(
+        resource_root,
+        cache_dir,
+        clock,
+        secret,
+        static_origin.clone(),
+    )?));
+    Ok(PreparedRpc {
+        listener,
+        shared,
+        static_origin,
+    })
+}
+
+/// Serve an already prepared server on the caller's LocalSet.
+pub async fn serve_prepared(
+    prepared: PreparedRpc,
+    shutdown: watch::Receiver<bool>,
+    handle: crate::core::runtime::AppHandle,
+) -> Result<(), ServerError> {
+    serve_until_closed(
+        prepared.listener,
+        shutdown,
+        handle,
+        prepared.shared,
+        prepared.static_origin,
+    )
+    .await
+}
+
 /// Accept loop with owned shutdown: closing the sender drains the listener
 /// and every connection task it owns before returning. All connection tasks
 /// run `spawn_local` on this thread, so the `!Send` App/dispatcher borrows

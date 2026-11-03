@@ -37,6 +37,10 @@ pub enum UpdateError {
     Binding(String),
     Package(String),
     Install(String),
+    /// Another process owns the per-install transaction lock. A startup that
+    /// sees this must stop with a retryable outcome instead of running the
+    /// business App on a tree that is mid-switch.
+    Busy(String),
 }
 
 impl std::fmt::Display for UpdateError {
@@ -50,6 +54,7 @@ impl std::fmt::Display for UpdateError {
             Self::Binding(message) => write!(f, "update source binding error: {message}"),
             Self::Package(message) => write!(f, "update package rejected: {message}"),
             Self::Install(message) => write!(f, "update installation failed: {message}"),
+            Self::Busy(message) => write!(f, "update installation is busy: {message}"),
         }
     }
 }

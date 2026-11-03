@@ -862,6 +862,36 @@ impl App {
         &self.authorized_dir
     }
 
+    /// Bind the configured RPC listener and load its real dispatcher/filters
+    /// WITHOUT serving yet. Startup uses this to make the run's required RPC
+    /// initialization happen before an update identity is confirmed; the
+    /// resulting server is then served as-is, never constructed twice.
+    pub async fn prepare_rpc(
+        &self,
+        resource_root: &Path,
+        static_origin: String,
+    ) -> Result<crate::rpc::server::PreparedRpc, crate::rpc::ServerError> {
+        use crate::rpc::ServerError;
+        let (interface, port, secret, base_dir, resources, clock) =
+            self.rpc_bind_parts(resource_root, self.session_config.clock.clone());
+        let port = port.ok_or_else(|| ServerError::Shape("rpc_port is not configured".into()))?;
+        if !(1..=65535).contains(&port) {
+            return Err(ServerError::Shape(format!(
+                "rpc_port {port} is out of range"
+            )));
+        }
+        crate::rpc::server::prepare(
+            &interface,
+            port as u16,
+            &base_dir,
+            &resources,
+            clock,
+            secret,
+            static_origin,
+        )
+        .await
+    }
+
     /// Parts the owned M5 server start binds from: interface, optional port,
     /// optional secret, cache directory, resource root and clock. Stored
     /// values only; binding (and its real errors) happens in the runtime.

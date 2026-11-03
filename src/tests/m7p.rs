@@ -2494,3 +2494,940 @@ fn m7p_native_reexec_real_app_failure_restores_previous_image() {
     assert!(!log.contains("was applied"), "{log}");
     assert!(!log.contains("is running"), "{log}");
 }
+
+// MARK: - address r2: every stop joins the owned publication job
+
+/// Child side of the non-signal stop proof. It is a REAL separate process
+/// running the real `run_with_args` supervisor; the test-only publish barrier
+/// (compiled out of production) holds the owned blocking job AFTER staging and
+/// BEFORE the commit. The gallery completes naturally, so the supervisor stops
+/// with `AutoExit` while that job is still held.
+#[test]
+fn m7p_stage_job_retention_child() {
+    let Some(install) = std::env::var_os("XEH_M7P_CHILD_INSTALL") else {
+        return;
+    };
+    let install = PathBuf::from(install);
+    let hit = install.join(".stage-hit");
+    let release = install.join(".stage-release");
+    let watched = install.join(AREA).join("pending");
+    {
+        let hit = hit.clone();
+        let release = release.clone();
+        crate::updater::install::test_hooks::set(Some(Box::new(move |path: &Path| {
+            if path != watched.as_path() {
+                return;
+            }
+            std::fs::write(&hit, b"hit").expect("barrier hit");
+            let deadline = std::time::Instant::now() + Duration::from_secs(120);
+            while !release.exists() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the stage barrier was never released"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        })));
+    }
+    {
+        let join_hit = install.join(".join-hit");
+        crate::updater::install::test_hooks::set_join(Some(Box::new(move || {
+            std::fs::write(&join_hit, b"join").expect("join marker");
+        })));
+    }
+    let gallery = m6::Gallery::start(8);
+    let code = crate::run_with_args(
+        &install,
+        [
+            "xeHentai",
+            "-l",
+            "eh.log",
+            "-vv",
+            "-p",
+            &gallery.proxy(),
+            "--auto-update",
+            "download",
+            "http://e-hentai.org/g/1/aaaa",
+        ],
+    );
+    assert_eq!(code, 0, "the natural gallery completion must exit zero");
+}
+
+#[test]
+fn m7p_non_signal_stop_joins_the_held_stage_job() {
+    let Some(child_exe) = std::env::current_exe().ok() else {
+        return;
+    };
+    let key = signing_key();
+    let pem = public_pem(&key);
+    let server = Server::start(vec![]);
+    let origin = server.origin();
+    let install = install_dir();
+    publish_rss(install.path(), &origin, Some(&pem), "rss");
+    // No pending candidate exists before this run: startup consumes none, so
+    // the only pending bytes are the ones the held job would publish.
+    let pkg = sign(
+        &key,
+        &Spec::new(UPDATE_ID).with_tree(
+            &format!("xeHentai-{UPDATE_ID}/"),
+            &candidate_rss(&origin, Some(&pem), "rss-b"),
+        ),
+    );
+    serve_package(&server, &origin, &pkg);
+    std::fs::create_dir_all(install.path().join("home")).unwrap();
+    std::fs::create_dir_all(install.path().join("tmp")).unwrap();
+    std::fs::create_dir_all(install.path().join("cache")).unwrap();
+    let mut child = std::process::Command::new(child_exe)
+        .current_dir(install.path())
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", install.path().join("home"))
+        .env("TMPDIR", install.path().join("tmp"))
+        .env("XDG_CACHE_HOME", install.path().join("cache"))
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env("XEH_M7P_CHILD_INSTALL", install.path())
+        .args([
+            "--exact",
+            "tests::m7p::m7p_stage_job_retention_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn the real supervisor process");
+
+    assert!(
+        m6::wait_for(Duration::from_secs(60), || install
+            .path()
+            .join(".stage-hit")
+            .exists()),
+        "the stage barrier was never reached"
+    );
+    // The blocking job is parked after staging, before the persist gate: no
+    // pending envelope may exist while the gallery finishes.
+    assert!(
+        !pending_path(install.path()).exists(),
+        "a staged job published before its commit gate"
+    );
+    // The supervisor reached its publication join (the stop already happened
+    // and the local updater task was aborted) while the job is still held.
+    assert!(
+        m6::wait_for(Duration::from_secs(60), || install
+            .path()
+            .join(".join-hit")
+            .exists()),
+        "the supervisor never reached the publication join"
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        child.try_wait().expect("try_wait").is_none(),
+        "AutoExit returned while the owned publication job was still held"
+    );
+    assert!(
+        !pending_path(install.path()).exists(),
+        "the held job must not publish while parked"
+    );
+    std::fs::write(install.path().join(".stage-release"), b"go").expect("release");
+    let status = m6::wait_exit(&mut child, Duration::from_secs(60)).expect("child exit");
+    assert_eq!(status.code(), Some(0), "the supervisor must finish cleanly");
+    assert!(
+        !pending_path(install.path()).exists(),
+        "a cancellation after staging must not publish a late candidate"
+    );
+    let leftovers: Vec<String> =
+        std::fs::read_dir(pending_path(install.path()).parent().expect("pending dir"))
+            .expect("pending dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name != "src.zip")
+            .collect();
+    assert!(
+        leftovers.is_empty(),
+        "the retired job must not leave staged temp files: {leftovers:?}"
+    );
+    // A fresh run owns a clean publisher and still publishes normally.
+    let report = check_download(install.path(), "download");
+    assert_eq!(report.outcome, "pending");
+    assert!(pending_path(install.path()).exists());
+}
+
+// MARK: - address r2: exact rollback tree and recovery retention
+
+fn private_dir(path: &Path) {
+    std::fs::create_dir_all(path).expect("private dir");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Every installer-created level (backup/, backup/rss/, ...) must be
+        // private, exactly as the real create path leaves it. Only levels at
+        // or below the installer's own `.xehentai-update` are touched.
+        let mut chain: Vec<&Path> = vec![path];
+        let mut current = path.parent();
+        while let Some(dir) = current {
+            chain.push(dir);
+            if dir
+                .file_name()
+                .is_some_and(|name| name == ".xehentai-update")
+            {
+                break;
+            }
+            current = dir.parent();
+        }
+        if !chain
+            .last()
+            .and_then(|dir| dir.file_name())
+            .is_some_and(|name| name == ".xehentai-update")
+        {
+            chain.truncate(1);
+        }
+        for dir in chain {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+                .expect("chmod 0700");
+        }
+    }
+}
+
+fn write_activation_fixture(
+    install: &Path,
+    previous_id: &str,
+    paths: &[&str],
+    created: &[&str],
+    executable: Option<&str>,
+) {
+    let area = install.join(AREA);
+    private_dir(&area);
+    let previous = serde_json::json!({
+        "update_id": previous_id,
+        "build_id": crate::r#const::BUILD_ID,
+        "native": executable.is_some(),
+        "applied_at": "2026-11-02T00:00:00+08:00"
+    });
+    std::fs::write(
+        area.join("activation.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "v": 1,
+            "candidate": {
+                "update_id": "cccccccccccccccccccccccccccccccccccccccc",
+                "build_id": "c-native",
+                "native": executable.is_some(),
+                "applied_at": "2026-11-03T00:00:00+08:00"
+            },
+            "previous": previous,
+            "paths": paths,
+            "created": created,
+            "executable": executable,
+            "native": executable.is_some()
+        }))
+        .expect("activation json"),
+    )
+    .expect("activation");
+}
+
+#[test]
+fn m7p_partway_switch_failure_removes_the_installed_new_file_and_restores_the_old_tree() {
+    let key = signing_key();
+    let pem = public_pem(&key);
+    let server = Server::start(vec![]);
+    let origin = server.origin();
+    let mut files = candidate_rss(&origin, Some(&pem), "rss-b");
+    // Installed BEFORE the failing entry: a candidate-only file.
+    files.push(("rss/newdir/created.rss".to_string(), b"new".to_vec()));
+    // Fails AFTER it: the live parent directory is read-only.
+    files.push(("rss/ro/x.rss".to_string(), b"x".to_vec()));
+    let pkg = sign(
+        &key,
+        &Spec::new(UPDATE_ID).with_tree(&format!("xeHentai-{UPDATE_ID}/"), &files),
+    );
+    let install = install_dir();
+    publish_rss(install.path(), &origin, Some(&pem), "rss");
+    private_dir(&install.path().join("rss/ro"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            install.path().join("rss/ro"),
+            std::fs::Permissions::from_mode(0o555),
+        )
+        .expect("read-only dir");
+    }
+    let before = tree(install.path(), "rss");
+    let session = b"{\"tasks\":{},\"cookies\":{\"nw\":\"1\"}}".to_vec();
+    std::fs::write(install.path().join("h.json"), &session).expect("session");
+    seed_pending(
+        install.path(),
+        pkg.info.clone(),
+        pkg.sig.clone(),
+        pkg.payload.clone(),
+    );
+    let exe = owned_exe(install.path());
+
+    let child = ChildRun::spawn(
+        install.path(),
+        &exe,
+        &["-l", "eh.log", "-vv", "--auto-update", "off"],
+    );
+    assert!(
+        wait_log(install.path(), "rolled back to"),
+        "the part-way switch was not rolled back: {}",
+        log_of(install.path())
+    );
+    assert_eq!(child.stop(), 0);
+    assert!(
+        !install.path().join("rss/newdir/created.rss").exists(),
+        "a candidate-created file survived the rollback"
+    );
+    assert_eq!(
+        tree(install.path(), "rss"),
+        before,
+        "the old resource tree was not restored exactly"
+    );
+    assert_eq!(
+        std::fs::read(install.path().join("h.json")).expect("session"),
+        session
+    );
+    assert!(!area_path(install.path()).join("activation.json").exists());
+    assert!(!area_path(install.path()).join("state.json").exists());
+    assert!(!pending_path(install.path()).exists());
+    let log = log_of(install.path());
+    assert!(!log.contains("was applied"), "{log}");
+    assert!(log.contains("started."), "{log}");
+}
+
+#[test]
+fn m7p_restart_recovery_removes_candidate_created_files() {
+    let pem = public_pem(&signing_key());
+    let install = install_dir();
+    publish_rss(install.path(), "http://127.0.0.1:9", Some(&pem), "rss");
+    let old_binding =
+        std::fs::read(install.path().join("rss/updater/github.rss")).expect("old binding");
+    let area = install.path().join(AREA);
+    private_dir(&area.join("backup/rss/updater"));
+    std::fs::write(area.join("backup/rss/updater/github.rss"), &old_binding).expect("backup");
+    // The live tree is mid-switch: the previous file is in the backup, a
+    // candidate-only file is installed, and the ONE record says so.
+    std::fs::write(
+        install.path().join("rss/updater/github.rss"),
+        b"// candidate binding\n",
+    )
+    .expect("candidate live");
+    private_dir(&install.path().join("rss/newdir"));
+    std::fs::write(
+        install.path().join("rss/newdir/created.rss"),
+        b"candidate-only",
+    )
+    .expect("candidate new file");
+    write_activation_fixture(
+        install.path(),
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        &["rss/updater/github.rss"],
+        &["rss/newdir/created.rss"],
+        None,
+    );
+    let exe = owned_exe(install.path());
+    let child = ChildRun::spawn(
+        install.path(),
+        &exe,
+        &["-l", "eh.log", "-vv", "--auto-update", "off"],
+    );
+    assert!(
+        wait_log(
+            install.path(),
+            "rolled back to bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ),
+        "restart recovery did not run: {}",
+        log_of(install.path())
+    );
+    assert_eq!(child.stop(), 0);
+    assert_eq!(
+        std::fs::read(install.path().join("rss/updater/github.rss")).expect("restored"),
+        old_binding
+    );
+    assert!(
+        !install.path().join("rss/newdir/created.rss").exists(),
+        "restart recovery left a candidate-created file"
+    );
+    assert!(!area.join("activation.json").exists());
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(area.join("state.json")).expect("state"))
+            .expect("state json");
+    assert_eq!(
+        state["active"]["update_id"],
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    );
+    assert!(!log_of(install.path()).contains("was applied"));
+}
+
+#[test]
+fn m7p_failed_recovery_keeps_the_record_and_stops_then_a_repaired_start_completes() {
+    let pem = public_pem(&signing_key());
+    let install = install_dir();
+    publish_rss(install.path(), "http://127.0.0.1:9", Some(&pem), "rss");
+    let old_binding =
+        std::fs::read(install.path().join("rss/updater/github.rss")).expect("old binding");
+    let area = install.path().join(AREA);
+    private_dir(&area.join("backup/rss/updater"));
+    std::fs::write(area.join("backup/rss/updater/github.rss"), &old_binding).expect("backup");
+    std::fs::write(
+        install.path().join("rss/updater/github.rss"),
+        b"// candidate binding\n",
+    )
+    .expect("candidate live");
+    write_activation_fixture(
+        install.path(),
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        &["rss/updater/github.rss"],
+        &[],
+        None,
+    );
+    // The restore cannot write into the live directory.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            install.path().join("rss/updater"),
+            std::fs::Permissions::from_mode(0o555),
+        )
+        .expect("read-only live dir");
+    }
+    let exe = owned_exe(install.path());
+    let mut child = ChildRun::spawn(
+        install.path(),
+        &exe,
+        &["-l", "eh.log", "-vv", "--auto-update", "off"],
+    );
+    let code = m6::wait_exit(
+        &mut child.child.as_mut().expect("child"),
+        Duration::from_secs(30),
+    )
+    .expect("the failed recovery must stop the process")
+    .code();
+    child.child.take();
+    assert_eq!(code, Some(1), "a failed recovery is an honest error exit");
+    let log = log_of(install.path());
+    assert!(
+        !log.contains("started."),
+        "the business App started on a mixed tree: {log}"
+    );
+    assert!(
+        area.join("activation.json").exists(),
+        "the recovery record was cleared after a failed restore"
+    );
+    assert!(
+        area.join("backup/rss/updater/github.rss").exists(),
+        "the backup was consumed after a failed restore"
+    );
+
+    // Repair the fixture permissions: the SAME recovery record now completes.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            install.path().join("rss/updater"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .expect("repair live dir");
+    }
+    std::fs::write(install.path().join("eh.log"), "").expect("reset log");
+    let child = ChildRun::spawn(
+        install.path(),
+        &exe,
+        &["-l", "eh.log", "-vv", "--auto-update", "off"],
+    );
+    assert!(
+        wait_log(
+            install.path(),
+            "rolled back to bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ),
+        "the retried recovery did not complete: {}",
+        log_of(install.path())
+    );
+    assert!(wait_log(install.path(), "started."));
+    assert_eq!(child.stop(), 0);
+    assert_eq!(
+        std::fs::read(install.path().join("rss/updater/github.rss")).expect("restored"),
+        old_binding
+    );
+    assert!(!area.join("activation.json").exists());
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(area.join("state.json")).expect("state"))
+            .expect("state json");
+    assert_eq!(
+        state["active"]["update_id"],
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    );
+}
+
+// MARK: - address r2: real module/listener init before confirmation
+
+#[test]
+fn m7p_rpc_listener_failure_after_the_switch_rolls_back_instead_of_confirming() {
+    let key = signing_key();
+    let pem = public_pem(&key);
+    let server = Server::start(vec![]);
+    let origin = server.origin();
+    let pkg = sign(
+        &key,
+        &Spec::new(UPDATE_ID).with_tree(
+            &format!("xeHentai-{UPDATE_ID}/"),
+            &candidate_rss(&origin, Some(&pem), "rss-b"),
+        ),
+    );
+    let install = install_dir();
+    publish_rss(install.path(), &origin, Some(&pem), "rss");
+    serve_package(&server, &origin, &pkg);
+    let exe = owned_exe(install.path());
+    let old_binding =
+        std::fs::read(install.path().join("rss/updater/github.rss")).expect("old binding");
+    let session = b"{\"tasks\":{},\"cookies\":{\"nw\":\"1\"}}".to_vec();
+    std::fs::write(install.path().join("h.json"), &session).expect("session");
+    seed_pending(
+        install.path(),
+        pkg.info.clone(),
+        pkg.sig.clone(),
+        pkg.payload.clone(),
+    );
+    // A real occupied port makes the actual RPC listener initialization fail
+    // AFTER the private preflight and the live resource switch succeeded.
+    let occupied = std::net::TcpListener::bind("0.0.0.0:0").expect("bind fixture");
+    let port = occupied.local_addr().expect("addr").port().to_string();
+    let child = ChildRun::spawn(
+        install.path(),
+        &exe,
+        &[
+            "-l",
+            "eh.log",
+            "-vv",
+            "--auto-update",
+            "off",
+            "--rpc-port",
+            &port,
+        ],
+    );
+    assert!(
+        wait_log(install.path(), "rolled back to"),
+        "the failed real RPC init was not rolled back: {}",
+        log_of(install.path())
+    );
+    assert_eq!(child.stop(), 1);
+    let log = log_of(install.path());
+    assert!(!log.contains("was applied"), "{log}");
+    assert!(!log.contains("started."), "{log}");
+    assert_eq!(
+        std::fs::read(install.path().join("rss/updater/github.rss")).expect("restored"),
+        old_binding,
+        "the candidate tree was left installed after the failed listener init"
+    );
+    assert_eq!(
+        std::fs::read(install.path().join("h.json")).expect("session"),
+        session
+    );
+    assert!(!area_path(install.path()).join("activation.json").exists());
+    let state = std::fs::read(area_path(install.path()).join("state.json")).ok();
+    if let Some(state) = state {
+        let state: serde_json::Value = serde_json::from_slice(&state).expect("state json");
+        assert!(
+            state["active"].is_null(),
+            "a failed confirmation published an active record: {state}"
+        );
+    }
+    assert!(!pending_path(install.path()).exists());
+    drop(occupied);
+}
+
+#[test]
+fn m7p_busy_startup_stops_before_the_business_app() {
+    use crate::updater::install::{InstallLock, Installation};
+    let key = signing_key();
+    let pem = public_pem(&key);
+    let server = Server::start(vec![]);
+    let origin = server.origin();
+    let pkg = sign(
+        &key,
+        &Spec::new(UPDATE_ID).with_tree(
+            &format!("xeHentai-{UPDATE_ID}/"),
+            &candidate_rss(&origin, Some(&pem), "rss-b"),
+        ),
+    );
+    let install = install_dir();
+    publish_rss(install.path(), &origin, Some(&pem), "rss");
+    serve_package(&server, &origin, &pkg);
+    let old_binding =
+        std::fs::read(install.path().join("rss/updater/github.rss")).expect("old binding");
+    seed_pending(
+        install.path(),
+        pkg.info.clone(),
+        pkg.sig.clone(),
+        pkg.payload.clone(),
+    );
+    let exe = owned_exe(install.path());
+    let installation = Installation::new(install.path());
+    // This process holds the real transaction lock, exactly as a concurrent
+    // updater mid-rename would.
+    let held = InstallLock::acquire(&installation).expect("held lock");
+    let mut child = ChildRun::spawn(
+        install.path(),
+        &exe,
+        &["-l", "eh.log", "-vv", "--auto-update", "off"],
+    );
+    let status = m6::wait_exit(
+        &mut child.child.as_mut().expect("child"),
+        Duration::from_secs(30),
+    )
+    .expect("a busy startup must stop instead of running the App")
+    .code();
+    child.child.take();
+    drop(held);
+    assert_eq!(
+        status,
+        Some(75),
+        "a busy startup is a retryable explicit exit"
+    );
+    let log = log_of(install.path());
+    assert!(
+        !log.contains("started."),
+        "the business App started on a tree another process is switching: {log}"
+    );
+    assert_eq!(
+        std::fs::read(install.path().join("rss/updater/github.rss")).expect("live"),
+        old_binding,
+        "the busy startup modified the live tree"
+    );
+    assert!(
+        pending_path(install.path()).exists(),
+        "the busy startup consumed the pending candidate"
+    );
+    assert!(
+        !install.path().join("h.json").exists(),
+        "the busy startup wrote a session"
+    );
+}
+
+// MARK: - address r2: pending subdirectory and leaf validation
+
+#[test]
+fn m7p_pending_inspection_does_not_create_or_follow_unsafe_paths() {
+    use crate::updater::install::{Installation, ensure_private_dir};
+    let install = install_dir();
+    let installation = Installation::new(install.path());
+    // A missing area/subdirectory is "no candidate", never an empty one.
+    assert!(!installation.pending_present().expect("absent probe"));
+    assert!(
+        !install.path().join(AREA).exists(),
+        "the probe created the area"
+    );
+    ensure_private_dir(&install.path().join(AREA)).expect("area");
+    assert!(!installation.pending_present().expect("absent pending"));
+    assert!(
+        !install.path().join(AREA).join("pending").exists(),
+        "the probe created the pending directory"
+    );
+
+    // A normal private pending envelope is readable and discardable.
+    let bytes = seed_pending(install.path(), b"i".to_vec(), b"s".to_vec(), b"p".to_vec());
+    assert!(installation.pending_present().expect("present"));
+    let envelope = installation
+        .read_pending()
+        .expect("read normal pending")
+        .expect("envelope");
+    assert_eq!(envelope.payload, b"p".to_vec());
+    assert_eq!(
+        std::fs::read(pending_path(install.path())).expect("bytes"),
+        bytes
+    );
+    installation.discard_pending().expect("discard normal");
+    assert!(!pending_path(install.path()).exists());
+
+    // A read-only private directory keeps its REAL write failure instead of
+    // being repaired to make a test pass.
+    let second = install_dir();
+    let second_installation = Installation::new(second.path());
+    seed_pending(second.path(), b"i".to_vec(), b"s".to_vec(), b"p".to_vec());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            second.path().join(AREA).join("pending"),
+            std::fs::Permissions::from_mode(0o500),
+        )
+        .expect("read-only pending");
+    }
+    assert!(
+        second_installation
+            .read_pending()
+            .expect("read only")
+            .is_some()
+    );
+    assert!(
+        second_installation.discard_pending().is_err(),
+        "a read-only pending directory must fail the unlink for real"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn m7p_pending_dir_symlink_and_leaf_symlink_are_refused_before_read_or_delete() {
+    use crate::updater::install::{Installation, ensure_private_dir};
+    let install = install_dir();
+    let installation = Installation::new(install.path());
+    let area = install.path().join(AREA);
+    private_dir(&area);
+    let outside = tempfile::tempdir().expect("outside");
+    let outside_pending = outside.path().join("pending");
+    private_dir(&outside_pending);
+    let envelope = crate::updater::package::PendingEnvelope::new(
+        b"outside-info".to_vec(),
+        b"outside-sig".to_vec(),
+        b"outside-payload".to_vec(),
+    )
+    .expect("envelope");
+    crate::updater::package::publish(&outside_pending, &envelope).expect("outside publish");
+    let sentinel = std::fs::read(outside_pending.join("src.zip")).expect("sentinel");
+    // A symlinked pending DIRECTORY must not be probed, read or deleted.
+    std::os::unix::fs::symlink(&outside_pending, area.join("pending")).expect("dir symlink");
+    assert!(
+        installation.pending_present().is_err(),
+        "a symlinked pending directory was trusted"
+    );
+    assert!(
+        installation.read_pending().is_err(),
+        "a symlinked pending directory was read"
+    );
+    assert!(
+        installation.discard_pending().is_err(),
+        "a symlinked pending directory was deleted through"
+    );
+    assert_eq!(
+        std::fs::read(outside_pending.join("src.zip")).expect("sentinel"),
+        sentinel,
+        "an outside envelope was read or deleted through the symlinked directory"
+    );
+    std::fs::remove_file(area.join("pending")).expect("remove dir symlink");
+
+    // A symlinked LEAF inside a real private directory is refused the same way.
+    ensure_private_dir(&area.join("pending")).expect("pending dir");
+    let target = outside.path().join("leaf.zip");
+    std::fs::write(&target, &sentinel).expect("outside leaf");
+    std::os::unix::fs::symlink(&target, pending_path(install.path())).expect("leaf symlink");
+    assert!(
+        installation.read_pending().is_err(),
+        "a symlinked pending leaf was read"
+    );
+    assert!(
+        installation.discard_pending().is_err(),
+        "a symlinked pending leaf was deleted"
+    );
+    assert_eq!(
+        std::fs::read(&target).expect("outside leaf"),
+        sentinel,
+        "the outside leaf was modified"
+    );
+    assert!(
+        pending_path(install.path()).is_symlink(),
+        "the leaf symlink was removed instead of refused"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn m7p_startup_refuses_a_symlinked_pending_leaf_before_reading_it() {
+    let key = signing_key();
+    let pem = public_pem(&key);
+    let server = Server::start(vec![]);
+    let origin = server.origin();
+    let pkg = sign(
+        &key,
+        &Spec::new(UPDATE_ID).with_tree(
+            &format!("xeHentai-{UPDATE_ID}/"),
+            &candidate_rss(&origin, Some(&pem), "rss-b"),
+        ),
+    );
+    let install = install_dir();
+    publish_rss(install.path(), &origin, Some(&pem), "rss");
+    serve_package(&server, &origin, &pkg);
+    let old_binding =
+        std::fs::read(install.path().join("rss/updater/github.rss")).expect("old binding");
+    let outside = tempfile::tempdir().expect("outside");
+    let outer_pending = outside.path().join("pending");
+    private_dir(&outer_pending);
+    let envelope = crate::updater::package::PendingEnvelope::new(
+        pkg.info.clone(),
+        pkg.sig.clone(),
+        pkg.payload.clone(),
+    )
+    .expect("envelope");
+    crate::updater::package::publish(&outer_pending, &envelope).expect("outside publish");
+    let outside_leaf = outer_pending.join("src.zip");
+    let outside_bytes = std::fs::read(&outside_leaf).expect("outside envelope");
+    private_dir(&install.path().join(AREA).join("pending"));
+    std::os::unix::fs::symlink(&outside_leaf, pending_path(install.path())).expect("leaf symlink");
+    let exe = owned_exe(install.path());
+
+    let mut child = ChildRun::spawn(
+        install.path(),
+        &exe,
+        &["-l", "eh.log", "-vv", "--auto-update", "off"],
+    );
+    let code = m6::wait_exit(
+        &mut child.child.as_mut().expect("child"),
+        Duration::from_secs(30),
+    )
+    .expect("an unsafe pending leaf must stop startup")
+    .code();
+    child.child.take();
+    assert_eq!(code, Some(1));
+    let log = log_of(install.path());
+    assert!(
+        !log.contains("started."),
+        "the App started with an unsafe pending leaf: {log}"
+    );
+    assert_eq!(
+        std::fs::read(install.path().join("rss/updater/github.rss")).expect("live"),
+        old_binding,
+        "the candidate outside the area was applied"
+    );
+    assert_eq!(
+        std::fs::read(&outside_leaf).expect("outside leaf"),
+        outside_bytes,
+        "the outside envelope was read, consumed or modified"
+    );
+    assert!(
+        pending_path(install.path()).is_symlink(),
+        "the refused leaf symlink was removed"
+    );
+    assert!(!area_path(install.path()).join("activation.json").exists());
+    assert!(!area_path(install.path()).join("state.json").exists());
+}
+
+// MARK: - address r2: exec failure keeps the transaction lock through rollback
+
+#[test]
+fn m7p_exec_failure_lock_child() {
+    let Some(install) = std::env::var_os("XEH_M7P_EXEC_CHILD") else {
+        return;
+    };
+    let install = PathBuf::from(install);
+    let root = install.clone();
+    let hit = install.join(".rollback-hit");
+    let release = install.join(".rollback-release");
+    crate::updater::install::test_hooks::set_exec_permission_fault(true);
+    crate::updater::install::test_hooks::set_rollback(Some(Box::new(move |path: &Path| {
+        if path != root.as_path() {
+            return;
+        }
+        std::fs::write(&hit, b"hit").expect("rollback hit");
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        while !release.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the rollback barrier was never released"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    })));
+    let code = crate::run_with_args(
+        &install,
+        ["xeHentai", "-l", "eh.log", "-vv", "--auto-update", "off"],
+    );
+    assert_eq!(code, 1, "an exec failure must be an error exit");
+}
+
+#[cfg(unix)]
+#[test]
+fn m7p_exec_failure_rolls_back_under_the_held_lock_and_keeps_the_backup() {
+    use crate::updater::install::{InstallLock, Installation};
+    let _restore = RestoreDefaultBuild;
+    let key = signing_key();
+    let pem = public_pem(&key);
+    let server = Server::start(vec![]);
+    let origin = server.origin();
+    let build_b = format!("b-{}", &UPDATE_ID[..8]);
+    let binary_b = build_identity(&build_b);
+    let install = install_dir();
+    release_tree(install.path());
+    // The installed "A" image is an owned copy of this very test process, so
+    // it can run the test-only barrier; the transaction behaviour is the real
+    // production path.
+    let image_a = std::fs::read(std::env::current_exe().expect("current exe")).expect("image A");
+    let exe = install.path().join("xeHentai");
+    std::fs::write(&exe, &image_a).expect("install A");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).expect("chmod A");
+    }
+    publish_rss(install.path(), &origin, Some(&pem), "rss");
+    let mut spec = Spec::new(UPDATE_ID).with_tree(
+        &format!("xeHentai-{UPDATE_ID}/"),
+        &candidate_rss(&origin, Some(&pem), "rss-b"),
+    );
+    spec = spec.native("xeHentai", &build_b, binary_b);
+    let pkg = sign(&key, &spec);
+    serve_package(&server, &origin, &pkg);
+    seed_pending(
+        install.path(),
+        pkg.info.clone(),
+        pkg.sig.clone(),
+        pkg.payload.clone(),
+    );
+    std::fs::create_dir_all(install.path().join("home")).unwrap();
+    std::fs::create_dir_all(install.path().join("tmp")).unwrap();
+    std::fs::create_dir_all(install.path().join("cache")).unwrap();
+    let mut child = std::process::Command::new(&exe)
+        .current_dir(install.path())
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", install.path().join("home"))
+        .env("TMPDIR", install.path().join("tmp"))
+        .env("XDG_CACHE_HOME", install.path().join("cache"))
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env("XEH_M7P_EXEC_CHILD", install.path())
+        .args([
+            "--exact",
+            "tests::m7p::m7p_exec_failure_lock_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn the exec-failure process");
+    assert!(
+        m6::wait_for(Duration::from_secs(120), || install
+            .path()
+            .join(".rollback-hit")
+            .exists()),
+        "the exec failure never reached the rollback"
+    );
+    // The locked transaction is still owned: a competing process may not
+    // enter between the exec failure and the completed rollback.
+    let installation = Installation::new(install.path());
+    match InstallLock::acquire(&installation) {
+        Ok(_) => panic!("the transaction lock was released before the rollback"),
+        Err(error) => assert!(
+            matches!(error, crate::updater::UpdateError::Busy(_)),
+            "expected a bounded busy refusal: {error}"
+        ),
+    }
+    std::fs::write(install.path().join(".rollback-release"), b"go").expect("release");
+    let status = m6::wait_exit(&mut child, Duration::from_secs(120)).expect("child exit");
+    assert_eq!(status.code(), Some(0), "the child test must observe exit 1");
+    assert_eq!(
+        std::fs::read(&exe).expect("restored image"),
+        image_a,
+        "the previous executable bytes were not restored at the installation path"
+    );
+    let log = log_of(install.path());
+    assert!(!log.contains("started."), "{log}");
+    assert!(!log.contains("was applied"), "{log}");
+    assert!(!area_path(install.path()).join("activation.json").exists());
+    assert!(
+        area_path(install.path())
+            .join("backup/previous-exe")
+            .exists(),
+        "the only previous-executable copy was consumed by the rollback"
+    );
+}

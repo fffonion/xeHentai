@@ -103,6 +103,17 @@ pub struct Activation {
     pub previous: Option<Record>,
     /// Install-relative files moved into `backup/` by this activation.
     pub paths: Vec<String>,
+    /// Install-relative candidate resources that did NOT exist on the live
+    /// tree before this activation. A rollback removes them again; every
+    /// other path is restored from `backup/`. An older record without this
+    /// field simply has no candidate-new files.
+    #[serde(default)]
+    pub created: Vec<String>,
+    /// Install-relative path of the executable this activation replaced, so a
+    /// recovery writes the previous image back to the KNOWN installation path
+    /// instead of guessing from the current process.
+    #[serde(default)]
+    pub executable: Option<String>,
     pub native: bool,
 }
 
@@ -200,10 +211,74 @@ impl Installation {
     /// recovery or write. A missing area is not an error here.
     pub fn verify_private_area(&self) -> Result<(), UpdateError> {
         match std::fs::symlink_metadata(self.area()) {
-            Ok(_) => ensure_private_dir(&self.area()),
+            Ok(metadata) => verify_private_dir_metadata(self.area().as_path(), &metadata),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(UpdateError::io(self.area(), &error)),
         }
+    }
+
+    fn pending_dir(&self) -> PathBuf {
+        self.area().join(PENDING_DIR)
+    }
+
+    /// Do not trust an EXISTING `pending/` subdirectory for a probe, read or
+    /// delete before checking that it is a real installer-owned private
+    /// directory. `Ok(false)` means the subdirectory does not exist, which is
+    /// simply "no candidate": this NEVER creates it.
+    pub fn verify_pending_dir(&self) -> Result<bool, UpdateError> {
+        self.verify_private_area()?;
+        let path = self.pending_dir();
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(UpdateError::install(format!(
+                        "{} is a symlink; the pending update directory must be a real installer-owned directory",
+                        path.display()
+                    )));
+                }
+                if !metadata.is_dir() {
+                    return Err(UpdateError::install(format!(
+                        "{} exists and is not a directory",
+                        path.display()
+                    )));
+                }
+                private_dir_verdict_metadata(&path, &metadata)?;
+                Ok(true)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(UpdateError::io(&path, &error)),
+        }
+    }
+
+    /// Probe the pending envelope WITHOUT reading it, after the parent
+    /// directory has been validated. A missing leaf is "no candidate".
+    pub fn pending_present(&self) -> Result<bool, UpdateError> {
+        if !self.verify_pending_dir()? {
+            return Ok(false);
+        }
+        let path = self.pending_path();
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(UpdateError::io(&path, &error)),
+        }
+    }
+
+    /// Read the pending envelope through the validated private directory and a
+    /// leaf that is a real, installer-owned regular file opened without
+    /// following a symlink. Nothing outside the installer area can be read.
+    pub fn read_pending(&self) -> Result<Option<package::PendingEnvelope>, UpdateError> {
+        if !self.verify_pending_dir()? {
+            return Ok(None);
+        }
+        let path = self.pending_path();
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => verify_pending_leaf(&path, &metadata)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(UpdateError::io(&path, &error)),
+        }
+        let bytes = read_private_leaf(&path)?;
+        Ok(Some(package::read_bytes(&bytes)?))
     }
 
     pub fn records(&self) -> Result<Records, UpdateError> {
@@ -246,15 +321,114 @@ impl Installation {
 
     /// The pending envelope has been consumed (applied or rejected); removing
     /// it can never resurrect a partially written candidate.
+    ///
+    /// The parent directory is validated first (a symlinked `pending/` would
+    /// redirect the unlink outside the installer area) and a symlink or
+    /// non-regular leaf is rejected instead of deleted.
     pub fn discard_pending(&self) -> Result<(), UpdateError> {
-        self.verify_private_area()?;
+        if !self.verify_pending_dir()? {
+            return Ok(());
+        }
         let path = self.pending_path();
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => verify_pending_leaf(&path, &metadata)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(UpdateError::io(&path, &error)),
+        }
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(UpdateError::io(&path, &error)),
         }
     }
+}
+
+/// One existing private installer directory. Used both by the create path and
+/// by read/delete probes, so a probe can never create or `chmod` anything.
+fn verify_private_dir_metadata(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> Result<(), UpdateError> {
+    if metadata.file_type().is_symlink() {
+        return Err(UpdateError::install(format!(
+            "{} is a symlink; the update area must be a real directory",
+            path.display()
+        )));
+    }
+    if !metadata.is_dir() {
+        return Err(UpdateError::install(format!(
+            "{} exists and is not a directory",
+            path.display()
+        )));
+    }
+    private_dir_verdict_metadata(path, metadata)
+}
+
+fn private_dir_verdict_metadata(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> Result<(), UpdateError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let euid = nix::unistd::geteuid().as_raw();
+        private_dir_verdict(metadata.uid(), metadata.mode() & 0o7777, euid)
+            .map_err(|problem| UpdateError::install(format!("{}: {problem}", path.display())))?;
+    }
+    let _ = (path, metadata);
+    Ok(())
+}
+
+/// A pending leaf must be a real installer-owned regular file. A symlink could
+/// point anywhere outside the private area, so it is rejected BEFORE the read
+/// or delete rather than resolved.
+fn verify_pending_leaf(path: &Path, metadata: &std::fs::Metadata) -> Result<(), UpdateError> {
+    if metadata.file_type().is_symlink() {
+        return Err(UpdateError::install(format!(
+            "{} is a symlink; the pending update envelope must be a regular installer-owned file",
+            path.display()
+        )));
+    }
+    if !metadata.is_file() {
+        return Err(UpdateError::install(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let euid = nix::unistd::geteuid().as_raw();
+        if metadata.uid() != euid {
+            return Err(UpdateError::install(format!(
+                "{} is owned by uid {}, not the effective uid {euid}",
+                path.display(),
+                metadata.uid()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Read the validated leaf without following a final symlink. On Unix the open
+/// itself refuses a symlink (`O_NOFOLLOW`), so a swap between the metadata
+/// check and the read cannot escape the private area.
+fn read_private_leaf(path: &Path) -> Result<Vec<u8>, UpdateError> {
+    use std::io::Read;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_NOFOLLOW);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| UpdateError::io(path, &error))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| UpdateError::io(path, &error))?;
+    Ok(bytes)
 }
 
 /// One held cross-process transaction lock for this installation.
@@ -294,8 +468,8 @@ impl InstallLock {
                 nix::fcntl::FlockArg::LockExclusiveNonblock,
             ) {
                 Ok(()) => Ok(Self { file }),
-                Err(nix::errno::Errno::EWOULDBLOCK) => Err(UpdateError::install(
-                    "another xeHentai process is updating this installation; the pending candidate was left unchanged",
+                Err(nix::errno::Errno::EWOULDBLOCK) => Err(UpdateError::Busy(
+                    "another xeHentai process is updating this installation; the pending candidate was left unchanged".to_string(),
                 )),
                 Err(error) => Err(UpdateError::install(format!(
                     "{}: cannot take the update lock: {error}",
@@ -307,8 +481,8 @@ impl InstallLock {
         {
             match file.try_lock() {
                 Ok(()) => Ok(Self { file }),
-                Err(std::fs::TryLockError::WouldBlock) => Err(UpdateError::install(
-                    "another xeHentai process is updating this installation; the pending candidate was left unchanged",
+                Err(std::fs::TryLockError::WouldBlock) => Err(UpdateError::Busy(
+                    "another xeHentai process is updating this installation; the pending candidate was left unchanged".to_string(),
                 )),
                 Err(std::fs::TryLockError::Error(error)) => Err(UpdateError::io(&path, &error)),
             }
@@ -376,7 +550,9 @@ impl InstallLock {
     }
 
     /// Test-only: the owned descriptor number for the real fork handoff proof.
-    #[cfg(test)]
+    /// The caller is Unix-only, so the helper must not reference Unix-only
+    /// descriptor APIs on a Windows test build.
+    #[cfg(all(test, unix))]
     pub(crate) fn raw_fd_for_test(&self) -> i32 {
         use std::os::fd::AsRawFd;
         self.file.as_raw_fd()
@@ -744,23 +920,82 @@ impl Drop for CancelOnDrop {
 /// Test-only hooks for the deterministic pre-commit barrier.
 #[cfg(test)]
 pub mod test_hooks {
+    #![allow(dead_code)]
     use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex, OnceLock};
 
     pub type Hook = Box<dyn Fn(&Path) + Send + Sync>;
 
     static HOOK: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
+    static ROLLBACK_HOOK: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
+    pub type JoinHook = Box<dyn Fn() + Send + Sync>;
+    static JOIN_HOOK: OnceLock<Mutex<Option<JoinHook>>> = OnceLock::new();
+    static EXEC_FAULT: AtomicBool = AtomicBool::new(false);
 
     fn cell() -> &'static Mutex<Option<Hook>> {
         HOOK.get_or_init(|| Mutex::new(None))
+    }
+
+    fn rollback_cell() -> &'static Mutex<Option<Hook>> {
+        ROLLBACK_HOOK.get_or_init(|| Mutex::new(None))
     }
 
     pub fn set(hook: Option<Hook>) {
         *cell().lock().unwrap_or_else(|error| error.into_inner()) = hook;
     }
 
+    pub fn set_rollback(hook: Option<Hook>) {
+        *rollback_cell()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = hook;
+    }
+
+    fn join_cell() -> &'static Mutex<Option<JoinHook>> {
+        JOIN_HOOK.get_or_init(|| Mutex::new(None))
+    }
+
+    pub fn set_join(hook: Option<JoinHook>) {
+        *join_cell()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = hook;
+    }
+
+    /// Test-only barrier at the START of the supervisor's publication join,
+    /// i.e. after the local updater task was aborted and before the owned
+    /// blocking job is released.
+    pub fn join_boundary() {
+        let guard = join_cell()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(hook) = guard.as_ref() {
+            hook();
+        }
+    }
+
+    /// Test-only: make the next real exec fail with `EACCES` by removing the
+    /// execute bits from the installed image immediately before `execv`.
+    pub fn set_exec_permission_fault(fault: bool) {
+        EXEC_FAULT.store(fault, Ordering::SeqCst);
+    }
+
+    pub fn exec_permission_fault() -> bool {
+        EXEC_FAULT.load(Ordering::SeqCst)
+    }
+
     pub fn publish_boundary(path: &Path) {
         let guard = cell().lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(hook) = guard.as_ref() {
+            hook(path);
+        }
+    }
+
+    /// Test-only barrier at the START of a real rollback, after the transaction
+    /// lock was taken and before any file is restored.
+    pub fn rollback_boundary(path: &Path) {
+        let guard = rollback_cell()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if let Some(hook) = guard.as_ref() {
             hook(path);
         }
@@ -787,6 +1022,10 @@ pub struct Committed {
 pub struct ActivationFailure {
     pub error: UpdateError,
     pub rolled_back: bool,
+    /// The previous release could NOT be completely restored (or its recovery
+    /// record could not be retired). The caller must keep the recovery state
+    /// and stop instead of running the business App on a mixed tree.
+    pub recovery_failed: bool,
 }
 
 impl ActivationFailure {
@@ -794,6 +1033,7 @@ impl ActivationFailure {
         Self {
             error,
             rolled_back: false,
+            recovery_failed: false,
         }
     }
 }
@@ -904,11 +1144,31 @@ pub fn install_candidate(
     };
 
     // ONE provisional activation/recovery record BEFORE the first live change.
+    // It records, for every candidate resource path, whether the entry already
+    // existed on the live tree: a rollback restores the old ones from `backup/`
+    // and REMOVES the ones this activation created.
+    let mut created: Vec<String> = Vec::new();
+    for entry in &resources {
+        let live = installation.root().join(&entry.path);
+        match std::fs::symlink_metadata(&live) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                created.push(entry.path.clone());
+            }
+            Err(error) => {
+                return Err(ActivationFailure::before_install(UpdateError::io(
+                    &live, &error,
+                )));
+            }
+        }
+    }
     let activation = Activation {
         v: ACTIVATION_VERSION,
         candidate: record.clone(),
         previous: previous_record.clone(),
         paths: resources.iter().map(|entry| entry.path.clone()).collect(),
+        created: created.clone(),
+        executable: native.clone(),
         native: native.is_some(),
     };
     installation
@@ -951,18 +1211,33 @@ pub fn install_candidate(
     })();
 
     if let Err(error) = commit {
-        let restore_error =
-            restore_moved(installation, &backup, &moved).and_then(|()| restore_executable(&backup));
-        let _ = installation.clear_activation();
-        let error = match restore_error {
-            Ok(()) => error,
-            Err(restore) => UpdateError::install(format!(
-                "{error}; restoring the previous release failed: {restore}"
-            )),
+        let mut recovery_failed = false;
+        let error = match undo_activation(installation, &backup, &activation, &activation.paths) {
+            Ok(()) => {
+                // Only a COMPLETE restore retires the one recovery record; a
+                // failure here left the live tree partly switched, so the
+                // record must survive for the next start to retry.
+                match installation.clear_activation() {
+                    Ok(()) => error,
+                    Err(clear) => {
+                        recovery_failed = true;
+                        UpdateError::install(format!(
+                            "{error}; the previous release was restored but the recovery record could not be retired: {clear}"
+                        ))
+                    }
+                }
+            }
+            Err(restore) => {
+                recovery_failed = true;
+                UpdateError::install(format!(
+                    "{error}; restoring the previous release failed: {restore}; the recovery record and backup were kept for the next start"
+                ))
+            }
         };
         return Err(ActivationFailure {
             error,
             rolled_back: !moved.is_empty(),
+            recovery_failed,
         });
     }
 
@@ -988,29 +1263,88 @@ pub fn confirm_activation(installation: &Installation) -> Result<Option<Record>,
     Ok(Some(activation.candidate))
 }
 
-/// Put the previous files back. Best effort: every step that can fail is
-/// reported through the returned error, and a partially restored tree is never
-/// reported as success.
+/// Undo one provisional activation from its ONE recovery record.
+///
+/// Restores every previous file from `backup/`, REMOVES every candidate file
+/// this activation created, and writes the previous executable back to the
+/// KNOWN installation path. Every step reports its real failure; a partly
+/// restored tree is never reported as success.
+fn undo_activation(
+    installation: &Installation,
+    backup: &Path,
+    activation: &Activation,
+    paths: &[String],
+) -> Result<(), UpdateError> {
+    restore_moved(installation, backup, paths, &activation.created)?;
+    for path in &activation.created {
+        let live = installation.root().join(path);
+        match std::fs::symlink_metadata(&live) {
+            Ok(metadata) if metadata.is_dir() => {
+                return Err(UpdateError::install(format!(
+                    "cannot remove the candidate-created {}: it is a directory",
+                    live.display()
+                )));
+            }
+            Ok(_) => std::fs::remove_file(&live).map_err(|error| UpdateError::io(&live, &error))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(UpdateError::io(&live, &error)),
+        }
+    }
+    restore_executable(installation, backup, activation.executable.as_deref())
+}
+
+/// Put the previous files back. A path that had no previous version is a
+/// candidate-created file and has no backup to restore; a path that HAD one is
+/// an unrecoverable gap if neither the live file nor its backup exists.
 fn restore_moved(
     installation: &Installation,
     backup: &Path,
     moved: &[String],
+    created: &[String],
 ) -> Result<(), UpdateError> {
     let mut failure = None;
     for path in moved {
         let live = installation.root().join(path);
         let aside = backup.join(path);
-        if !aside.exists() {
-            continue;
-        }
-        if let Some(parent) = live.parent()
-            && let Err(error) = std::fs::create_dir_all(parent)
-        {
-            failure.get_or_insert_with(|| UpdateError::io(parent, &error));
-            continue;
-        }
-        if let Err(error) = std::fs::rename(&aside, &live) {
-            failure.get_or_insert_with(|| UpdateError::io(&live, &error));
+        match std::fs::symlink_metadata(&aside) {
+            Ok(metadata) => {
+                if metadata.is_dir() {
+                    failure.get_or_insert_with(|| {
+                        UpdateError::install(format!(
+                            "{} inside the backup is a directory, not a previous file",
+                            aside.display()
+                        ))
+                    });
+                    continue;
+                }
+                if let Some(parent) = live.parent()
+                    && let Err(error) = std::fs::create_dir_all(parent)
+                {
+                    failure.get_or_insert_with(|| UpdateError::io(parent, &error));
+                    continue;
+                }
+                if let Err(error) = std::fs::rename(&aside, &live) {
+                    failure.get_or_insert_with(|| UpdateError::io(&live, &error));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // No backup: either the candidate created this path (and the
+                // removal pass retires it), or the previous file is simply
+                // still live. Anything else is a real, reported gap.
+                if !created.iter().any(|created| created == path)
+                    && std::fs::symlink_metadata(&live).is_err()
+                {
+                    failure.get_or_insert_with(|| {
+                        UpdateError::install(format!(
+                            "{} has neither a live file nor a backup copy",
+                            live.display()
+                        ))
+                    });
+                }
+            }
+            Err(error) => {
+                failure.get_or_insert_with(|| UpdateError::io(&aside, &error));
+            }
         }
     }
     match failure {
@@ -1019,17 +1353,53 @@ fn restore_moved(
     }
 }
 
-/// Put the backed up executable back. `self_replace` consumes the backup copy,
-/// so this runs exactly once per recovery.
-fn restore_executable(backup: &Path) -> Result<(), UpdateError> {
+/// Put the backed up executable back at the KNOWN installation path.
+///
+/// A copy through a synced temporary file in the destination directory is
+/// atomic and, unlike `self_replace`, does NOT consume `backup/previous-exe`:
+/// a retry after a failed rollback still has the only recovery copy. The
+/// destination is the path recorded in the activation record (never an
+/// arbitrary current process image).
+fn restore_executable(
+    installation: &Installation,
+    backup: &Path,
+    executable: Option<&str>,
+) -> Result<(), UpdateError> {
+    use std::io::Write;
     let backup_exe = backup.join(BACKUP_EXE);
-    if !backup_exe.exists() {
+    if std::fs::symlink_metadata(&backup_exe).is_err() {
         return Ok(());
     }
-    self_replace::self_replace(&backup_exe).map_err(|error| {
-        UpdateError::install(format!("restoring the previous executable: {error}"))
+    let destination = match executable {
+        Some(relative) => installation.root().join(relative),
+        None => std::env::current_exe().map_err(|error| {
+            UpdateError::install(format!(
+                "the installation executable path is unavailable: {error}"
+            ))
+        })?,
+    };
+    let parent = destination.parent().ok_or_else(|| {
+        UpdateError::install(format!("{} has no parent directory", destination.display()))
     })?;
-    Ok(())
+    let mut source =
+        std::fs::File::open(&backup_exe).map_err(|error| UpdateError::io(&backup_exe, &error))?;
+    let mut temp =
+        tempfile::NamedTempFile::new_in(parent).map_err(|error| UpdateError::io(parent, &error))?;
+    std::io::copy(&mut source, &mut temp).map_err(|error| UpdateError::io(temp.path(), &error))?;
+    temp.as_file()
+        .sync_all()
+        .map_err(|error| UpdateError::io(temp.path(), &error))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o755))
+            .map_err(|error| UpdateError::io(temp.path(), &error))?;
+    }
+    let _ = temp.flush();
+    match temp.persist(&destination) {
+        Ok(_) => Ok(()),
+        Err(error) => Err(UpdateError::io(&destination, &error.error)),
+    }
 }
 
 /// Name of the previous executable copy inside the backup directory.
@@ -1043,35 +1413,34 @@ pub fn rollback_activation(installation: &Installation) -> Result<Option<Record>
     let Some(activation) = installation.activation()? else {
         return Ok(None);
     };
+    #[cfg(test)]
+    test_hooks::rollback_boundary(installation.root());
     let backup = installation.backup_root();
-    let mut files: Vec<PathBuf> = Vec::new();
+    // Every path the record lists, plus any previous file a crash actually
+    // moved into the backup, is restored from the same complete snapshot.
+    let mut paths: Vec<String> = activation.paths.clone();
     if backup.exists() {
         ensure_private_dir(&backup)?;
+        let mut files: Vec<PathBuf> = Vec::new();
         collect_files(&backup, &backup, &mut files)?;
+        for relative in files {
+            if relative.file_name().is_some_and(|name| name == BACKUP_EXE) {
+                continue;
+            }
+            let spelled = relative.to_string_lossy().replace('\\', "/");
+            if !paths.contains(&spelled) {
+                paths.push(spelled);
+            }
+        }
     }
-    restore_moved(installation, &backup, &activation.paths)?;
-    // Files a crash moved aside but the record does not list are still
-    // installer-owned backup content; restore anything left.
-    for relative in &files {
-        if relative.file_name().is_some_and(|name| name == BACKUP_EXE) {
-            continue;
-        }
-        let live = installation.root().join(relative);
-        let aside = backup.join(relative);
-        if !aside.exists() {
-            continue;
-        }
-        if let Some(parent) = live.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| UpdateError::io(parent, &error))?;
-        }
-        std::fs::rename(&aside, &live).map_err(|error| UpdateError::io(&live, &error))?;
-    }
-    restore_executable(&backup)?;
+    undo_activation(installation, &backup, &activation, &paths)?;
     installation.write_records(&Records {
         v: STATE_VERSION,
         active: activation.previous.clone(),
         previous: None,
     })?;
+    // The recovery record is retired only after EVERY resource, native image
+    // and state record was actually restored.
     installation.clear_activation()?;
     installation.discard_pending()?;
     Ok(activation.previous)
@@ -1235,6 +1604,13 @@ pub fn reexec(exe: &Path, lock: Option<&InstallLock>) -> UpdateError {
             && let Err(error) = lock.prepare_exec()
         {
             return error;
+        }
+        // Test-only fault, compiled out of production: the REAL exec then
+        // fails with EACCES instead of entering the new image.
+        #[cfg(test)]
+        if test_hooks::exec_permission_fault() {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(exe, std::fs::Permissions::from_mode(0o000));
         }
         let error = nix::unistd::execv(&args[0], &args).unwrap_err();
         UpdateError::install(format!("re-executing the installed update: {error}"))

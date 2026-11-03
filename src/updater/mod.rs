@@ -1035,10 +1035,22 @@ pub struct StartupReport {
     pub events: Vec<LogEvent>,
     pub reexec: Option<PathBuf>,
     pub provisional: Option<install::Record>,
+    /// Set when the startup transaction could not be completed safely: the
+    /// caller must NOT construct the business App or touch the session.
+    pub stop: Option<StartupStop>,
     /// The per-install lock, held from the startup read/apply through real App
     /// confirmation. Dropping it closes this process' descriptor; an inherited
     /// daemon child keeps the same lock alive through its own descriptor.
     pub lock: Option<install::InstallLock>,
+}
+
+/// A fail-closed startup outcome. `Busy` is retryable (another process is
+/// mid-transaction); `RecoveryFailed` means the previous release could not be
+/// completely restored, so the recovery record is kept for the next start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartupStop {
+    Busy,
+    RecoveryFailed,
 }
 
 impl StartupReport {
@@ -1048,6 +1060,7 @@ impl StartupReport {
             events,
             reexec: None,
             provisional: None,
+            stop: None,
             lock: None,
         }
     }
@@ -1060,6 +1073,11 @@ impl StartupReport {
                 args: vec![detail.into()],
             }],
         )
+    }
+    fn stopped(detail: impl Into<String>, stop: StartupStop) -> Self {
+        let mut report = Self::failed(detail);
+        report.stop = Some(stop);
+        report
     }
 }
 
@@ -1090,9 +1108,16 @@ pub fn startup(install_root: &Path) -> StartupReport {
     if let Err(error) = installation.verify_private_area() {
         return StartupReport::failed(error.to_string());
     }
-    let pending_path = installation.pending_path();
+    // The pending SUBDIRECTORY and its leaf are validated before they are
+    // probed, read or deleted. A missing subdirectory is simply "no pending"
+    // and is never created here.
+    let pending_present = match installation.pending_present() {
+        Ok(present) => present,
+        Err(error) => {
+            return StartupReport::stopped(error.to_string(), StartupStop::RecoveryFailed);
+        }
+    };
     let activation_present = installation.has_activation();
-    let pending_present = pending_path.exists();
     if !activation_present && !pending_present {
         return StartupReport::new("none", Vec::new());
     }
@@ -1100,10 +1125,15 @@ pub fn startup(install_root: &Path) -> StartupReport {
     // Cross-process serialization. The replacement image of a private native
     // activation inherits the owned descriptor, so no unlock/reacquire gap
     // exists across the real exec; the private preflight never reaches here.
+    // A concurrent owner is a retryable STOP: the tree is mid-switch, so the
+    // business App must not start from it.
     let lock = match install::InstallLock::adopt_handoff(&installation) {
         Ok(Some(lock)) => lock,
         Ok(None) => match install::InstallLock::acquire(&installation) {
             Ok(lock) => lock,
+            Err(error @ UpdateError::Busy(_)) => {
+                return StartupReport::stopped(error.to_string(), StartupStop::Busy);
+            }
             Err(error) => return StartupReport::failed(error.to_string()),
         },
         Err(error) => return StartupReport::failed(error.to_string()),
@@ -1123,6 +1153,7 @@ pub fn startup(install_root: &Path) -> StartupReport {
                 events: Vec::new(),
                 reexec: None,
                 provisional: Some(candidate),
+                stop: None,
                 lock: Some(lock),
             };
         }
@@ -1149,12 +1180,16 @@ pub fn startup(install_root: &Path) -> StartupReport {
                     events,
                     reexec: None,
                     provisional: None,
+                    stop: None,
                     lock: None,
                 }
             }
-            Err(error) => StartupReport::failed(format!(
-                "{detail}; restoring the previous release failed: {error}"
-            )),
+            Err(error) => {
+                return StartupReport::stopped(
+                    format!("{detail}; restoring the previous release failed: {error}"),
+                    StartupStop::RecoveryFailed,
+                );
+            }
         };
     }
 
@@ -1167,14 +1202,19 @@ pub fn startup(install_root: &Path) -> StartupReport {
         Err(error) => return StartupReport::failed(error.to_string()),
     };
 
-    if !pending_path.exists() {
-        return StartupReport::new("none", Vec::new());
-    }
-
-    let envelope = match package::read(&pending_path) {
-        Ok(envelope) => envelope,
+    let envelope = match installation.read_pending() {
+        Ok(Some(envelope)) => envelope,
+        Ok(None) => return StartupReport::new("none", Vec::new()),
         Err(error) => {
-            let _ = installation.discard_pending();
+            // A malformed candidate is retired through the same validated
+            // parent/leaf path. If even that is refused (an unsafe leaf), the
+            // state is left untouched and startup stops.
+            if let Err(discard) = installation.discard_pending() {
+                return StartupReport::stopped(
+                    format!("{error}; retiring the pending candidate failed: {discard}"),
+                    StartupStop::RecoveryFailed,
+                );
+            }
             return StartupReport::failed(error.to_string());
         }
     };
@@ -1243,6 +1283,7 @@ pub fn startup(install_root: &Path) -> StartupReport {
                         events: Vec::new(),
                         reexec: None,
                         provisional: Some(committed.record),
+                        stop: None,
                         lock: Some(lock),
                     };
                     if committed.reexec {
@@ -1251,14 +1292,23 @@ pub fn startup(install_root: &Path) -> StartupReport {
                     report
                 }
                 Err(failure) => {
-                    let _ = installation.discard_pending();
                     let previous_id = records
                         .active
                         .as_ref()
                         .map(|record| record.update_id.clone())
                         .unwrap_or_default();
                     let detail = failure.error.to_string();
-                    let events = if failure.rolled_back {
+                    let recovery_failed = failure.recovery_failed;
+                    if !recovery_failed {
+                        let _ = installation.discard_pending();
+                    }
+                    let events = if recovery_failed {
+                        vec![LogEvent {
+                            level: "error".into(),
+                            key: "UPDATE_FAILED".into(),
+                            args: vec![detail.clone()],
+                        }]
+                    } else if failure.rolled_back {
                         updater
                             .rollback_events(&detail, &previous_id)
                             .unwrap_or_else(|_| vec![plain_rollback_event(&detail, &previous_id)])
@@ -1269,14 +1319,19 @@ pub fn startup(install_root: &Path) -> StartupReport {
                             args: vec![detail.clone()],
                         }]
                     };
-                    StartupReport::new(
+                    let mut report = StartupReport::new(
                         if failure.rolled_back {
                             "rolled_back"
                         } else {
                             "failed"
                         },
                         events,
-                    )
+                    );
+                    if recovery_failed {
+                        report.stop = Some(StartupStop::RecoveryFailed);
+                        report.lock = Some(lock);
+                    }
+                    report
                 }
             }
         }
@@ -1286,21 +1341,30 @@ pub fn startup(install_root: &Path) -> StartupReport {
 
 /// Publish the provisional identity after the REAL new image initialized.
 ///
-/// The required modules are loaded FIRST: a module failure keeps the
-/// activation provisional so the caller can roll back.
+/// EVERY fallible confirmation step runs FIRST: the trusted modules are loaded
+/// from the installed tree and the completion events are computed while the
+/// activation is still provisional. Only then is `state.json` published and
+/// the recovery record retired, so a confirmation failure can still roll the
+/// previous release back.
 pub fn confirm_provisional(install_root: &Path) -> Result<Vec<LogEvent>, UpdateError> {
     let installation = install::Installation::new(install_root);
-    let mut updater = Updater::load(install_root)?;
-    let Some(record) = install::confirm_activation(&installation)? else {
+    let Some(record) = installation
+        .activation()?
+        .map(|activation| activation.candidate)
+    else {
         return Ok(Vec::new());
     };
+    let mut updater = Updater::load(install_root)?;
     let mut events = vec![LogEvent {
         level: "info".into(),
         key: "UPDATE_APPLIED".into(),
         args: vec![record.update_id.clone()],
     }];
     events.extend(updater.confirmed_events(&record.update_id)?);
-    Ok(events)
+    match install::confirm_activation(&installation)? {
+        Some(_) => Ok(events),
+        None => Ok(Vec::new()),
+    }
 }
 
 /// Restore the previous release after a post-install initialization failure.

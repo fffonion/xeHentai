@@ -2311,6 +2311,7 @@ pub fn run_with_rpc(app: crate::core::App, root: &Path) -> i32 {
         Vec::new(),
         crate::i18n::Locale::EnUs,
         resource_root,
+        None,
     )))
 }
 

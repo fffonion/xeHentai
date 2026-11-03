@@ -150,14 +150,16 @@ pub fn stage(pending_dir: &Path, envelope: &PendingEnvelope) -> Result<Staged, U
 /// Read and structurally validate a published envelope. The signature and
 /// digest are checked by the caller against the trusted binding; this function
 /// only guarantees the three fixed members, their uniqueness and their bounds.
-pub fn read(path: &Path) -> Result<PendingEnvelope, UpdateError> {
-    let bytes = std::fs::read(path).map_err(|error| UpdateError::io(path, &error))?;
+/// The caller must have validated the directory and leaf it opened.
+/// Decode an envelope whose bytes the caller obtained through its own trusted
+/// open (the installer validates the pending directory and leaf first).
+pub fn read_bytes(bytes: &[u8]) -> Result<PendingEnvelope, UpdateError> {
     if bytes.len() as u64 > MAX_ENVELOPE_BYTES {
         return Err(UpdateError::package(
             "pending envelope is larger than its parts allow",
         ));
     }
-    let mut archive = ZipArchive::new(Cursor::new(bytes))
+    let mut archive = ZipArchive::new(Cursor::new(bytes.to_vec()))
         .map_err(|error| UpdateError::package(format!("pending envelope is not a ZIP: {error}")))?;
     let mut names: Vec<String> = Vec::new();
     for index in 0..archive.len() {
