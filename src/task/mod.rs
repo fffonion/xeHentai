@@ -47,17 +47,19 @@ pub struct RenameError {
     pub to: String,
     pub message: String,
 }
+#[cfg(all(test, target_os = "linux"))]
+pub use file_ops::DirectoryObservation;
 pub use file_ops::resolve_dir;
 pub use file_ops::{
     ActivePrivateLog, GalleryGrant, OpenedEntry, PrivatePaths, boundary_path, normalize,
     path_within,
 };
 #[cfg(test)]
-pub use file_ops::{DirectoryObservation, PrivatePolicy, observe_directory};
-#[cfg(test)]
 pub(crate) use file_ops::{
     ObservationSwap, PreopenSwap, arm_observation_swap, arm_preopen_swap, run_observation_swap,
 };
+#[cfg(test)]
+pub use file_ops::{PrivatePolicy, observe_directory};
 
 /// The fourteen configuration keys captured when a task is created, in the
 /// order the reference `config.py` defines them.
