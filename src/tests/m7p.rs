@@ -76,9 +76,11 @@ impl Route {
 
 /// How the fixture's read side of a holding route actually ended.
 ///
-/// Only a graceful `Eof` is the client closing the connection. A reset means the
-/// bytes this fixture wrote were still queued on the client's receive side when
-/// the client closed, so the kernel answered with RST instead of FIN.
+/// `Eof` is a graceful end of the peer's read side; `Reset` is an abortive end.
+/// The calibration below observes the abortive form when a client closes with
+/// response bytes still queued in its receive buffer, which is why an observed
+/// reset is a real physical close even though it is not a graceful EOF. Any
+/// other outcome, and no recorded outcome, is not closure evidence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PeerReadEnd {
     Eof,
@@ -90,6 +92,16 @@ fn classify_read_end(error: &std::io::Error) -> PeerReadEnd {
     match error.kind() {
         std::io::ErrorKind::ConnectionReset => PeerReadEnd::Reset,
         kind => PeerReadEnd::Other(kind),
+    }
+}
+
+impl PeerReadEnd {
+    /// Whether this recorded end is evidence that the peer's read side closed.
+    ///
+    /// Only a graceful `Eof` or an abortive `Reset` the fixture really observed
+    /// qualifies. Any other `ErrorKind`, and no recorded end at all, does not.
+    fn is_closed(self) -> bool {
+        matches!(self, Self::Eof | Self::Reset)
     }
 }
 
@@ -188,6 +200,12 @@ impl Server {
 
     fn peer_eof(&self, path: &str) -> bool {
         self.peer_ends(path).contains(&PeerReadEnd::Eof)
+    }
+
+    /// True when the fixture recorded a qualifying physical close for `path`,
+    /// judged only from the ends it really observed.
+    fn peer_closed(&self, path: &str) -> bool {
+        self.peer_ends(path).iter().any(|end| end.is_closed())
     }
 
     /// Every terminal read state observed for `path`, in the order recorded.
@@ -289,10 +307,10 @@ fn serve(
                             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                         ) => {}
                     Err(error) => {
-                        // Record what really ended the read side. On Linux a
-                        // client that closes with unread response bytes queued
-                        // makes close send RST, so this is ConnectionReset
-                        // rather than the graceful EOF of `Ok(0)`.
+                        // Record what really ended the read side. The calibration
+                        // below observes `ConnectionReset`, an abortive end, when
+                        // a client closes over unread response bytes; anything
+                        // else stays a named `Other`.
                         closed
                             .lock()
                             .unwrap()
@@ -1525,8 +1543,9 @@ fn m7p_cancelled_download_keeps_the_old_pending_and_a_fresh_run_succeeds() {
     });
 
     assert!(
-        m6::wait_for(Duration::from_secs(10), || server.peer_eof(&payload_target)),
-        "the cancelled request kept its connection open: peer_read_ends={:?} flushed_body_bytes={} body_bytes={payload_len}",
+        m6::wait_for(Duration::from_secs(10), || server
+            .peer_closed(&payload_target)),
+        "the cancelled request observed no qualifying close (graceful EOF or explicit reset): peer_read_ends={:?} flushed_body_bytes={} body_bytes={payload_len}",
         server.peer_ends(&payload_target),
         server.partial(&payload_target),
     );
@@ -1549,7 +1568,14 @@ fn m7p_cancelled_download_keeps_the_old_pending_and_a_fresh_run_succeeds() {
     );
 }
 
+/// Linux-only calibration of the fixture's own read-end observation.
+///
+/// It measures this loopback fixture, not the product: an observed reset here
+/// comes from a client that closes over its queued response bytes, and says
+/// nothing about any other reset, nor about earlier CI runs. A graceful `Eof`
+/// stays the separate graceful-close control.
 #[test]
+#[cfg(target_os = "linux")]
 #[ignore = "explicit calibration probe for the loopback fixture's read-end observation"]
 fn m7p_peer_read_end_calibration_for_close_with_unread_response() {
     // Close over a real, unconsumed response: the fixture recorded its body
@@ -1595,6 +1621,10 @@ fn m7p_peer_read_end_calibration_for_close_with_unread_response() {
         unread_ends,
         vec![PeerReadEnd::Reset],
         "closing over a queued response must surface as ConnectionReset, not EOF"
+    );
+    assert!(
+        unread.peer_closed(unread_target),
+        "an observed reset must qualify as a physical close"
     );
     assert!(
         !unread.peer_eof(unread_target),
@@ -1649,6 +1679,46 @@ fn m7p_peer_read_end_calibration_for_close_with_unread_response() {
     assert!(
         consumed.peer_eof(consumed_target),
         "an ordinary close must still satisfy the graceful-EOF check"
+    );
+    assert!(
+        consumed.peer_closed(consumed_target),
+        "a graceful EOF must qualify as a physical close"
+    );
+}
+
+/// The close qualification itself, over synthesized end tables: only a graceful
+/// `Eof` or an actually observed `Reset` closes the read side. Every other
+/// `ErrorKind`, and an empty table, stay unqualified.
+#[test]
+fn m7p_peer_close_qualification_accepts_only_eof_or_reset() {
+    let closed = |ends: &[PeerReadEnd]| ends.iter().any(|end| end.is_closed());
+    assert!(closed(&[PeerReadEnd::Eof]), "a graceful EOF must qualify");
+    assert!(
+        closed(&[PeerReadEnd::Reset]),
+        "an observed reset must qualify"
+    );
+    assert!(
+        closed(&[
+            PeerReadEnd::Other(std::io::ErrorKind::Interrupted),
+            PeerReadEnd::Reset
+        ]),
+        "one observed reset must qualify alongside an unrelated error"
+    );
+    for kind in [
+        std::io::ErrorKind::Interrupted,
+        std::io::ErrorKind::TimedOut,
+        std::io::ErrorKind::WouldBlock,
+        std::io::ErrorKind::ConnectionAborted,
+        std::io::ErrorKind::Other,
+    ] {
+        assert!(
+            !closed(&[PeerReadEnd::Other(kind)]),
+            "{kind:?} must not qualify as a physical close"
+        );
+    }
+    assert!(
+        !closed(&[]),
+        "an empty end table must not qualify as a physical close"
     );
 }
 
