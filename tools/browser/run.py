@@ -54,6 +54,14 @@ ENV_LAYOUT = {
     "PIP_CACHE_DIR": "pip",
     "UV_CACHE_DIR": "uv",
 }
+# Rustup and Cargo resolve their implicit home from $HOME when these are not
+# exported (CI installs its toolchain and caches under the original runner
+# home without exporting either). ENV_LAYOUT replaces HOME, so the implicit
+# values must be pinned from the ORIGINAL caller home before that swap.
+IMPLICIT_HOME_DEFAULTS = {
+    "RUSTUP_HOME": ".rustup",
+    "CARGO_HOME": ".cargo",
+}
 
 
 class RunError(RuntimeError):
@@ -135,6 +143,15 @@ def _assert_fresh(run_root, temp_root):
 def _child_env(run_root, target):
     env = os.environ.copy()
     env.pop("PYTHONPYCACHEPREFIX", None)
+    # Bind the implicit toolchain/cache homes while HOME is still the caller's
+    # real home; ENV_LAYOUT below then confines everything else. Explicit
+    # non-empty values are kept verbatim, blank ones mean "unset" as they do
+    # for Rustup/Cargo, and RUSTUP_TOOLCHAIN selection is never rewritten.
+    caller_home = env.get("HOME")
+    if caller_home:
+        for name, relative in IMPLICIT_HOME_DEFAULTS.items():
+            if not env.get(name):
+                env[name] = str(Path(caller_home) / relative)
     env.update({
         name: str(run_root / relative) for name, relative in ENV_LAYOUT.items()
     })

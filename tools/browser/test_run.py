@@ -20,6 +20,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -105,6 +106,56 @@ class GuardTests(unittest.TestCase):
             self.assertTrue(env[name].startswith(str(self.work / "run")), (name, env[name]))
         self.assertEqual(env["CARGO_TARGET_DIR"], str(self.work / "target"))
         self.assertNotIn("PYTHONPYCACHEPREFIX", env)
+
+
+class ToolchainHomePinTests(unittest.TestCase):
+    """Implicit Rustup/Cargo homes come from the ORIGINAL caller home.
+
+    The child gets a fresh isolated HOME, but the toolchain installation and
+    the offline Cargo cache live under the caller's home when the caller did
+    not export RUSTUP_HOME/CARGO_HOME (exactly what CI does). Only the mapping
+    is exercised here; no Cargo runs and no real user configuration is read.
+    """
+
+    caller_home = "/controlled/caller-home"
+    run_root = Path("/controlled/run-root")
+    target = Path("/controlled/target")
+
+    def child_env(self, mapping):
+        with mock.patch.dict(os.environ, mapping, clear=True):
+            return run._child_env(self.run_root, self.target)
+
+    def test_missing_toolchain_homes_default_to_caller_home(self):
+        env = self.child_env({"HOME": self.caller_home, "PATH": "/usr/bin:/bin"})
+        self.assertEqual(env["RUSTUP_HOME"], self.caller_home + "/.rustup")
+        self.assertEqual(env["CARGO_HOME"], self.caller_home + "/.cargo")
+        child_home = str(self.run_root / "home")
+        self.assertEqual(env["HOME"], child_home)
+        for name in ("RUSTUP_HOME", "CARGO_HOME"):
+            self.assertFalse(env[name].startswith(child_home), (name, env[name]))
+
+    def test_blank_toolchain_homes_are_treated_as_unset(self):
+        env = self.child_env({"HOME": self.caller_home,
+                              "RUSTUP_HOME": "", "CARGO_HOME": ""})
+        self.assertEqual(env["RUSTUP_HOME"], self.caller_home + "/.rustup")
+        self.assertEqual(env["CARGO_HOME"], self.caller_home + "/.cargo")
+
+    def test_explicit_toolchain_homes_are_preserved_literally(self):
+        env = self.child_env({
+            "HOME": self.caller_home,
+            "RUSTUP_HOME": "/foreign/rustup",
+            "CARGO_HOME": "relative/cargo",
+            "RUSTUP_TOOLCHAIN": "1.99.1-custom-token",
+        })
+        self.assertEqual(env["RUSTUP_HOME"], "/foreign/rustup")
+        self.assertEqual(env["CARGO_HOME"], "relative/cargo")
+        self.assertEqual(env["RUSTUP_TOOLCHAIN"], "1.99.1-custom-token")
+
+    def test_caller_environment_is_not_mutated(self):
+        mapping = {"HOME": self.caller_home}
+        with mock.patch.dict(os.environ, mapping, clear=True):
+            run._child_env(self.run_root, self.target)
+            self.assertEqual(dict(os.environ), mapping)
 
 
 class RetirementTests(unittest.TestCase):
