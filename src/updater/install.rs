@@ -806,6 +806,14 @@ pub fn install_candidate(
             let staged = staging.path().join(&entry.path);
             let live = installation.root().join(&entry.path);
             replace_file(&live, &staged)?;
+            // Test-only seam: called after every REAL replacement, before the
+            // next one. It exists so a case can create a genuine later file
+            // conflict without faking an error; it is compiled out of every
+            // production build.
+            #[cfg(test)]
+            {
+                test_hooks::apply_boundary(&live);
+            }
         }
         let record = Record {
             update_id: candidate.descriptor.update_id.clone(),
@@ -842,7 +850,9 @@ fn preflight(candidate_root: &Path) -> Result<(), UpdateError> {
 /// One live target must be reachable without following a symlink: every
 /// existing ancestor under the installation root is a real directory, and the
 /// leaf is either absent or a real regular file. An RSS replacement therefore
-/// can never be redirected outside the installed tree.
+/// can never be redirected outside the installed tree. A symlink, directory,
+/// FIFO, socket or device at the leaf is refused HERE, before the first
+/// replacement: that is a preparation rejection, not a late apply failure.
 fn verify_live_boundary(root: &Path, relative: &str) -> Result<(), UpdateError> {
     let live = root.join(relative);
     let mut current = root.to_path_buf();
@@ -888,7 +898,14 @@ fn verify_live_boundary(root: &Path, relative: &str) -> Result<(), UpdateError> 
             "{} is a symlink; an RSS script is never replaced through it",
             live.display()
         ))),
-        Ok(_) => Ok(()),
+        Ok(metadata) if metadata.is_file() => Ok(()),
+        // A directory, FIFO, socket or device at the leaf is discoverable now,
+        // so it is a preparation rejection: the real rename would otherwise
+        // fail (or replace a special file) only after earlier scripts landed.
+        Ok(_) => Err(UpdateError::install(format!(
+            "{} exists and is not a regular file; an RSS script is never replaced over it",
+            live.display()
+        ))),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(UpdateError::io(&live, &error)),
     }
@@ -946,6 +963,34 @@ pub mod test_hooks {
         *join_cell()
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = hook;
+    }
+
+    /// A separate, minimal seam for the apply loop: it fires after each real
+    /// live replacement. It is NOT the publication/join barrier, so installing
+    /// it cannot mask another test's hook.
+    pub type ApplyHook = Box<dyn Fn(&Path) + Send + Sync>;
+    static APPLY_HOOK: OnceLock<Mutex<Option<ApplyHook>>> = OnceLock::new();
+
+    fn apply_cell() -> &'static Mutex<Option<ApplyHook>> {
+        APPLY_HOOK.get_or_init(|| Mutex::new(None))
+    }
+
+    pub fn set_apply(hook: Option<ApplyHook>) {
+        *apply_cell()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = hook;
+    }
+
+    /// Called after every successful live replacement, before the next one.
+    /// The callback must not wait while this lock is held; the only user
+    /// (the late-failure child) does two immediate filesystem operations.
+    pub fn apply_boundary(path: &Path) {
+        let guard = apply_cell()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(hook) = guard.as_ref() {
+            hook(path);
+        }
     }
 
     /// Test-only barrier at the START of the supervisor's publication join,

@@ -748,8 +748,9 @@ fn log_of(install: &Path) -> String {
 }
 
 /// Byte snapshot of an install tree, excluding the host executable (proved
-/// through its own hard link) and the ordinary log file: logging is normal
-/// application behaviour, not a package write.
+/// separately through its inode and the independent build baseline) and the
+/// ordinary log file: logging is normal application behaviour, not a package
+/// write.
 fn snapshot_without_host(root: &Path) -> Vec<(String, Vec<u8>)> {
     let mut out = Vec::new();
     collect_files(root, Path::new(""), &mut out);
@@ -1629,12 +1630,26 @@ fn m7p_next_start_applies_the_resource_candidate_and_runs_the_new_rss() {
     publish_rss(install.path(), &origin, Some(&pem), "rss");
     serve_package(&server, &origin, &pkg);
     let exe = owned_exe(install.path());
-    // A hard link keeps the ORIGINAL host image without copying 260 MiB: if
-    // the update ever rewrote or renamed the executable, this inode's bytes
-    // would stop being the path's bytes.
+    // A hard link keeps the ORIGINAL install path and inode without copying
+    // 260 MiB: if the update ever rewrote or renamed the executable, the
+    // install path would stop being this inode. It shares the inode by
+    // construction, so it proves identity only — never byte equality.
     let shadow = tempfile::tempdir().expect("shadow");
     let exe_shadow = shadow.path().join("xeHentai");
     std::fs::hard_link(&exe, &exe_shadow).expect("hard link the installed host");
+    // The byte baseline is the ordinary build output that `owned_exe` really
+    // copied from: a separate, read-only source with its own inode.
+    let host_baseline = Path::new(&target_dir()).join("debug").join("xeHentai");
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        assert_ne!(
+            std::fs::metadata(&exe).expect("installed host").ino(),
+            std::fs::metadata(&host_baseline)
+                .expect("build baseline")
+                .ino(),
+            "the installed host must be a copy of the build output, not the same file"
+        );
+    }
 
     // Run 1: the real download path publishes pending while A keeps running.
     let child = ChildRun::spawn(
@@ -1782,7 +1797,10 @@ fn m7p_next_start_applies_the_resource_candidate_and_runs_the_new_rss() {
         vec![format!("{AREA}/pending/{}", "src.zip")],
         "the update removed a file outside its private pending envelope"
     );
-    // The running host image is the same inode with the same bytes.
+    // The running host image is the same inode: the update never replaced or
+    // renamed the executable. Its bytes are compared against the independent
+    // build output it was copied from — the hard link shares this inode, so it
+    // is an identity check, not a byte baseline.
     use std::os::unix::fs::MetadataExt as _;
     assert!(
         std::fs::metadata(&exe).expect("exe after").ino()
@@ -1790,7 +1808,7 @@ fn m7p_next_start_applies_the_resource_candidate_and_runs_the_new_rss() {
         "the update replaced the host executable"
     );
     assert!(
-        files_equal(&exe, &exe_shadow).expect("compare host image"),
+        files_equal(&exe, &host_baseline).expect("compare host image"),
         "the host executable bytes changed across the RSS-only update"
     );
 }
@@ -2889,6 +2907,135 @@ fn m7p_startup_refuses_a_symlinked_live_script() {
     );
 }
 
+/// An existing live leaf that is NOT a regular file is a PREPARATION problem,
+/// not a late apply error. The boundary pass must refuse it before the first
+/// RSS replacement, exactly like a symlinked leaf: otherwise the pass accepts
+/// the tree, an earlier script is already replaced, and only the real rename
+/// reports the conflict (`EISDIR` for a directory) or silently replaces a
+/// special file such as a FIFO.
+#[cfg(unix)]
+#[test]
+fn m7p_startup_rejects_a_non_regular_live_leaf_before_any_replacement() {
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+    let key = signing_key();
+    let pem = public_pem(&key);
+    let server = Server::start(vec![]);
+    let origin = server.origin();
+    let pkg = sign(
+        &key,
+        &Spec::new(UPDATE_ID).with_tree(
+            &format!("xeHentai-{UPDATE_ID}/"),
+            &candidate_rss(&origin, Some(&pem), "rss-b"),
+        ),
+    );
+    let install = install_dir();
+    publish_rss(install.path(), &origin, Some(&pem), "rss");
+    let first_live = install.path().join("rss/filters/match.rss");
+    let first_before = std::fs::read(&first_live).expect("first live");
+    let first_inode = std::fs::metadata(&first_live).expect("first live").ino();
+    let blocked_live = install.path().join("rss/rpc/handlers.rss");
+    let last_live = install.path().join("rss/updater/updater.rss");
+    let last_before = std::fs::read(&last_live).expect("last live");
+    let seed = || {
+        seed_pending(
+            install.path(),
+            pkg.info.clone(),
+            pkg.sig.clone(),
+            pkg.payload.clone(),
+        )
+    };
+    let rejections = |report: &crate::updater::StartupReport| {
+        report
+            .events
+            .iter()
+            .map(|event| format!("{} {:?}", event.key, event.args))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+
+    // Phase 1: the second signed leaf already exists as a real directory.
+    std::fs::remove_file(&blocked_live).expect("remove live rpc script");
+    std::fs::create_dir(&blocked_live).expect("live rpc script as directory");
+    seed();
+    let report = crate::updater::startup(install.path());
+    let detail = rejections(&report);
+    assert!(
+        report.stop.is_none(),
+        "a directory at a live leaf is a preparation rejection, not a late apply stop: {detail}"
+    );
+    assert!(detail.contains("UPDATE_FAILED"), "{detail}");
+    assert!(
+        detail.contains("rpc/handlers.rss") && detail.contains("not a regular file"),
+        "the rejection does not name the non-regular live leaf: {detail}"
+    );
+    assert_eq!(
+        std::fs::read(&first_live).expect("first live after"),
+        first_before,
+        "the first live script was replaced before the whole boundary was checked"
+    );
+    assert_eq!(
+        std::fs::metadata(&first_live)
+            .expect("first live after")
+            .ino(),
+        first_inode,
+        "the first live script was replaced before the whole boundary was checked"
+    );
+    assert_eq!(
+        std::fs::read(&last_live).expect("last live after"),
+        last_before,
+        "a live script was replaced although the candidate was rejected"
+    );
+    assert!(
+        std::fs::symlink_metadata(&blocked_live)
+            .expect("blocked live after")
+            .is_dir(),
+        "the refused candidate replaced the live directory"
+    );
+    assert!(
+        !pending_path(install.path()).exists(),
+        "the rejected candidate was not retired"
+    );
+    assert!(!area_path(install.path()).join("state.json").exists());
+    assert!(!install.path().join("h.json").exists());
+
+    // Phase 2: a FIFO is refused the same way. The preparation must never open
+    // the live leaf (a read would block, so this case would hang instead).
+    std::fs::remove_dir(&blocked_live).expect("drop the directory");
+    nix::unistd::mkfifo(&blocked_live, nix::sys::stat::Mode::S_IRWXU).expect("mkfifo live leaf");
+    seed();
+    let report = crate::updater::startup(install.path());
+    let detail = rejections(&report);
+    assert!(
+        report.stop.is_none(),
+        "a FIFO at a live leaf is a preparation rejection, not a late apply stop: {detail}"
+    );
+    assert!(
+        detail.contains("rpc/handlers.rss") && detail.contains("not a regular file"),
+        "the rejection does not name the FIFO live leaf: {detail}"
+    );
+    assert!(
+        std::fs::symlink_metadata(&blocked_live)
+            .expect("fifo after")
+            .file_type()
+            .is_fifo(),
+        "the refused candidate replaced the live FIFO"
+    );
+    assert_eq!(
+        std::fs::metadata(&first_live)
+            .expect("first live after fifo")
+            .ino(),
+        first_inode,
+        "a live script was replaced although the FIFO candidate was rejected"
+    );
+    assert_eq!(
+        std::fs::read(&last_live).expect("last live after fifo"),
+        last_before
+    );
+    assert!(!pending_path(install.path()).exists());
+    assert!(!area_path(install.path()).join("state.json").exists());
+    assert!(!install.path().join("h.json").exists());
+}
+
 #[test]
 fn m7p_busy_startup_stops_before_the_business_app() {
     use crate::updater::install::{InstallLock, Installation};
@@ -3155,15 +3302,68 @@ fn m7p_startup_refuses_a_symlinked_pending_leaf_before_reading_it() {
 
 // MARK: - address r1: apply-phase failure and truthful installed-files event
 
-/// One live target of a signed entry is an incompatible type (a directory), so
-/// a LATER `rename(2)` in the real apply loop fails with EISDIR after earlier
-/// scripts were really replaced. The installation itself is otherwise complete:
-/// every script compiles and binds, so this can only be discovered by the real
-/// replacement. The start must then stop THIS launch with a nonzero status
-/// before the App/session/tasks, keep the ordinary pending candidate and write
-/// no applied identity, no completion event and no rollback artifact.
+/// Marker for the instrumented TEST child process of the late-failure case.
+/// Only this test reads it; production code never looks at it.
+const LATE_APPLY_CHILD: &str = "XEH_M7P_LATE_APPLY_CHILD";
+
+/// The child side of the late apply failure: a plainly labelled instrumented
+/// TEST process (the unit test binary, compiled with `cfg(test)`), never a
+/// claim about an uninstrumented production binary. It registers the minimal
+/// apply hook, then calls the REAL `main` entry point (`run_with_args`) on the
+/// fixture root and turns its returned status into the process status.
+fn late_apply_child(root: PathBuf) {
+    use crate::updater::install::test_hooks;
+
+    /// Clears the registration on every path out, including an unwind, and
+    /// only after the hook invocation has returned (never while its lock is
+    /// held).
+    struct HookGuard;
+    impl Drop for HookGuard {
+        fn drop(&mut self) {
+            test_hooks::set_apply(None);
+        }
+    }
+
+    assert_eq!(
+        crate::resource_root(&root),
+        root,
+        "the instrumented test process must resolve the fixture directory as its resource root"
+    );
+    let first_live = root.join("rss/filters/match.rss");
+    let blocked_live = root.join("rss/rpc/handlers.rss");
+    // After the FIRST real replacement, and before the next one, the second
+    // live leaf becomes a directory. The boundary pass already accepted the
+    // tree, so the next rename fails with a real EISDIR.
+    test_hooks::set_apply(Some(Box::new(move |path: &Path| {
+        if path != first_live.as_path() {
+            return;
+        }
+        std::fs::remove_file(&blocked_live).expect("remove the next live script");
+        std::fs::create_dir(&blocked_live).expect("the next live script becomes a directory");
+    })));
+    let _guard = HookGuard;
+
+    let code = crate::run_with_args(
+        &root,
+        ["xeHentai", "-l", "eh.log", "-vv", "--auto-update", "off"],
+    );
+    std::process::exit(code);
+}
+
+/// One live target becomes unusable only AFTER the boundary pass accepted the
+/// whole tree and the FIRST script was really replaced: the child's test-only
+/// apply hook (after replacement 1, before replacement 2) turns the second
+/// live leaf into a directory, so the next real `rename(2)` fails with EISDIR.
+/// That is the genuine late apply failure which preparation cannot detect. The
+/// start must then stop THIS launch with status 1 before the business App,
+/// session or task exists, keep the ordinary pending candidate and write no
+/// applied identity, completion event or rollback artifact.
+#[cfg(unix)]
 #[test]
 fn m7p_r1_late_apply_failure_stops_the_start_before_the_business_app() {
+    if let Some(root) = std::env::var_os(LATE_APPLY_CHILD) {
+        late_apply_child(PathBuf::from(root));
+    }
     use std::os::unix::fs::MetadataExt as _;
     let key = signing_key();
     let pem = public_pem(&key);
@@ -3176,7 +3376,6 @@ fn m7p_r1_late_apply_failure_stops_the_start_before_the_business_app() {
     );
     let install = install_dir();
     publish_rss(install.path(), &origin, Some(&pem), "rss");
-    let exe = owned_exe(install.path());
     let first_live = install.path().join("rss/filters/match.rss");
     let first_inode = std::fs::metadata(&first_live).expect("first live").ino();
     let first_expected = files
@@ -3185,12 +3384,18 @@ fn m7p_r1_late_apply_failure_stops_the_start_before_the_business_app() {
         .map(|(_, body)| body.clone())
         .expect("candidate filters module");
     let blocked_live = install.path().join("rss/rpc/handlers.rss");
+    let third_live = install.path().join("rss/updater/github.rss");
     let last_live = install.path().join("rss/updater/updater.rss");
+    let third_before = std::fs::read(&third_live).expect("third live before");
     let last_before = std::fs::read(&last_live).expect("last live before");
-    // The live target of the SECOND signed entry is a directory: the first
-    // replacement succeeds and this one fails with a real EISDIR.
-    std::fs::remove_file(&blocked_live).expect("remove live rpc script");
-    std::fs::create_dir(&blocked_live).expect("live rpc script as directory");
+    // BEFORE the start every leaf is a regular file, so the preparation and
+    // the live boundary pass must both accept this candidate.
+    assert!(
+        std::fs::symlink_metadata(&blocked_live)
+            .expect("second live before")
+            .is_file(),
+        "the second live target must be healthy before the start"
+    );
     let seeded = seed_pending(
         install.path(),
         pkg.info.clone(),
@@ -3198,16 +3403,39 @@ fn m7p_r1_late_apply_failure_stops_the_start_before_the_business_app() {
         pkg.payload.clone(),
     );
 
-    let mut child = ChildRun::spawn(
-        install.path(),
-        &exe,
-        &["-l", "eh.log", "-vv", "--auto-update", "off"],
-    );
-    let exit = m6::wait_exit(
-        child.child.as_mut().expect("child"),
-        Duration::from_secs(30),
-    );
-    drop(child);
+    std::fs::create_dir_all(install.path().join("home")).unwrap();
+    std::fs::create_dir_all(install.path().join("tmp")).unwrap();
+    std::fs::create_dir_all(install.path().join("cache")).unwrap();
+    let exe = std::env::current_exe().expect("the unit test binary");
+    let mut child = std::process::Command::new(exe)
+        .current_dir(install.path())
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", install.path().join("home"))
+        .env("TMPDIR", install.path().join("tmp"))
+        .env("XDG_CACHE_HOME", install.path().join("cache"))
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env(LATE_APPLY_CHILD, install.path())
+        .args([
+            "--exact",
+            "tests::m7p::m7p_r1_late_apply_failure_stops_the_start_before_the_business_app",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn the instrumented test process");
+
+    let exit = m6::wait_exit(&mut child, Duration::from_secs(30));
+    if exit.is_none() {
+        // Bounded reaping: a child that never exits is killed instead of being
+        // waited on indefinitely.
+        let _ = child.kill();
+    }
+    let _ = child.wait();
     let log = log_of(install.path());
     let code = exit.and_then(|status| status.code());
     assert_eq!(
@@ -3221,27 +3449,36 @@ fn m7p_r1_late_apply_failure_stops_the_start_before_the_business_app() {
         "the business App started on a mixed tree: {log}"
     );
     assert!(
-        log.contains("Failure when updating program") && log.contains("update application failed"),
+        log.contains("Failure when updating program")
+            && log.contains("update application failed")
+            && log.contains("Is a directory"),
         "the real apply error was not reported: {log}"
     );
-    assert!(
-        log.contains("Is a directory"),
-        "the report does not carry the real replacement error: {log}"
-    );
-    // The earlier replacement really happened, so this is a mixed tree.
+    // The hook ran only after the FIRST replacement really landed.
     assert_eq!(
         std::fs::read(&first_live).expect("first live after"),
         first_expected,
         "the first live replacement never happened"
     );
-    let first_after = std::fs::metadata(&first_live)
-        .expect("first live after")
-        .ino();
     assert_ne!(
-        first_inode, first_after,
+        first_inode,
+        std::fs::metadata(&first_live)
+            .expect("first live after")
+            .ino(),
         "the first live replacement never happened"
     );
+    assert!(
+        std::fs::symlink_metadata(&blocked_live)
+            .expect("second live after")
+            .is_dir(),
+        "the apply hook never turned the second live target into a directory"
+    );
     // Nothing after the failing entry was replaced.
+    assert_eq!(
+        std::fs::read(&third_live).expect("third live after"),
+        third_before,
+        "a later replacement ran after the failure"
+    );
     assert_eq!(
         std::fs::read(&last_live).expect("last live after"),
         last_before,
