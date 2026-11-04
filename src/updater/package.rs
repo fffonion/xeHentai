@@ -391,9 +391,9 @@ fn open(payload: &[u8]) -> Result<ZipArchive<Cursor<&[u8]>>, UpdateError> {
 }
 
 /// Test entry point: a STORE archive whose members are exactly
-/// `(name, bytes)` in the given order. Only the Unix updater tests build
-/// payloads; the non-Unix test build would otherwise carry it unused.
-#[cfg(all(test, unix))]
+/// `(name, bytes)` in the given order. Test-only, but platform-neutral: it is
+/// pure in-memory `Vec`/`Cursor` work, so every test target can build payloads.
+#[cfg(test)]
 pub fn store_zip(members: &[(String, Vec<u8>)]) -> Result<Vec<u8>, UpdateError> {
     let mut bytes = Vec::new();
     {
