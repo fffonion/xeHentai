@@ -14052,6 +14052,36 @@ mod m7 {
         true
     }
 
+    /// Best-effort single-line probe record on real stderr via `Write`
+    /// (never a captured `eprintln!`). Emission failures are diagnostics;
+    /// they never change test outcomes and never touch response bytes.
+    fn emit(line: &str) {
+        let stderr = std::io::stderr();
+        let mut handle = stderr.lock();
+        let _ = handle.write_all(line.as_bytes());
+        let _ = handle.write_all(b"\n");
+        let _ = handle.flush();
+    }
+
+    /// The three transport steps of a normal response, in this order. The
+    /// caller records the per-step results and keeps the historical
+    /// ignore-everything semantics: every step runs even if an earlier one
+    /// failed. A successful server write/flush is only a wire observation;
+    /// it never proves the client parsed the body.
+    fn write_steps(
+        socket: &mut TcpStream,
+        bytes: &[u8],
+    ) -> (
+        std::io::Result<()>,
+        std::io::Result<()>,
+        std::io::Result<()>,
+    ) {
+        let write = socket.write_all(bytes);
+        let flush = socket.flush();
+        let shutdown = socket.shutdown(std::net::Shutdown::Both);
+        (write, flush, shutdown)
+    }
+
     fn write_response(socket: &mut TcpStream, status: u16, body: &str) {
         let reason = match status {
             200 => "OK",
@@ -14063,9 +14093,28 @@ mod m7 {
             "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
-        let _ = socket.write_all(response.as_bytes());
-        let _ = socket.flush();
-        let _ = socket.shutdown(std::net::Shutdown::Both);
+        let port = socket.local_addr().map(|addr| addr.port()).unwrap_or(0);
+        emit(&format!(
+            "m7obs write_response start port={port} status={status} body_len={} response_len={}",
+            body.len(),
+            response.len()
+        ));
+        let (write, flush, shutdown) = write_steps(socket, response.as_bytes());
+        emit(&format!(
+            "m7obs write_response write_all port={port} ok={} err={:?}",
+            write.is_ok(),
+            write.as_ref().err().map(std::io::Error::kind),
+        ));
+        emit(&format!(
+            "m7obs write_response flush port={port} ok={} err={:?}",
+            flush.is_ok(),
+            flush.as_ref().err().map(std::io::Error::kind),
+        ));
+        emit(&format!(
+            "m7obs write_response shutdown port={port} ok={} err={:?}",
+            shutdown.is_ok(),
+            shutdown.as_ref().err().map(std::io::Error::kind),
+        ));
     }
 
     fn serve(mut socket: TcpStream, seen: &Arc<Mutex<Vec<Request>>>, status: u16, body: &str) {
@@ -14212,30 +14261,86 @@ mod m7 {
 
     #[test]
     fn m7_binary_check_requests_native_stable_channel_and_logs_available() {
+        // Only this test's own child is ever signalled or reaped: on any
+        // failure/unwind the owned non-daemon child is killed and waited;
+        // ordinary success keeps the historical SIGINT + 30s wait + exit 0.
+        struct Reap(Child);
+        impl Drop for Reap {
+            fn drop(&mut self) {
+                if self.0.try_wait().ok().flatten().is_none() {
+                    let _ = self.0.kill();
+                    let _ = self.0.wait();
+                }
+            }
+        }
+        let obs = |phase: &str| {
+            let stderr = std::io::stderr();
+            let mut handle = stderr.lock();
+            let _ = handle.write_all(phase.as_bytes());
+            let _ = handle.write_all(b"\n");
+            let _ = handle.flush();
+        };
         let root = tempfile::tempdir().expect("root");
         let server = Server::start(200, COMMITS);
         prepare_binding(root.path(), &server.origin(), None);
-        let mut child = spawn(
+        let mut child = Reap(spawn(
             root.path(),
             &["-l", "eh.log", "-vv", "--auto-update", "check"],
-        );
+        ));
+        let child_state = |child: &mut Child| match child.try_wait() {
+            Ok(None) => "alive".to_string(),
+            Ok(Some(status)) => format!("exited({:?})", status.code()),
+            Err(error) => format!("try_wait_err({:?})", error.kind()),
+        };
+        obs(&format!(
+            "m7obs spawn pid={} port={}",
+            child.0.id(),
+            server.port
+        ));
+        let request_start = std::time::Instant::now();
+        let request_ok = m6::wait_for(Duration::from_secs(20), || !server.requests().is_empty());
+        obs(&format!(
+            "m7obs request_wait ok={request_ok} elapsed_ms={} requests={} log_len={} child={}",
+            request_start.elapsed().as_millis(),
+            server.requests().len(),
+            log(root.path()).len(),
+            child_state(&mut child.0),
+        ));
         assert!(
-            m6::wait_for(Duration::from_secs(20), || !server.requests().is_empty()),
+            request_ok,
             "the update check never reached the source binding; log:\n{}",
             log(root.path())
         );
+        let availability_start = std::time::Instant::now();
+        let availability_ok = m6::wait_for(Duration::from_secs(20), || {
+            log(root.path()).contains("Update available")
+        });
+        let availability_log = log(root.path());
+        obs(&format!(
+            "m7obs availability_wait ok={availability_ok} elapsed_ms={} requests={} log_len={} log_lines={} child={}",
+            availability_start.elapsed().as_millis(),
+            server.requests().len(),
+            availability_log.len(),
+            availability_log.lines().count(),
+            child_state(&mut child.0),
+        ));
         assert!(
-            m6::wait_for(Duration::from_secs(20), || log(root.path())
-                .contains("Update available")),
+            availability_ok,
             "no availability log; log:\n{}",
             log(root.path())
         );
         nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(child.id() as i32),
+            nix::unistd::Pid::from_raw(child.0.id() as i32),
             nix::sys::signal::Signal::SIGINT,
         )
         .expect("SIGINT");
-        let status = m6::wait_exit(&mut child, Duration::from_secs(30)).expect("stopped");
+        let status = m6::wait_exit(&mut child.0, Duration::from_secs(30)).expect("stopped");
+        obs(&format!(
+            "m7obs reap status={:?} requests={} log_len={}",
+            status.code(),
+            server.requests().len(),
+            log(root.path()).len(),
+        ));
         assert_eq!(status.code(), Some(0));
         let requests = server.requests();
         assert_eq!(requests.len(), 1, "requests: {requests:?}");
@@ -14260,6 +14365,36 @@ mod m7 {
         );
         assert!(!log.contains("Update is complete"), "{log}");
         assert!(log.contains("cleaning up..."), "{log}");
+    }
+
+    /// Focused transport control for the m7 normal-response writer: the same
+    /// three steps run against real loopback sockets, proving the success
+    /// path reports all-ok and the actual I/O error stage (local write-half
+    /// shut down first). Deterministic: no sleeps, no resets, no timeouts.
+    /// This exercises socket mechanics only, not the application update flow.
+    #[test]
+    fn m7_write_steps_reports_real_loopback_success_and_write_half_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture");
+        let addr = listener.local_addr().expect("fixture addr");
+        let mut reader = TcpStream::connect(addr).expect("connect fixture");
+        let (mut writer, _) = listener.accept().expect("accept fixture");
+        let (write, flush, shutdown) = write_steps(&mut writer, b"hello");
+        assert!(write.is_ok(), "{write:?}");
+        assert!(flush.is_ok(), "{flush:?}");
+        assert!(shutdown.is_ok(), "{shutdown:?}");
+        let mut got = [0u8; 5];
+        reader.read_exact(&mut got).expect("read back");
+        assert_eq!(&got, b"hello");
+        let mut stale = TcpStream::connect(addr).expect("connect fixture");
+        let _ = listener.accept().expect("accept fixture");
+        stale
+            .shutdown(std::net::Shutdown::Write)
+            .expect("shut write-half");
+        let (write, _, _) = write_steps(&mut stale, b"hello");
+        assert!(
+            write.is_err(),
+            "write after local write-half shutdown must fail"
+        );
     }
 
     fn stop(child: &mut Child) -> i32 {
