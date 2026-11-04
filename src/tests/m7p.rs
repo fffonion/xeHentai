@@ -996,67 +996,99 @@ fn m7p_package_rejections_keep_the_previous_pending_intact() {
         Box::new(|spec, _pkg, _server, _origin| spec.clone()),
     ));
 
-    for (name, case_pem, shape) in cases {
-        let install = tempfile::tempdir().expect("install");
-        let server = Server::start(vec![]);
-        let origin = server.origin();
-        publish_rss(install.path(), &origin, case_pem.as_deref(), "rss");
-        let before = seed_pending(
-            install.path(),
-            seeded.info.clone(),
-            seeded.sig.clone(),
-            seeded.payload.clone(),
+    fn mark(index: usize, total: usize, name: &str, phase: &str, detail: &str) {
+        use std::io::Write as _;
+        let mut err = std::io::stderr();
+        let _ = writeln!(
+            err,
+            "m7p_package_rejections_keep_the_previous_pending_intact idx={index}/{total} case={name} phase={phase} {detail}"
         );
-
-        let spec = shape(
-            &Spec::new(UPDATE_ID).with_tree(
-                &prefix,
-                &[(
-                    "rss/updater/updater.rss".to_string(),
-                    b"// next candidate\n".to_vec(),
-                )],
-            ),
-            &good,
-            &server,
-            &origin,
-        );
-        let signing = if name == "signed by another key" {
-            &other_key()
-        } else {
-            &key
-        };
-        let pkg = sign(signing, &spec);
-        serve_package(&server, &origin, &pkg);
-        if name == "re-serialized descriptor" {
-            let (_, descriptor, _) = package_targets(&origin, UPDATE_ID);
-            let value: serde_json::Value =
-                serde_json::from_slice(&pkg.info).expect("descriptor json");
-            let pretty = serde_json::to_vec_pretty(&value).expect("pretty");
-            server.set(&descriptor, Route::ok(pretty));
-        }
-
-        let report = check_download(install.path(), "download");
-        assert_eq!(
-            report.outcome,
-            "failed",
-            "case {name}: {:?}",
-            event_keys(&report)
-        );
-        assert_eq!(
-            event_keys(&report),
-            vec!["UPDATE_AVAILABLE", "UPDATE_FAILED"],
-            "case {name} must log a failure, not a completion"
-        );
-        assert_eq!(
-            std::fs::read(pending_path(install.path())).expect("pending"),
-            before,
-            "case {name} must leave the previous pending byte-identical"
-        );
-        assert!(
-            !install.path().join(AREA).join("state.json").exists(),
-            "case {name} must not publish an applied identity"
-        );
+        let _ = err.flush();
     }
+
+    let total = cases.len();
+    mark(0, total, "suite", "start", "");
+    for (index, (name, case_pem, shape)) in cases.into_iter().enumerate() {
+        mark(index, total, name, "enter", "");
+        {
+            mark(index, total, name, "before-server-start", "");
+            let install = tempfile::tempdir().expect("install");
+            let server = Server::start(vec![]);
+            let origin = server.origin();
+            mark(
+                index,
+                total,
+                name,
+                "after-server-start",
+                &format!("install={} origin={}", install.path().display(), origin),
+            );
+            mark(index, total, name, "before-publish-seed", "");
+            publish_rss(install.path(), &origin, case_pem.as_deref(), "rss");
+            let before = seed_pending(
+                install.path(),
+                seeded.info.clone(),
+                seeded.sig.clone(),
+                seeded.payload.clone(),
+            );
+            mark(index, total, name, "after-publish-seed", "");
+
+            mark(index, total, name, "before-sign-serve", "");
+            let spec = shape(
+                &Spec::new(UPDATE_ID).with_tree(
+                    &prefix,
+                    &[(
+                        "rss/updater/updater.rss".to_string(),
+                        b"// next candidate\n".to_vec(),
+                    )],
+                ),
+                &good,
+                &server,
+                &origin,
+            );
+            let signing = if name == "signed by another key" {
+                &other_key()
+            } else {
+                &key
+            };
+            let pkg = sign(signing, &spec);
+            serve_package(&server, &origin, &pkg);
+            if name == "re-serialized descriptor" {
+                let (_, descriptor, _) = package_targets(&origin, UPDATE_ID);
+                let value: serde_json::Value =
+                    serde_json::from_slice(&pkg.info).expect("descriptor json");
+                let pretty = serde_json::to_vec_pretty(&value).expect("pretty");
+                server.set(&descriptor, Route::ok(pretty));
+            }
+            mark(index, total, name, "after-sign-serve", "");
+
+            mark(index, total, name, "before-check-download", "");
+            let report = check_download(install.path(), "download");
+            mark(index, total, name, "after-check-download", "");
+            assert_eq!(
+                report.outcome,
+                "failed",
+                "case {name}: {:?}",
+                event_keys(&report)
+            );
+            assert_eq!(
+                event_keys(&report),
+                vec!["UPDATE_AVAILABLE", "UPDATE_FAILED"],
+                "case {name} must log a failure, not a completion"
+            );
+            assert_eq!(
+                std::fs::read(pending_path(install.path())).expect("pending"),
+                before,
+                "case {name} must leave the previous pending byte-identical"
+            );
+            assert!(
+                !install.path().join(AREA).join("state.json").exists(),
+                "case {name} must not publish an applied identity"
+            );
+            mark(index, total, name, "after-asserts", "");
+        }
+        mark(index, total, name, "scope-dropped", "");
+    }
+    mark(total, total, "suite", "loop-complete", "");
 }
 
 #[test]

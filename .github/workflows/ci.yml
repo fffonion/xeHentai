@@ -45,6 +45,7 @@ jobs:
       - name: Strict Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Unit tests
+        timeout-minutes: 15
         run: cargo test --locked
       - name: Install Python and browser test dependencies
         run: |
@@ -118,6 +119,57 @@ jobs:
           kill -TERM "$pid"
           wait "$pid"
           trap - EXIT
+      - name: Record browser child-env provenance (observation only)
+        run: |
+          set -euo pipefail
+          dest="$RUNNER_TEMP/ci-diagnostics"
+          mkdir -p "$dest"
+          "$XEH_PYTHON" - "$dest" <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          worktree = Path(os.environ.get("GITHUB_WORKSPACE", ".")).resolve()
+          sys.path.insert(0, str(worktree / "tools" / "browser"))
+          import run as browser_run
+
+          dest = Path(sys.argv[1])
+          # Sibling of browser-run: this probe path is never created and the
+          # real browser run root is never pre-created here.
+          probe_root = dest / "_child_env_probe"
+          target = Path(os.environ["CARGO_TARGET_DIR"]).resolve()
+          child = browser_run._child_env(probe_root, target)
+          caller = {
+              name: os.environ.get(name)
+              for name in ("HOME", "RUSTUP_HOME", "CARGO_HOME", "RUSTUP_TOOLCHAIN")
+          }
+          resolved = {
+              name: child.get(name)
+              for name in (
+                  "HOME",
+                  "RUSTUP_HOME",
+                  "CARGO_HOME",
+                  "CARGO_TARGET_DIR",
+                  "RUSTUP_TOOLCHAIN",
+              )
+          }
+          head = subprocess.run(
+              ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+              capture_output=True, text=True, check=True,
+          ).stdout.strip()
+          record = {
+              "tool": "tools/browser/run.py::_child_env",
+              "caller_env_allowlist": caller,
+              "child_env_allowlist": resolved,
+              "assigned_target": str(target),
+              "source_head": head,
+          }
+          (dest / "child-env-provenance.json").write_text(
+              json.dumps(record, indent=1) + "\n", encoding="utf-8")
+          print(json.dumps(record, indent=1))
+          PY
       - name: Browser evidence, original UI (49 checks)
         run: |
           set -euo pipefail
@@ -148,6 +200,29 @@ jobs:
           print("manifest bound to", manifest["head"], "dirty", manifest["dirty"])
           PY
           "$XEH_PYTHON" tools/compat.py --verify-all --evidence "$evidence"
+      - name: Upload Linux diagnostics (observation only)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-diagnostics-${{ github.sha }}-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/ci-diagnostics/child-env-provenance.json
+            ${{ runner.temp }}/browser-run/browser-report.json
+            ${{ runner.temp }}/browser-run/receipt.json
+            ${{ runner.temp }}/browser-run/request.json
+            ${{ runner.temp }}/browser-run/backend.stdout.log
+            ${{ runner.temp }}/browser-run/backend.stderr.log
+            ${{ runner.temp }}/browser-run/driver.log
+            ${{ runner.temp }}/browser-run/verifier.log
+            ${{ runner.temp }}/browser-run/*.png
+            ${{ runner.temp }}/compat-evidence/manifest.json
+            ${{ runner.temp }}/compat-evidence/*/self-check.json
+            ${{ runner.temp }}/compat-evidence/*/round-1/comparison.json
+            ${{ runner.temp }}/compat-evidence/*/round-2/comparison.json
+            ${{ runner.temp }}/compat-evidence/*/round-1/*.log
+            ${{ runner.temp }}/compat-evidence/*/round-2/*.log
 
   # The only native-platform gate: ONE real gallery-read test on each host.
   # Compile-only was insufficient (see the M8 platform facts); this step runs
