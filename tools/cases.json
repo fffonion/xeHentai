@@ -2521,7 +2521,7 @@
         "real per-side commits request: python master/dev, native rss/explicit beta; an unbound beta binding fails closed with no request, and changing the RSS channel changes the actual target",
         "real RSS decision changes requests and pending files",
         "signed native package is verified and published as one pending envelope",
-        "next start validates/preflights the complete candidate and applies it, with real resource and native A/B",
+        "next start validates/preflights the complete candidate and applies it, with real RSS A/B",
         "a rejected candidate leaves the live tree, applied id and session unchanged"
       ],
       "status": "implemented",
@@ -2538,7 +2538,7 @@
         "the reference archive prefix (xeHentai-<id>/xeHentai) and the native signed descriptor/signature links and archive prefix (xeHentai-<id>/) are asserted as explicit per-side expectations",
         "real RSS decision changes requests and pending files",
         "signed native package is verified and published as one pending envelope",
-        "next start validates/preflights the complete candidate and applies it, with real resource and native A/B",
+        "next start validates/preflights the complete candidate and applies it, with real RSS A/B",
         "a rejected candidate leaves the live tree, applied id and session unchanged"
       ],
       "status": "implemented",
@@ -2555,7 +2555,7 @@
         "the exact request sequence is asserted per side (python: commits + source archive; native: commits + descriptor + signature + payload)",
         "real RSS decision changes requests and pending files",
         "signed native package is verified and published as one pending envelope",
-        "next start validates/preflights the complete candidate and applies it, with real resource and native A/B",
+        "next start validates/preflights the complete candidate and applies it, with real RSS A/B",
         "a rejected candidate leaves the live tree, applied id and session unchanged"
       ],
       "status": "implemented",
@@ -2572,11 +2572,11 @@
         "native selection installs only descriptor-listed entries under xeHentai-<id>/ and drops directories/foreign members; signature/digest/target/ABI rejection is a native-format assertion",
         "real RSS decision changes requests and pending files",
         "signed native package is verified and published as one pending envelope",
-        "next start validates/preflights the complete candidate and applies it, with real resource and native A/B",
+        "next start validates/preflights the complete candidate and applies it, with real RSS A/B",
         "a rejected candidate leaves the live tree, applied id and session unchanged"
       ],
       "status": "implemented",
-      "delta": "Native v1 signed descriptor (v/update_id/app_version/target/host_abi/script_abi/archive_sha256/entries/native_executable/native_build_id) with a detached Ed25519 signature over the exact descriptor bytes and a SHA-256 of the whole payload ZIP. Pending is ONE atomically published STORE envelope 'src.zip' holding exactly info.json (the signed bytes), info.sig and payload.zip (the original archive). This is an explicit format migration, not the Python source-injection archive: the reference prefix rules are preserved and compared explicitly (only members under 'xeHentai-<update_id>/' that the signed descriptor lists are materialized; directories and foreign entries are dropped), but entries are named install-relative with signed lengths and the format is not byte-compared to the Python code zip. Reading uses zip's enclosed_name plus real copy counts, and rejects traversal, absolute/backslash-ambiguous names, duplicates, symlinks, reserved user-state paths and archive expansion. Where Python accepted v=999 and kept unusable packages, the native format rejects ABI/target/version mismatches and retires rejected candidates. The comparative B6 producer/oracle/native map and the two-round paired proof are wired in tools/compat.py --suite update and pass at this commit."
+      "delta": "The ONLY automatic-update format is the v2 signed descriptor (v/update_id/host_abi/script_abi/archive_sha256/entries) with a detached Ed25519 signature over the exact descriptor bytes and a SHA-256 of the whole payload ZIP. The retired v1 fields (app_version/target/native_executable/native_build_id) and every v1 document are rejected by deny_unknown_fields/wrong version; there is no compatibility parse or migration switch. The signed entry list must be EXACTLY this host's four RSS consumers (rss/filters/match.rss, rss/rpc/handlers.rss, rss/updater/github.rss, rss/updater/updater.rss): a partial list would mix new and old scripts and is refused, and no executable, native library, UI asset, locale, configuration, session, log or private installer file can be listed. Pending is ONE atomically published STORE envelope 'src.zip' holding exactly info.json (the signed bytes), info.sig and payload.zip (the original archive). This is an explicit format migration, not the Python source-injection archive: the reference prefix rules are preserved and compared explicitly (only members under 'xeHentai-<update_id>/' that the signed descriptor lists are materialized; directories and foreign entries are dropped), but entries are named install-relative with signed lengths and the format is not byte-compared to the Python code zip. Reading uses zip's enclosed_name plus real copy counts, and rejects traversal, absolute/backslash-ambiguous names, duplicates, symlinks, reserved user-state paths and archive expansion. Where Python accepted v=999 and kept unusable packages, the native format rejects ABI mismatches, non-RSS entries, partial entry sets and retires rejected candidates. The explicit package CDN origin (package_cdn_origin, production https://release-assets.githubusercontent.com) is admitted ONLY as a redirect target of a package request, never for commit metadata and never as an initial URL; every hop still re-validates the complete scheme/host/effective-port tuple and the real public address. The comparative B6 producer/oracle/native map and the two-round paired proof are wired in tools/compat.py --suite update and pass at this commit."
     },
     {
       "id": "update.apply",
@@ -2590,11 +2590,11 @@
         "the observed subcase ID set must equal the registered set on both sides; an unregistered ID is rejected even when both sides agree on it",
         "real RSS decision changes requests and pending files",
         "signed native package is verified and published as one pending envelope",
-        "next start validates/preflights the complete candidate and applies it, with real resource and native A/B",
+        "next start validates/preflights the complete candidate and applies it, with real RSS A/B",
         "a rejected candidate leaves the live tree, applied id and session unchanged"
       ],
       "status": "implemented",
-      "delta": "Download publishes pending only; the running App/Task/VM and its reported identity stay on the old build and a cancelled or failed download leaves the previous pending byte-identical. The next start calls the OLD release's rss/updater/updater.rss startup controller before the business App exists, validates the envelope, materializes the COMPLETE candidate into private staging and preflights it with the same host's private '--update-preflight' mode (real configuration/App/module loading against private state, no user config/session/network) BEFORE any live file is replaced. Only a fully prepared candidate replaces exactly the listed files; a native package uses self-replace and really re-executes the installed image. No backup, activation journal, confirmation or rollback state exists: the applied record is written only after the replacement succeeded, and a rejected candidate is discarded while the running release and user session stay unchanged. Resource-only A/B is proved by a changed real request from the new RSS; native A/B by two sequential real builds whose compiled XEH_BUILD_ID appears in the existing version label. Windows native replacement is UNVERIFIED and fails closed; formal M7/M8 stay partial. The comparative B6 producer/oracle/native map and the two-round paired proof are wired in tools/compat.py --suite update and pass at this commit."
+      "delta": "Download publishes pending only; the running App/Task/VM and its reported identity stay on the old scripts and a cancelled or failed download leaves the previous pending byte-identical. The next start calls the OLD release's rss/updater/updater.rss startup controller before the business App exists, validates the envelope, materializes the COMPLETE candidate into private staging and compiles/binds all four scripts in the SAME process through their existing module entry points (Filters::load, RpcDispatcher::load, Updater::load) BEFORE any live file is replaced. The preflight helper process ('--update-preflight'), self-replace dependency, re-exec and every reexec/Committed/StartupReport field are deleted: an automatic update only replaces the four RSS scripts in place, the host executable and its bytes never change, and no second process or loader is started. A failure after the first real replacement is reported as an apply error and stops THIS start with a nonzero status before the App, its session or any task; the ordinary pending candidate is kept and no applied identity is written. No backup, activation journal, confirmation or rollback state exists: the v2 applied record ({update_id, applied_at}) is written only after every replacement succeeded, and a rejected candidate is discarded while the running release and user session stay unchanged. RSS A/B is proved by one real host: a download of B leaves A running, and the next ordinary start of the same unmodified executable applies B whose real business decision (a different channel request) is observed, with only the four RSS scripts plus the private pending/applied metadata changing byte-wise. Windows/macOS RSS application remains UNVERIFIED; formal M7/M8 stay partial. The comparative B6 producer/oracle/native map and the two-round paired proof are wired in tools/compat.py --suite update and pass at this commit."
     },
     {
       "id": "webui.static",

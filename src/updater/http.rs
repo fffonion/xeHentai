@@ -4,8 +4,10 @@
 //! `worker::Session::get_once` (a direct GET: no retry, proxy, cookie jar,
 //! redirect or fallback), and this module owns everything above it:
 //!
-//! * the two complete trusted origin tuples from `github.rss` — never a
-//!   re-combinable set of schemes, hosts and ports;
+//! * the complete trusted origin tuples from `github.rss` — never a
+//!   re-combinable set of schemes, hosts and ports — plus the one explicitly
+//!   authorized CDN origin, which is admitted ONLY as a redirect target of a
+//!   package request;
 //! * per-hop public-unicast address classification (URL literals before the
 //!   request, DNS answers before the connect) with a loopback exception only
 //!   for the one binding that is itself a loopback literal;
@@ -49,10 +51,34 @@ pub(crate) const MAX_REDIRECTS: usize = 5;
 
 const TIMEOUT_ERROR: &str = "update transport deadline exceeded";
 
-/// The trusted source: exactly two complete origin tuples.
+/// What a request is FOR. The same fixture origin can legitimately be the API
+/// origin and the package origin, so the purpose — never an origin match — is
+/// what authorizes the CDN.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Purpose {
+    /// Commit metadata: exactly the API origin, initial URL and every redirect.
+    Api,
+    /// The signed package (descriptor, signature, payload): the package origin
+    /// initially, and on a redirect either the package origin or the explicit
+    /// CDN origin.
+    Package,
+}
+
+impl Purpose {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Api => "commit metadata",
+            Self::Package => "package download",
+        }
+    }
+}
+
+/// The trusted source: the API tuple, the package tuple and the one explicit
+/// CDN tuple.
 pub(crate) struct Transport {
     api: Origin,
     package: Origin,
+    cdn: Option<Origin>,
     resolver: Arc<dyn Resolver>,
     limit: usize,
 }
@@ -141,6 +167,7 @@ impl Transport {
         Self::build(
             &binding.api_origin,
             &binding.package_download_origin,
+            binding.package_cdn_origin.as_deref(),
             body_limit(),
             Arc::new(SystemResolver),
         )
@@ -149,12 +176,17 @@ impl Transport {
     fn build(
         api_origin: &str,
         package_origin: &str,
+        cdn_origin: Option<&str>,
         limit: usize,
         resolver: Arc<dyn Resolver>,
     ) -> Result<Self, UpdateError> {
         Ok(Self {
             api: Origin::parse(api_origin, "api")?,
             package: Origin::parse(package_origin, "package download")?,
+            cdn: match cdn_origin {
+                Some(origin) => Some(Origin::parse(origin, "package cdn")?),
+                None => None,
+            },
             resolver,
             limit,
         })
@@ -164,20 +196,42 @@ impl Transport {
     pub(crate) fn for_test(
         api_origin: &str,
         package_origin: &str,
+        cdn_origin: Option<&str>,
         limit: usize,
         resolver: Arc<dyn Resolver>,
     ) -> Result<Self, UpdateError> {
-        Self::build(api_origin, package_origin, limit, resolver)
+        Self::build(api_origin, package_origin, cdn_origin, limit, resolver)
     }
 
-    /// One logical GET: at most five redirects, every hop re-validated against
-    /// the two complete origin tuples and re-classified before it connects.
-    pub(crate) async fn get(
+    /// Commit metadata: exactly the API origin. The CDN is never authorized
+    /// here, neither as an initial URL nor as a redirect target.
+    pub(crate) async fn get_api(
         &self,
         url: &str,
         headers: &[(String, String)],
     ) -> Result<Response, UpdateError> {
-        match tokio::time::timeout(CHAIN_TIMEOUT, self.follow(url, headers)).await {
+        self.get(url, headers, Purpose::Api).await
+    }
+
+    /// One signed package fetch. The initial URL is the package origin; only a
+    /// redirect of this request may use the explicitly bound CDN origin.
+    pub(crate) async fn get_package(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+    ) -> Result<Response, UpdateError> {
+        self.get(url, headers, Purpose::Package).await
+    }
+
+    /// One logical GET: at most five redirects, every hop re-validated for the
+    /// request's purpose and re-classified before it connects.
+    async fn get(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        purpose: Purpose,
+    ) -> Result<Response, UpdateError> {
+        match tokio::time::timeout(CHAIN_TIMEOUT, self.follow(url, headers, purpose)).await {
             Ok(result) => result,
             Err(_) => Err(runtime_error(TIMEOUT_ERROR.into())),
         }
@@ -187,12 +241,13 @@ impl Transport {
         &self,
         url: &str,
         headers: &[(String, String)],
+        purpose: Purpose,
     ) -> Result<Response, UpdateError> {
         let mut current = Url::parse(url)
             .map_err(|error| UpdateError::Binding(format!("request URL {url:?}: {error}")))?;
         let mut followed = 0usize;
         loop {
-            let allow_loopback = self.check_origin(&current)?;
+            let allow_loopback = self.check_origin(&current, purpose, followed > 0)?;
             let hop = self.hop(&current, headers, allow_loopback).await?;
             if matches!(hop.status, 301 | 302 | 303 | 307 | 308) {
                 if followed == MAX_REDIRECTS {
@@ -216,10 +271,17 @@ impl Transport {
         }
     }
 
-    /// The URL must be exactly the API tuple or exactly the package tuple. An
-    /// IP-literal host is classified here, before any request or DNS; a name is
-    /// classified after its real resolution.
-    fn check_origin(&self, url: &Url) -> Result<bool, UpdateError> {
+    /// The URL must be exactly one of the tuples this purpose authorizes. The
+    /// CDN is authorized only for a package redirect, never for an initial URL
+    /// and never for commit metadata. An IP-literal host is classified here,
+    /// before any request or DNS; a name is classified after its real
+    /// resolution.
+    fn check_origin(
+        &self,
+        url: &Url,
+        purpose: Purpose,
+        redirected: bool,
+    ) -> Result<bool, UpdateError> {
         if !url.username().is_empty() || url.password().is_some() {
             return Err(UpdateError::Binding(
                 "update request URL must not carry credentials".into(),
@@ -239,7 +301,17 @@ impl Transport {
         let port = url
             .port_or_known_default()
             .ok_or_else(|| UpdateError::Binding("update request URL has no known port".into()))?;
-        for origin in [&self.api, &self.package] {
+        let mut allowed: Vec<&Origin> = Vec::with_capacity(3);
+        match purpose {
+            Purpose::Api => allowed.push(&self.api),
+            Purpose::Package => {
+                allowed.push(&self.package);
+                if redirected && let Some(cdn) = &self.cdn {
+                    allowed.push(cdn);
+                }
+            }
+        }
+        for origin in allowed {
             if origin.scheme != scheme || origin.host != host || origin.port != port {
                 continue;
             }
@@ -263,12 +335,13 @@ impl Transport {
             return Ok(origin.loopback_literal);
         }
         Err(UpdateError::Binding(format!(
-            "{}://{}{} is not one of the two trusted origins",
+            "{}://{}{} is not a trusted origin for this {} request",
             scheme,
             url.host_str().unwrap_or(""),
             url.port()
                 .map(|port| format!(":{port}"))
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            purpose.name()
         )))
     }
 

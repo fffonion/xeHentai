@@ -18,7 +18,10 @@ pub const SCRIPT_NAME: &str = "xeHentai";
 pub const HOST_ABI: i64 = 1;
 pub const SCRIPT_ABI: i64 = 1;
 
-/// Build target triple, compiled in by `build.rs` for native package checks.
+/// Build target triple, compiled in by `build.rs`. The v2 update descriptor no
+/// longer binds a platform string: an automatic update only replaces the four
+/// RSS scripts, and the running host never changes, so the triple is retained
+/// as the compiled identity rather than as a package field.
 pub const TARGET: &str = env!("XEH_TARGET");
 /// Compiled release/update identifier (`XEH_BUILD_ID`, `dev` when unset).
 pub const BUILD_ID: &str = env!("XEH_BUILD_ID");

@@ -43,15 +43,6 @@ fn main() {
 
 /// Startup with the process' own arguments.
 pub fn run(root: &Path) -> i32 {
-    // Installer-private candidate preflight. This is not a public switch: it is
-    // reached only by the installer's own child process, before configuration
-    // or the business App exists, and it loads the candidate resources against
-    // a private temporary state directory.
-    if let Some((candidate_root, state)) =
-        updater::install::preflight_request(&std::env::args_os().collect::<Vec<_>>())
-    {
-        return updater::run_preflight(&candidate_root, &state);
-    }
     run_with_args(root, std::env::args_os())
 }
 
@@ -95,7 +86,8 @@ where
     // The trusted startup controller runs here: before the business App, its
     // session and its modules exist. It decides (through the OLD release's
     // rss/updater modules) whether a pending candidate is applied, and the
-    // native owner enforces the signature, digest, ABI, path, preflight and
+    // native owner enforces the signature, digest, ABI, entry list, complete
+    // staging, the in-process compile/bind of all four scripts and the
     // replacement rules. A failure after the first live replacement stops this
     // start instead of running the App on a mixed tree. An ordinary start with
     // nothing pending loads no updater module at all.
@@ -134,9 +126,6 @@ where
         };
         eprintln!("xeHentai: update startup stopped ({stop:?}): {reason}");
         return code;
-    }
-    if let Some(exe) = startup.reexec {
-        return reexec_installed(locale, &mut logger, &exe);
     }
     let mut app = match App::new(loaded.config, logger, root, &filepath) {
         Ok(app) => app,
@@ -177,25 +166,6 @@ where
         }
     }
     run_application(app, root, &opts, locale)
-}
-
-/// Start the installed native image.
-///
-/// Installing the update files and starting the new process are distinct
-/// observed outcomes: the installed-files event already logged by the caller
-/// says exactly that, while only the new process's own version log proves that
-/// the new version runs. A real exec failure is reported here and this start
-/// exits nonzero; the installed files are not reported as a completed update
-/// and there is no rollback or confirmation state.
-pub(crate) fn reexec_installed(locale: Locale, logger: &mut Logger, exe: &Path) -> i32 {
-    let failure = updater::install::reexec(exe);
-    logger
-        .error(
-            &i18n::render(locale, "UPDATE_FAILED", &[&failure.to_string()])
-                .unwrap_or_else(|| failure.to_string()),
-        )
-        .ok();
-    1
 }
 
 /// Resolve `rss/` and `locales/` from the program directory when the release

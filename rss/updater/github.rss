@@ -29,6 +29,13 @@ struct SourceBinding {
     stable_channel: string,
     beta_channel: string?,
     package_download_origin: string,
+    // The one explicitly authorized Content-Delivery origin. GitHub Release
+    // assets answer 302 from github.com to release-assets.githubusercontent.com;
+    // the native transport admits this origin ONLY as a redirect target of a
+    // package request (descriptor, signature, payload) and never for the commit
+    // metadata request. A controlled install may point it at one owned loopback
+    // origin or leave it null.
+    package_cdn_origin: string?,
     // Detached-signature verification key (PEM). Production stays unbound
     // (null) until the release stage binds the real key; a controlled local
     // install binds an explicit synthetic test key. A package can never be
@@ -95,6 +102,7 @@ pub fn gh_binding() -> SourceBinding {
         stable_channel: "rss",
         beta_channel: null,
         package_download_origin: "https://github.com",
+        package_cdn_origin: "https://release-assets.githubusercontent.com",
         verification_key: null,
     }
 }

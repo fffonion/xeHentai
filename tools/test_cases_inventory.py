@@ -171,7 +171,7 @@ def test_cli_rows_are_implemented_and_update_rows_are_promoted():
         "real RSS decision changes requests and pending files",
         "signed native package is verified and published as one pending envelope",
         "next start validates/preflights the complete candidate and applies it, "
-        "with real resource and native A/B",
+        "with real RSS A/B",
         "a rejected candidate leaves the live tree, applied id and session "
         "unchanged",
     ]

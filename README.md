@@ -41,10 +41,31 @@ configuration, filesystem and process operations live in Rust under `src/`.
   check/download decisions. The native layer supplies the system primitives.
 - **Updates.** `--auto-update` accepts `check`, `download` (the default) or
   `off`. An explicit `off` suppresses the updater entirely; this is the mode to
-  use for offline or unattended runs. An update package is verified against its
-  configured verification key before any file is replaced, and installation is
-  fail-closed: this repository ships no production verification key, so
-  downloaded packages are rejected rather than installed.
+  use for offline or unattended runs.
+- **What an update may replace.** Only the four RSS scripts this host consumes
+  (`rss/filters/match.rss`, `rss/rpc/handlers.rss`, `rss/updater/github.rss`,
+  `rss/updater/updater.rss`). The signed v2 descriptor must list exactly those
+  four install-relative paths; an executable, native library, UI asset, locale,
+  configuration, session or log entry is rejected, and so is an incomplete list.
+  The host executable never changes and no helper, preflight or replacement
+  process is started.
+- **When it lands.** A `download` publishes one pending envelope and the running
+  App, tasks and scripts stay on the version that started. The next ordinary
+  start validates the envelope, materializes the candidate into private
+  staging, compiles and binds all four scripts through their existing module
+  entry points in the same process, and only then replaces the four files. A
+  preparation failure discards the candidate and keeps the old scripts and the
+  user session. A real I/O failure after the first replacement is reported and
+  stops that start before the business App; there is no rollback, backup or
+  journal. Signing is fail-closed: this repository ships no production
+  verification key, so downloaded packages are rejected until the release stage
+  binds it.
+- **Where packages come from.** Commit metadata is requested from the API origin
+  only. A same-repository GitHub Release asset redirects from the package origin
+  to `https://release-assets.githubusercontent.com`, which the source binding
+  authorizes as the one CDN origin — only as a redirect target of a package
+  request, never for commit metadata, never as an initial URL, and every hop
+  still checks the complete scheme/host/port tuple and the real public address.
 
 ## Running
 
@@ -189,7 +210,7 @@ CI has no deployment, release publishing, push or repository secret access.
 | Runtime / CLI | supported and tested | not verified | not verified |
 | Confined gallery, ZIP and task-root reads | supported | unsupported (refused explicitly) | unsupported (refused explicitly) |
 | `--daemon` | fork implementation | unsupported (reported) | Unix code path, not verified |
-| Native update replacement / restart | supported | refused explicitly | not verified |
+| RSS-only update application (four scripts, no exe) | supported and tested | not verified | not verified |
 
 The confined-read implementation uses Linux directory handles. On other
 platforms those reads are refused rather than performed with weaker checks, so

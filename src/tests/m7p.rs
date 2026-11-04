@@ -31,6 +31,8 @@ struct Route {
     body: Arc<Vec<u8>>,
     /// Send this many body bytes, then hold the rest until `release()`.
     hold_after: Option<usize>,
+    /// Extra response header lines (a redirect `Location` in the CDN cases).
+    headers: Vec<(String, String)>,
 }
 
 impl Route {
@@ -39,6 +41,7 @@ impl Route {
             status: 200,
             body: Arc::new(body),
             hold_after: None,
+            headers: Vec::new(),
         }
     }
 
@@ -47,6 +50,7 @@ impl Route {
             status,
             body: Arc::new(body),
             hold_after: None,
+            headers: Vec::new(),
         }
     }
 
@@ -55,6 +59,17 @@ impl Route {
             status: 200,
             body: Arc::new(body),
             hold_after: Some(after),
+            headers: Vec::new(),
+        }
+    }
+
+    /// A real redirect response carrying one `Location`.
+    fn redirect(status: u16, location: String) -> Self {
+        Self {
+            status,
+            body: Arc::new(Vec::new()),
+            hold_after: None,
+            headers: vec![("Location".to_string(), location)],
         }
     }
 }
@@ -194,12 +209,12 @@ fn serve(
     let route = routes.lock().unwrap().get(&target).cloned();
     let Some(route) = route else {
         let body = b"not found".to_vec();
-        write_head(&mut socket, 404, &body);
+        write_head(&mut socket, 404, &body, &[]);
         let _ = socket.write_all(&body);
         let _ = socket.shutdown(std::net::Shutdown::Write);
         return;
     };
-    write_head(&mut socket, route.status, &route.body);
+    write_head(&mut socket, route.status, &route.body, &route.headers);
     match route.hold_after {
         None => {
             let _ = socket.write_all(&route.body);
@@ -281,18 +296,24 @@ fn read_head(socket: &mut TcpStream) -> Option<RawHead> {
     Some((method, target, headers))
 }
 
-fn write_head(socket: &mut TcpStream, status: u16, body: &[u8]) {
+fn write_head(socket: &mut TcpStream, status: u16, body: &[u8], extra: &[(String, String)]) {
     let reason = match status {
         200 => "OK",
+        302 => "Found",
+        307 => "Temporary Redirect",
         404 => "Not Found",
         500 => "Internal Server Error",
         503 => "Service Unavailable",
         _ => "Status",
     };
-    let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+    let mut head = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
     );
+    for (name, value) in extra {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
     let _ = socket.write_all(head.as_bytes());
     let _ = socket.flush();
 }
@@ -358,13 +379,10 @@ const COMMITS_TARGET_B: &str = "/repos/fffonion/xeHentai/commits?sha=rss-b";
 #[derive(Clone)]
 struct Spec {
     update_id: String,
-    app_version: String,
-    target: String,
     host_abi: i64,
     script_abi: i64,
     entries: Vec<(String, u64)>,
     members: Vec<(String, Vec<u8>)>,
-    native: Option<(String, String)>,
     symlinks: Vec<String>,
 }
 
@@ -372,13 +390,10 @@ impl Spec {
     fn new(update_id: &str) -> Self {
         Self {
             update_id: update_id.to_string(),
-            app_version: crate::r#const::VERSION_DISPLAY.to_string(),
-            target: crate::r#const::TARGET.to_string(),
             host_abi: crate::r#const::HOST_ABI,
             script_abi: crate::r#const::SCRIPT_ABI,
             entries: Vec::new(),
             members: Vec::new(),
-            native: None,
             symlinks: Vec::new(),
         }
     }
@@ -389,14 +404,6 @@ impl Spec {
             self.entries.push((path.clone(), body.len() as u64));
             self.members.push((format!("{prefix}{path}"), body.clone()));
         }
-        self
-    }
-
-    fn native(mut self, path: &str, build_id: &str, body: Vec<u8>) -> Self {
-        self.entries.push((path.to_string(), body.len() as u64));
-        self.members
-            .push((format!("xeHentai-{}/{}", self.update_id, path), body));
-        self.native = Some((path.to_string(), build_id.to_string()));
         self
     }
 }
@@ -417,16 +424,12 @@ fn sign(key: &SigningKey, spec: &Spec) -> Pkg {
         .map(|(path, len)| serde_json::json!({"path": path, "len": len}))
         .collect();
     let info = serde_json::to_vec(&serde_json::json!({
-        "v": 1,
+        "v": 2,
         "update_id": spec.update_id,
-        "app_version": spec.app_version,
-        "target": spec.target,
         "host_abi": spec.host_abi,
         "script_abi": spec.script_abi,
         "archive_sha256": digest,
         "entries": entries,
-        "native_executable": spec.native.as_ref().map(|(path, _)| path.clone()),
-        "native_build_id": spec.native.as_ref().map(|(_, id)| id.clone()),
     }))
     .expect("descriptor json");
     let sig = key.sign(&info).to_bytes().to_vec();
@@ -486,20 +489,53 @@ fn tree(root: &Path, sub: &str) -> Vec<(String, Vec<u8>)> {
 // MARK: - installation fixtures
 
 fn patch_binding(path: &Path, origin: &str, pem: Option<&str>, channel: &str) {
+    patch_binding_cdn(path, origin, None, pem, channel);
+}
+
+/// Patch the trusted source constants of the copied `github.rss`. The optional
+/// CDN is the one explicitly authorized package-redirect origin; production
+/// ships `https://release-assets.githubusercontent.com` and a fixture replaces
+/// only that constant with its own owned loopback listener.
+fn patch_binding_cdn(
+    path: &Path,
+    origin: &str,
+    cdn: Option<&str>,
+    pem: Option<&str>,
+    channel: &str,
+) {
+    patch_binding_split(path, origin, origin, cdn, pem, channel);
+}
+
+/// Bind the API and package origins to two DIFFERENT fixture listeners, so a
+/// case can prove which one a request really went to.
+fn patch_binding_split(
+    path: &Path,
+    api: &str,
+    package: &str,
+    cdn: Option<&str>,
+    pem: Option<&str>,
+    channel: &str,
+) {
     let source = std::fs::read_to_string(path).expect("github.rss");
     let mut source = source
         .replace(
             "api_origin: \"https://api.github.com\",",
-            &format!("api_origin: \"{origin}\","),
+            &format!("api_origin: \"{api}\","),
         )
         .replace(
             "package_download_origin: \"https://github.com\",",
-            &format!("package_download_origin: \"{origin}\","),
+            &format!("package_download_origin: \"{package}\","),
         )
         .replace(
             "stable_channel: \"rss\",",
             &format!("stable_channel: \"{channel}\","),
         );
+    if let Some(cdn) = cdn {
+        source = source.replace(
+            "package_cdn_origin: \"https://release-assets.githubusercontent.com\",",
+            &format!("package_cdn_origin: \"{cdn}\","),
+        );
+    }
     if let Some(pem) = pem {
         let pem_literal = pem.replace('\n', "\\n");
         source = source.replace(
@@ -513,11 +549,37 @@ fn patch_binding(path: &Path, origin: &str, pem: Option<&str>, channel: &str) {
 /// Publish the production resource tree, then bind ONLY the trusted source
 /// constants to the owned loopback fixture and its synthetic test key.
 fn publish_rss(root: &Path, origin: &str, pem: Option<&str>, channel: &str) {
+    publish_rss_cdn(root, origin, None, pem, channel);
+}
+
+fn publish_rss_cdn(root: &Path, origin: &str, cdn: Option<&str>, pem: Option<&str>, channel: &str) {
     let rss = root.join("rss");
     if !rss.is_dir() {
         m6::copy_tree(&Path::new(MANIFEST).join("rss"), &rss);
     }
-    patch_binding(&rss.join("updater/github.rss"), origin, pem, channel);
+    patch_binding_cdn(&rss.join("updater/github.rss"), origin, cdn, pem, channel);
+}
+
+fn publish_rss_split(
+    root: &Path,
+    api: &str,
+    package: &str,
+    cdn: Option<&str>,
+    pem: Option<&str>,
+    channel: &str,
+) {
+    let rss = root.join("rss");
+    if !rss.is_dir() {
+        m6::copy_tree(&Path::new(MANIFEST).join("rss"), &rss);
+    }
+    patch_binding_split(
+        &rss.join("updater/github.rss"),
+        api,
+        package,
+        cdn,
+        pem,
+        channel,
+    );
 }
 
 /// A complete candidate resource tree: all four RSS modules, bound to the
@@ -685,6 +747,72 @@ fn log_of(install: &Path) -> String {
     std::fs::read_to_string(install.join("eh.log")).unwrap_or_default()
 }
 
+/// Byte snapshot of an install tree, excluding the host executable (proved
+/// through its own hard link) and the ordinary log file: logging is normal
+/// application behaviour, not a package write.
+fn snapshot_without_host(root: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    collect_files(root, Path::new(""), &mut out);
+    out.retain(|(path, _)| path != "xeHentai" && path != "eh.log");
+    out.sort();
+    out
+}
+
+/// Direct byte phase comparison: which paths changed, appeared or disappeared.
+fn tree_phase_diff(
+    before: &[(String, Vec<u8>)],
+    after: &[(String, Vec<u8>)],
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    use std::collections::BTreeMap;
+    let before: BTreeMap<&str, &Vec<u8>> = before
+        .iter()
+        .map(|(path, body)| (path.as_str(), body))
+        .collect();
+    let after: BTreeMap<&str, &Vec<u8>> = after
+        .iter()
+        .map(|(path, body)| (path.as_str(), body))
+        .collect();
+    let mut changed = Vec::new();
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    for (path, body) in &after {
+        match before.get(path) {
+            Some(old) if **old == **body => {}
+            Some(_) => changed.push(path.to_string()),
+            None => added.push(path.to_string()),
+        }
+    }
+    for path in before.keys() {
+        if !after.contains_key(path) {
+            removed.push(path.to_string());
+        }
+    }
+    (changed, added, removed)
+}
+
+/// Byte equality of two files, read in chunks so a large host image is never
+/// held twice in memory.
+fn files_equal(left: &Path, right: &Path) -> std::io::Result<bool> {
+    use std::io::Read;
+    let mut left = std::fs::File::open(left)?;
+    let mut right = std::fs::File::open(right)?;
+    let mut left_buf = vec![0u8; 1024 * 1024];
+    let mut right_buf = vec![0u8; 1024 * 1024];
+    loop {
+        let left_read = left.read(&mut left_buf)?;
+        let right_read = right.read(&mut right_buf)?;
+        if left_read != right_read {
+            return Ok(false);
+        }
+        if left_read == 0 {
+            return Ok(true);
+        }
+        if left_buf[..left_read] != right_buf[..right_read] {
+            return Ok(false);
+        }
+    }
+}
+
 fn wait_log(install: &Path, needle: &str) -> bool {
     m6::wait_for(Duration::from_secs(30), || log_of(install).contains(needle))
 }
@@ -697,6 +825,105 @@ fn serve_package(server: &Server, origin: &str, pkg: &Pkg) {
     server.set(&payload, Route::ok(pkg.payload.clone()));
 }
 
+// MARK: - RSS-only install boundary and the explicit CDN trust
+
+/// The one install boundary this host has: its four RSS consumers. A signed
+/// package that also lists a non-RSS product file (`locales/`, an executable,
+/// UI or user state) must be refused before anything is written.
+#[test]
+fn m7p_rss_only_install_boundary_rejects_non_rss_entries() {
+    let key = signing_key();
+    let pem = public_pem(&key);
+    let server = Server::start(vec![]);
+    let origin = server.origin();
+    let install = tempfile::tempdir().expect("install");
+    publish_rss(install.path(), &origin, Some(&pem), "rss");
+    let mut files = candidate_rss(&origin, Some(&pem), "rss-b");
+    files.push(("locales/en_us.yml".to_string(), b"en_us: {}\n".to_vec()));
+    let pkg = sign(
+        &key,
+        &Spec::new(UPDATE_ID).with_tree(&format!("xeHentai-{UPDATE_ID}/"), &files),
+    );
+    serve_package(&server, &origin, &pkg);
+
+    let report = check_download(install.path(), "download");
+    assert_eq!(
+        report.outcome,
+        "failed",
+        "a package installing outside rss/ was accepted: {:?}",
+        event_keys(&report)
+    );
+    assert!(
+        !pending_path(install.path()).exists(),
+        "a non-RSS package was published as pending"
+    );
+    assert!(
+        !install.path().join("locales/en_us.yml").exists(),
+        "a non-RSS file was installed"
+    );
+}
+
+const CDN_PAYLOAD_TARGET: &str = "/release-assets/xeHentai-rss.zip";
+
+/// The real same-repository Release asset redirect: the package origin answers
+/// 302 with a Location on the explicitly bound CDN origin. That is the only
+/// place the CDN is authorized; commit metadata still goes to the API origin.
+#[test]
+fn m7p_download_follows_the_explicit_cdn_payload_redirect() {
+    let key = signing_key();
+    let pem = public_pem(&key);
+    let api = Server::start(vec![]);
+    let package = Server::start(vec![]);
+    let cdn = Server::start(vec![]);
+    let install = tempfile::tempdir().expect("install");
+    publish_rss_split(
+        install.path(),
+        &api.origin(),
+        &package.origin(),
+        Some(&cdn.origin()),
+        Some(&pem),
+        "rss",
+    );
+    let files = candidate_rss(&package.origin(), Some(&pem), "rss-b");
+    let pkg = sign(
+        &key,
+        &Spec::new(UPDATE_ID).with_tree(&format!("xeHentai-{UPDATE_ID}/"), &files),
+    );
+    let (payload_target, descriptor_target, signature_target) =
+        package_targets(&package.origin(), UPDATE_ID);
+    api.set(COMMITS_TARGET, Route::ok(COMMITS.as_bytes().to_vec()));
+    package.set(&descriptor_target, Route::ok(pkg.info.clone()));
+    package.set(&signature_target, Route::ok(pkg.sig.clone()));
+    package.set(
+        &payload_target,
+        Route::redirect(302, format!("{}{CDN_PAYLOAD_TARGET}", cdn.origin())),
+    );
+    cdn.set(CDN_PAYLOAD_TARGET, Route::ok(pkg.payload.clone()));
+
+    let report = check_download(install.path(), "download");
+    assert_eq!(
+        report.outcome,
+        "pending",
+        "the trusted CDN redirect was refused: {:?}",
+        event_keys(&report)
+    );
+    assert!(
+        pending_path(install.path()).exists(),
+        "the signed package was not published"
+    );
+    assert_eq!(api.requests().len(), 1, "one commit metadata request");
+    let cdn_requests = cdn.requests();
+    let reached: Vec<&str> = cdn_requests
+        .iter()
+        .map(|request| request.target.as_str())
+        .collect();
+    assert_eq!(
+        reached,
+        vec![CDN_PAYLOAD_TARGET],
+        "only the payload redirect may reach the CDN"
+    );
+}
+
 // MARK: - download / pending
 
 #[test]
@@ -704,17 +931,13 @@ fn m7p_download_publishes_one_signed_pending_envelope_and_keeps_the_live_tree() 
     let key = signing_key();
     let pem = public_pem(&key);
     let install = tempfile::tempdir().expect("install");
-    let files = vec![(
-        "rss/updater/updater.rss".to_string(),
-        b"// candidate resource\n".to_vec(),
-    )];
+    let server = Server::start(vec![]);
+    let origin = server.origin();
+    let files = candidate_rss(&origin, Some(&pem), "rss-b");
     let pkg = sign(
         &key,
         &Spec::new(UPDATE_ID).with_tree(&format!("xeHentai-{UPDATE_ID}/"), &files),
     );
-
-    let server = Server::start(vec![]);
-    let origin = server.origin();
     publish_rss(install.path(), &origin, Some(&pem), "rss");
     let live_before =
         std::fs::read(install.path().join("rss/updater/updater.rss")).expect("live before");
@@ -794,10 +1017,7 @@ fn m7p_download_same_update_id_skips_the_package() {
         &key,
         &Spec::new(UPDATE_ID).with_tree(
             &format!("xeHentai-{UPDATE_ID}/"),
-            &[(
-                "rss/updater/updater.rss".to_string(),
-                b"// candidate\n".to_vec(),
-            )],
+            &candidate_rss(&origin, Some(&pem), "rss-b"),
         ),
     );
     serve_package(&server, &origin, &pkg);
@@ -827,24 +1047,21 @@ fn m7p_package_rejections_keep_the_previous_pending_intact() {
     let other_pem = other_public_pem();
 
     // The previously valid pending that every rejection must leave untouched.
+    // Its bytes are only ever compared, never validated, so its binding points
+    // at an inert placeholder origin.
+    let placeholder = "http://127.0.0.1:9";
     let seeded = sign(
         &key,
         &Spec::new("1111111111111111111111111111111111111111").with_tree(
             "xeHentai-1111111111111111111111111111111111111111/",
-            &[(
-                "rss/updater/updater.rss".to_string(),
-                b"// previous pending\n".to_vec(),
-            )],
+            &candidate_rss(placeholder, Some(&pem), "rss-b"),
         ),
     );
     let good = sign(
         &key,
         &Spec::new(UPDATE_ID).with_tree(
             &format!("xeHentai-{UPDATE_ID}/"),
-            &[(
-                "rss/updater/updater.rss".to_string(),
-                b"// next candidate\n".to_vec(),
-            )],
+            &candidate_rss(placeholder, Some(&pem), "rss-b"),
         ),
     );
     let prefix = format!("xeHentai-{UPDATE_ID}/");
@@ -876,16 +1093,7 @@ fn m7p_package_rejections_keep_the_previous_pending_intact() {
         None,
         Box::new(|spec, _pkg, _server, _origin| spec.clone()),
     ));
-    // Target / ABI / version contract mismatches.
-    cases.push((
-        "wrong target",
-        Some(pem.clone()),
-        Box::new(|spec, _pkg, _server, _origin| {
-            let mut spec = spec.clone();
-            spec.target = "x86_64-pc-windows-gnu".into();
-            spec
-        }),
-    ));
+    // ABI contract mismatches.
     cases.push((
         "wrong host abi",
         Some(pem.clone()),
@@ -904,12 +1112,43 @@ fn m7p_package_rejections_keep_the_previous_pending_intact() {
             spec
         }),
     ));
+    // Anything outside the four RSS consumers is not an update target.
     cases.push((
-        "wrong app version",
+        "locales entry",
         Some(pem.clone()),
         Box::new(|spec, _pkg, _server, _origin| {
             let mut spec = spec.clone();
-            spec.app_version = "9.999-rss".into();
+            spec.entries.push(("locales/en_us.yml".into(), 3));
+            spec
+        }),
+    ));
+    cases.push((
+        "executable entry",
+        Some(pem.clone()),
+        Box::new(|spec, _pkg, _server, _origin| {
+            let mut spec = spec.clone();
+            spec.entries.push(("xeHentai".into(), 3));
+            spec
+        }),
+    ));
+    cases.push((
+        "ui asset entry",
+        Some(pem.clone()),
+        Box::new(|spec, _pkg, _server, _origin| {
+            let mut spec = spec.clone();
+            spec.entries.push(("ui/index.html".into(), 3));
+            spec
+        }),
+    ));
+    // A partial list would mix new and old scripts.
+    cases.push((
+        "incomplete install set",
+        Some(pem.clone()),
+        Box::new(|spec, _pkg, _server, _origin| {
+            let mut spec = spec.clone();
+            let path = "rss/rpc/handlers.rss";
+            spec.entries.retain(|(entry, _)| entry != path);
+            spec.members.retain(|(member, _)| !member.ends_with(path));
             spec
         }),
     ));
@@ -1036,10 +1275,7 @@ fn m7p_package_rejections_keep_the_previous_pending_intact() {
             let spec = shape(
                 &Spec::new(UPDATE_ID).with_tree(
                     &prefix,
-                    &[(
-                        "rss/updater/updater.rss".to_string(),
-                        b"// next candidate\n".to_vec(),
-                    )],
+                    &candidate_rss(&origin, case_pem.as_deref(), "rss-b"),
                 ),
                 &good,
                 &server,
@@ -1100,10 +1336,7 @@ fn m7p_transport_failures_and_damaged_archives_are_rejected() {
         &key,
         &Spec::new(UPDATE_ID).with_tree(
             &prefix,
-            &[(
-                "rss/updater/updater.rss".to_string(),
-                b"// next candidate\n".to_vec(),
-            )],
+            &candidate_rss("http://127.0.0.1:9", Some(&pem), "rss-b"),
         ),
     );
     let mut damaged = pkg.payload.clone();
@@ -1198,22 +1431,13 @@ fn m7p_cancelled_download_keeps_the_old_pending_and_a_fresh_run_succeeds() {
     let prefix = format!("xeHentai-{UPDATE_ID}/");
     let pkg = sign(
         &key,
-        &Spec::new(UPDATE_ID).with_tree(
-            &prefix,
-            &[(
-                "rss/updater/updater.rss".to_string(),
-                b"// next candidate\n".to_vec(),
-            )],
-        ),
+        &Spec::new(UPDATE_ID).with_tree(&prefix, &candidate_rss(&origin, Some(&pem), "rss-b")),
     );
     let seeded = sign(
         &key,
         &Spec::new("3333333333333333333333333333333333333333").with_tree(
             "xeHentai-3333333333333333333333333333333333333333/",
-            &[(
-                "rss/updater/updater.rss".to_string(),
-                b"// previous pending\n".to_vec(),
-            )],
+            &candidate_rss(&origin, Some(&pem), "rss-b"),
         ),
     );
     let before = seed_pending(
@@ -1291,10 +1515,7 @@ fn m7p_publish_failure_keeps_the_old_pending() {
         &key,
         &Spec::new(UPDATE_ID).with_tree(
             &format!("xeHentai-{UPDATE_ID}/"),
-            &[(
-                "rss/updater/updater.rss".to_string(),
-                b"// next candidate\n".to_vec(),
-            )],
+            &candidate_rss(&origin, Some(&pem), "rss-b"),
         ),
     );
     let before = seed_pending(
@@ -1386,23 +1607,20 @@ fn owned_exe(install: &Path) -> PathBuf {
     exe
 }
 
-/// Restore the ordinary build when a test that built identified artifacts
-/// ends, however it ends.
-struct RestoreDefaultBuild;
-
-impl Drop for RestoreDefaultBuild {
-    fn drop(&mut self) {
-        cargo_build(None);
-    }
-}
-
 #[test]
 fn m7p_next_start_applies_the_resource_candidate_and_runs_the_new_rss() {
     let key = signing_key();
     let pem = public_pem(&key);
     let server = Server::start(vec![]);
     let origin = server.origin();
-    let candidate = candidate_rss(&origin, Some(&pem), "rss-b");
+    // Every candidate script carries a build marker, so the apply phase really
+    // rewrites all four files and each replacement is observable byte-wise.
+    let mut candidate = candidate_rss(&origin, Some(&pem), "rss-b");
+    for (path, body) in candidate.iter_mut() {
+        let mut marked = format!("// candidate B: {path}\n").into_bytes();
+        marked.extend_from_slice(body);
+        *body = marked;
+    }
     let pkg = sign(
         &key,
         &Spec::new(UPDATE_ID).with_tree(&format!("xeHentai-{UPDATE_ID}/"), &candidate),
@@ -1411,6 +1629,12 @@ fn m7p_next_start_applies_the_resource_candidate_and_runs_the_new_rss() {
     publish_rss(install.path(), &origin, Some(&pem), "rss");
     serve_package(&server, &origin, &pkg);
     let exe = owned_exe(install.path());
+    // A hard link keeps the ORIGINAL host image without copying 260 MiB: if
+    // the update ever rewrote or renamed the executable, this inode's bytes
+    // would stop being the path's bytes.
+    let shadow = tempfile::tempdir().expect("shadow");
+    let exe_shadow = shadow.path().join("xeHentai");
+    std::fs::hard_link(&exe, &exe_shadow).expect("hard link the installed host");
 
     // Run 1: the real download path publishes pending while A keeps running.
     let child = ChildRun::spawn(
@@ -1442,6 +1666,17 @@ fn m7p_next_start_applies_the_resource_candidate_and_runs_the_new_rss() {
         4,
         "one commits + descriptor + signature + payload"
     );
+    // A really ran: run 1 asked the channel A's binding names, never B's.
+    let run1: Vec<String> = server
+        .requests()
+        .iter()
+        .map(|request| request.target.clone())
+        .collect();
+    assert!(run1.contains(&COMMITS_TARGET.to_string()), "{run1:?}");
+    assert!(!run1.contains(&COMMITS_TARGET_B.to_string()), "{run1:?}");
+    // The exact phase before the applying launch: every file except the host
+    // image and the ordinary log, byte for byte.
+    let before_phase = snapshot_without_host(install.path());
 
     // Run 2: the next start applies the candidate through the OLD RSS
     // controller, then the NEW business module drives the real request.
@@ -1490,12 +1725,13 @@ fn m7p_next_start_applies_the_resource_candidate_and_runs_the_new_rss() {
     let live_after =
         std::fs::read(install.path().join("rss/updater/github.rss")).expect("live binding");
     assert_ne!(live_after, live_before);
-    let expected = candidate
-        .iter()
-        .find(|(path, _)| path == "rss/updater/github.rss")
-        .map(|(_, body)| body.clone())
-        .expect("candidate binding");
-    assert_eq!(live_after, expected, "the real RSS module was replaced");
+    for (path, body) in &candidate {
+        assert_eq!(
+            &std::fs::read(install.path().join(path)).expect("live script"),
+            body,
+            "the live {path} is not the candidate script"
+        );
+    }
     assert_eq!(
         std::fs::read(install.path().join("h.json")).expect("session h.json"),
         session,
@@ -1506,9 +1742,207 @@ fn m7p_next_start_applies_the_resource_candidate_and_runs_the_new_rss() {
         &std::fs::read(install.path().join(AREA).join("state.json")).expect("state"),
     )
     .expect("state json");
+    assert_eq!(
+        state["v"], 2,
+        "the applied record is the v2 record: {state}"
+    );
     assert_eq!(state["active"]["update_id"], UPDATE_ID);
-    assert_eq!(state["active"]["native"], false);
+    assert_eq!(
+        state["active"]
+            .as_object()
+            .expect("active record")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["update_id".to_string(), "applied_at".to_string()],
+        "the applied record carries only the update id and its time: {state}"
+    );
     assert!(log_of(install.path()).contains("2.023-rss started."));
+
+    // Only the four RSS scripts and the private pending/applied metadata moved.
+    let after_phase = snapshot_without_host(install.path());
+    let (changed, added, removed) = tree_phase_diff(&before_phase, &after_phase);
+    assert_eq!(
+        changed,
+        vec![
+            "rss/filters/match.rss".to_string(),
+            "rss/rpc/handlers.rss".to_string(),
+            "rss/updater/github.rss".to_string(),
+            "rss/updater/updater.rss".to_string(),
+        ],
+        "an automatic update changed something outside the four RSS scripts"
+    );
+    assert_eq!(
+        added,
+        vec![format!("{AREA}/state.json")],
+        "the update added a file outside its private applied record"
+    );
+    assert_eq!(
+        removed,
+        vec![format!("{AREA}/pending/{}", "src.zip")],
+        "the update removed a file outside its private pending envelope"
+    );
+    // The running host image is the same inode with the same bytes.
+    use std::os::unix::fs::MetadataExt as _;
+    assert!(
+        std::fs::metadata(&exe).expect("exe after").ino()
+            == std::fs::metadata(&exe_shadow).expect("shadow").ino(),
+        "the update replaced the host executable"
+    );
+    assert!(
+        files_equal(&exe, &exe_shadow).expect("compare host image"),
+        "the host executable bytes changed across the RSS-only update"
+    );
+}
+
+const STRACE: &str = "/usr/bin/strace";
+
+/// Launch the one real host under an OS process trace (`strace -f -e
+/// trace=process`): every fork/clone/exec of the whole process is recorded, so
+/// a helper process, a replacement or a loader cannot be hidden.
+fn spawn_straced(install: &Path, exe: &Path, trace: &Path, args: &[&str]) -> Child {
+    std::fs::create_dir_all(install.join("home")).unwrap();
+    std::fs::create_dir_all(install.join("tmp")).unwrap();
+    std::fs::create_dir_all(install.join("cache")).unwrap();
+    let mut command = std::process::Command::new(STRACE);
+    command
+        .arg("-f")
+        .arg("-e")
+        .arg("trace=process")
+        .arg("-o")
+        .arg(trace)
+        .arg(exe)
+        .current_dir(install)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", install.join("home"))
+        .env("TMPDIR", install.join("tmp"))
+        .env("XDG_CACHE_HOME", install.join("cache"))
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command.spawn().expect("spawn the traced production binary")
+}
+
+/// The tracee pid of `strace -f`: the single child of the tracer, read from
+/// procfs, so the interrupt goes to the real host and not to the tracer.
+fn traced_child(tracer: u32) -> Option<u32> {
+    let text = std::fs::read_to_string(format!("/proc/{tracer}/task/{tracer}/children")).ok()?;
+    text.split_whitespace().next()?.parse().ok()
+}
+
+/// First SIGINT to the traced host: it must retire gracefully with status 0.
+fn stop_traced(child: &mut Child) -> i32 {
+    std::thread::sleep(Duration::from_millis(300));
+    let target = traced_child(child.id()).expect("the traced host process");
+    let _ = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(target as i32),
+        nix::sys::signal::Signal::SIGINT,
+    );
+    m6::wait_exit(child, Duration::from_secs(60))
+        .expect("the traced host must retire on the first signal")
+        .code()
+        .unwrap_or(-1)
+}
+
+/// The only `execve` an RSS-only update may perform is the launch of the host
+/// the test itself asked for: download and apply both run inside the one
+/// process, so there is no preflight helper, no replacement process and no
+/// loader.
+fn executed_paths(trace: &Path) -> Vec<String> {
+    let text = std::fs::read_to_string(trace).unwrap_or_default();
+    text.lines()
+        .filter(|line| line.contains("execve("))
+        .filter(|line| line.contains("= 0"))
+        .filter_map(|line| {
+            let start = line.find('"')? + 1;
+            let rest = &line[start..];
+            let end = rest.find('"')?;
+            Some(rest[..end].to_string())
+        })
+        .collect()
+}
+
+#[test]
+fn m7p_no_update_helper_process_is_executed() {
+    if !Path::new(STRACE).exists() {
+        eprintln!("{STRACE} is unavailable in this environment; no process-trace evidence");
+        return;
+    }
+    let key = signing_key();
+    let pem = public_pem(&key);
+    let server = Server::start(vec![]);
+    let origin = server.origin();
+    let pkg = sign(
+        &key,
+        &Spec::new(UPDATE_ID).with_tree(
+            &format!("xeHentai-{UPDATE_ID}/"),
+            &candidate_rss(&origin, Some(&pem), "rss-b"),
+        ),
+    );
+    let install = install_dir();
+    publish_rss(install.path(), &origin, Some(&pem), "rss");
+    serve_package(&server, &origin, &pkg);
+    let exe = owned_exe(install.path());
+    let traces = tempfile::tempdir().expect("traces");
+
+    // Launch 1 (the download): the host publishes pending and keeps running A.
+    let trace_a = traces.path().join("strace-download.log");
+    let mut child = spawn_straced(
+        install.path(),
+        &exe,
+        &trace_a,
+        &["-l", "eh.log", "-vv", "--auto-update", "download"],
+    );
+    assert!(
+        wait_log(install.path(), "Update is complete"),
+        "no pending publication: {}",
+        log_of(install.path())
+    );
+    let code = stop_traced(&mut child);
+    let _ = child.wait();
+    assert_eq!(code, 0);
+
+    // Launch 2 (the ordinary next start): the same unmodified host applies B.
+    server.set(COMMITS_TARGET_B, Route::ok(COMMITS.as_bytes().to_vec()));
+    let trace_b = traces.path().join("strace-apply.log");
+    let mut child = spawn_straced(
+        install.path(),
+        &exe,
+        &trace_b,
+        &["-l", "eh.log", "-vv", "--auto-update", "check"],
+    );
+    assert!(
+        wait_log(install.path(), "files installed"),
+        "the candidate was not applied: {}",
+        log_of(install.path())
+    );
+    let code = stop_traced(&mut child);
+    let _ = child.wait();
+    assert_eq!(code, 0);
+
+    for trace in [&trace_a, &trace_b] {
+        let executed = executed_paths(trace);
+        assert_eq!(
+            executed.len(),
+            1,
+            "an update start executed more than the launch the test asked for: {executed:?}"
+        );
+        assert_eq!(
+            executed[0],
+            exe.to_string_lossy(),
+            "the only exec must be the harness launch of the host itself"
+        );
+        let text = std::fs::read_to_string(trace).unwrap_or_default();
+        assert!(
+            !text.contains("--update-preflight"),
+            "a preflight helper was executed: {text}"
+        );
+        eprintln!("strace {}: {}", trace.display(), text.lines().count());
+    }
 }
 
 /// A successful next-start upgrade changes the live tree and its applied id
@@ -1814,193 +2248,6 @@ fn m7p_next_start_drops_a_pending_candidate_that_is_already_applied() {
         applied
     );
 }
-// MARK: - next start: native A/B
-
-/// Build the real application with a distinct compiled identifier and copy it
-/// out of Cargo's output. The Cargo artifact itself is only ever copied from.
-fn build_identity(id: &str) -> Vec<u8> {
-    cargo_build(Some(id));
-    let binary = Path::new(&target_dir()).join("debug").join("xeHentai");
-    // Package the copy the way a release would: the debug build carries
-    // hundreds of megabytes of debug info, the installed image does not.
-    let unpacked = tempfile::tempdir().expect("unpacked");
-    let copy = unpacked.path().join("xeHentai");
-    std::fs::copy(&binary, &copy).expect("copy built binary");
-    let strip = Path::new("/usr/bin/strip");
-    if strip.exists() {
-        let output = std::process::Command::new(strip)
-            .arg("--strip-unneeded")
-            .arg(&copy)
-            .output()
-            .expect("strip copy");
-        assert!(output.status.success(), "strip failed: {output:?}");
-    }
-    std::fs::read(&copy).expect("built binary bytes")
-}
-
-fn release_tree(install: &Path) {
-    m6::copy_tree(&Path::new(MANIFEST).join("rss"), &install.join("rss"));
-    m6::copy_tree(
-        &Path::new(MANIFEST).join("locales"),
-        &install.join("locales"),
-    );
-    m6::copy_tree(&Path::new(MANIFEST).join("ui"), &install.join("ui"));
-}
-
-#[test]
-fn m7p_native_ab_reexec_runs_the_new_image_and_rejects_a_bad_candidate() {
-    let _restore = RestoreDefaultBuild;
-    let key = signing_key();
-    let pem = public_pem(&key);
-    let server = Server::start(vec![]);
-    let origin = server.origin();
-    let build_b = format!("b-{}", &UPDATE_ID[..8]);
-
-    // Two REAL builds, sequentially, each copied out before any replacement.
-    let binary_a = build_identity("a-native");
-    let binary_b = build_identity(&build_b);
-
-    let install = install_dir();
-    release_tree(install.path());
-    std::fs::write(install.path().join("xeHentai"), &binary_a).expect("install A");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            install.path().join("xeHentai"),
-            std::fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
-    }
-    publish_rss(install.path(), &origin, Some(&pem), "rss");
-    let exe = install.path().join("xeHentai");
-
-    // Candidate: B's executable plus B's RSS tree (channel rss-b).
-    let mut spec = Spec::new(UPDATE_ID).with_tree(
-        &format!("xeHentai-{UPDATE_ID}/"),
-        &candidate_rss(&origin, Some(&pem), "rss-b"),
-    );
-    spec = spec.native("xeHentai", &build_b, binary_b.clone());
-    let pkg = sign(&key, &spec);
-    serve_package(&server, &origin, &pkg);
-
-    // A downloads B and keeps running A.
-    let child = ChildRun::spawn(
-        install.path(),
-        &exe,
-        &["-l", "eh.log", "-vv", "--auto-update", "download"],
-    );
-    assert!(
-        wait_log(install.path(), "Update is complete"),
-        "no pending: {}",
-        log_of(install.path())
-    );
-    let log = log_of(install.path());
-    assert!(
-        log.contains("xeHentai 2.023-rss+a-native started."),
-        "{log}"
-    );
-    assert_eq!(child.stop(), 0);
-    assert!(pending_path(install.path()).exists());
-    assert_eq!(
-        std::fs::read(&exe).expect("live exe"),
-        binary_a,
-        "A is still installed"
-    );
-    let session = std::fs::read(install.path().join("h.json")).expect("session");
-
-    // The next start really re-executes: the running image reports B's
-    // compiled identifier and B's RSS module drives the request.
-    server.set(COMMITS_TARGET_B, Route::ok(COMMITS.as_bytes().to_vec()));
-    let child = ChildRun::spawn(
-        install.path(),
-        &exe,
-        &["-l", "eh.log", "-vv", "--auto-update", "check"],
-    );
-    assert!(
-        wait_log(
-            install.path(),
-            &format!("xeHentai 2.023-rss+{build_b} started.")
-        ),
-        "the replacement never ran B: {}",
-        log_of(install.path())
-    );
-    assert!(
-        m6::wait_for(Duration::from_secs(30), || {
-            server
-                .requests()
-                .iter()
-                .any(|request| request.target == COMMITS_TARGET_B)
-        }),
-        "B's RSS never ran: {}",
-        log_of(install.path())
-    );
-    assert_eq!(child.stop(), 0);
-    let log = log_of(install.path());
-    assert!(log.contains("files installed"), "{log}");
-    assert_eq!(
-        std::fs::read(&exe).expect("live exe"),
-        binary_b,
-        "B is installed"
-    );
-    assert_eq!(
-        std::fs::read(install.path().join("h.json")).expect("session"),
-        session,
-        "the previous session is read by B"
-    );
-    assert!(!pending_path(install.path()).exists());
-
-    // Negative fixture: a deliberately broken executable (never an application
-    // version) must be rejected by the preflight and leave B running. It
-    // carries its own update id, so it is a real candidate rather than a stale
-    // copy of the release that is already applied.
-    const BAD_ID: &str = "2222222222222222222222222222222222222222";
-    let mut bad_spec = Spec::new(BAD_ID).with_tree(
-        &format!("xeHentai-{BAD_ID}/"),
-        &candidate_rss(&origin, Some(&pem), "rss-b"),
-    );
-    bad_spec = bad_spec.native(
-        "xeHentai",
-        "b-broken-fixture",
-        b"#!/bin/sh\nexit 7\n".to_vec(),
-    );
-    let bad_pkg = sign(&key, &bad_spec);
-
-    let offset = log_of(install.path()).len();
-    seed_pending(
-        install.path(),
-        bad_pkg.info.clone(),
-        bad_pkg.sig.clone(),
-        bad_pkg.payload.clone(),
-    );
-    let child = ChildRun::spawn(
-        install.path(),
-        &exe,
-        &["-l", "eh.log", "-vv", "--auto-update", "off"],
-    );
-    assert!(
-        wait_log(install.path(), "Failure when updating program"),
-        "the broken executable was not rejected: {}",
-        log_of(install.path())
-    );
-    assert_eq!(child.stop(), 0);
-    let log = log_of(install.path())[offset..].to_string();
-    assert!(!log.contains("files installed"), "{log}");
-    assert!(!log.contains("is running"), "{log}");
-    assert!(
-        log.contains(&format!("xeHentai 2.023-rss+{build_b} started.")),
-        "B must still be the running image: {log}"
-    );
-    assert_eq!(
-        std::fs::read(&exe).expect("live exe"),
-        binary_b,
-        "B stays installed"
-    );
-    assert_eq!(
-        std::fs::read(install.path().join("h.json")).expect("session"),
-        session
-    );
-}
 
 // MARK: - address r1: reserved installer area, applied state, lock, bounds
 
@@ -2036,7 +2283,7 @@ fn seed_installer_tree(install: &Path) -> Vec<(String, Vec<u8>)> {
     std::fs::write(pending.join("src.zip"), b"OLD-PENDING-BYTES").expect("pending bytes");
     std::fs::write(
         area.join("state.json"),
-        br#"{"v":1,"active":{"update_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","build_id":"b-old","native":false,"applied_at":"2026-11-01T00:00:00+08:00"}}"#,
+        br#"{"v":2,"active":{"update_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","applied_at":"2026-11-01T00:00:00+08:00"}}"#,
     )
     .expect("state");
     snapshot_tree(&area_path(install))
@@ -2221,7 +2468,7 @@ fn m7p_archive_member_cap_rejects_signed_payload_without_pending_change() {
     );
     let mut spec = Spec::new(UPDATE_ID).with_tree(
         &format!("xeHentai-{UPDATE_ID}/"),
-        &[("rss/updater/github.rss".to_string(), b"ok".to_vec())],
+        &candidate_rss(&origin, Some(&pem), "rss-b"),
     );
     // A VALID signed payload whose foreign member count exceeds the archive
     // member bound: the digest and signature are correct by construction.
@@ -2572,6 +2819,76 @@ fn private_dir(path: &Path) {
 }
 
 // MARK: - startup write lock
+/// A live RSS script that is a symlink is refused BEFORE any replacement, so an
+/// automatic update can never be written through a link to a file outside the
+/// installed tree. The candidate is retired as an ordinary rejection and the
+/// start continues with the unchanged release.
+#[test]
+fn m7p_startup_refuses_a_symlinked_live_script() {
+    let key = signing_key();
+    let pem = public_pem(&key);
+    let server = Server::start(vec![]);
+    let origin = server.origin();
+    let pkg = sign(
+        &key,
+        &Spec::new(UPDATE_ID).with_tree(
+            &format!("xeHentai-{UPDATE_ID}/"),
+            &candidate_rss(&origin, Some(&pem), "rss-b"),
+        ),
+    );
+    let install = install_dir();
+    publish_rss(install.path(), &origin, Some(&pem), "rss");
+    seed_pending(
+        install.path(),
+        pkg.info.clone(),
+        pkg.sig.clone(),
+        pkg.payload.clone(),
+    );
+    // The live target of one signed entry is a symlink to an outside file.
+    let outside = install.path().join("outside-script.rss");
+    std::fs::write(&outside, b"// outside the installed tree\n").expect("outside file");
+    let linked = install.path().join("rss/filters/match.rss");
+    std::fs::remove_file(&linked).expect("remove live script");
+    std::os::unix::fs::symlink(&outside, &linked).expect("symlink live script");
+
+    let report = crate::updater::startup(install.path());
+    assert!(
+        report.stop.is_none(),
+        "a symlinked live target must be an ordinary candidate rejection, not a stop"
+    );
+    let detail = report
+        .events
+        .iter()
+        .map(|event| format!("{} {:?}", event.key, event.args))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(detail.contains("UPDATE_FAILED"), "{detail}");
+    assert!(
+        detail.contains("symlink"),
+        "the rejection does not name the symlinked target: {detail}"
+    );
+    assert_eq!(
+        std::fs::read(&outside).expect("outside after"),
+        b"// outside the installed tree\n",
+        "a candidate was written through a live symlink"
+    );
+    assert!(
+        std::fs::symlink_metadata(&linked)
+            .expect("linked after")
+            .file_type()
+            .is_symlink(),
+        "the refused candidate replaced the live symlink"
+    );
+    assert!(
+        !pending_path(install.path()).exists(),
+        "the rejected candidate was not retired"
+    );
+    assert!(
+        !area_path(install.path()).join("state.json").exists(),
+        "a refused candidate published an applied identity"
+    );
+}
+
 #[test]
 fn m7p_busy_startup_stops_before_the_business_app() {
     use crate::updater::install::{InstallLock, Installation};
@@ -2840,11 +3157,11 @@ fn m7p_startup_refuses_a_symlinked_pending_leaf_before_reading_it() {
 
 /// One live target of a signed entry is an incompatible type (a directory), so
 /// a LATER `rename(2)` in the real apply loop fails with EISDIR after earlier
-/// files were really replaced. On the old source that ordinary error is treated
-/// like a preparation rejection: pending is discarded and the start continues
-/// into the business App on the mixed tree. The corrected behavior stops THIS
-/// start with a nonzero status before App/session/tasks, keeps the pending
-/// candidate and writes no applied identity and no completion event.
+/// scripts were really replaced. The installation itself is otherwise complete:
+/// every script compiles and binds, so this can only be discovered by the real
+/// replacement. The start must then stop THIS launch with a nonzero status
+/// before the App/session/tasks, keep the ordinary pending candidate and write
+/// no applied identity, no completion event and no rollback artifact.
 #[test]
 fn m7p_r1_late_apply_failure_stops_the_start_before_the_business_app() {
     use std::os::unix::fs::MetadataExt as _;
@@ -2852,11 +3169,7 @@ fn m7p_r1_late_apply_failure_stops_the_start_before_the_business_app() {
     let pem = public_pem(&key);
     let server = Server::start(vec![]);
     let origin = server.origin();
-    let mut files = candidate_rss(&origin, Some(&pem), "rss-b");
-    // A signed resource the business modules never load: refusing exactly this
-    // path can only come from the apply loop, not from module loading.
-    let probe = "rss/update-probe/apply-target.bin";
-    files.push((probe.to_string(), b"probe\n".to_vec()));
+    let files = candidate_rss(&origin, Some(&pem), "rss-b");
     let pkg = sign(
         &key,
         &Spec::new(UPDATE_ID).with_tree(&format!("xeHentai-{UPDATE_ID}/"), &files),
@@ -2866,11 +3179,18 @@ fn m7p_r1_late_apply_failure_stops_the_start_before_the_business_app() {
     let exe = owned_exe(install.path());
     let first_live = install.path().join("rss/filters/match.rss");
     let first_inode = std::fs::metadata(&first_live).expect("first live").ino();
+    let first_expected = files
+        .iter()
+        .find(|(path, _)| path == "rss/filters/match.rss")
+        .map(|(_, body)| body.clone())
+        .expect("candidate filters module");
+    let blocked_live = install.path().join("rss/rpc/handlers.rss");
     let last_live = install.path().join("rss/updater/updater.rss");
-    // The live target of the LAST signed entry is a directory.
-    let sabotage = install.path().join(probe);
-    std::fs::create_dir_all(sabotage.parent().expect("probe parent")).expect("probe dir");
-    std::fs::create_dir(&sabotage).expect("probe leaf");
+    let last_before = std::fs::read(&last_live).expect("last live before");
+    // The live target of the SECOND signed entry is a directory: the first
+    // replacement succeeds and this one fails with a real EISDIR.
+    std::fs::remove_file(&blocked_live).expect("remove live rpc script");
+    std::fs::create_dir(&blocked_live).expect("live rpc script as directory");
     let seeded = seed_pending(
         install.path(),
         pkg.info.clone(),
@@ -2908,7 +3228,12 @@ fn m7p_r1_late_apply_failure_stops_the_start_before_the_business_app() {
         log.contains("Is a directory"),
         "the report does not carry the real replacement error: {log}"
     );
-    // The earlier replacements really happened, so this is a mixed tree.
+    // The earlier replacement really happened, so this is a mixed tree.
+    assert_eq!(
+        std::fs::read(&first_live).expect("first live after"),
+        first_expected,
+        "the first live replacement never happened"
+    );
     let first_after = std::fs::metadata(&first_live)
         .expect("first live after")
         .ino();
@@ -2916,15 +3241,11 @@ fn m7p_r1_late_apply_failure_stops_the_start_before_the_business_app() {
         first_inode, first_after,
         "the first live replacement never happened"
     );
-    let expected_last = files
-        .iter()
-        .find(|(path, _)| path == "rss/updater/updater.rss")
-        .map(|(_, body)| body.clone())
-        .expect("candidate updater module");
+    // Nothing after the failing entry was replaced.
     assert_eq!(
         std::fs::read(&last_live).expect("last live after"),
-        expected_last,
-        "the last replacement before the failure never happened"
+        last_before,
+        "a later replacement ran after the failure"
     );
     assert!(
         std::fs::read(pending_path(install.path())).expect("pending kept") == seeded,
@@ -2941,6 +3262,11 @@ fn m7p_r1_late_apply_failure_stops_the_start_before_the_business_app() {
     assert!(
         !log.contains("Update is complete") && !log.contains("files installed"),
         "the failed apply published a completion event: {log}"
+    );
+    assert!(
+        !area_path(install.path()).join("backup").exists()
+            && !area_path(install.path()).join("activation.json").exists(),
+        "the failed apply created rollback machinery"
     );
 }
 
@@ -2965,43 +3291,6 @@ fn m7p_r1_installed_files_event_is_neutral_in_every_locale() {
             "{locale:?} still claims the new program runs: {text}"
         );
     }
-}
-
-/// The real main branch that starts an installed native image. Here the copied
-/// TEMP image is revoked AFTER file application, so the real `execv` reports
-/// the real OS error. The start must report `UPDATE_FAILED`, exit nonzero and
-/// never claim the new version is running. Only an independent copied TEMP
-/// executable is involved: the Cargo test binary is never self-replaced or
-/// executed, and no production fault flag exists.
-#[test]
-fn m7p_r1_reexec_failure_reports_failed_without_claiming_a_running_version() {
-    use crate::i18n::Locale;
-    let install = install_dir();
-    let exe = install.path().join("installed-candidate");
-    std::fs::copy(m6::binary(), &exe).expect("copy the installed TEMP image");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    }
-    // Revoke the installed image after the files are installed: the real exec
-    // now fails for a real OS reason.
-    std::fs::remove_file(&exe).expect("revoke the installed image");
-    let mut logger = crate::util::logger::Logger::new();
-    logger
-        .set_logfile(&install.path().join("eh.log"))
-        .expect("open the log file");
-    let code = crate::reexec_installed(Locale::EnUs, &mut logger, &exe);
-    assert_eq!(code, 1, "a failed exec must exit nonzero");
-    let log = log_of(install.path());
-    assert!(
-        log.contains("Failure when updating program") && log.contains("No such file or directory"),
-        "the real exec error was not reported: {log}"
-    );
-    assert!(
-        !log.contains("runs the new version") && !log.contains("files installed"),
-        "the failed exec start claimed an installed/running update: {log}"
-    );
 }
 
 // MARK: - B6 update compatibility probe
@@ -3662,13 +3951,13 @@ fn b6_apply_reject(root: &Path, server: &Server) -> serde_json::Value {
         "the intended broken candidate error was not observed: {detail}"
     );
     assert!(
-        detail.contains("preflight updater"),
-        "the rejection did not come from the candidate preflight: {detail}"
+        detail.contains("candidate rss/updater scripts rejected"),
+        "the rejection did not come from the in-process candidate preflight: {detail}"
     );
-    // A harness/argument failure (the test binary refusing to start the
-    // preflight) is NOT the intended candidate rejection.
+    // A harness/argument failure (a missing script, an unreadable staging
+    // tree) is NOT the intended candidate rejection.
     for harness in [
-        "cannot run the candidate preflight",
+        "cannot run the candidate",
         "preflight configuration",
         "preflight app",
     ] {

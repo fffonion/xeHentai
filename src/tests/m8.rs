@@ -645,9 +645,103 @@ fn transport(
     crate::updater::http::Transport::for_test(
         api,
         package,
+        None,
         crate::updater::http::body_limit(),
         map_resolver(vec![]),
     )
+}
+
+/// The one explicit CDN origin is authorized ONLY as a redirect target of a
+/// package request. It is never an initial URL and never valid for commit
+/// metadata, and no other origin becomes reachable by adding it.
+#[test]
+fn m8_transport_admits_the_explicit_cdn_only_for_package_redirects() {
+    let api = Source::start("api", "127.0.0.1", vec![("/api", Route::json(COMMITS))]);
+    let cdn = Source::start(
+        "cdn",
+        "127.0.0.1",
+        vec![("/release-asset", Route::status(200, b"payload".to_vec()))],
+    );
+    let package = Source::start(
+        "package",
+        "127.0.0.2",
+        vec![(
+            "/payload",
+            Route::redirect(&format!("{}/release-asset", cdn.origin())),
+        )],
+    );
+    let transport = crate::updater::http::Transport::for_test(
+        &api.origin(),
+        &package.origin(),
+        Some(&cdn.origin()),
+        crate::updater::http::body_limit(),
+        map_resolver(vec![]),
+    )
+    .expect("transport");
+
+    // A package redirect to the explicitly bound CDN is followed.
+    let response = run_local(async {
+        transport
+            .get_package(&format!("{}/payload", package.origin()), &[])
+            .await
+    })
+    .expect("the trusted CDN redirect must be followed");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, b"payload");
+    assert_eq!(cdn.requests().len(), 1);
+
+    // The CDN is not an initial URL, even for a package request.
+    let error = run_local(async {
+        transport
+            .get_package(&format!("{}/release-asset", cdn.origin()), &[])
+            .await
+    })
+    .expect_err("the CDN must never be an initial URL");
+    assert!(
+        format!("{error}").contains("trusted origin"),
+        "unexpected refusal: {error}"
+    );
+
+    // Commit metadata never reaches the CDN, not even through a redirect.
+    api.set(
+        "/to-cdn",
+        Route::redirect(&format!("{}/release-asset", cdn.origin())),
+    );
+    let error = run_local(async {
+        transport
+            .get_api(&format!("{}/to-cdn", api.origin()), &[])
+            .await
+    })
+    .expect_err("commit metadata must not use the CDN");
+    assert!(
+        format!("{error}").contains("trusted origin"),
+        "unexpected refusal: {error}"
+    );
+    assert_eq!(
+        cdn.requests().len(),
+        1,
+        "the CDN was contacted outside a package redirect"
+    );
+
+    // Without the binding the CDN is not reachable at all.
+    let unbound = crate::updater::http::Transport::for_test(
+        &api.origin(),
+        &package.origin(),
+        None,
+        crate::updater::http::body_limit(),
+        map_resolver(vec![]),
+    )
+    .expect("unbound transport");
+    let error = run_local(async {
+        unbound
+            .get_package(&format!("{}/payload", package.origin()), &[])
+            .await
+    })
+    .expect_err("an unbound CDN redirect must be refused");
+    assert!(
+        format!("{error}").contains("trusted origin"),
+        "unexpected refusal: {error}"
+    );
 }
 
 #[test]
@@ -697,9 +791,9 @@ fn m8_transport_reaches_both_trusted_tuples_and_refuses_recombined_ones() {
     let api_url = format!("{}/api", api.origin());
     let package_url = format!("http://127.0.0.2:{}/pkg", package.port);
     let (api_response, package_response) = run_local(async {
-        let first = transport.get(&api_url, &[]).await.expect("api origin");
+        let first = transport.get_api(&api_url, &[]).await.expect("api origin");
         let second = transport
-            .get(&package_url, &[])
+            .get_package(&package_url, &[])
             .await
             .expect("package origin");
         (first, second)
@@ -710,7 +804,7 @@ fn m8_transport_reaches_both_trusted_tuples_and_refuses_recombined_ones() {
 
     for path in ["/to-cross", "/to-host", "/to-scheme"] {
         let url = format!("{}{path}", api.origin());
-        let error = run_local(async { transport.get(&url, &[]).await })
+        let error = run_local(async { transport.get_api(&url, &[]).await })
             .expect_err("a redirect outside the two tuples must be refused");
         assert!(
             format!("{error}").contains("trusted"),
@@ -739,7 +833,7 @@ fn m8_transport_reaches_an_ipv6_loopback_tuple() {
     let source = Source::start("api", "::1", vec![(COMMITS_TARGET, Route::json(COMMITS))]);
     let transport = transport(&source.origin(), &source.origin()).expect("transport");
     let url = format!("{}{COMMITS_TARGET}", source.origin());
-    let response = run_local(async { transport.get(&url, &[]).await }).expect("ipv6 origin");
+    let response = run_local(async { transport.get_api(&url, &[]).await }).expect("ipv6 origin");
     assert_eq!(response.status, 200);
     let requests = source.requests();
     assert_eq!(requests.len(), 1);
@@ -773,12 +867,13 @@ fn m8_transport_follows_five_redirects_and_refuses_the_sixth() {
     );
     let transport = transport(&source.origin(), &source.origin()).expect("transport");
     let five = format!("{}/r0", source.origin());
-    let response = run_local(async { transport.get(&five, &[]).await }).expect("five redirects");
+    let response =
+        run_local(async { transport.get_api(&five, &[]).await }).expect("five redirects");
     assert_eq!(response.status, 200);
     assert_eq!(response.body, b"done");
 
     let six = format!("{}/s0", source.origin());
-    let error = run_local(async { transport.get(&six, &[]).await })
+    let error = run_local(async { transport.get_api(&six, &[]).await })
         .expect_err("the sixth redirect in a row must be refused");
     assert!(
         format!("{error}").contains("redirect"),
@@ -859,13 +954,23 @@ fn m8_transport_refuses_private_and_mapped_private_dns_answers() {
     let transport = crate::updater::http::Transport::for_test(
         "http://update.example:80",
         "http://package.example:80",
+        None,
         crate::updater::http::body_limit(),
         resolver,
     )
     .expect("transport");
-    for url in ["http://update.example/x", "http://package.example/y"] {
-        let error = run_local(async { transport.get(url, &[]).await })
-            .expect_err("a non-public address must be refused");
+    for (url, package) in [
+        ("http://update.example/x", false),
+        ("http://package.example/y", true),
+    ] {
+        let error = run_local(async {
+            if package {
+                transport.get_package(url, &[]).await
+            } else {
+                transport.get_api(url, &[]).await
+            }
+        })
+        .expect_err("a non-public address must be refused");
         assert!(
             format!("{error}").contains("public") || format!("{error}").contains("address"),
             "the refusal must name the address policy: {error}"
@@ -903,7 +1008,7 @@ fn m8_transport_cancel_of_a_half_response_closes_and_the_owner_stays_usable() {
 
     // Cancel by dropping the whole future at a deadline: no fixture release.
     let cancelled = run_local(async {
-        tokio::time::timeout(Duration::from_millis(300), transport.get(&url, &[])).await
+        tokio::time::timeout(Duration::from_millis(300), transport.get_api(&url, &[])).await
     });
     assert!(cancelled.is_err(), "the half response must be cancelled");
     assert!(
@@ -914,7 +1019,7 @@ fn m8_transport_cancel_of_a_half_response_closes_and_the_owner_stays_usable() {
     // The same owner is immediately usable again.
     source.set(COMMITS_TARGET, Route::json(COMMITS));
     source.release();
-    let response = run_local(async { transport.get(&url, &[]).await }).expect("next request");
+    let response = run_local(async { transport.get_api(&url, &[]).await }).expect("next request");
     assert_eq!(response.status, 200);
     assert_eq!(response.text().expect("text"), COMMITS);
 }

@@ -1117,7 +1117,7 @@ def test_update_apply_reject_uses_the_executed_error_class_and_old_identity():
     native = _observation("apply.reject", "native")["sections"]["apply"]
     assert native["error_class"] == "Install", native
     assert native["module_origin_kind"] == "source_tree", native
-    assert native["module_version"] == compat.UPDATE_PLATFORM["app_version"], native
+    assert native["module_version"] == compat.UPDATE_PLATFORM["host_version"], native
     assert native["stop"] is None, native
     python_apply = _observation("apply.reject", "python")["sections"]["apply"]
     assert python_apply["error_class"] is None, python_apply

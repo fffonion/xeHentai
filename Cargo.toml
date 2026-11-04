@@ -42,14 +42,13 @@ percent-encoding = "2"
 image = "0.25"
 md5 = "0.7"
 tempfile = "3"
-# Native update packages: standard integrity/authenticity primitives and the
-# OS-level self replacement. `sha2` and `ed25519-dalek` are the mature crates
-# the reference authorization names; `self-replace` is the reviewed cross
-# platform replace helper (see `src/updater/install.rs`).
+# Signed RSS update packages: standard integrity/authenticity primitives only.
+# `sha2` and `ed25519-dalek` are the mature crates the reference authorization
+# names. An automatic update replaces the four RSS scripts in place; the running
+# host executable is never rewritten, so no self-replacement helper is needed.
 sha2 = "0.10"
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "pkcs8", "pem"] }
 hex = "0.4"
-self-replace = "1.5"
 # The confined gallery/archive opens use the reviewed `cap-primitives` 4.0.3
 # resolver on all supported hosts (Linux, macOS, Windows). Its Unix and
 # Windows backends are both reached through this one dependency; `rustix` and

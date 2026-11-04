@@ -1,4 +1,4 @@
-//! The v1 signed package descriptor and its mandatory native checks.
+//! The v2 signed package descriptor: the ONLY automatic-update format.
 //!
 //! The descriptor is a small JSON document whose EXACT bytes are signed with a
 //! detached Ed25519 signature. Verification therefore runs on the raw bytes
@@ -7,15 +7,22 @@
 //! field is then validated against the explicit contract numbers compiled into
 //! this binary.
 //!
-//! Native safety that the descriptor controls:
+//! Automatic updates only ever replace the four RSS scripts this host consumes.
+//! The signed entry list must therefore be EXACTLY those four install-relative
+//! paths: no executable, native library, UI asset, locale, configuration,
+//! session, log or private installer file may be listed, and a partial list is
+//! a rejection rather than a candidate that would mix new and old scripts.
+//!
+//! Contract checks:
+//!   * `v` is exactly [`DESCRIPTOR_VERSION`] (2); the retired v1 document and
+//!     every field it carried (`app_version`, `target`, `native_executable`,
+//!     `native_build_id`) is an unknown field or a wrong version, so it is
+//!     rejected instead of being migrated;
 //!   * `update_id` must be the identifier the trusted RSS decision selected;
-//!   * `target` must equal the compiled target triple, `host_abi`/`script_abi`
-//!     the compiled contract revisions, `app_version` this build's version;
+//!   * `host_abi`/`script_abi` must equal the compiled contract revisions;
 //!   * `archive_sha256` is the SHA-256 of the whole payload ZIP;
-//!   * `entries` is the complete list of install-relative files with their
-//!     exact lengths, and no entry may name user state or an ambiguous path;
-//!   * a native executable entry is only meaningful together with the
-//!     compiled build identifier it must report after the update is applied.
+//!   * `entries` is the complete list of install-relative RSS scripts with
+//!     their exact lengths.
 
 use std::path::Component;
 
@@ -26,7 +33,7 @@ use sha2::{Digest, Sha256};
 
 use super::error::UpdateError;
 
-pub const DESCRIPTOR_VERSION: i64 = 1;
+pub const DESCRIPTOR_VERSION: i64 = 2;
 /// Bound on the signed descriptor document itself.
 pub const MAX_DESCRIPTOR_BYTES: usize = 256 * 1024;
 /// A detached Ed25519 signature is exactly 64 bytes.
@@ -41,16 +48,10 @@ pub const MAX_TOTAL_BYTES: u64 = 384 * 1024 * 1024;
 pub struct Descriptor {
     pub v: i64,
     pub update_id: String,
-    pub app_version: String,
-    pub target: String,
     pub host_abi: i64,
     pub script_abi: i64,
     pub archive_sha256: String,
     pub entries: Vec<Entry>,
-    #[serde(default)]
-    pub native_executable: Option<String>,
-    #[serde(default)]
-    pub native_build_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -131,20 +132,6 @@ pub fn validate(descriptor: &Descriptor, expected_update_id: &str) -> Result<(),
             descriptor.update_id, expected_update_id
         )));
     }
-    if descriptor.app_version != crate::r#const::VERSION_DISPLAY {
-        return Err(UpdateError::package(format!(
-            "package app_version {:?} does not match this build {:?}",
-            descriptor.app_version,
-            crate::r#const::VERSION_DISPLAY
-        )));
-    }
-    if descriptor.target != crate::r#const::TARGET {
-        return Err(UpdateError::package(format!(
-            "package target {:?} is not this build target {:?}",
-            descriptor.target,
-            crate::r#const::TARGET
-        )));
-    }
     if descriptor.host_abi != crate::r#const::HOST_ABI
         || descriptor.script_abi != crate::r#const::SCRIPT_ABI
     {
@@ -166,6 +153,12 @@ pub fn validate(descriptor: &Descriptor, expected_update_id: &str) -> Result<(),
     let mut total = 0u64;
     for entry in &descriptor.entries {
         validate_install_path(&entry.path)?;
+        if !super::RSS_INSTALL_PATHS.contains(&entry.path.as_str()) {
+            return Err(UpdateError::package(format!(
+                "entry {:?} is not one of this host's four installable RSS scripts",
+                entry.path
+            )));
+        }
         if entry.len > MAX_ENTRY_BYTES {
             return Err(UpdateError::package(format!(
                 "entry {:?} declares {} bytes, above the {MAX_ENTRY_BYTES} limit",
@@ -189,30 +182,12 @@ pub fn validate(descriptor: &Descriptor, expected_update_id: &str) -> Result<(),
         }
         seen.push(&entry.path);
     }
-    match (&descriptor.native_executable, &descriptor.native_build_id) {
-        (None, None) => {}
-        (Some(executable), Some(build_id)) => {
-            validate_install_path(executable)?;
-            if !descriptor
-                .entries
-                .iter()
-                .any(|entry| &entry.path == executable)
-            {
-                return Err(UpdateError::package(format!(
-                    "native executable {executable:?} is not one of the declared entries"
-                )));
-            }
-            validate_identifier(build_id, "native_build_id")?;
-        }
-        (Some(_), None) => {
-            return Err(UpdateError::package(
-                "a native executable requires a native_build_id",
-            ));
-        }
-        (None, Some(_)) => {
-            return Err(UpdateError::package(
-                "a native_build_id requires a native executable entry",
-            ));
+    for path in super::RSS_INSTALL_PATHS {
+        if !seen.contains(&path) {
+            return Err(UpdateError::package(format!(
+                "the signed entry list is incomplete: it does not install {path}, so applying it \
+                 would mix new and old scripts"
+            )));
         }
     }
     Ok(())

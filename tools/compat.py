@@ -1112,11 +1112,12 @@ NATIVE_CASE_MAP = {
         "tests::m7::m7_module_direct_off_check_requests_and_hints_manually": ["update.decision"],
         "tests::m7::m7_binary_off_never_loads_the_update_module": ["update.decision"],
         "tests::m7p::m7p_download_publishes_one_signed_pending_envelope_and_keeps_the_live_tree": ["update.commit", "update.package"],
+        "tests::m7p::m7p_rss_only_install_boundary_rejects_non_rss_entries": ["update.package"],
+        "tests::m7p::m7p_download_follows_the_explicit_cdn_payload_redirect": ["update.package"],
         "tests::m7p::m7p_download_same_update_id_skips_the_package": ["update.decision"],
         "tests::m7p::m7p_cancelled_download_keeps_the_old_pending_and_a_fresh_run_succeeds": ["update.package"],
         "tests::m7p::m7p_next_start_applies_the_resource_candidate_and_runs_the_new_rss": ["update.apply"],
         "tests::m7p::m7p_next_start_rejects_an_uncompilable_candidate_and_keeps_the_live_tree": ["update.apply", "update.package"],
-        "tests::m7p::m7p_native_ab_reexec_runs_the_new_image_and_rejects_a_bad_candidate": ["update.apply"],
         "tests::m7p::m7p_successful_upgrade_leaves_no_rollback_artifacts": ["update.apply"],
         "tests::m7p::m7p_next_start_discards_a_tampered_pending_and_keeps_the_running_release": ["update.apply"],
         "tests::m7p::m7p_next_start_drops_a_pending_candidate_that_is_already_applied": ["update.apply"],
@@ -1222,11 +1223,12 @@ NATIVE_COMMANDS = {
         ["cargo", "test", "--bin", "xeHentai", "tests::m7::m7_module_direct_off_check_requests_and_hints_manually", "--", "--exact"],
         ["cargo", "test", "--bin", "xeHentai", "tests::m7::m7_binary_off_never_loads_the_update_module", "--", "--exact"],
         ["cargo", "test", "--bin", "xeHentai", "tests::m7p::m7p_download_publishes_one_signed_pending_envelope_and_keeps_the_live_tree", "--", "--exact"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m7p::m7p_rss_only_install_boundary_rejects_non_rss_entries", "--", "--exact"],
+        ["cargo", "test", "--bin", "xeHentai", "tests::m7p::m7p_download_follows_the_explicit_cdn_payload_redirect", "--", "--exact"],
         ["cargo", "test", "--bin", "xeHentai", "tests::m7p::m7p_download_same_update_id_skips_the_package", "--", "--exact"],
         ["cargo", "test", "--bin", "xeHentai", "tests::m7p::m7p_cancelled_download_keeps_the_old_pending_and_a_fresh_run_succeeds", "--", "--exact"],
         ["cargo", "test", "--bin", "xeHentai", "tests::m7p::m7p_next_start_applies_the_resource_candidate_and_runs_the_new_rss", "--", "--exact"],
         ["cargo", "test", "--bin", "xeHentai", "tests::m7p::m7p_next_start_rejects_an_uncompilable_candidate_and_keeps_the_live_tree", "--", "--exact"],
-        ["cargo", "test", "--bin", "xeHentai", "tests::m7p::m7p_native_ab_reexec_runs_the_new_image_and_rejects_a_bad_candidate", "--", "--exact"],
         ["cargo", "test", "--bin", "xeHentai", "tests::m7p::m7p_successful_upgrade_leaves_no_rollback_artifacts", "--", "--exact"],
         ["cargo", "test", "--bin", "xeHentai", "tests::m7p::m7p_next_start_discards_a_tampered_pending_and_keeps_the_running_release", "--", "--exact"],
         ["cargo", "test", "--bin", "xeHentai", "tests::m7p::m7p_next_start_drops_a_pending_candidate_that_is_already_applied", "--", "--exact"],
@@ -4848,14 +4850,22 @@ UPDATE_SEEDED_CASES = (
     "apply.reject",
 )
 
-# The descriptor must bind exactly the compiling host; these are the current
-# `src/const.rs` values (VERSION_DISPLAY/TARGET/HOST_ABI/SCRIPT_ABI).
+# The v2 descriptor binds exactly the compiling host ABI; the host version is
+# what the running image reports (it never changes with an RSS-only update).
 UPDATE_PLATFORM = {
-    "app_version": "2.023-rss",
-    "target": "x86_64-unknown-linux-gnu",
+    "host_version": "2.023-rss",
     "host_abi": 1,
     "script_abi": 1,
 }
+
+# The complete install boundary of an automatic update: exactly the four RSS
+# scripts this host consumes (src/updater/mod.rs RSS_INSTALL_PATHS).
+UPDATE_INSTALL_PATHS = [
+    "rss/filters/match.rss",
+    "rss/rpc/handlers.rss",
+    "rss/updater/github.rss",
+    "rss/updater/updater.rss",
+]
 
 UPDATE_PY_API = (
     "https://api.github.com/repos/fffonion/xeHentai/commits?sha=%s")
@@ -4869,6 +4879,8 @@ UPDATE_NA_COMMITS = "%s/repos/fffonion/xeHentai/commits?sha=%s"
 # The native package fixture bodies are shared inputs so both sides observe the
 # same bytes and the descriptor lengths stay independently checkable.
 UPDATE_PACKAGE_BODIES = {
+    "rss/filters/match.rss": "// b6 candidate filters\n",
+    "rss/rpc/handlers.rss": "// b6 candidate rpc handlers\n",
     "rss/updater/github.rss": "// b6 candidate binding\n",
     "rss/updater/updater.rss": "// b6 candidate decision\n",
 }
@@ -5127,20 +5139,20 @@ def _update_python_member_bodies():
 
 
 def _update_na_package():
+    if list(UPDATE_PACKAGE_BODIES) != UPDATE_INSTALL_PATHS:
+        raise CompatError(
+            "the native package fixture no longer covers exactly the four RSS "
+            "install paths")
     bodies = list(UPDATE_PACKAGE_BODIES.items())
     entries = [{"path": path, "len": len(body.encode("utf-8"))}
                for path, body in bodies]
     info = {
-        "v": 1,
+        "v": 2,
         "update_id": UPDATE_ID,
-        "app_version": UPDATE_PLATFORM["app_version"],
-        "target": UPDATE_PLATFORM["target"],
         "host_abi": UPDATE_PLATFORM["host_abi"],
         "script_abi": UPDATE_PLATFORM["script_abi"],
         "archive_sha256": "<sha256>",
         "entries": entries,
-        "native_executable": None,
-        "native_build_id": None,
     }
     selected = [path for path, _ in bodies]
     input_members = ["xeHentai-%s/%s" % (UPDATE_ID, path)
@@ -5330,7 +5342,7 @@ def update_expected_sections(case, side, origin):
                 None, None, None)}
         return {"apply": _update_apply(
             True, False, UPDATE_ID, True, True, "source_tree",
-            UPDATE_PLATFORM["app_version"], None,
+            UPDATE_PLATFORM["host_version"], None,
             None,
             "/repos/fffonion/xeHentai/commits?sha=rss-b")}
     if case == "apply.reject":
@@ -5345,7 +5357,7 @@ def update_expected_sections(case, side, origin):
                 True, True, "", None, True, None, 2.023, None, None, None)}
         return {"apply": _update_apply(
             True, False, None, False, True, "source_tree",
-            UPDATE_PLATFORM["app_version"], None, "Install", None)}
+            UPDATE_PLATFORM["host_version"], None, "Install", None)}
     if case == "cli.off":
         return {
             "feed": _update_feed([]),

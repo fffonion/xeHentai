@@ -22,7 +22,7 @@
 //! The owned background task, cancellation and logger sink belong to the
 //! existing `main`/`run_supervised` owner (see `src/main.rs`).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::OnceLock;
 
 use vm::{
@@ -40,6 +40,18 @@ pub use error::UpdateError;
 
 pub const GITHUB_RSS: &str = "rss/updater/github.rss";
 pub const UPDATER_RSS: &str = "rss/updater/updater.rss";
+
+/// The complete install boundary of an automatic update: exactly the four RSS
+/// scripts this host consumes. Nothing else — no executable, native library,
+/// UI asset, locale, configuration, session or installer state — is an
+/// update target. A signed package must list all four and nothing else, so a
+/// prepared candidate can never mix new and old scripts.
+pub const RSS_INSTALL_PATHS: [&str; 4] = [
+    crate::filters::FILTER_RSS,
+    crate::rpc::RPC_RSS,
+    GITHUB_RSS,
+    UPDATER_RSS,
+];
 
 /// The only SDK surface the two business modules need: strict JSON decode and
 /// the reference CR/LF rewrite. They perform no network operation themselves.
@@ -93,6 +105,14 @@ pub struct SourceBinding {
     pub stable_channel: String,
     pub beta_channel: Option<String>,
     pub package_download_origin: String,
+    /// The one explicitly authorized Content-Delivery origin. A same-repository
+    /// GitHub Release asset answers `302` to
+    /// `https://release-assets.githubusercontent.com`; this origin is admitted
+    /// ONLY as a redirect target of a package request (descriptor, signature or
+    /// payload). It is never an initial URL and never valid for commit
+    /// metadata. `None` means a package chain may only stay on the package
+    /// origin.
+    pub package_cdn_origin: Option<String>,
     pub verification_key: Option<String>,
 }
 
@@ -270,6 +290,13 @@ fn binding_value(binding: &SourceBinding) -> Value {
         ),
     ];
     entries.push((
+        Value::string("package_cdn_origin"),
+        match &binding.package_cdn_origin {
+            Some(origin) => Value::string(origin.clone()),
+            None => Value::Null,
+        },
+    ));
+    entries.push((
         Value::string("beta_channel"),
         match &binding.beta_channel {
             Some(channel) => Value::string(channel.clone()),
@@ -295,6 +322,7 @@ fn decode_binding(value: &Value) -> Result<SourceBinding, UpdateError> {
         stable_channel: text_of(map, "stable_channel", what)?,
         beta_channel: optional_text(map, "beta_channel", what)?,
         package_download_origin: text_of(map, "package_download_origin", what)?,
+        package_cdn_origin: optional_text(map, "package_cdn_origin", what)?,
         verification_key: optional_text(map, "verification_key", what)?,
     })
 }
@@ -556,7 +584,7 @@ impl Updater {
 
         // The plan's GET is performed by the updater's own native transport:
         // status and a strictly decoded body are all `gh_parse` sees.
-        let response = self.transport.get(&plan.url, &plan.headers).await?;
+        let response = self.transport.get_api(&plan.url, &plan.headers).await?;
         let body = response.text()?;
 
         let parse_value = {
@@ -622,7 +650,10 @@ impl Updater {
         info: &UpdateInfo,
         headers: &[(String, String)],
     ) -> Result<CheckReport, UpdateError> {
-        let descriptor_fetch = self.transport.get(&info.descriptor_link, headers).await?;
+        let descriptor_fetch = self
+            .transport
+            .get_package(&info.descriptor_link, headers)
+            .await?;
         if descriptor_fetch.status != 200 {
             return self.failure(&format!(
                 "descriptor request returned HTTP {}",
@@ -631,7 +662,10 @@ impl Updater {
         }
         // The descriptor is text: strict UTF-8, then the same bytes are signed.
         let descriptor_bytes = descriptor_fetch.text()?.into_bytes();
-        let signature_fetch = self.transport.get(&info.signature_link, headers).await?;
+        let signature_fetch = self
+            .transport
+            .get_package(&info.signature_link, headers)
+            .await?;
         let signature_status = signature_fetch.status;
         let signature = signature_fetch.body;
         if signature_status != 200 {
@@ -649,7 +683,10 @@ impl Updater {
             Err(error) => return self.failure(&error.to_string()),
         };
 
-        let payload_fetch = self.transport.get(&info.download_link, headers).await?;
+        let payload_fetch = self
+            .transport
+            .get_package(&info.download_link, headers)
+            .await?;
         let payload_status = payload_fetch.status;
         let payload = payload_fetch.body;
         if payload_status != 200 {
@@ -761,11 +798,12 @@ fn read_script(root: &Path, relative: &'static str) -> Result<String, UpdateErro
 }
 
 /// What the pre-business-App startup controller did, in terms `main` can log
-/// and act on. `reexec` is present only for a native candidate whose real new
-/// image was installed and must now run.
+/// and act on. A successful application changes the four RSS scripts in place;
+/// the running host keeps executing and simply loads the new scripts through
+/// its existing module entry points, so no re-execution or helper process is
+/// ever requested.
 pub struct StartupReport {
     pub events: Vec<LogEvent>,
-    pub reexec: Option<PathBuf>,
     /// Set when the startup could not safely continue: the caller must NOT
     /// construct the business App or touch the session.
     pub stop: Option<StartupStop>,
@@ -786,11 +824,7 @@ pub enum StartupStop {
 impl StartupReport {
     fn new(outcome: &str, events: Vec<LogEvent>) -> Self {
         let _ = outcome;
-        Self {
-            events,
-            reexec: None,
-            stop: None,
-        }
+        Self { events, stop: None }
     }
     fn failed(detail: impl Into<String>) -> Self {
         Self::new(
@@ -829,8 +863,9 @@ impl StartupReport {
 /// modules and the per-install lock are not loaded at all. When a pending
 /// envelope exists, the OLD installation's `rss/updater/updater.rss` decides
 /// apply/stale, while this function enforces the native safety: signature,
-/// digest, ABI/target, entry list, complete staging and the private preflight
-/// all happen BEFORE any live file is replaced. A rejected candidate is
+/// digest, ABI, the exact four-script entry list, complete staging, the live
+/// symlink boundary and the in-process compile/bind of all four scripts all
+/// happen BEFORE any live file is replaced. A rejected candidate is
 /// discarded and the current release keeps running exactly as it was. A
 /// failure after the first live replacement may leave a mixed tree, so it
 /// stops this start (`StartupStop::ApplyFailed`) and keeps the pending
@@ -942,19 +977,10 @@ pub fn startup(install_root: &Path) -> StartupReport {
                 payload: envelope.payload,
                 prefix,
             };
-            // Capture the running path BEFORE any self-replacement: after the
-            // executable inode is replaced, `/proc/self/exe` reports the old
-            // unlinked image (Linux appends " (deleted)") and would not be
-            // executable again.
-            let exe = std::env::current_exe().ok();
             match install::install_candidate(&installation, &candidate) {
-                Ok(committed) => {
+                Ok(()) => {
                     let _ = installation.discard_pending();
-                    let mut report = StartupReport::new("applied", decision.events);
-                    if committed.reexec {
-                        report.reexec = exe;
-                    }
-                    report
+                    StartupReport::new("applied", decision.events)
                 }
                 Err(error) if error.is_apply() => {
                     // The live replacement already began, so the tree may be
@@ -985,46 +1011,6 @@ pub fn startup(install_root: &Path) -> StartupReport {
         }
         _ => StartupReport::new("none", decision.events),
     }
-}
-
-/// Run the installer-private candidate preflight: the real executable and real
-/// module loading against private state, no user configuration/session, no
-/// network. Prints the marker `main`'s caller looks for.
-pub fn run_preflight(candidate_root: &Path, state: &Path) -> i32 {
-    let loaded = match crate::config::Config::load(state) {
-        Ok(loaded) => loaded,
-        Err(error) => {
-            eprintln!("xeHentai: preflight configuration: {error}");
-            return 1;
-        }
-    };
-    let logger = crate::util::logger::Logger::new();
-    let app = match crate::core::App::new(loaded.config, logger, state, candidate_root) {
-        Ok(app) => app,
-        Err(error) => {
-            eprintln!("xeHentai: preflight app: {error}");
-            return 1;
-        }
-    };
-    if let Err(error) = crate::filters::Filters::load(candidate_root) {
-        eprintln!("xeHentai: preflight filters: {error}");
-        return 1;
-    }
-    if let Err(error) = crate::rpc::RpcDispatcher::load(candidate_root) {
-        eprintln!("xeHentai: preflight rpc: {error}");
-        return 1;
-    }
-    if let Err(error) = Updater::load(candidate_root) {
-        eprintln!("xeHentai: preflight updater: {error}");
-        return 1;
-    }
-    let _ = app.base_dir();
-    println!(
-        "{} {}",
-        install::PREFLIGHT_MARKER,
-        crate::r#const::version_label()
-    );
-    0
 }
 
 /// Convenience for the logging owner: render one RSS-selected event through

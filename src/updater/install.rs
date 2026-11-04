@@ -13,49 +13,46 @@
 //!   lock                               per-install cross-process write lock
 //!   pending/src.zip                    one atomically published envelope
 //!   staging/<random>/                  complete candidate tree, private
-//!   preflight/                         private state for the candidate run
 //!   state.json                         the single applied identity (atomic)
 //! ```
 //!
-//! There is no rollback state. Download only publishes the pending envelope;
-//! the next start materializes the COMPLETE candidate into staging, runs the
-//! real private preflight and only then replaces the selected live files. A
-//! candidate that fails any preparation step is discarded and the running
-//! release keeps running unchanged. The applied identity is published only
-//! after the replacement really succeeded.
+//! There is no rollback state, no journal and no recovery record. Download
+//! only publishes the pending envelope; the next start materializes the
+//! COMPLETE candidate into staging, compiles and binds the four RSS scripts
+//! in THIS process through their existing module entry points, and only then
+//! replaces the four live scripts. A candidate that fails any preparation step
+//! is discarded and the running release keeps running unchanged. The applied
+//! identity is published only after every replacement really succeeded.
+//!
+//! Automatic updates only replace the four RSS scripts; the running host
+//! executable is never rewritten and no helper process is started.
 //! `h.json`, `config.rss`, `eh.log` and the legacy cookie file are never
 //! package entries and never touched.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
 use super::descriptor::Descriptor;
 use super::error::UpdateError;
-use super::package::{self, SelectedEntry};
+use super::package;
 
 pub const AREA_DIR: &str = ".xehentai-update";
 pub const STATE_FILE: &str = "state.json";
 pub const LOCK_FILE: &str = "lock";
 pub const PENDING_DIR: &str = "pending";
 pub const STAGING_DIR: &str = "staging";
-pub const PREFLIGHT_DIR: &str = "preflight";
-pub const STATE_VERSION: i64 = 1;
-/// The candidate preflight is a real process; this bound only stops a wedged
-/// child, it is not a policy timeout.
-const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(180);
+pub const STATE_VERSION: i64 = 2;
 
 /// The one applied release identity. It is also the only source of the
-/// same-update-id decision; it is never inferred from files.
+/// same-update-id decision; it is never inferred from files. It carries no
+/// build/native/history/backup field: an automatic update is an RSS script
+/// replacement and nothing else.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Record {
     pub update_id: String,
-    pub build_id: String,
-    pub native: bool,
     pub applied_at: String,
 }
 
@@ -111,10 +108,6 @@ impl Installation {
 
     fn staging_root(&self) -> PathBuf {
         self.area().join(STAGING_DIR)
-    }
-
-    fn preflight_root(&self) -> PathBuf {
-        self.area().join(PREFLIGHT_DIR)
     }
 
     /// Verify an EXISTING update area before it is trusted for a read or a
@@ -763,30 +756,25 @@ pub struct Candidate {
     pub prefix: String,
 }
 
-/// One installed release: whether the caller must re-execute the installed
-/// image. The applied record was already published by the installer.
-pub struct Committed {
-    pub reexec: bool,
-}
-
-/// Prepare and then apply one validated candidate.
+/// Prepare and apply one validated candidate.
 ///
 /// Everything that can reject the candidate — complete materialization into a
-/// private staging tree and the real private preflight — happens BEFORE any
-/// live file is touched, so a failure there leaves the running release
-/// completely unchanged and is an ordinary `Install` rejection. Only a fully
-/// prepared candidate replaces the selected files; the applied record is
-/// written only after that replacement succeeded. Any failure from the first
-/// live mutation on is tagged as an `Apply` failure (the tree may be mixed),
-/// which the startup controller must stop on rather than continue past.
+/// private staging tree, the live-target boundary pass, and the real compile
+/// and binding of all four scripts through their existing module entry points
+/// in THIS process — happens BEFORE any live file is touched, so a failure
+/// there leaves the running release completely unchanged and is an ordinary
+/// `Install` rejection. Only a fully prepared candidate replaces the four
+/// scripts; the applied record is written only after every replacement
+/// succeeded. Any failure from the first live mutation on is tagged as an
+/// `Apply` failure (the tree may be mixed), which the startup controller must
+/// stop on rather than continue past.
 pub fn install_candidate(
     installation: &Installation,
     candidate: &Candidate,
-) -> Result<Committed, UpdateError> {
+) -> Result<(), UpdateError> {
     let area = installation.area();
     ensure_private_dir(&area)?;
     ensure_private_dir(&installation.staging_root())?;
-    ensure_private_dir(&installation.preflight_root())?;
 
     let staging = tempfile::Builder::new()
         .prefix("candidate-")
@@ -799,73 +787,28 @@ pub fn install_candidate(
         staging.path(),
     )?;
 
-    let exe_path = std::env::current_exe().map_err(|error| {
-        UpdateError::install(format!(
-            "the running executable path is unavailable: {error}"
-        ))
-    })?;
-    let native = candidate.descriptor.native_executable.clone();
-    let preflight_exe = match &native {
-        Some(entry) => {
-            let staged = staging.path().join(entry);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
-                    .map_err(|error| UpdateError::io(&staged, &error))?;
-            }
-            staged
-        }
-        None => exe_path.clone(),
-    };
+    preflight(staging.path())?;
 
-    #[cfg(not(unix))]
-    if native.is_some() {
-        // Honest platform boundary: native self replacement plus re-execution
-        // is only verified on Unix. A resource-only candidate stays available.
-        return Err(UpdateError::install(
-            "native executable replacement is not verified on this platform; the candidate was rejected",
-        ));
+    // Refuse an unusable live target BEFORE the first replacement, so a
+    // predictable boundary problem cannot be discovered halfway through the
+    // switch. Nothing has been written yet, so this is still a rejection.
+    for entry in &selected {
+        verify_live_boundary(installation.root(), &entry.path)?;
     }
 
-    preflight(
-        &preflight_exe,
-        staging.path(),
-        &installation.preflight_root(),
-    )?;
-
-    // The candidate is complete and preflighted; only now are live files
-    // replaced. This is the apply phase: from the first replacement on, a
-    // failure means the live tree may already be mixed, so it must stop this
-    // start instead of being reported as a candidate rejection. There is no
-    // undo, journal or recovery record.
-    let resources: Vec<&SelectedEntry> = selected
-        .iter()
-        .filter(|entry| Some(&entry.path) != native.as_ref())
-        .collect();
+    // The candidate is complete and preflighted; only now are the four live
+    // scripts replaced. This is the apply phase: from the first replacement
+    // on, a failure means the live tree may already be mixed, so it must stop
+    // this start instead of being reported as a candidate rejection. There is
+    // no undo, journal or recovery record.
     let apply = || -> Result<(), UpdateError> {
-        for entry in &resources {
+        for entry in &selected {
             let staged = staging.path().join(&entry.path);
             let live = installation.root().join(&entry.path);
             replace_file(&live, &staged)?;
         }
-        if let Some(entry) = &native {
-            // The running image keeps its inode; the path now refers to the
-            // candidate bytes. Re-execution below loads the real new image.
-            let staged = staging.path().join(entry);
-            self_replace::self_replace(&staged)
-                .map_err(|error| UpdateError::install(format!("self replacement: {error}")))?;
-        }
-
-        let build_id = candidate
-            .descriptor
-            .native_build_id
-            .clone()
-            .unwrap_or_else(|| crate::r#const::BUILD_ID.to_string());
         let record = Record {
             update_id: candidate.descriptor.update_id.clone(),
-            build_id,
-            native: native.is_some(),
             applied_at: crate::util::logger::now_gmt8().to_rfc3339(),
         };
         installation.write_records(&Records {
@@ -876,9 +819,79 @@ pub fn install_candidate(
     };
     apply().map_err(UpdateError::during_apply)?;
 
-    Ok(Committed {
-        reexec: native.is_some(),
-    })
+    Ok(())
+}
+
+/// Compile and bind every script of the prepared candidate in this process,
+/// through the same module entry points the business code uses. No helper
+/// process, no business `App`, no user configuration and no session is
+/// involved; the four scripts are exactly the four consumers this host loads.
+fn preflight(candidate_root: &Path) -> Result<(), UpdateError> {
+    crate::filters::Filters::load(candidate_root).map_err(|error| {
+        UpdateError::install(format!("candidate rss/filters/match.rss rejected: {error}"))
+    })?;
+    crate::rpc::RpcDispatcher::load(candidate_root).map_err(|error| {
+        UpdateError::install(format!("candidate rss/rpc/handlers.rss rejected: {error}"))
+    })?;
+    super::Updater::load(candidate_root).map_err(|error| {
+        UpdateError::install(format!("candidate rss/updater scripts rejected: {error}"))
+    })?;
+    Ok(())
+}
+
+/// One live target must be reachable without following a symlink: every
+/// existing ancestor under the installation root is a real directory, and the
+/// leaf is either absent or a real regular file. An RSS replacement therefore
+/// can never be redirected outside the installed tree.
+fn verify_live_boundary(root: &Path, relative: &str) -> Result<(), UpdateError> {
+    let live = root.join(relative);
+    let mut current = root.to_path_buf();
+    let Some(parent) = live.parent() else {
+        return Err(UpdateError::install(format!(
+            "{} has no parent directory",
+            live.display()
+        )));
+    };
+    for component in parent
+        .strip_prefix(root)
+        .map_err(|_| {
+            UpdateError::install(format!(
+                "{} is not inside {}",
+                live.display(),
+                root.display()
+            ))
+        })?
+        .components()
+    {
+        current = current.join(component);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(UpdateError::install(format!(
+                        "{} is a symlink; an RSS script is never installed through it",
+                        current.display()
+                    )));
+                }
+                if !metadata.is_dir() {
+                    return Err(UpdateError::install(format!(
+                        "{} exists and is not a directory",
+                        current.display()
+                    )));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(UpdateError::io(&current, &error)),
+        }
+    }
+    match std::fs::symlink_metadata(&live) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(UpdateError::install(format!(
+            "{} is a symlink; an RSS script is never replaced through it",
+            live.display()
+        ))),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(UpdateError::io(&live, &error)),
+    }
 }
 
 /// Replace one live file with the prepared staged copy via the same
@@ -901,131 +914,6 @@ fn replace_file(live: &Path, staged: &Path) -> Result<(), UpdateError> {
             Err(error) => return Err(UpdateError::io(live, &error)),
         }
         std::fs::rename(staged, live).map_err(|error| UpdateError::io(live, &error))
-    }
-}
-
-/// Run the candidate through the same host's minimal private update mode: the
-/// real executable, real configuration and module loading, private state, no
-/// network and no user configuration or session touched.
-fn preflight(exe: &Path, resources: &Path, preflight_root: &Path) -> Result<(), UpdateError> {
-    let state = preflight_root.join(format!("state-{}", std::process::id()));
-    if state.exists() {
-        ensure_private_dir(&state)?;
-        std::fs::remove_dir_all(&state).map_err(|error| UpdateError::io(&state, &error))?;
-    }
-    ensure_private_dir(&state)?;
-    for dir in ["home", "tmp", "cache"] {
-        ensure_private_dir(&state.join(dir))?;
-    }
-    let mut child = Command::new(exe)
-        .arg("--update-preflight")
-        .arg(resources)
-        .arg(&state)
-        .current_dir(&state)
-        // `env_clear` keeps the private preflight independent of the parent:
-        // it never inherits the update area or a user configuration spelling.
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("HOME", state.join("home"))
-        .env("TMPDIR", state.join("tmp"))
-        .env("XDG_CACHE_HOME", state.join("cache"))
-        .env("LANG", "C")
-        .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            UpdateError::install(format!(
-                "cannot run the candidate preflight ({}): {error}",
-                exe.display()
-            ))
-        })?;
-    let deadline = Instant::now() + PREFLIGHT_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let output = child
-                    .wait_with_output()
-                    .map_err(|error| UpdateError::install(format!("preflight output: {error}")))?;
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if !status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(UpdateError::install(format!(
-                        "candidate preflight exited {:?}: {}{}",
-                        status.code(),
-                        stdout.trim(),
-                        stderr.trim()
-                    )));
-                }
-                if !stdout.contains(PREFLIGHT_MARKER) {
-                    return Err(UpdateError::install(format!(
-                        "candidate preflight did not report {PREFLIGHT_MARKER}: {}",
-                        stdout.trim()
-                    )));
-                }
-                return Ok(());
-            }
-            Ok(None) => {
-                if Instant::now() > deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(UpdateError::install(
-                        "candidate preflight did not finish in time",
-                    ));
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Err(error) => {
-                return Err(UpdateError::install(format!("preflight wait: {error}")));
-            }
-        }
-    }
-}
-
-/// The marker the private preflight mode prints on success.
-pub const PREFLIGHT_MARKER: &str = "xeHentai-preflight-ok";
-
-/// Parse `--update-preflight <resources> <state>` from a real process argv.
-/// This is an installer primitive, not a public switch: an ordinary command
-/// line never reaches it.
-pub fn preflight_request(argv: &[std::ffi::OsString]) -> Option<(PathBuf, PathBuf)> {
-    if argv.len() != 4 || argv[1] != "--update-preflight" {
-        return None;
-    }
-    Some((PathBuf::from(&argv[2]), PathBuf::from(&argv[3])))
-}
-
-/// Re-execute the installed image in place. Returns only if the platform has
-/// no verified path, which the caller reports as a failed update.
-pub fn reexec(exe: &Path) -> UpdateError {
-    #[cfg(unix)]
-    {
-        use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt;
-        let mut args: Vec<CString> = Vec::new();
-        let mut argv = std::env::args_os();
-        argv.next();
-        let exe_c = match CString::new(exe.as_os_str().as_bytes()) {
-            Ok(value) => value,
-            Err(_) => return UpdateError::install("executable path is not a valid argument"),
-        };
-        args.push(exe_c);
-        for arg in argv {
-            match CString::new(arg.as_os_str().as_bytes()) {
-                Ok(value) => args.push(value),
-                Err(_) => return UpdateError::install("argument is not a valid exec argument"),
-            }
-        }
-        // The owned lock descriptor is close-on-exec, so the lock is released
-        // when the replacement image really starts; there is no handoff state.
-        let error = nix::unistd::execv(&args[0], &args).unwrap_err();
-        UpdateError::install(format!("re-executing the installed update: {error}"))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = exe;
-        UpdateError::install("re-execution is not verified on this platform")
     }
 }
 
