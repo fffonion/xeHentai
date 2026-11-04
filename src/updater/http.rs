@@ -192,7 +192,7 @@ impl Transport {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn for_test(
         api_origin: &str,
         package_origin: &str,
