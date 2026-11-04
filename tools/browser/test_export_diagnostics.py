@@ -318,6 +318,88 @@ class ExporterTests(unittest.TestCase):
         self.assertIn("export_diagnostics.py", step_block)
         self.assertIn("always()", step_block)
 
+    def extract_project_diagnostics_script(self):
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8")
+        lines = ci.splitlines()
+        anchor = next(i for i, line in enumerate(lines)
+                      if "Project browser diagnostics" in line)
+        run_idx = next(i for i in range(anchor, min(anchor + 10, len(lines)))
+                      if lines[i].strip() == "run: |")
+        run_indent = len(lines[run_idx]) - len(lines[run_idx].lstrip())
+        block_indent = run_indent + 2
+        prefix = " " * block_indent
+        script_lines = []
+        for line in lines[run_idx + 1:]:
+            if line.strip() == "":
+                script_lines.append("")
+                continue
+            indent = len(line) - len(line.lstrip())
+            if indent < block_indent:
+                break
+            script_lines.append(line[len(prefix):] if line.startswith(prefix)
+                                else line.lstrip())
+        script = "\n".join(script_lines).rstrip("\n") + "\n"
+        self.assertIn("export_diagnostics.py", script)
+        return script
+
+    def run_project_diagnostics_script(self, script, runner_temp):
+        script_path = self.work / "workflow-projection.sh"
+        script_path.write_text(script, encoding="utf-8")
+        env = dict(os.environ)
+        env["RUNNER_TEMP"] = str(runner_temp)
+        env["XEH_PYTHON"] = sys.executable
+        return subprocess.run(
+            ["bash", "-euo", "pipefail", str(script_path)],
+            capture_output=True, text=True, timeout=60,
+            cwd=str(ROOT), env=env)
+
+    def test_project_browser_diagnostics_workflow_argv_executes(self):
+        script = self.extract_project_diagnostics_script()
+        with self.subTest(case="valid"):
+            runner_temp = self.work / "runner-valid"
+            report_path = runner_temp / "browser-run" / "browser-report.json"
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            before = json.dumps(synthetic_report()).encode("utf-8")
+            report_path.write_bytes(before)
+            proc = self.run_project_diagnostics_script(script, runner_temp)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            out = runner_temp / "ci-diagnostics" / "browser-report-public.json"
+            projected = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual([c["check"] for c in projected["checks"]],
+                             ["exporter.synthetic.connect",
+                              "exporter.synthetic.rows",
+                              "exporter.synthetic.config"])
+            self.assertEqual(report_path.read_bytes(), before)
+            self.assert_scrubbed(out.read_text(encoding="utf-8"))
+        with self.subTest(case="absent"):
+            runner_temp = self.work / "runner-absent"
+            (runner_temp / "browser-run").mkdir(parents=True, exist_ok=True)
+            proc = self.run_project_diagnostics_script(script, runner_temp)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            out = runner_temp / "ci-diagnostics" / "browser-report-public.json"
+            payload = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(payload["status"], "report-absent")
+            self.assertNotIn("checks", payload)
+            self.assertNotIn("trace", payload)
+            self.assertEqual(payload["check_count"], 0)
+            self.assertEqual(payload["trace_count"], 0)
+        with self.subTest(case="malformed"):
+            runner_temp = self.work / "runner-malformed"
+            report_path = runner_temp / "browser-run" / "browser-report.json"
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            marker = "MALFORMED-MARKER-workflow-9t2"
+            before = b"{oops " + marker.encode()
+            report_path.write_bytes(before)
+            proc = self.run_project_diagnostics_script(script, runner_temp)
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+            out = runner_temp / "ci-diagnostics" / "browser-report-public.json"
+            payload = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(payload["status"], "report-malformed")
+            self.assertIsInstance(payload["error"], str)
+            self.assertNotIn(marker, out.read_text(encoding="utf-8"))
+            self.assertEqual(report_path.read_bytes(), before)
+
 
 if __name__ == "__main__":
     unittest.main()

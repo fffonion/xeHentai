@@ -214,7 +214,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/ci-diagnostics"
           "$XEH_PYTHON" tools/browser/export_diagnostics.py \
-            --report "$RUNNER_TEMP/browser-run/browser-report.json" \
+            "$RUNNER_TEMP/browser-run/browser-report.json" \
             --out "$RUNNER_TEMP/ci-diagnostics/browser-report-public.json"
       - name: Upload Linux diagnostics (observation only)
         if: always()
