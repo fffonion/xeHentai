@@ -198,6 +198,7 @@ impl Server {
         *self.partial.lock().unwrap().get(path).unwrap_or(&0)
     }
 
+    #[cfg(target_os = "linux")]
     fn peer_eof(&self, path: &str) -> bool {
         self.peer_ends(path).contains(&PeerReadEnd::Eof)
     }
