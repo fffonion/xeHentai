@@ -88,6 +88,7 @@ jobs:
           "$XEH_PYTHON" tools/test_package_dist.py
           "$XEH_PYTHON" tools/test_compat_gallery.py
           "$XEH_PYTHON" tools/browser/test_verify_webui_49.py
+          "$XEH_PYTHON" tools/browser/test_export_diagnostics.py
           "$XEH_PYTHON" tools/browser/test_run.py
       - name: Release build
         run: cargo build --release --locked
@@ -200,6 +201,21 @@ jobs:
           print("manifest bound to", manifest["head"], "dirty", manifest["dirty"])
           PY
           "$XEH_PYTHON" tools/compat.py --verify-all --evidence "$evidence"
+      # Public-only projection of the browser report: the runner-local original
+      # embeds the synthetic test credential (request post params/bodies and
+      # raw URLs), so it is never uploaded. This step runs right before the
+      # always-upload and writes only the allowlisted projection; when no
+      # report exists it writes a small report-absent status instead of
+      # fabricating checks or trace. A malformed present report fails this
+      # step with a fixed safe error and no raw dump.
+      - name: Project browser diagnostics (public allowlist only)
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ci-diagnostics"
+          "$XEH_PYTHON" tools/browser/export_diagnostics.py \
+            --report "$RUNNER_TEMP/browser-run/browser-report.json" \
+            --out "$RUNNER_TEMP/ci-diagnostics/browser-report-public.json"
       - name: Upload Linux diagnostics (observation only)
         if: always()
         uses: actions/upload-artifact@v7
@@ -209,9 +225,8 @@ jobs:
           if-no-files-found: warn
           path: |
             ${{ runner.temp }}/ci-diagnostics/child-env-provenance.json
-            ${{ runner.temp }}/browser-run/browser-report.json
+            ${{ runner.temp }}/ci-diagnostics/browser-report-public.json
             ${{ runner.temp }}/browser-run/receipt.json
-            ${{ runner.temp }}/browser-run/request.json
             ${{ runner.temp }}/browser-run/backend.stdout.log
             ${{ runner.temp }}/browser-run/backend.stderr.log
             ${{ runner.temp }}/browser-run/driver.log
