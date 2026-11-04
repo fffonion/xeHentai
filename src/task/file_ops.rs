@@ -1010,9 +1010,9 @@ impl GalleryGrant {
         check_leaf(leaf)?;
         // Test-only deterministic window: the fixture change lands between the
         // snapshot observation and the descriptor capture, exactly where the
-        // real race would be. A no-op unless armed, and compiled out of
-        // production builds.
-        #[cfg(test)]
+        // real race would be. Unix-only, a no-op unless armed, and compiled
+        // out of production builds.
+        #[cfg(all(test, unix))]
         run_preopen_seam(&self.gallery_path(), &leaf.to_string_lossy());
         let Some(rooted) = self.capture()? else {
             return Ok(None);
@@ -1048,7 +1048,7 @@ impl GalleryGrant {
     /// was missing or unavailable at snapshot time grants nothing.
     pub fn open_sibling_archive(&self) -> Result<Option<File>, TaskError> {
         let name = self.sibling_name();
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         run_preopen_seam(&self.root, &name.to_string_lossy());
         let Some(rooted) = self.capture()? else {
             return Ok(None);
@@ -1677,9 +1677,10 @@ impl CapturedGalleryDir {
 /// TEST-ONLY swap performed on the calling thread between the link precheck
 /// and the open, so a regular inside-gallery file becomes an outside or
 /// reserved symlink (or a swapped parent) exactly in the race window. Armed
-/// once per `(root, name)` open attempt; a no-op unless armed. Production
-/// builds contain no hook at all.
-#[cfg(test)]
+/// once per `(root, name)` open attempt; a no-op unless armed. Unix-only:
+/// every fixture is a real symlink, which this seam must actually create.
+/// Production builds contain no hook at all.
+#[cfg(all(test, unix))]
 #[derive(Debug)]
 pub(crate) enum PreopenSwap {
     /// Replace `root/name` with a symlink to `target`.
@@ -1688,10 +1689,10 @@ pub(crate) enum PreopenSwap {
     RootLink(PathBuf),
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 static PREOPEN_SEAMS: Mutex<Vec<(String, String, PreopenSwap)>> = Mutex::new(Vec::new());
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn arm_preopen_swap(root: &Path, name: &str, swap: PreopenSwap) {
     PREOPEN_SEAMS.lock().unwrap().push((
         root.to_string_lossy().into_owned(),
@@ -1700,7 +1701,7 @@ pub(crate) fn arm_preopen_swap(root: &Path, name: &str, swap: PreopenSwap) {
     ));
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn take_preopen_swap(root: &Path, name: &str) -> Option<PreopenSwap> {
     let key = root.to_string_lossy().into_owned();
     let mut seams = PREOPEN_SEAMS.lock().unwrap();
@@ -1713,29 +1714,20 @@ fn take_preopen_swap(root: &Path, name: &str) -> Option<PreopenSwap> {
 /// Run the armed swap for this open attempt, if any. Called by the gallery
 /// and sibling-archive open paths between their precheck and their open, on
 /// the same thread, so the swap lands deterministically inside the window.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn run_preopen_seam(root: &Path, name: &str) {
     match take_preopen_swap(root, name) {
         None => {}
         Some(PreopenSwap::LeafLink(target)) => {
             let path = root.join(name);
             let _ = fs::remove_file(&path);
-            #[cfg(unix)]
             let _ = std::os::unix::fs::symlink(&target, &path);
-            // Creating a symlink needs a privilege Windows runners do not
-            // have, and every test that arms this seam is Unix-only; the
-            // binding stays part of the recorded swap but is unused here.
-            #[cfg(not(unix))]
-            let _ = &target;
         }
         Some(PreopenSwap::RootLink(target)) => {
             let backup = root.with_extension("seambak");
             let _ = fs::remove_dir_all(&backup);
             if fs::rename(root, &backup).is_ok() {
-                #[cfg(unix)]
                 let _ = std::os::unix::fs::symlink(&target, root);
-                #[cfg(not(unix))]
-                let _ = &target;
             }
         }
     }

@@ -6006,13 +6006,18 @@ mod tests {
         });
     }
 
+    /// Unix-only symlink race: a real leaf/root swap must be rejected before
+    /// any byte of the substituted target is read. Every fixture here creates
+    /// an actual symlink, so the case is only meaningful where that seam
+    /// creates one; the ordinary-file control lives in
+    /// `b3_2_ordinary_file_still_serves`.
     #[test]
+    #[cfg(unix)]
     fn b3_2_preopen_swap_is_denied_before_read() {
         use crate::rpc::{probe_gallery_file, read_zip_fallback, snapshot_gallery_file};
         use crate::task::{PreopenSwap, arm_preopen_swap};
         // (a) Regular file swapped for an outside symlink between check and
-        // open: no outside byte may be served. The candidate opens the swap
-        // and returns the outside bytes: RED.
+        // open: no outside byte may be served.
         let mut app = test_app();
         let png = png_bytes(16, 16);
         let guid = task_with_image(&mut app, "1.jpg", &png);
@@ -6058,7 +6063,7 @@ mod tests {
             Err(error) => panic!("swapped reserved link must be denied, got {error:?}"),
         }
         // (c) Sibling archive swapped for an outside zip: the fallback must
-        // refuse instead of serving the foreign entry. RED on the candidate.
+        // refuse instead of serving the foreign entry.
         let mut app = test_app();
         let png = png_bytes(16, 16);
         let guid = task_with_zip(&mut app, "1.jpg", &png);
@@ -6088,7 +6093,7 @@ mod tests {
             ),
         }
         // (d) Gallery root itself swapped for a link to a hostile dir: the
-        // opened bytes must not serve. RED on the candidate.
+        // opened bytes must not serve.
         let mut app = test_app();
         let png = png_bytes(16, 16);
         let guid = task_with_image(&mut app, "1.jpg", &png);
@@ -6110,17 +6115,16 @@ mod tests {
             }
             Err(error) => panic!("swapped gallery root must be denied, got {error:?}"),
         }
-        // (e) Control: a legitimate inside-root alias still serves, and a
-        // normal regular file is unaffected. The confined Linux/macOS backend
-        // serves the payload; other targets deny via the explicit Unsupported
-        // stub before any ambient open (no portable fallback).
+        // (e) Control: a legitimate inside-root alias still serves. The
+        // confined Linux/macOS backends follow it; other Unix targets deny via
+        // the explicit Unsupported stub before any ambient open. Windows alias
+        // qualification needs its own native fixture and stays pending.
         let mut app = test_app();
         let png = png_bytes(16, 16);
         let guid = task_with_image(&mut app, "1.jpg", &png);
         let snap = snapshot_gallery_file(&app, &guid, "1").expect("snap");
         let real = snap.root.join("real.jpg");
         std::fs::rename(snap.root.join(&snap.name), &real).expect("move");
-        #[cfg(unix)]
         std::os::unix::fs::symlink("real.jpg", snap.root.join(&snap.name)).expect("alias");
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         match probe_gallery_file(&snap) {
@@ -6138,25 +6142,37 @@ mod tests {
             Ok(_) => panic!("unported alias must deny via Unsupported, got File/Missing"),
             Err(_) => panic!("unported alias must deny via Unsupported, got Err"),
         }
+    }
+
+    /// Cross-platform ordinary-read control: a real inside-gallery regular
+    /// file is served verbatim through the snapshot/probe path on every
+    /// supported host (Linux, macOS and Windows). Targets with no confined
+    /// backend still deny via the explicit Unsupported stub. This is the
+    /// Windows-relevant positive control; it is deliberately separate from
+    /// the Unix-only symlink-race test above.
+    #[test]
+    fn b3_2_ordinary_file_still_serves() {
+        use crate::rpc::{probe_gallery_file, snapshot_gallery_file};
+
         let mut app = test_app();
         let png = png_bytes(16, 16);
         let guid = task_with_image(&mut app, "1.jpg", &png);
         let snap = snapshot_gallery_file(&app, &guid, "1").expect("snap");
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         match probe_gallery_file(&snap) {
             Ok(crate::rpc::OpenOutcome::File(mut opened)) => {
                 use std::io::Read;
                 let mut bytes = Vec::new();
                 opened.file.read_to_end(&mut bytes).expect("read");
-                assert_eq!(bytes, png);
+                assert_eq!(bytes, png, "ordinary file must serve its exact bytes");
             }
-            _ => panic!("regular file must serve"),
+            _ => panic!("ordinary regular file must serve on this host"),
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         match probe_gallery_file(&snap) {
             Ok(crate::rpc::OpenOutcome::Denied) => {}
-            Ok(_) => panic!("unported regular file must deny via Unsupported, got File/Missing"),
-            Err(_) => panic!("unported regular file must deny via Unsupported, got Err"),
+            Ok(_) => panic!("unported ordinary file must deny via Unsupported, got File/Missing"),
+            Err(_) => panic!("unported ordinary file must deny via Unsupported, got Err"),
         }
     }
 

@@ -55,9 +55,9 @@ pub use file_ops::{
     path_within,
 };
 #[cfg(test)]
-pub(crate) use file_ops::{
-    ObservationSwap, PreopenSwap, arm_observation_swap, arm_preopen_swap, run_observation_swap,
-};
+pub(crate) use file_ops::{ObservationSwap, arm_observation_swap, run_observation_swap};
+#[cfg(all(test, unix))]
+pub(crate) use file_ops::{PreopenSwap, arm_preopen_swap};
 #[cfg(test)]
 pub use file_ops::{PrivatePolicy, observe_directory};
 
