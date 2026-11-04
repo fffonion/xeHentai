@@ -15160,5 +15160,6 @@ mod m7 {
 #[cfg(unix)]
 mod m7p;
 
-// M8 focused proof: terminal HTTP worker exit notification vs the awaiting VM.
-mod http_worker_exit;
+// M8: the updater's own native transport (trusted origin tuples, redirects,
+// strict UTF-8 and the real public consumer).
+mod m8;

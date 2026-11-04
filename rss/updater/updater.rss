@@ -1,14 +1,12 @@
-use bytes;
-use http;
-
 // Update check decision and log selection (`updater/updater.py:21-63`).
 //
 // This module owns the mode decision (off/check/download), the same-update-id
-// comparison, what gets logged for each outcome, the buffered commits request,
-// and the start-time apply/stale decision. The Rust owner supplies the typed
-// binding/request plan from `github.rss`, the transport policy, the package
-// primitives and the logger sink, and enforces the signature, digest, ABI,
-// path, platform and preparation safety whatever these decisions ask for.
+// comparison, what gets logged for each outcome, the download decision, and the
+// start-time apply/stale decision. It performs NO network operation: the Rust
+// owner supplies the typed binding/request plan from `github.rss`, executes
+// that plan through its own native transport, and enforces the signature,
+// digest, ABI, path, platform and preparation safety whatever these decisions
+// ask for.
 // A `download` decision selects the signed package download; ONLY the native
 // installer publishes pending, and only the next start applies it. A failed
 // candidate is dropped and the running release stays as it is.
@@ -22,18 +20,6 @@ struct LogEvent {
 struct ModeDecision {
     outcome: string,
     exception: string?,
-}
-
-struct FetchResult {
-    status: int,
-    url: string,
-    body: string,
-}
-
-struct RawFetch {
-    status: int,
-    url: string,
-    body: bytes,
 }
 
 struct CheckDecision {
@@ -67,46 +53,6 @@ pub fn upd_mode(mode: string) -> ModeDecision {
         exception: exception,
     };
     decision
-}
-
-/// Perform the commits request inside the sandboxed HTTP host. A transport
-/// failure is a VM error surfaced by the Rust owner; a completed response is
-/// returned with its status, final URL and decoded text for `github.rss`.
-pub fn upd_fetch(url: string, headers: [[string]]) -> FetchResult {
-    let mut request = http::request::new("GET", url);
-    for index in 0..headers.length {
-        let pair = &headers[index];
-        http::request::set_header(&mut request, pair[0], pair[1]);
-    }
-    let response = http::client::request(request);
-    let final_url = http::response::url(&response);
-    let body = bytes::to_utf8(http::response::body(&response));
-    let result = {
-        status: http::response::status(&response),
-        url: final_url,
-        body: body,
-    };
-    result
-}
-
-/// The binary half of the transport: a detached signature or a whole payload
-/// archive is not text, so it is returned as the SDK's own bytes value instead
-/// of being forced through UTF-8. Same request policy as the check.
-pub fn upd_fetch_bytes(url: string, headers: [[string]]) -> RawFetch {
-    let mut request = http::request::new("GET", url);
-    for index in 0..headers.length {
-        let pair = &headers[index];
-        http::request::set_header(&mut request, pair[0], pair[1]);
-    }
-    let response = http::client::request(request);
-    let final_url = http::response::url(&response);
-    let body = http::response::body(&response);
-    let result = {
-        status: http::response::status(&response),
-        url: final_url,
-        body: body,
-    };
-    result
 }
 
 fn event(level: string, key: string, args: [string]) -> LogEvent {

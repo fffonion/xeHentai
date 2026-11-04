@@ -5,10 +5,10 @@
 //! link) and `rss/updater/updater.rss` (mode, same-update-id, check/download
 //! branch, log selection). This module only:
 //!
-//! * loads the trusted install-resource source binding and derives the exact
-//!   `HttpConfig` allowlist (one scheme/host/port, no gallery cookies);
-//! * compiles/binds both scripts against the existing Core SDK surface and
-//!   drives the buffered `http::client::request`; and
+//! * loads the trusted install-resource source binding into the updater's own
+//!   native transport ([`http`]): exactly the API and package origin tuples;
+//! * compiles/binds both scripts against the existing Core SDK surface for the
+//!   pure business decisions, and performs every network read natively; and
 //! * converts the named script results into typed values.
 //!
 //! The download/apply stages are the native installation primitives in
@@ -26,12 +26,13 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use vm::{
-    BuiltinFunction, CapabilityProfile, CompileSourceFileOptions, HostFunctionRegistry, HttpConfig,
-    HttpHostExt, SourceFlavor, Value, Vm, VmStatus, compile_source_with_flavor_and_options,
+    BuiltinFunction, CapabilityProfile, CompileSourceFileOptions, HostFunctionRegistry,
+    SourceFlavor, Value, Vm, VmStatus, compile_source_with_flavor_and_options,
 };
 
 pub mod descriptor;
 pub mod error;
+pub(crate) mod http;
 pub mod install;
 pub mod package;
 
@@ -40,18 +41,9 @@ pub use error::UpdateError;
 pub const GITHUB_RSS: &str = "rss/updater/github.rss";
 pub const UPDATER_RSS: &str = "rss/updater/updater.rss";
 
-/// The exact HTTP host imports the updater scripts may call. Nothing else is
-/// granted, so the gallery/session/proxy surface is unreachable from a check.
-const HTTP_HOST_IMPORTS: &[&str] = &[
-    "http::request::new",
-    "http::request::set_header",
-    "http::client::request",
-    "http::response::status",
-    "http::response::url",
-    "http::response::body",
-];
-
-const BUILTIN_CALLS: &[&str] = &["json::decode", "bytes::to_utf8", "string_replace_literal"];
+/// The only SDK surface the two business modules need: strict JSON decode and
+/// the reference CR/LF rewrite. They perform no network operation themselves.
+const BUILTIN_CALLS: &[&str] = &["json::decode", "string_replace_literal"];
 
 /// Named update metadata (`xeHentai/updater/__init__.py` `UpdateInfo`).
 ///
@@ -111,11 +103,6 @@ struct Plan {
     exception: Option<String>,
 }
 
-struct Fetched {
-    status: i64,
-    body: String,
-}
-
 struct ParsedCommit {
     outcome: String,
     info: Option<UpdateInfo>,
@@ -133,8 +120,7 @@ pub struct Updater {
     github_parse: Value,
     github_prefix: Value,
     updater: Vm,
-    updater_fetch: Value,
-    updater_fetch_bytes: Value,
+    transport: http::Transport,
     updater_mode: Value,
     updater_decide: Value,
     updater_failure: Value,
@@ -156,9 +142,6 @@ fn registry() -> &'static HostFunctionRegistry {
                 .or_else(|| BuiltinFunction::from_source_name(name))
                 .unwrap_or_else(|| panic!("unknown updater builtin {name}"));
             profile = profile.allow_builtin(builtin);
-        }
-        for name in HTTP_HOST_IMPORTS {
-            profile = profile.allow_host_import(*name);
         }
         registry.set_capability_profile(profile.build());
         registry
@@ -243,20 +226,6 @@ fn optional_text(
         Some(other) => Err(UpdateError::Shape {
             what,
             message: format!("field {name} is not a string: {other:?}"),
-        }),
-    }
-}
-
-fn int_of(map: &vm::VmMap, name: &str, what: &'static str) -> Result<i64, UpdateError> {
-    match field(map, name) {
-        Some(Value::Int(value)) => Ok(*value),
-        Some(other) => Err(UpdateError::Shape {
-            what,
-            message: format!("field {name} is not an int: {other:?}"),
-        }),
-        None => Err(UpdateError::Shape {
-            what,
-            message: format!("missing field {name}"),
         }),
     }
 }
@@ -370,15 +339,6 @@ fn decode_plan(value: &Value) -> Result<Plan, UpdateError> {
     })
 }
 
-fn decode_fetched(value: &Value) -> Result<Fetched, UpdateError> {
-    let what = "fetch result";
-    let map = map_of(value, what)?;
-    Ok(Fetched {
-        status: int_of(map, "status", what)?,
-        body: text_of(map, "body", what)?,
-    })
-}
-
 fn decode_commit(value: &Value) -> Result<ParsedCommit, UpdateError> {
     let what = "commit result";
     let map = map_of(value, what)?;
@@ -431,84 +391,6 @@ fn decode_decision(value: &Value) -> Result<Decision, UpdateError> {
     Ok(Decision { outcome, events })
 }
 
-/// Exact scheme/host/port from one binding origin. A private/loopback address
-/// is admitted only when the origin itself is a loopback IP, i.e. an explicitly
-/// configured owned fixture binding; production ships public HTTPS origins.
-struct Origin {
-    scheme: String,
-    host: String,
-    port: u16,
-    loopback: bool,
-}
-
-fn http_origin(origin: &str, what: &'static str) -> Result<Origin, UpdateError> {
-    let url = url::Url::parse(origin).map_err(|error| {
-        UpdateError::Binding(format!("{what} origin {origin:?} is not a URL: {error}"))
-    })?;
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err(UpdateError::Binding(format!(
-            "{what} origin must not carry credentials"
-        )));
-    }
-    if url.query().is_some() || url.fragment().is_some() || url.path() != "/" {
-        return Err(UpdateError::Binding(format!(
-            "{what} origin must be scheme://host[:port] without a path"
-        )));
-    }
-    let scheme = url.scheme().to_ascii_lowercase();
-    if scheme != "http" && scheme != "https" {
-        return Err(UpdateError::Binding(format!(
-            "{what} origin scheme {scheme:?} is not http(s)"
-        )));
-    }
-    let host = url
-        .host_str()
-        .ok_or_else(|| UpdateError::Binding(format!("{what} origin has no host")))?
-        .to_ascii_lowercase();
-    let port = url
-        .port_or_known_default()
-        .ok_or_else(|| UpdateError::Binding(format!("{what} origin has no known port")))?;
-    let loopback = host
-        .parse::<std::net::IpAddr>()
-        .map(|ip| ip.is_loopback())
-        .unwrap_or(false);
-    Ok(Origin {
-        scheme,
-        host,
-        port,
-        loopback,
-    })
-}
-
-/// The transport policy: exactly the two explicitly bound origins (API and
-/// package download), no gallery cookies. The response bound is the one
-/// setting that has to grow for a real native package: a payload archive with
-/// the executable plus resources. Nothing else is relaxed.
-fn http_policy(binding: &SourceBinding) -> Result<HttpConfig, UpdateError> {
-    let api = http_origin(&binding.api_origin, "api")?;
-    let package = http_origin(&binding.package_download_origin, "package download")?;
-    let mut config = HttpConfig {
-        allowed_schemes: Vec::new(),
-        allowed_hosts: Vec::new(),
-        allowed_ports: Vec::new(),
-        allow_private_ips: api.loopback || package.loopback,
-        max_response_body_bytes: package::MAX_PAYLOAD_BYTES + 1024 * 1024,
-        ..HttpConfig::default()
-    };
-    for origin in [api, package] {
-        if !config.allowed_schemes.contains(&origin.scheme) {
-            config.allowed_schemes.push(origin.scheme);
-        }
-        if !config.allowed_hosts.contains(&origin.host) {
-            config.allowed_hosts.push(origin.host);
-        }
-        if !config.allowed_ports.contains(&origin.port) {
-            config.allowed_ports.push(origin.port);
-        }
-    }
-    Ok(config)
-}
-
 impl Updater {
     /// Load both trusted business modules and their binding. Nothing is
     /// requested here; the loaded `Updater` owns only its two VMs.
@@ -529,7 +411,7 @@ impl Updater {
                 })?,
         )?;
 
-        let http = http_policy(&binding)?;
+        let transport = http::Transport::from_binding(&binding)?;
         if binding.beta_channel.as_deref().is_some_and(str::is_empty) {
             return Err(UpdateError::Binding(
                 "beta channel must be absent or non-empty".into(),
@@ -543,15 +425,9 @@ impl Updater {
             ));
         }
 
-        let mut updater = compile(UPDATER_RSS, &updater_source)?;
-        updater
-            .configure_http(http)
-            .map_err(|error| UpdateError::Bind {
-                script: UPDATER_RSS,
-                message: format!("HTTP policy: {error}"),
-            })?;
-        let updater_fetch = callable(&updater, UPDATER_RSS, "upd_fetch")?;
-        let updater_fetch_bytes = callable(&updater, UPDATER_RSS, "upd_fetch_bytes")?;
+        // The business module is compiled for its pure decisions only: the
+        // transport lives here and the script performs no network call.
+        let updater = compile(UPDATER_RSS, &updater_source)?;
         let updater_decide = callable(&updater, UPDATER_RSS, "upd_decide")?;
         let updater_failure = callable(&updater, UPDATER_RSS, "upd_failure")?;
         let updater_mode = callable(&updater, UPDATER_RSS, "upd_mode")?;
@@ -564,8 +440,7 @@ impl Updater {
             github_parse,
             github_prefix,
             updater,
-            updater_fetch,
-            updater_fetch_bytes,
+            transport,
             updater_mode,
             updater_decide,
             updater_failure,
@@ -679,36 +554,17 @@ impl Updater {
             return self.failure(&detail);
         }
 
-        let fetch_value = {
-            let callable = self.updater_fetch.clone();
-            let args = [
-                Value::string(plan.url.clone()),
-                Value::array(
-                    plan.headers
-                        .iter()
-                        .map(|(name, value)| {
-                            Value::array(vec![
-                                Value::string(name.clone()),
-                                Value::string(value.clone()),
-                            ])
-                        })
-                        .collect(),
-                ),
-            ];
-            self.call_waiting(UPDATER_RSS, &callable, &args).await?
-        };
-        let fetched = decode_fetched(&fetch_value)?;
+        // The plan's GET is performed by the updater's own native transport:
+        // status and a strictly decoded body are all `gh_parse` sees.
+        let response = self.transport.get(&plan.url, &plan.headers).await?;
+        let body = response.text()?;
 
         let parse_value = {
             let callable = self.github_parse.clone();
             self.github
                 .invoke_callable(
                     callable,
-                    &[
-                        binding,
-                        Value::Int(fetched.status),
-                        Value::string(fetched.body),
-                    ],
+                    &[binding, Value::Int(response.status), Value::string(body)],
                 )
                 .map_err(|error| UpdateError::Runtime {
                     script: GITHUB_RSS,
@@ -766,15 +622,18 @@ impl Updater {
         info: &UpdateInfo,
         headers: &[(String, String)],
     ) -> Result<CheckReport, UpdateError> {
-        let descriptor_fetch = self.fetch_text(&info.descriptor_link, headers).await?;
+        let descriptor_fetch = self.transport.get(&info.descriptor_link, headers).await?;
         if descriptor_fetch.status != 200 {
             return self.failure(&format!(
                 "descriptor request returned HTTP {}",
                 descriptor_fetch.status
             ));
         }
-        let descriptor_bytes = descriptor_fetch.body.into_bytes();
-        let (signature_status, signature) = self.fetch_bytes(&info.signature_link, headers).await?;
+        // The descriptor is text: strict UTF-8, then the same bytes are signed.
+        let descriptor_bytes = descriptor_fetch.text()?.into_bytes();
+        let signature_fetch = self.transport.get(&info.signature_link, headers).await?;
+        let signature_status = signature_fetch.status;
+        let signature = signature_fetch.body;
         if signature_status != 200 {
             return self.failure(&format!(
                 "signature request returned HTTP {signature_status}"
@@ -790,7 +649,9 @@ impl Updater {
             Err(error) => return self.failure(&error.to_string()),
         };
 
-        let (payload_status, payload) = self.fetch_bytes(&info.download_link, headers).await?;
+        let payload_fetch = self.transport.get(&info.download_link, headers).await?;
+        let payload_status = payload_fetch.status;
+        let payload = payload_fetch.body;
         if payload_status != 200 {
             return self.failure(&format!("payload request returned HTTP {payload_status}"));
         }
@@ -857,43 +718,6 @@ impl Updater {
         })
     }
 
-    async fn fetch_text(
-        &mut self,
-        url: &str,
-        headers: &[(String, String)],
-    ) -> Result<Fetched, UpdateError> {
-        let callable = self.updater_fetch.clone();
-        let value = self
-            .call_waiting(UPDATER_RSS, &callable, &request_args(url, headers))
-            .await?;
-        decode_fetched(&value)
-    }
-
-    async fn fetch_bytes(
-        &mut self,
-        url: &str,
-        headers: &[(String, String)],
-    ) -> Result<(i64, Vec<u8>), UpdateError> {
-        let callable = self.updater_fetch_bytes.clone();
-        let value = self
-            .call_waiting(UPDATER_RSS, &callable, &request_args(url, headers))
-            .await?;
-        let what = "raw fetch";
-        let map = map_of(&value, what)?;
-        let status = int_of(map, "status", what)?;
-        match field(map, "body") {
-            Some(Value::Bytes(body)) => Ok((status, (**body).clone())),
-            Some(other) => Err(UpdateError::Shape {
-                what,
-                message: format!("body is not bytes: {other:?}"),
-            }),
-            None => Err(UpdateError::Shape {
-                what,
-                message: "missing field body".into(),
-            }),
-        }
-    }
-
     fn startup_decision(
         &mut self,
         pending_present: bool,
@@ -926,53 +750,6 @@ impl Updater {
             }),
         }
     }
-
-    /// Drive one script call that may wait on the buffered HTTP host operation.
-    /// Only the updater VM performs network work; the await releases the
-    /// LocalSet so gallery tasks keep running.
-    async fn call_waiting(
-        &mut self,
-        script: &'static str,
-        callable: &Value,
-        args: &[Value],
-    ) -> Result<Value, UpdateError> {
-        let callable = callable.clone();
-        let vm = self.vm_mut(script);
-        let mut status =
-            vm.start_callable(callable, args)
-                .map_err(|error| UpdateError::Runtime {
-                    script,
-                    message: error.to_string(),
-                })?;
-        loop {
-            match status {
-                VmStatus::Halted => break,
-                VmStatus::Yielded => {
-                    status = vm.resume().map_err(|error| UpdateError::Runtime {
-                        script,
-                        message: error.to_string(),
-                    })?;
-                }
-                VmStatus::Waiting(_) => {
-                    vm.await_waiting_host_op()
-                        .await
-                        .map_err(|error| UpdateError::Runtime {
-                            script,
-                            message: error.to_string(),
-                        })?;
-                    status = vm.resume().map_err(|error| UpdateError::Runtime {
-                        script,
-                        message: error.to_string(),
-                    })?;
-                }
-            }
-        }
-        vm.take_callable_result()
-            .ok_or_else(|| UpdateError::Runtime {
-                script,
-                message: "host invocation completed without a result".into(),
-            })
-    }
 }
 
 fn read_script(root: &Path, relative: &'static str) -> Result<String, UpdateError> {
@@ -981,23 +758,6 @@ fn read_script(root: &Path, relative: &'static str) -> Result<String, UpdateErro
         path,
         message: error.to_string(),
     })
-}
-
-fn request_args(url: &str, headers: &[(String, String)]) -> [Value; 2] {
-    [
-        Value::string(url),
-        Value::array(
-            headers
-                .iter()
-                .map(|(name, value)| {
-                    Value::array(vec![
-                        Value::string(name.clone()),
-                        Value::string(value.clone()),
-                    ])
-                })
-                .collect(),
-        ),
-    ]
 }
 
 /// What the pre-business-App startup controller did, in terms `main` can log

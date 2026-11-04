@@ -924,7 +924,14 @@ impl Session {
             let selected = self.select_proxy(&current)?;
             let proxy_addr = selected.as_ref().map(|spec| spec.addr.clone());
             let hop = self
-                .fetch_hop(method, &current, data.as_deref(), stream, selected.as_ref())
+                .fetch_hop(
+                    method,
+                    &current,
+                    data.as_deref(),
+                    stream,
+                    selected.as_ref(),
+                    self.config.timeout,
+                )
                 .await;
             match hop {
                 Ok(mut response) => {
@@ -1091,6 +1098,15 @@ impl Session {
             .collect()
     }
 
+    /// One direct GET with no retry, proxy, cookie, redirect or fallback
+    /// semantics: the updater's own transport owns the redirect chain and the
+    /// trusted-origin policy. Only route establishment uses the shorter
+    /// connect budget; the response body keeps the session request timeout.
+    pub(crate) async fn get_once(&mut self, url: &str) -> Result<FetchedResponse, HttpError> {
+        self.fetch_hop("GET", url, None, false, None, Duration::from_secs(10))
+            .await
+    }
+
     async fn fetch_hop(
         &mut self,
         method: &str,
@@ -1098,16 +1114,26 @@ impl Session {
         data: Option<&[(String, String)]>,
         stream: bool,
         selected: Option<&ProxySpec>,
+        connect_timeout: Duration,
     ) -> Result<FetchedResponse, HttpError> {
         let url = url::Url::parse(url_text).map_err(|error| HttpError::Url(error.to_string()))?;
         let scheme = url.scheme().to_string();
         if scheme != "http" && scheme != "https" {
             return Err(HttpError::Url(format!("unsupported scheme {scheme}")));
         }
-        let host = url
-            .host_str()
-            .ok_or_else(|| HttpError::Url("missing host".into()))?
-            .to_string();
+        // Typed host extraction: an IPv6 literal must be a bare address for
+        // resolution/TLS and a bracketed authority on the wire. A hand-written
+        // string split would break the legal IPv6 form.
+        let host = match url.host() {
+            Some(url::Host::Ipv4(address)) => address.to_string(),
+            Some(url::Host::Ipv6(address)) => address.to_string(),
+            Some(url::Host::Domain(name)) => name.to_string(),
+            None => return Err(HttpError::Url("missing host".into())),
+        };
+        let authority = match url.host() {
+            Some(url::Host::Ipv6(address)) => format!("[{address}]"),
+            _ => host.clone(),
+        };
         let port = url
             .port_or_known_default()
             .ok_or_else(|| HttpError::Url("missing port".into()))?;
@@ -1133,9 +1159,9 @@ impl Session {
             .flatten();
         let fallback_port = url.port().unwrap_or(443);
         let host_header = if fallback.is_some() || port == default_port(&scheme) {
-            host.clone()
+            authority.clone()
         } else {
-            format!("{host}:{port}")
+            format!("{authority}:{port}")
         };
 
         let mut headers = self.session_headers(&url, &host_header);
@@ -1179,9 +1205,9 @@ impl Session {
                 .map_err(|error| HttpError::Dns(format!("{ip}: {error}")))?;
             let socket = SocketAddr::new(address, fallback_port);
             // DNS is skipped for a pinned fallback IP, but TCP + TLS still
-            // share the one configured route deadline.
-            match tokio::time::timeout(self.config.timeout, async {
-                let stream = connect_socket(socket, self.config.timeout).await?;
+            // share the caller's route-establishment deadline.
+            match tokio::time::timeout(connect_timeout, async {
+                let stream = connect_socket(socket, connect_timeout).await?;
                 let tls = self
                     .config
                     .tls
@@ -1198,7 +1224,7 @@ impl Session {
                 }
             }
         } else if let Some(spec) = selected {
-            let absolute = proxy::absolute_url(&scheme, &host, port, &path);
+            let absolute = proxy::absolute_url(&scheme, &authority, port, &path);
             proxy::open_route(
                 Some(spec),
                 &absolute,
@@ -1207,7 +1233,7 @@ impl Session {
                 target_tls,
                 self.config.resolver.as_ref(),
                 &self.config.tls,
-                self.config.timeout,
+                connect_timeout,
             )
             .await?
         } else {
@@ -1219,11 +1245,11 @@ impl Session {
                 target_tls,
                 self.config.resolver.as_ref(),
                 &self.config.tls,
-                self.config.timeout,
+                connect_timeout,
             )
             .await?
         };
-        let absolute = proxy::absolute_url(&scheme, &host, port, &path);
+        let absolute = proxy::absolute_url(&scheme, &authority, port, &path);
         let exchange = self
             .exchange(io, form, method, &path, &absolute, &headers, body, stream)
             .await?;

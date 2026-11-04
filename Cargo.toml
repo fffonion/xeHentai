@@ -31,6 +31,11 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12", "logging"] }
 webpki-roots = "1"
 url = "2"
+# Public-unicast address classification for the updater's own native transport.
+# The std `IpAddr::is_global` is not stable on the pinned toolchain, so the one
+# reviewed classifier crate is bound under the app-local name `ip`. Only
+# `std` is enabled: no HTTP stack, no optional `ipnet`/`proptest` features.
+ip = { package = "generic-ip", version = "=0.1.1", default-features = false, features = ["std"] }
 fastrand = "2"
 httparse = "1"
 percent-encoding = "2"
