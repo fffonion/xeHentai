@@ -49,7 +49,6 @@ UPDATE_APPLIED: 'Update files installed: %{0}'
 UPDATE_PENDING_ID: 'Pending update %{0} is ready for the next start'
 UPDATE_DEV_CHANNEL: dev
 UPDATE_DOWNLOAD_MANUALLY: You can download update from https://dl.yooooo.us/share/xeHentai/
-UPDATE_DOWNLOAD_UNSUPPORTED: Update check completed, but this build does not download or install packages
 UPDATE_FAILED: 'Failure when updating program: %{0}'
 UPDATE_NO_UPDATE: Program is up-to-date
 UPDATE_RELEASE_CHANNEL: release

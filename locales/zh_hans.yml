@@ -49,7 +49,6 @@ UPDATE_APPLIED: '更新文件已安装: %{0}'
 UPDATE_PENDING_ID: '待用更新 %{0} 已准备好，下次启动生效'
 UPDATE_DEV_CHANNEL: 测试版
 UPDATE_DOWNLOAD_MANUALLY: 可以从 https://dl.yooooo.us/share/xeHentai/ 下载更新
-UPDATE_DOWNLOAD_UNSUPPORTED: 更新检查已完成，但此版本不下载或安装更新包
 UPDATE_FAILED: '更新时遇到错误: %{0}'
 UPDATE_NO_UPDATE: 没有可用更新
 UPDATE_RELEASE_CHANNEL: 正式版
