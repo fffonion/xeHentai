@@ -305,6 +305,89 @@ def test_the_ignored_control_is_appended_only_in_the_windows_branch():
     assert "${{ runner.temp }}/native-rss-hold-control" in text
 
 
+MIGRATION_BEGIN = "# --- migration-chain-gate: begin ---"
+MIGRATION_END = "# --- migration-chain-gate: end ---"
+MIGRATION_CASE = (
+    "tests::native_rss_update::migration_chain::"
+    "native_legacy_session_to_archived_ui_and_rss_b_same_host"
+)
+
+
+def migration_block():
+    text = workflow_text()
+    start = text.index(MIGRATION_BEGIN) + len(MIGRATION_BEGIN)
+    stop = text.index(MIGRATION_END, start)
+    return textwrap.dedent(text[start:stop])
+
+
+def migration_functions(*names):
+    block = migration_block()
+    tree = ast.parse(block, filename=str(WORKFLOW))
+    found = {
+        node.name: ast.get_source_segment(block, node)
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in names
+    }
+    missing = [name for name in names if name not in found]
+    assert not missing, f"migration gate block is missing {missing}"
+    source = "import re\n\n\n" + "\n\n\n".join(found[name] for name in names)
+    namespace = {}
+    exec(compile(source, str(WORKFLOW), "exec"), namespace)  # noqa: S102 - own workflow source
+    return namespace
+
+
+def test_migration_gate_rejects_zero_match_and_accepts_only_exact_pass():
+    classify = migration_functions("classify_chain")["classify_chain"]
+    passed = classify(pass_output(MIGRATION_CASE), 0, MIGRATION_CASE)
+    assert passed["verdict"] == "PASS", passed
+    assert passed["executed"] == 1
+    assert passed["exact_test_name_observed"] is True
+    zero = classify(zero_output(), 0, MIGRATION_CASE)
+    assert zero["verdict"] == "ZERO_MATCH_REJECTED", zero
+    assert zero["executed"] == 0
+    compile_error = classify(zero_output(), 101, MIGRATION_CASE)
+    assert compile_error["verdict"] == "INFRA_SETUP_OR_COMPILE", compile_error
+    other = classify(pass_output("tests::native_rss_update::some_other_case"), 0, MIGRATION_CASE)
+    assert other["verdict"] == "INVALID_LIBTEST_SUMMARY", other
+    failed = classify(
+        "running 1 test\n"
+        f"test {MIGRATION_CASE} ... FAILED\n\n"
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; "
+        "415 filtered out; finished in 0.02s\n",
+        101,
+        MIGRATION_CASE,
+    )
+    assert failed["verdict"] == "BEHAVIOR_RED", failed
+
+
+def test_migration_gate_argv_is_ignored_exact_and_target_bound():
+    argv = migration_functions("cargo_argv_chain")["cargo_argv_chain"](
+        MIGRATION_CASE, "/runner/temp/cargo-target"
+    )
+    assert argv[:2] == ["cargo", "test"]
+    assert argv[argv.index("--exact") + 1] == MIGRATION_CASE
+    assert argv.index("--exact") > argv.index("--")
+    assert argv.index("--ignored") > argv.index("--exact")
+    assert argv[-1] == "--nocapture"
+    assert argv[argv.index("--target-dir") + 1] == "/runner/temp/cargo-target"
+    assert argv.count("--target-dir") == 1
+
+
+def test_migration_gate_verifies_a_fresh_report_and_binds_the_run_root():
+    block = migration_block()
+    assert "--verify-report" in block
+    assert "--expected-root" in block
+    assert "--require-clean" in block
+    assert "REPORT_MISSING" in block
+    assert 'RUN_ROOT / "migration-report.json"' in block
+    assert "migration-run" in block
+    assert "migration-gate" in block
+    text = workflow_text()
+    assert "Migration chain (real host, original UI, ignored exact)" in text
+    assert "${{ runner.temp }}/migration-run/migration-report.json" in text
+    assert "${{ runner.temp }}/migration-gate/gate.json" in text
+
+
 TESTS = [
     test_libtest_pass_is_the_only_pass_verdict,
     test_zero_match_is_rejected_even_with_exit_zero,
@@ -319,6 +402,9 @@ TESTS = [
     test_the_two_original_cases_are_unchanged_and_never_ignored,
     test_seven_base_cases_bind_the_five_gallery_archive_consumers,
     test_the_ignored_control_is_appended_only_in_the_windows_branch,
+    test_migration_gate_rejects_zero_match_and_accepts_only_exact_pass,
+    test_migration_gate_argv_is_ignored_exact_and_target_bound,
+    test_migration_gate_verifies_a_fresh_report_and_binds_the_run_root,
 ]
 
 

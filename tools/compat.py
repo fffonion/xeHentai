@@ -3325,6 +3325,12 @@ def _rename_key_count(raw):
 
 
 def oracle_session_fixture(upstream, request):
+    # Additive auxiliary variant: the same `session-fixture` entry point, an
+    # explicitly requested half-finished session for the one real migration
+    # chain. The default fixture and every directory-restore adjunct below are
+    # untouched; no new oracle suite is registered.
+    if request.get("variant") == "parallel-resume":
+        return oracle_session_parallel_resume(upstream, request)
     core, _task_module, _const, defaults = _load_upstream(upstream)
     work = Path(request["root"])
     directory = _scenario(work, "migrate")
@@ -3354,6 +3360,126 @@ def oracle_session_fixture(upstream, request):
     assert app.save_session()[0] == 0
     _write_session_directory_fixtures(core, defaults, work)
     return {"ok": True, "dir": str(directory), "guid": guid}
+
+
+def oracle_session_parallel_resume(upstream, request):
+    """Write one REAL half-finished reference session for the migration chain.
+
+    The fixed Python `App`/`Task` and its own `save_session()` produce
+    `h.json`; four image identities are recorded, the gallery already holds two
+    real JPEGs and the two missing ones are produced as real JPEG bytes for the
+    owned loopback source to serve. Nothing here is hand-written JSON, and all
+    data is synthetic.
+    """
+    import io
+    import queue
+
+    from PIL import Image
+
+    core, _task_module, _const, defaults = _load_upstream(upstream)
+    work = Path(request["root"])
+    work.mkdir(parents=True, exist_ok=True)
+    # The host's current directory is the single install root, so the real
+    # save_session() must land there directly.
+    os.chdir(work)
+    url = request.get("url", GALLERY_URL)
+    proxy = request["proxy"]
+    threads = int(request.get("download_thread_cnt", 2))
+    scan_threads = int(request.get("scan_thread_cnt", 1))
+    timeout = int(request.get("download_timeout", 10))
+    title = request.get("title", "M8 Migration Chain")
+    # The restored task keeps the reference's own 14-key snapshot. These values
+    # are set BOTH globally and as task kwargs so the persisted snapshot, the
+    # native global configuration and the native CLI flags agree; the chain
+    # never relies on a CLI flag to repair an off task snapshot.
+    task_overrides = {
+        "dir": "downloads",
+        "download_ori": False,
+        "jpn_title": False,
+        "rename_ori": True,
+        "proxy_image": True,
+        "proxy_image_only": False,
+        "make_archive": True,
+        "scan_thread_cnt": scan_threads,
+        "download_thread_cnt": threads,
+        "download_timeout": timeout,
+        "delete_task_files": False,
+        "low_speed_threshold": 10,
+    }
+    overrides = dict(task_overrides)
+    overrides.update(
+        {
+            "proxy": [proxy],
+            "save_tasks": True,
+            "log_path": str(work / "eh.log"),
+        }
+    )
+    app = _new_app(core, defaults, work, [request.get("guid", "m8chain1")], overrides)
+    added = app.add_task(url, **task_overrides)
+    guid = added[1]
+    task = app._all_tasks[guid]
+
+    images = work / "images"
+    images.mkdir(parents=True, exist_ok=True)
+    gallery = work / "downloads" / title
+    gallery.mkdir(parents=True, exist_ok=True)
+    filelist = {}
+    page_urls = []
+    identities = []
+    for fid in range(1, 5):
+        # Four distinct real JPEGs: 64x48 with a per-fid solid colour and a
+        # deterministic 1-pixel marker, so bytes and decoded sizes identify
+        # the fid without being one another's duplicate.
+        picture = Image.new("RGB", (64, 48), (fid * 40 % 256, 160 - fid * 20, 60 + fid))
+        picture.putpixel((fid - 1, fid - 1), (255, 255, 255))
+        buffer = io.BytesIO()
+        picture.save(buffer, format="JPEG", quality=88)
+        body = buffer.getvalue()
+        (images / f"{fid}.jpg").write_bytes(body)
+        digest = f"{fid:010x}" + "0" * 30
+        filelist[digest] = [str(fid), f"unique-{fid}.jpg"]
+        page_urls.append(f"{url.split('/g/')[0]}/s/{digest[:10]}/700000-{fid}")
+        identities.append(
+            {"fid": fid, "hash": digest, "hash10": digest[:10], "name": f"unique-{fid}.jpg"}
+        )
+        if fid in (1, 4):
+            (gallery / f"{fid}.jpg").write_bytes(body)
+    for fid in (2, 3):
+        assert not (gallery / f"{fid}.jpg").exists()
+
+    task.meta.update(
+        {
+            "gnname": title,
+            "gjname": None,
+            "total": 4,
+            "finished": 2,
+            "tags": ["language:japanese"],
+            "thumbnail_cnt": 2,
+            "use_multipage_viewer": False,
+            "filelist": filelist,
+        }
+    )
+    task.update_meta({})
+    task.state = 10
+    task.page_q = queue.Queue()
+    for page_url in page_urls:
+        task.page_q.put(page_url)
+    app.set_cookie("ipb_member_id=42; ipb_pass_hash=cafebabe")
+    assert app.save_session()[0] == 0
+    return {
+        "ok": True,
+        "dir": str(work),
+        "guid": guid,
+        "title": title,
+        "gallery": str(gallery),
+        "hjson": str(work / "h.json"),
+        "images": [str(images / f"{fid}.jpg") for fid in range(1, 5)],
+        "present": [1, 4],
+        "missing": [2, 3],
+        "identities": identities,
+        "page_urls": page_urls,
+        "cookie": {"ipb_member_id": "42", "ipb_pass_hash": "cafebabe"},
+    }
 
 
 def _write_session_directory_fixtures(core, defaults, work):

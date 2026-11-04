@@ -54,6 +54,17 @@ jobs:
           "$XEH_PYTHON" -m pip install --disable-pip-version-check \
             pillow==13.0.0 requests==2.34.2 PySocks==1.7.1 playwright==1.64.1
           "$XEH_PYTHON" -m playwright install --with-deps chromium
+          # The migration chain takes the browser executable explicitly; resolve
+          # the one this step installed instead of guessing a cache path. The
+          # value is exported for later steps AND checked in this shell.
+          chromium="$("$XEH_PYTHON" - <<'PY'
+          from playwright.sync_api import sync_playwright
+          with sync_playwright() as playwright:
+              print(playwright.chromium.executable_path)
+          PY
+          )"
+          test -f "$chromium"
+          printf 'XEH_CHROMIUM=%s\n' "$chromium" >> "$GITHUB_ENV"
       - name: Fetch fixed Python oracle
         run: |
           set -euo pipefail
@@ -180,6 +191,211 @@ jobs:
             --temp-root "$RUNNER_TEMP" \
             --worktree "$GITHUB_WORKSPACE" \
             --port 8010
+      # One real end-to-end migration chain on the ordinary host: reference
+      # Python half-session, two concurrently missing image bodies, rename and
+      # archive, the ORIGINAL WebUI through the product persisted cache, a
+      # memory-only settings change, graceful SIGTERM save, then the SAME
+      # executable applying signed release B and reading the saved task and
+      # archived images over the real RPC server. The ignored test is selected
+      # explicitly; a zero-match cargo pass is refused, and success exists only
+      # as a fresh report that the production verifier accepts.
+      - name: Migration chain (real host, original UI, ignored exact)
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          # --- migration-chain-gate: begin ---
+          import json
+          import os
+          import pathlib
+          import re
+          import subprocess
+          import sys
+
+          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+          sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+          WORKSPACE = os.environ["GITHUB_WORKSPACE"]
+          RUNNER_TEMP = pathlib.Path(os.environ["RUNNER_TEMP"])
+          TARGET_DIR = os.environ["CARGO_TARGET_DIR"]
+          PYTHON = os.environ["XEH_PYTHON"]
+          CASE = (
+              "tests::native_rss_update::migration_chain::"
+              "native_legacy_session_to_archived_ui_and_rss_b_same_host"
+          )
+          RUN_ROOT = RUNNER_TEMP / "migration-run"
+          REPORT = RUN_ROOT / "migration-report.json"
+          GATE_DIR = RUNNER_TEMP / "migration-gate"
+          VERIFIER = pathlib.Path(WORKSPACE) / "tools" / "browser" / "migration_probe.py"
+
+
+          def run(argv, timeout):
+              return subprocess.run(
+                  argv,
+                  cwd=WORKSPACE,
+                  stdin=subprocess.DEVNULL,
+                  capture_output=True,
+                  text=True,
+                  encoding="utf-8",
+                  errors="replace",
+                  timeout=timeout,
+              )
+
+
+          def cargo_argv_chain(test_name, target_dir):
+              return [
+                  "cargo",
+                  "test",
+                  "--bin",
+                  "xeHentai",
+                  "--locked",
+                  "--jobs",
+                  "2",
+                  "--target-dir",
+                  target_dir,
+                  "--",
+                  "--exact",
+                  test_name,
+                  "--ignored",
+                  "--nocapture",
+              ]
+
+
+          def classify_chain(stdout, returncode, test_name):
+              running = [
+                  int(count)
+                  for count in re.findall(r"^running (\d+) tests?$", stdout, re.M)
+              ]
+              summary = re.search(
+                  r"^test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; "
+                  r"(\d+) ignored;",
+                  stdout,
+                  re.M,
+              )
+              exact = (
+                  re.search(r"^test " + re.escape(test_name) + r" \.\.\. ok$", stdout, re.M)
+                  is not None
+              )
+              executed = running[0] if running else 0
+              passed = int(summary.group(1)) if summary else 0
+              failed = int(summary.group(2)) if summary else -1
+              if executed == 0:
+                  verdict = "ZERO_MATCH_REJECTED" if returncode == 0 else "INFRA_SETUP_OR_COMPILE"
+              elif returncode == 0 and failed == 0 and passed >= 1 and passed == executed and exact:
+                  verdict = "PASS"
+              elif returncode != 0:
+                  verdict = "BEHAVIOR_RED"
+              else:
+                  verdict = "INVALID_LIBTEST_SUMMARY"
+              return {
+                  "test_name": test_name,
+                  "executed": executed,
+                  "passed": passed,
+                  "failed": failed,
+                  "exact_test_name_observed": exact,
+                  "returncode": returncode,
+                  "verdict": verdict,
+              }
+
+
+          def verify(record):
+              if not REPORT.is_file():
+                  record["verifier"] = {"verdict": "REPORT_MISSING"}
+                  return False
+              proc = run(
+                  [
+                      PYTHON,
+                      str(VERIFIER),
+                      "--verify-report",
+                      str(REPORT),
+                      "--expected-root",
+                      str(RUN_ROOT),
+                      "--require-clean",
+                  ],
+                  120,
+              )
+              record["verifier"] = {
+                  "returncode": proc.returncode,
+                  "stdout": proc.stdout.strip(),
+                  "stderr_bytes": len(proc.stderr or ""),
+              }
+              return proc.returncode == 0 and "ACCEPTED" in proc.stdout
+
+
+          def main():
+              GATE_DIR.mkdir(parents=True, exist_ok=True)
+              if RUN_ROOT.exists():
+                  print("migration-chain: run root already exists; refusing a stale report")
+                  return 1
+              RUN_ROOT.mkdir(parents=True)
+              os.environ["XEH_MIGRATION_RUN_ROOT"] = str(RUN_ROOT)
+              os.environ["XEH_MIGRATION_REPORT"] = str(REPORT)
+              head_proc = run(["git", "rev-parse", "HEAD"], 60)
+              status_proc = run(["git", "status", "--porcelain"], 60)
+              source_sha = head_proc.stdout.strip()
+              record = {
+                  "case": CASE,
+                  "source_sha": source_sha,
+                  "source_status_empty": status_proc.stdout.strip() == "",
+                  "assigned_target": TARGET_DIR,
+                  "run_root": str(RUN_ROOT),
+                  "report": str(REPORT),
+                  "argv": cargo_argv_chain(CASE, TARGET_DIR),
+              }
+              print("migration-chain: argv " + json.dumps(record["argv"]))
+              if not record["source_status_empty"]:
+                  record["verdict"] = "SOURCE_DIRTY"
+                  (GATE_DIR / "gate.json").write_text(
+                      json.dumps(record, indent=1) + "\n", encoding="utf-8")
+                  print("migration-chain: source tree is not clean")
+                  return 1
+              # A real zero-match control proves this parser refuses a cargo pass
+              # that executed no test. It is a gate control, not a product case.
+              zero_name = CASE + "_zero_match_probe_absent"
+              zero = run(cargo_argv_chain(zero_name, TARGET_DIR), 600)
+              zero_result = classify_chain(zero.stdout, zero.returncode, zero_name)
+              record["zero_match_probe"] = zero_result
+              (GATE_DIR / "zero-match.stdout.txt").write_text(
+                  zero.stdout, encoding="utf-8")
+              if zero_result["verdict"] != "ZERO_MATCH_REJECTED":
+                  record["verdict"] = "ZERO_MATCH_CONTROL_INVALID"
+                  (GATE_DIR / "gate.json").write_text(
+                      json.dumps(record, indent=1) + "\n", encoding="utf-8")
+                  print("migration-chain: zero-match control did not behave as required")
+                  return 1
+              try:
+                  proc = run(cargo_argv_chain(CASE, TARGET_DIR), 2400)
+              except subprocess.TimeoutExpired:
+                  record["verdict"] = "INFRA_TIMEOUT"
+                  record["detail"] = "the bounded chain run exceeded 2400s"
+                  (GATE_DIR / "gate.json").write_text(
+                      json.dumps(record, indent=1) + "\n", encoding="utf-8")
+                  print("migration-chain: verdict INFRA_TIMEOUT")
+                  return 1
+              (GATE_DIR / "cargo.stdout.txt").write_text(proc.stdout, encoding="utf-8")
+              (GATE_DIR / "cargo.stderr.txt").write_text(proc.stderr, encoding="utf-8")
+              result = classify_chain(proc.stdout, proc.returncode, CASE)
+              record["chain"] = result
+              print("migration-chain: verdict " + result["verdict"])
+              if result["verdict"] != "PASS":
+                  record["verdict"] = result["verdict"]
+              elif not verify(record):
+                  record["verdict"] = "REPORT_REJECTED"
+              else:
+                  record["verdict"] = "PASS"
+              (GATE_DIR / "gate.json").write_text(
+                  json.dumps(record, indent=1) + "\n", encoding="utf-8")
+              if record["verdict"] != "PASS":
+                  print("migration-chain: " + record["verdict"])
+                  return 1
+              print("migration-chain: the exact ignored case executed, passed and its fresh report was accepted")
+              return 0
+
+
+          if __name__ == "__main__":
+              sys.exit(main())
+          # --- migration-chain-gate: end ---
+          PY
       - name: Differential evidence (all suites, two internal rounds)
         run: |
           set -euo pipefail
@@ -233,6 +449,11 @@ jobs:
             ${{ runner.temp }}/browser-run/driver.log
             ${{ runner.temp }}/browser-run/verifier.log
             ${{ runner.temp }}/browser-run/*.png
+            ${{ runner.temp }}/migration-run/migration-report.json
+            ${{ runner.temp }}/migration-run/probe-report.json
+            ${{ runner.temp }}/migration-gate/gate.json
+            ${{ runner.temp }}/migration-gate/cargo.stdout.txt
+            ${{ runner.temp }}/migration-gate/zero-match.stdout.txt
             ${{ runner.temp }}/compat-evidence/manifest.json
             ${{ runner.temp }}/compat-evidence/*/self-check.json
             ${{ runner.temp }}/compat-evidence/*/round-1/comparison.json

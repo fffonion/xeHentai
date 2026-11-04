@@ -574,6 +574,30 @@ const OUTPUT_LABELS: [(&str, &str); 7] = [
     ("child_panic", "panicked at"),
 ];
 
+/// Fixed closed categories for the existing updater error text. Only these
+/// five producer strings are recognised; everything else stays `unknown`, so a
+/// diagnostic never carries raw error text, a path or a URL.
+const UPDATE_FAILURE_LABELS: [(&str, &str); 5] = [
+    (
+        "transport_deadline",
+        "transport: update transport deadline exceeded",
+    ),
+    ("transport_request", "transport: request failed:"),
+    ("package_rejected", "update package rejected:"),
+    ("installation_failed", "update installation failed:"),
+    ("source_binding_error", "update source binding error:"),
+];
+
+/// The first fixed updater category present in the captured stream, else
+/// `unknown`. Returns only the closed label.
+fn scan_update_failure(bytes: &[u8]) -> &'static str {
+    UPDATE_FAILURE_LABELS
+        .iter()
+        .find(|(_, needle)| contains(bytes, needle.as_bytes()))
+        .map(|(name, _)| *name)
+        .unwrap_or("unknown")
+}
+
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty()
         && haystack
@@ -716,6 +740,9 @@ struct Run {
     out_len: usize,
     err_len: usize,
     labels: Vec<&'static str>,
+    /// The first fixed updater failure category seen in the captured streams,
+    /// else `unknown`. Closed labels only; no raw text is retained.
+    update_failure: &'static str,
 }
 
 fn spawn(install: &Path, args: &[&str]) -> Run {
@@ -786,6 +813,7 @@ fn spawn(install: &Path, args: &[&str]) -> Run {
         out_len: 0,
         err_len: 0,
         labels: Vec::new(),
+        update_failure: "unknown",
     }
 }
 
@@ -883,15 +911,23 @@ impl Run {
                 self.labels.push(label);
             }
         }
+        let failure = scan_update_failure(bytes);
+        if failure != "unknown" && self.update_failure == "unknown" {
+            self.update_failure = failure;
+        }
     }
 
     fn exit_facts(&self) -> String {
-        exit_facts_text(
-            self.exited,
-            self.exit_code,
-            self.out_len,
-            self.err_len,
-            &self.labels,
+        format!(
+            "{} failure_category={}",
+            exit_facts_text(
+                self.exited,
+                self.exit_code,
+                self.out_len,
+                self.err_len,
+                &self.labels,
+            ),
+            self.update_failure
         )
     }
 }
@@ -918,12 +954,35 @@ impl Drop for Run {
 /// a live script changing). The condition is the evidence; the poll is only a
 /// transfer mechanism, and an early child exit is reported as its own phase
 /// together with the authoritative exit code and the fixture/private facts.
-fn wait_event<F, C>(run: &mut Run, timeout: Duration, phase: &str, mut check: F, mut facts: C)
+fn wait_event<F, C>(run: &mut Run, timeout: Duration, phase: &str, check: F, facts: C)
 where
     F: FnMut() -> bool,
     C: FnMut() -> String,
 {
+    wait_event_with_fixture(run, timeout, phase, check, facts, None)
+}
+
+/// The same bounded waiter with an optional typed fixture tuple
+/// `(&Server, seen_before, &Gallery)`. On failure it appends the already
+/// existing safe request-stage counts (commits/info/signature/payload and the
+/// held gallery's seen/released) computed at that moment. Predicates,
+/// deadlines and panic propagation are unchanged.
+fn wait_event_with_fixture<F, C>(
+    run: &mut Run,
+    timeout: Duration,
+    phase: &str,
+    mut check: F,
+    mut facts: C,
+    fixture: Option<(&Server, usize, &Gallery)>,
+) where
+    F: FnMut() -> bool,
+    C: FnMut() -> String,
+{
     let deadline = Instant::now() + timeout;
+    let extra_facts = || match fixture {
+        Some((origin, since, gallery)) => fixture_facts(origin, since, gallery),
+        None => String::new(),
+    };
     loop {
         if check() {
             return;
@@ -931,13 +990,19 @@ where
         if !run.running() {
             run.collect();
             let facts_text = facts();
+            let fixture_text = extra_facts();
             panic!(
-                "{phase}: the host exited before the required event; {} {facts_text}",
+                "{phase}: the host exited before the required event; {} {facts_text} {fixture_text}",
                 run.exit_facts()
             );
         }
         if Instant::now() > deadline {
-            panic!("{phase}: bounded wait for the required event expired");
+            let facts_text = facts();
+            let fixture_text = extra_facts();
+            panic!(
+                "{phase}: bounded wait for the required event expired; {} {facts_text} {fixture_text}",
+                run.exit_facts()
+            );
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -1086,7 +1151,7 @@ fn wait_applied_record(
     files: &[(String, Vec<u8>)],
 ) {
     let expected: BTreeMap<String, Vec<u8>> = files.iter().cloned().collect();
-    wait_event(
+    wait_event_with_fixture(
         run,
         Duration::from_secs(120),
         "phase B startup apply",
@@ -1098,13 +1163,8 @@ fn wait_applied_record(
                         .unwrap_or(false)
                 })
         },
-        || {
-            format!(
-                "{} {}",
-                install_facts(install, Some(files)),
-                fixture_facts(origin, seen_before, gallery)
-            )
-        },
+        || install_facts(install, Some(files)),
+        Some((origin, seen_before, gallery)),
     );
 }
 
@@ -1138,18 +1198,13 @@ fn native_signed_rss_update_uses_the_same_host_and_preserves_non_rss_files() {
         "{GALLERY_URL}\nn\n{}\ndl-a\nn\nn\nn\n\n",
         gallery_a.proxy()
     ));
-    wait_event(
+    wait_event_with_fixture(
         &mut run,
         Duration::from_secs(120),
         "phase A pending publication",
         || pending_path(&install).is_file(),
-        || {
-            format!(
-                "{} {}",
-                install_facts(&install, None),
-                fixture_facts(&origin, 0, &gallery_a)
-            )
-        },
+        || install_facts(&install, None),
+        Some((&origin, 0, &gallery_a)),
     );
     assert!(
         run.running(),
@@ -1226,7 +1281,7 @@ fn native_signed_rss_update_uses_the_same_host_and_preserves_non_rss_files() {
         applied_record_matches(&install),
         "phase B: the successful apply must publish its v2 applied record"
     );
-    wait_event(
+    wait_event_with_fixture(
         &mut run,
         Duration::from_secs(120),
         "phase B release-B request",
@@ -1235,13 +1290,8 @@ fn native_signed_rss_update_uses_the_same_host_and_preserves_non_rss_files() {
                 .iter()
                 .any(|request| request.target == COMMITS_TARGET_B)
         },
-        || {
-            format!(
-                "{} {}",
-                install_facts(&install, Some(files.as_slice())),
-                fixture_facts(&origin, seen_before, &gallery_b)
-            )
-        },
+        || install_facts(&install, Some(files.as_slice())),
+        Some((&origin, seen_before, &gallery_b)),
     );
     assert!(
         run.running(),
@@ -1374,12 +1424,13 @@ fn native_held_gallery_times_out_then_auto_exits() {
         "{GALLERY_URL}\nn\n{}\ndl-a\nn\nn\nn\n\n",
         gallery_a.proxy()
     ));
-    wait_event(
+    wait_event_with_fixture(
         &mut run_a,
         Duration::from_secs(120),
         "control phase A pending publication",
         || pending_path(&install).is_file(),
         || install_facts(&install, None),
+        Some((&origin, 0, &gallery_a)),
     );
     assert!(
         run_a.running(),
@@ -1533,6 +1584,12 @@ fn native_timeout_cleanup_reaps_the_child_before_collecting() {
 
 // MARK: - diagnostics controls
 
+// M8: one real Unix end-to-end migration chain. It reuses this module's host,
+// signing, source-binding, wait/reap and byte-compare helpers; POSIX signals
+// make it Unix-only.
+#[cfg(unix)]
+mod migration_chain;
+
 /// The apply boundary must treat a missing, unreadable or foreign record as
 /// "not applied": folding any of those into success is exactly the
 /// misattribution this boundary exists to prevent.
@@ -1631,6 +1688,35 @@ mod early_exit_diagnostics {
         );
         assert!(scan_labels(b"xeHentai: session error: bad\n").contains(&"session_error"));
         assert!(scan_labels(b"ordinary output\n").is_empty());
+    }
+
+    /// The additive setup diagnostic must return only one of five closed
+    /// categories. This is a pure formatter control: it never claims that a
+    /// platform run reached any updater error.
+    #[test]
+    fn updater_failure_categories_are_closed_labels_not_raw_text() {
+        let secret = "ipb_pass_hash=cafebabe /owned/path?token=hidden";
+        for (name, text) in UPDATE_FAILURE_LABELS {
+            let captured = format!("WARN - [00:00:00] {text} boom {secret}\n");
+            assert_eq!(
+                scan_update_failure(captured.as_bytes()),
+                name,
+                "fixed producer text {text}"
+            );
+        }
+        assert_eq!(
+            scan_update_failure(format!("task #t1 error: {secret}").as_bytes()),
+            "unknown",
+            "an unrecognised failure must stay unknown"
+        );
+        for (name, _) in UPDATE_FAILURE_LABELS {
+            assert!(
+                !name
+                    .chars()
+                    .any(|character| matches!(character, ':' | '/' | ' ')),
+                "a category must be a closed identifier: {name}"
+            );
+        }
     }
 
     /// The producer logs the pool failure as `task #<guid> error: <error>`, and
