@@ -285,6 +285,10 @@ impl Gallery {
         self.paths.lock().unwrap().clone()
     }
 
+    fn released(&self) -> bool {
+        *self.gate.0.lock().unwrap()
+    }
+
     fn release(&self) {
         let (lock, cond) = &*self.gate;
         *lock.lock().unwrap() = true;
@@ -545,11 +549,148 @@ fn installed_host(root: &Path, api: &str) -> (PathBuf, Vec<u8>) {
     (exe, bound)
 }
 
+// MARK: - early-exit facts (test-only diagnostics)
+
+/// The only child-output facts this case reports. Each entry is a fixed message
+/// that `src/main.rs`, the startup controller, the prompt or the Rust runtime
+/// emit verbatim; nothing else is classified and the captured bytes are dropped
+/// after the scan.
+const OUTPUT_LABELS: [(&str, &str); 6] = [
+    ("loop_finished", "application task loop finished"),
+    ("update_failed", "Failure when updating program:"),
+    ("prompt_io", "xeHentai: cannot read input:"),
+    ("startup_stopped", "xeHentai: update startup stopped"),
+    ("session_error", "xeHentai: session error:"),
+    ("child_panic", "panicked at"),
+];
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
+/// Recognise the fixed messages present in one captured stream. It returns the
+/// label names only, never a slice of the output.
+fn scan_labels(bytes: &[u8]) -> Vec<&'static str> {
+    OUTPUT_LABELS
+        .iter()
+        .filter(|(_, needle)| contains(bytes, needle.as_bytes()))
+        .map(|(name, _)| *name)
+        .collect()
+}
+
+/// Render the observed exit facts: the code, both stream lengths and the fixed
+/// labels. Pure data in, fixed text out.
+fn exit_facts_text(
+    exited: bool,
+    code: Option<i32>,
+    out_len: usize,
+    err_len: usize,
+    labels: &[&str],
+) -> String {
+    let code = match code {
+        Some(code) => code.to_string(),
+        None => "none".to_string(),
+    };
+    format!(
+        "exited={exited} code={code} stdout_bytes={out_len} stderr_bytes={err_len} labels={labels:?}"
+    )
+}
+
+/// `yes`/`no` from a metadata answer; an unreadable path is `unknown` instead
+/// of being folded into either answer.
+fn path_state(path: &Path) -> &'static str {
+    match path.try_exists() {
+        Ok(true) => "yes",
+        Ok(false) => "no",
+        Err(_) => "unknown",
+    }
+}
+
+/// Whether the four live scripts are already release B. A definitive
+/// difference is `no`; only an unreadable script with no differing one is
+/// `unknown`.
+fn release_b_state(install: &Path, files: &[(String, Vec<u8>)]) -> &'static str {
+    let mut differs = false;
+    let mut unreadable = false;
+    for (path, body) in files {
+        match std::fs::read(install.join(path)) {
+            Ok(live) => differs |= &live != body,
+            Err(_) => unreadable = true,
+        }
+    }
+    if differs {
+        "no"
+    } else if unreadable {
+        "unknown"
+    } else {
+        "yes"
+    }
+}
+
+/// The private installer booleans and, when the candidate is known, whether the
+/// four live scripts are release B. These distinguish an exit before the apply
+/// from one after it.
+fn install_facts(install: &Path, expected: Option<&[(String, Vec<u8>)]>) -> String {
+    let pending = path_state(&pending_path(install));
+    let state = path_state(&install.join(AREA).join("state.json"));
+    match expected {
+        None => format!("pending_zip={pending} state_json={state}"),
+        Some(files) => format!(
+            "files_b={} pending_zip={pending} state_json={state}",
+            release_b_state(install, files)
+        ),
+    }
+}
+
+/// What the fixture already observed: counts per known update path (never the
+/// URL or headers) and the held gallery's request count and release state.
+fn fixture_facts(origin: &Server, since: usize, gallery: &Gallery) -> String {
+    let requests = origin.requests();
+    let since = since.min(requests.len());
+    // commits_a, commits_b, info, sig, payload, other
+    let mut counts = [0usize; 6];
+    for request in &requests[since..] {
+        let slot = match request.target.as_str() {
+            COMMITS_TARGET => 0,
+            COMMITS_TARGET_B => 1,
+            target if target.ends_with(".manifest.json") => 2,
+            target if target.ends_with(".sig") => 3,
+            target if target.ends_with("xeHentai-rss.zip") => 4,
+            _ => 5,
+        };
+        counts[slot] += 1;
+    }
+    format!(
+        "requests commits_a={} commits_b={} info={} sig={} payload={} other={} \
+         gallery_seen={} gallery_released={}",
+        counts[0],
+        counts[1],
+        counts[2],
+        counts[3],
+        counts[4],
+        counts[5],
+        gallery.paths().len(),
+        gallery.released(),
+    )
+}
+
 struct Run {
     child: Child,
     stdin: Option<ChildStdin>,
     stdout: Option<JoinHandle<Vec<u8>>>,
     stderr: Option<JoinHandle<Vec<u8>>>,
+    /// Whether `try_wait`/`wait_exit` observed a finish, and the code it
+    /// reported. A finished child without a code (a Unix signal) stays `None`.
+    exited: bool,
+    exit_code: Option<i32>,
+    /// Captured-output facts only: the byte lengths and the fixed labels this
+    /// case can recognise. The bytes themselves are dropped after the scan.
+    out_len: usize,
+    err_len: usize,
+    labels: Vec<&'static str>,
 }
 
 fn spawn(install: &Path, args: &[&str]) -> Run {
@@ -610,6 +751,11 @@ fn spawn(install: &Path, args: &[&str]) -> Run {
         stdin,
         stdout,
         stderr,
+        exited: false,
+        exit_code: None,
+        out_len: 0,
+        err_len: 0,
+        labels: Vec::new(),
     }
 }
 
@@ -621,12 +767,22 @@ impl Run {
         }
     }
 
+    /// Record the finish this guard observed. The code is part of the
+    /// early-exit diagnostic; the status itself is never discarded silently.
+    fn note_exit(&mut self, status: ExitStatus) {
+        self.exited = true;
+        self.exit_code = status.code();
+    }
+
     /// `try_wait` is part of the guard: an error is never ignored and never
     /// leaves a live child behind.
     fn running(&mut self) -> bool {
         match self.child.try_wait() {
             Ok(None) => true,
-            Ok(Some(_)) => false,
+            Ok(Some(status)) => {
+                self.note_exit(status);
+                false
+            }
             Err(error) => {
                 let _ = self.child.kill();
                 let _ = self.child.wait();
@@ -639,7 +795,10 @@ impl Run {
         let deadline = Instant::now() + timeout;
         loop {
             match self.child.try_wait() {
-                Ok(Some(status)) => return Some(status),
+                Ok(Some(status)) => {
+                    self.note_exit(status);
+                    return Some(status);
+                }
                 Ok(None) => {}
                 Err(error) => {
                     let _ = self.child.kill();
@@ -654,13 +813,39 @@ impl Run {
         }
     }
 
+    /// Join both readers, keep only the lengths and the fixed labels, and drop
+    /// the captured bytes so no raw output can reach a report.
     fn collect(&mut self) {
-        if let Some(handle) = self.stdout.take() {
-            let _ = handle.join();
+        if let Some(handle) = self.stdout.take()
+            && let Ok(bytes) = handle.join()
+        {
+            self.out_len = bytes.len();
+            self.note_labels(&bytes);
         }
-        if let Some(handle) = self.stderr.take() {
-            let _ = handle.join();
+        if let Some(handle) = self.stderr.take()
+            && let Ok(bytes) = handle.join()
+        {
+            self.err_len = bytes.len();
+            self.note_labels(&bytes);
         }
+    }
+
+    fn note_labels(&mut self, bytes: &[u8]) {
+        for label in scan_labels(bytes) {
+            if !self.labels.contains(&label) {
+                self.labels.push(label);
+            }
+        }
+    }
+
+    fn exit_facts(&self) -> String {
+        exit_facts_text(
+            self.exited,
+            self.exit_code,
+            self.out_len,
+            self.err_len,
+            &self.labels,
+        )
     }
 }
 
@@ -684,15 +869,25 @@ impl Drop for Run {
 
 /// Bounded observation of a real event (a file appearing, a request arriving or
 /// a live script changing). The condition is the evidence; the poll is only a
-/// transfer mechanism, and an early child exit is reported as its own phase.
-fn wait_event<F: FnMut() -> bool>(run: &mut Run, timeout: Duration, phase: &str, mut check: F) {
+/// transfer mechanism, and an early child exit is reported as its own phase
+/// together with the authoritative exit code and the fixture/private facts.
+fn wait_event<F, C>(run: &mut Run, timeout: Duration, phase: &str, mut check: F, mut facts: C)
+where
+    F: FnMut() -> bool,
+    C: FnMut() -> String,
+{
     let deadline = Instant::now() + timeout;
     loop {
         if check() {
             return;
         }
         if !run.running() {
-            panic!("{phase}: the host exited before the required event");
+            run.collect();
+            let facts_text = facts();
+            panic!(
+                "{phase}: the host exited before the required event; {} {facts_text}",
+                run.exit_facts()
+            );
         }
         if Instant::now() > deadline {
             panic!("{phase}: bounded wait for the required event expired");
@@ -839,6 +1034,13 @@ fn native_signed_rss_update_uses_the_same_host_and_preserves_non_rss_files() {
         Duration::from_secs(120),
         "phase A pending publication",
         || pending_path(&install).is_file(),
+        || {
+            format!(
+                "{} {}",
+                install_facts(&install, None),
+                fixture_facts(&origin, 0, &gallery_a)
+            )
+        },
     );
     assert!(
         run.running(),
@@ -918,6 +1120,13 @@ fn native_signed_rss_update_uses_the_same_host_and_preserves_non_rss_files() {
                     .unwrap_or(false)
             })
         },
+        || {
+            format!(
+                "{} {}",
+                install_facts(&install, Some(files.as_slice())),
+                fixture_facts(&origin, seen_before, &gallery_b)
+            )
+        },
     );
     wait_event(
         &mut run,
@@ -927,6 +1136,13 @@ fn native_signed_rss_update_uses_the_same_host_and_preserves_non_rss_files() {
             origin.requests()[seen_before..]
                 .iter()
                 .any(|request| request.target == COMMITS_TARGET_B)
+        },
+        || {
+            format!(
+                "{} {}",
+                install_facts(&install, Some(files.as_slice())),
+                fixture_facts(&origin, seen_before, &gallery_b)
+            )
         },
     );
     assert!(
@@ -1017,4 +1233,59 @@ fn native_signed_rss_update_uses_the_same_host_and_preserves_non_rss_files() {
         before.contains_key("config.rss"),
         "the configuration source is part of the preserved baseline"
     );
+}
+
+// MARK: - diagnostics controls
+
+/// Pure-data controls for the early-exit report: it must carry the code and the
+/// recognised fixed labels, and must never carry captured bytes. These do not
+/// prove the application behaviour; they only pin the diagnostic format.
+#[cfg(test)]
+mod early_exit_diagnostics {
+    use super::*;
+
+    #[test]
+    fn report_names_the_code_and_labels_but_not_the_output_bytes() {
+        let secret = "ipb_pass_hash=cafebabe";
+        let stderr =
+            format!("xeHentai: update startup stopped (ApplyFailed): {secret}\n").into_bytes();
+        let labels = scan_labels(&stderr);
+        assert_eq!(labels, vec!["startup_stopped"], "recognised labels");
+        let report = exit_facts_text(true, Some(1), 0, stderr.len(), &labels);
+        assert!(report.contains("code=1"), "{report}");
+        assert!(report.contains("startup_stopped"), "{report}");
+        assert!(
+            report.contains(&format!("stderr_bytes={}", stderr.len())),
+            "{report}"
+        );
+        assert!(!report.contains(secret), "{report}");
+        assert!(!report.contains("cafebabe"), "{report}");
+    }
+
+    #[test]
+    fn label_scan_matches_only_the_fixed_messages_this_server_emits() {
+        assert!(
+            scan_labels(b"INFO - [00:00:00] application task loop finished\n")
+                .contains(&"loop_finished")
+        );
+        assert!(
+            scan_labels(b"WARN - [00:00:00] Failure when updating program: boom\n")
+                .contains(&"update_failed")
+        );
+        assert!(scan_labels(b"xeHentai: cannot read input: end of input\n").contains(&"prompt_io"));
+        assert!(
+            scan_labels(b"thread 'main' panicked at src/main.rs:1:1\n").contains(&"child_panic")
+        );
+        assert!(scan_labels(b"xeHentai: session error: bad\n").contains(&"session_error"));
+        assert!(scan_labels(b"ordinary output\n").is_empty());
+    }
+
+    #[test]
+    fn unreadable_paths_are_reported_as_unknown_not_as_a_boolean() {
+        let root = tempfile::tempdir().expect("root");
+        let present = root.path().join("present");
+        std::fs::write(&present, b"x").expect("file");
+        assert_eq!(path_state(&present), "yes");
+        assert_eq!(path_state(&root.path().join("missing")), "no");
+    }
 }
