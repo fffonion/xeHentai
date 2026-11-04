@@ -27,6 +27,15 @@ END = "# --- native-gallery-read-gate: end ---"
 GALLERY_TEST = (
     "rpc::server::tests::native_gallery_read_serves_an_ordinary_file_verbatim"
 )
+ZIP_FALLBACK_TEST = "rpc::server::tests::gallery_reads_fall_back_to_sibling_zip"
+ARCHIVE_TEST = "rpc::server::tests::archive_builds_on_demand_and_reuses"
+ZIP_THUMBNAIL_TEST = (
+    "rpc::server::tests::gallery_zip_thumbnail_serves_resized_entry"
+)
+PRIVATE_HARDLINK_TEST = (
+    "rpc::server::tests::native_gallery_private_hardlink_alias_is_denied"
+)
+ROOT_ALIAS_TEST = "rpc::server::tests::native_gallery_root_alias_escape_is_denied"
 RSS_TEST = (
     "tests::native_rss_update::"
     "native_signed_rss_update_uses_the_same_host_and_preserves_non_rss_files"
@@ -34,6 +43,21 @@ RSS_TEST = (
 RSS_HOLD_TEST = (
     "tests::native_rss_update::native_held_gallery_times_out_then_auto_exits"
 )
+
+# The five gallery/archive consumers appended after the two original cases.
+# Order is part of the gate: macOS runs these seven, Windows these seven plus
+# the ignored long-running control.
+EXTRA_CASES = [
+    ("native-gallery-zip-fallback", "NATIVE_GALLERY_ZIP_FALLBACK_TEST", ZIP_FALLBACK_TEST),
+    ("native-gallery-archive", "NATIVE_GALLERY_ARCHIVE_TEST", ARCHIVE_TEST),
+    ("native-gallery-zip-thumbnail", "NATIVE_GALLERY_ZIP_THUMBNAIL_TEST", ZIP_THUMBNAIL_TEST),
+    (
+        "native-gallery-private-hardlink",
+        "NATIVE_GALLERY_PRIVATE_HARDLINK_TEST",
+        PRIVATE_HARDLINK_TEST,
+    ),
+    ("native-gallery-root-alias", "NATIVE_GALLERY_ROOT_ALIAS_TEST", ROOT_ALIAS_TEST),
+]
 
 
 def workflow_text():
@@ -71,6 +95,7 @@ GATE_ENV = {
     "NATIVE_RSS_UPDATE_TEST": RSS_TEST,
     "NATIVE_RSS_HOLD_CONTROL_TEST": RSS_HOLD_TEST,
 }
+GATE_ENV.update({env: test for _, env, test in EXTRA_CASES})
 
 
 @contextlib.contextmanager
@@ -91,7 +116,7 @@ def gate_module():
     """Execute the REAL gate block and return what it built.
 
     Only the environment is controlled; the block's own code decides the case
-    list. This host is not Windows, so the executed list is the two original
+    list. This host is not Windows, so the executed list is the seven base
     cases and the Windows-only append is asserted from the branch source.
     """
     namespace = {"__name__": "native_gate_under_test"}
@@ -194,6 +219,10 @@ def test_gate_requires_both_cases_and_the_exact_rss_name():
     assert "NATIVE_RSS_UPDATE_TEST" in block
     assert f"NATIVE_GALLERY_READ_TEST: {GALLERY_TEST}" in text
     assert f"NATIVE_RSS_UPDATE_TEST: {RSS_TEST}" in text
+    for label, env, test in EXTRA_CASES:
+        assert f'"{label}"' in block, label
+        assert env in block, env
+        assert f"{env}: {test}" in text, label
 
 
 def test_workflow_keeps_both_native_matrix_hosts():
@@ -218,12 +247,39 @@ def test_cargo_argv_places_ignored_after_the_libtest_separator():
 def test_the_two_original_cases_are_unchanged_and_never_ignored():
     module = gate_module()
     cases = module["CASES"]
-    assert [case[0] for case in cases] == ["native-gallery-read", "native-rss-update"]
-    assert [case[1] for case in cases] == [GALLERY_TEST, RSS_TEST]
-    assert [case[2] for case in cases] == [False, False]
+    labels = [case[0] for case in cases]
+    names = [case[1] for case in cases]
+    flags = [case[2] for case in cases]
+    # The original two keep their exact position, name and non-ignored flag.
+    assert labels[:2] == ["native-gallery-read", "native-rss-update"]
+    assert names[:2] == [GALLERY_TEST, RSS_TEST]
+    assert flags[:2] == [False, False]
     argv = module["cargo_argv"](RSS_TEST, "/runner/temp/cargo-target")
     assert "--ignored" not in argv
     assert argv[-3:] == ["--exact", RSS_TEST, "--nocapture"]
+    # The five gallery/archive consumers follow them, in order, never ignored.
+    assert labels[2:] == [label for label, _, _ in EXTRA_CASES]
+    assert names[2:] == [test for _, _, test in EXTRA_CASES]
+    assert flags[2:] == [False] * len(EXTRA_CASES)
+
+
+def test_seven_base_cases_bind_the_five_gallery_archive_consumers():
+    module = gate_module()
+    cases = module["CASES"]
+    assert len(cases) == 7, cases
+    assert [case[2] for case in cases] == [False] * 7
+    text = workflow_text()
+    block = gate_block()
+    for label, env, test in EXTRA_CASES:
+        # Each case owns an independent safe OUTDIR and exact argv.
+        assert "${{ runner.temp }}/" + label in text, label
+        argv = module["cargo_argv"](test, "/runner/temp/cargo-target")
+        assert argv[argv.index("--exact") + 1] == test, label
+        assert "--ignored" not in argv, label
+        assert argv[argv.index("--target-dir") + 1] == "/runner/temp/cargo-target"
+        assert env in block, env
+    # Windows is the only host that adds the ignored long-running control.
+    assert len(cases) + 1 == 8
 
 
 def test_the_ignored_control_is_appended_only_in_the_windows_branch():
@@ -261,6 +317,7 @@ TESTS = [
     test_workflow_keeps_both_native_matrix_hosts,
     test_cargo_argv_places_ignored_after_the_libtest_separator,
     test_the_two_original_cases_are_unchanged_and_never_ignored,
+    test_seven_base_cases_bind_the_five_gallery_archive_consumers,
     test_the_ignored_control_is_appended_only_in_the_windows_branch,
 ]
 

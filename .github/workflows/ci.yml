@@ -240,8 +240,10 @@ jobs:
             ${{ runner.temp }}/compat-evidence/*/round-1/*.log
             ${{ runner.temp }}/compat-evidence/*/round-2/*.log
 
-  # The native-platform gate: two real consumers on each host, plus one explicit
-  # long-running lifecycle control on Windows only. The ordinary gallery read and
+  # The native-platform gate: seven real consumers on each host, plus one
+  # explicit long-running lifecycle control on Windows only. The six gallery
+  # and archive consumers (ordinary read, sibling-ZIP fallback, on-demand
+  # archive, real ZIP thumbnail, private-alias denial, root-alias denial) and
   # the signed RSS update drive the production executable on native macOS and
   # Windows. A failing test is a behavior failure; a setup/compile failure is
   # recorded as infrastructure, never as behavior RED. Diagnostics are uploaded
@@ -259,6 +261,11 @@ jobs:
     env:
       CARGO_TERM_COLOR: never
       NATIVE_GALLERY_READ_TEST: rpc::server::tests::native_gallery_read_serves_an_ordinary_file_verbatim
+      NATIVE_GALLERY_ZIP_FALLBACK_TEST: rpc::server::tests::gallery_reads_fall_back_to_sibling_zip
+      NATIVE_GALLERY_ARCHIVE_TEST: rpc::server::tests::archive_builds_on_demand_and_reuses
+      NATIVE_GALLERY_ZIP_THUMBNAIL_TEST: rpc::server::tests::gallery_zip_thumbnail_serves_resized_entry
+      NATIVE_GALLERY_PRIVATE_HARDLINK_TEST: rpc::server::tests::native_gallery_private_hardlink_alias_is_denied
+      NATIVE_GALLERY_ROOT_ALIAS_TEST: rpc::server::tests::native_gallery_root_alias_escape_is_denied
       NATIVE_RSS_UPDATE_TEST: tests::native_rss_update::native_signed_rss_update_uses_the_same_host_and_preserves_non_rss_files
       NATIVE_RSS_HOLD_CONTROL_TEST: tests::native_rss_update::native_held_gallery_times_out_then_auto_exits
     steps:
@@ -302,8 +309,9 @@ jobs:
           # matching no test still exits 0, so the executed count, the exact
           # test name and the verdict are checked per case here rather than in
           # the shell. Every case in CASES must PASS for this step to succeed;
-          # Windows carries the extra ignored long-running control, the other
-          # hosts run the same two cases as before.
+          # the ordinary read and signed RSS update keep their original place,
+          # the five gallery/archive consumers follow them, and Windows carries
+          # the extra ignored long-running control.
           import json
           import os
           import pathlib
@@ -320,6 +328,31 @@ jobs:
           CASES = [
               ("native-gallery-read", os.environ["NATIVE_GALLERY_READ_TEST"], False),
               ("native-rss-update", os.environ["NATIVE_RSS_UPDATE_TEST"], False),
+              (
+                  "native-gallery-zip-fallback",
+                  os.environ["NATIVE_GALLERY_ZIP_FALLBACK_TEST"],
+                  False,
+              ),
+              (
+                  "native-gallery-archive",
+                  os.environ["NATIVE_GALLERY_ARCHIVE_TEST"],
+                  False,
+              ),
+              (
+                  "native-gallery-zip-thumbnail",
+                  os.environ["NATIVE_GALLERY_ZIP_THUMBNAIL_TEST"],
+                  False,
+              ),
+              (
+                  "native-gallery-private-hardlink",
+                  os.environ["NATIVE_GALLERY_PRIVATE_HARDLINK_TEST"],
+                  False,
+              ),
+              (
+                  "native-gallery-root-alias",
+                  os.environ["NATIVE_GALLERY_ROOT_ALIAS_TEST"],
+                  False,
+              ),
           ]
           if os.name == "nt":
               # This explicit long-running lifecycle control is required on
@@ -562,6 +595,11 @@ jobs:
           path: |
             ${{ runner.temp }}/native-gallery-read
             ${{ runner.temp }}/native-rss-update
+            ${{ runner.temp }}/native-gallery-zip-fallback
+            ${{ runner.temp }}/native-gallery-archive
+            ${{ runner.temp }}/native-gallery-zip-thumbnail
+            ${{ runner.temp }}/native-gallery-private-hardlink
+            ${{ runner.temp }}/native-gallery-root-alias
             ${{ runner.temp }}/native-rss-hold-control
             ${{ runner.temp }}/native-consumers-summary.json
           retention-days: 7

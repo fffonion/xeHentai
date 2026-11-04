@@ -1947,7 +1947,6 @@ pub async fn serve_until_closed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(target_os = "linux")]
     use crate::rpc::read_archive;
     use crate::rpc::{ThumbError, read_gallery_file, refuse_unsafe_name, thumbnail};
     use serde_json::Map as JsonMap;
@@ -3668,7 +3667,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "linux")]
     fn gallery_reads_fall_back_to_sibling_zip() {
         let mut app = test_app();
         let png = png_bytes(8, 8);
@@ -3732,6 +3730,207 @@ mod tests {
         // The same public consumer must resolve the task's renamed fid to it.
         let (renamed, _) = read_gallery_file(&app, &guid, "5").expect("renamed fid");
         assert_eq!(renamed, NATIVE_GALLERY_READ_BYTES);
+    }
+
+    /// A real App whose private session file was written BEFORE construction, so
+    /// the hardlink source in [`native_gallery_private_hardlink_alias_is_denied`]
+    /// is genuine private persistence the App actually loaded. The TempDir stays
+    /// a guard for the whole test: no `.keep()` fixture is created here.
+    fn test_app_with_private_session() -> (tempfile::TempDir, App) {
+        let root = tempfile::tempdir().expect("root");
+        let base = root.path();
+        std::fs::write(
+            base.join(crate::core::SESSION_FILE),
+            b"{\"tasks\":{},\"cookies\":{}}",
+        )
+        .expect("legal synthetic session before App::new");
+        let config = crate::config::Config::default();
+        let logger = crate::util::logger::Logger::with_output(Box::new(Vec::new()), false);
+        let app = App::new(config, logger, base, base).expect("app");
+        (root, app)
+    }
+
+    /// Known bytes of the image that lives OUTSIDE the task grant. The consumer
+    /// serves ordinary files verbatim, so a byte difference here would be the
+    /// escape itself, not codec behaviour.
+    const ALIASED_OUTSIDE_IMAGE_BYTES: &[u8] =
+        b"xeHentai native root-alias fixture: outside-grant image bytes.\n";
+
+    /// Point one owned directory path at another owned directory without any
+    /// system-policy change: on Unix an ordinary `std` directory symlink; on
+    /// Windows an NTFS junction created by the existing `cmd.exe /C mklink /J`,
+    /// run from the original TempDir base with a path relative to it. No
+    /// verbatim `\\?\` spelling is ever handed to cmd.
+    #[cfg(unix)]
+    fn create_owned_directory_alias(_base: &Path, link: &Path, target: &Path) {
+        std::os::unix::fs::symlink(target, link).expect("owned directory symlink");
+    }
+
+    #[cfg(windows)]
+    fn create_owned_directory_alias(base: &Path, link: &Path, target: &Path) {
+        let relative = link
+            .strip_prefix(base)
+            .expect("the alias path must stay under the App base");
+        let status = std::process::Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(relative)
+            .arg(target)
+            .current_dir(base)
+            .status()
+            .expect("cmd.exe must be invokable for the owned junction");
+        assert!(status.success(), "mklink /J failed for the owned junction");
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn create_owned_directory_alias(_base: &Path, _link: &Path, _target: &Path) {
+        panic!("no owned directory-alias construction exists for this native target");
+    }
+
+    #[cfg(unix)]
+    fn remove_owned_directory_alias(link: &Path) {
+        std::fs::remove_file(link).expect("remove the owned directory symlink");
+    }
+
+    #[cfg(windows)]
+    fn remove_owned_directory_alias(link: &Path) {
+        std::fs::remove_dir(link).expect("remove the owned junction");
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn remove_owned_directory_alias(_link: &Path) {
+        panic!("no owned directory-alias removal exists for this native target");
+    }
+
+    /// ONE native private-alias contract on Linux, macOS and Windows: an
+    /// ordinary gallery filename hardlinked on the same temporary filesystem to
+    /// the App's private session file must be denied by the production gallery
+    /// consumer with its existing denial outcome, while an unrelated healthy
+    /// image in the same gallery stays readable before and after. The ambient
+    /// read proves the alias is a real, readable file, so the denial cannot be
+    /// an artifact of an absent or unreadable fixture.
+    ///
+    /// There is no platform branch, skip, `#[ignore]` or `Unsupported` success
+    /// path here: a host whose confined read admits the alias fails this test.
+    #[test]
+    fn native_gallery_private_hardlink_alias_is_denied() {
+        let (_root, mut app) = test_app_with_private_session();
+        let png = png_bytes(8, 8);
+        let guid = task_with_image(&mut app, "2.jpg", &png);
+        let gallery = app
+            .task(&guid)
+            .expect("task")
+            .get_fpath()
+            .expect("gallery path");
+        let private = app.base_dir().join(crate::core::SESSION_FILE);
+
+        // Control BEFORE the alias: an unrelated ordinary image serves.
+        let (healthy_before, mime_before) =
+            read_gallery_file(&app, &guid, "2").expect("healthy image before the alias");
+        assert_eq!(healthy_before, png);
+        assert_eq!(mime_before, "image/jpeg");
+
+        // An ordinary gallery filename, hardlinked to the private session file
+        // on the same temporary filesystem.
+        let alias = gallery.join("1.jpg");
+        std::fs::hard_link(&private, &alias)
+            .expect("hardlink the private session into the gallery on the same temp fs");
+        let ambient_alias =
+            std::fs::read(&alias).expect("the alias must be an ordinary readable file");
+        let ambient_private =
+            std::fs::read(&private).expect("the private session must stay readable");
+        assert_eq!(
+            ambient_alias, ambient_private,
+            "the gallery alias must resolve to the private session file exactly"
+        );
+        assert!(
+            !ambient_alias.is_empty(),
+            "the private fixture must carry real bytes for this alias check"
+        );
+
+        // The production consumer must deny with its existing denial outcome.
+        assert_eq!(
+            read_gallery_file(&app, &guid, "1"),
+            Err(GalleryFail::NotFound),
+            "a private hardlink alias must be denied, never served"
+        );
+        assert!(
+            alias.is_file(),
+            "the denial must not delete or rewrite the fixture alias"
+        );
+
+        // And the denial is not global: the healthy image still serves.
+        let (healthy_after, mime_after) =
+            read_gallery_file(&app, &guid, "2").expect("healthy image after the denial");
+        assert_eq!(healthy_after, png);
+        assert_eq!(mime_after, "image/jpeg");
+    }
+
+    /// ONE native root-alias contract on Linux, macOS and Windows: after an
+    /// ordinary read is proven for a real App/Task, replace only its owned
+    /// gallery root with a directory alias to a separate owned TempDir that
+    /// holds a known image outside the task grant. The alias must really
+    /// resolve (ambient read), and the confined public consumer must still deny
+    /// it. The outside sentinel survives alias removal.
+    ///
+    /// Fixture construction is the only platform-specific half (Unix symlink /
+    /// Windows junction); the common assertions run on every native host. A
+    /// setup failure panics with its real reason and never becomes a skip.
+    #[test]
+    fn native_gallery_root_alias_escape_is_denied() {
+        let (root_guard, mut app) = test_app_with_private_session();
+        let png = png_bytes(8, 8);
+        let guid = task_with_image(&mut app, "1.jpg", &png);
+        let gallery = app
+            .task(&guid)
+            .expect("task")
+            .get_fpath()
+            .expect("gallery path");
+
+        // Control FIRST: the same Task reads its ordinary image.
+        let (ordinary, mime) =
+            read_gallery_file(&app, &guid, "1").expect("ordinary gallery read before the alias");
+        assert_eq!(ordinary, png);
+        assert_eq!(mime, "image/jpeg");
+
+        // A separate, owned directory outside the task grant.
+        let outside_guard = tempfile::tempdir().expect("outside");
+        let outside = outside_guard.path();
+        let sentinel = b"outside sentinel stays owned and untouched";
+        std::fs::write(outside.join("1.jpg"), ALIASED_OUTSIDE_IMAGE_BYTES).expect("outside image");
+        std::fs::write(outside.join("sentinel.txt"), sentinel).expect("outside sentinel");
+
+        // Replace ONLY the task's owned gallery root with the alias.
+        std::fs::remove_dir_all(&gallery).expect("remove the owned gallery root");
+        create_owned_directory_alias(app.base_dir(), &gallery, outside);
+
+        // The alias really resolves: an ambient read sees the outside image.
+        let ambient = std::fs::read(gallery.join("1.jpg"))
+            .expect("the directory alias must resolve to the outside image");
+        assert_eq!(
+            ambient, ALIASED_OUTSIDE_IMAGE_BYTES,
+            "the alias must address the outside image, not a missing path"
+        );
+
+        // The confined public consumer must still refuse.
+        assert_eq!(
+            read_gallery_file(&app, &guid, "1"),
+            Err(GalleryFail::NotFound),
+            "a gallery root aliased outside the task grant must be denied"
+        );
+
+        // Remove the alias before TempDir cleanup; the outside sentinel stays.
+        remove_owned_directory_alias(&gallery);
+        assert_eq!(
+            std::fs::read(outside.join("sentinel.txt")).expect("outside sentinel"),
+            sentinel,
+            "the outside sentinel must stay intact"
+        );
+        assert!(
+            outside.join("1.jpg").is_file(),
+            "the outside image must stay intact"
+        );
+        drop(root_guard);
+        drop(outside_guard);
     }
 
     // --- M5 frozen directory observations (snapshot boundary) ---------------
@@ -4193,7 +4392,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "linux")]
     fn archive_builds_on_demand_and_reuses() {
         let mut app = test_app();
         let png = png_bytes(8, 8);
