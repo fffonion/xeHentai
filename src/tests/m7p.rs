@@ -74,16 +74,35 @@ impl Route {
     }
 }
 
+/// How the fixture's read side of a holding route actually ended.
+///
+/// Only a graceful `Eof` is the client closing the connection. A reset means the
+/// bytes this fixture wrote were still queued on the client's receive side when
+/// the client closed, so the kernel answered with RST instead of FIN.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PeerReadEnd {
+    Eof,
+    Reset,
+    Other(std::io::ErrorKind),
+}
+
+fn classify_read_end(error: &std::io::Error) -> PeerReadEnd {
+    match error.kind() {
+        std::io::ErrorKind::ConnectionReset => PeerReadEnd::Reset,
+        kind => PeerReadEnd::Other(kind),
+    }
+}
+
 /// A real loopback HTTP source with per-target routes. It records every request
 /// head, and for a holding route it records how many body bytes really went out
-/// and whether the client closed first.
+/// and how the client's read side ended.
 struct Server {
     port: u16,
     routes: Arc<Mutex<HashMap<String, Route>>>,
     requests: Arc<Mutex<Vec<Request>>>,
     release: Arc<(Mutex<bool>, Condvar)>,
     partial: Arc<Mutex<HashMap<String, usize>>>,
-    eof: Arc<Mutex<Vec<String>>>,
+    ends: Arc<Mutex<Vec<(String, PeerReadEnd)>>>,
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -101,13 +120,13 @@ impl Server {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let release = Arc::new((Mutex::new(false), Condvar::new()));
         let partial = Arc::new(Mutex::new(HashMap::new()));
-        let eof = Arc::new(Mutex::new(Vec::new()));
+        let ends = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let seen = Arc::clone(&requests);
         let table = Arc::clone(&routes);
         let gate = Arc::clone(&release);
         let flushed = Arc::clone(&partial);
-        let closed = Arc::clone(&eof);
+        let closed = Arc::clone(&ends);
         let stopping = Arc::clone(&stop);
         let handle = std::thread::spawn(move || {
             while !stopping.load(Ordering::SeqCst) {
@@ -145,7 +164,7 @@ impl Server {
             requests,
             release,
             partial,
-            eof,
+            ends,
             stop,
             handle: Some(handle),
         }
@@ -168,7 +187,18 @@ impl Server {
     }
 
     fn peer_eof(&self, path: &str) -> bool {
-        self.eof.lock().unwrap().iter().any(|seen| seen == path)
+        self.peer_ends(path).contains(&PeerReadEnd::Eof)
+    }
+
+    /// Every terminal read state observed for `path`, in the order recorded.
+    fn peer_ends(&self, path: &str) -> Vec<PeerReadEnd> {
+        self.ends
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(seen, _)| seen == path)
+            .map(|(_, end)| *end)
+            .collect()
     }
 
     fn release(&self) {
@@ -195,7 +225,7 @@ fn serve(
     seen: &Arc<Mutex<Vec<Request>>>,
     gate: &Arc<(Mutex<bool>, Condvar)>,
     flushed: &Arc<Mutex<HashMap<String, usize>>>,
-    closed: &Arc<Mutex<Vec<String>>>,
+    closed: &Arc<Mutex<Vec<(String, PeerReadEnd)>>>,
     stopping: &Arc<AtomicBool>,
 ) {
     let Some((method, target, headers)) = read_head(&mut socket) else {
@@ -246,7 +276,10 @@ fn serve(
                 let mut chunk = [0u8; 256];
                 match socket.read(&mut chunk) {
                     Ok(0) => {
-                        closed.lock().unwrap().push(target.clone());
+                        closed
+                            .lock()
+                            .unwrap()
+                            .push((target.clone(), PeerReadEnd::Eof));
                         return;
                     }
                     Ok(_) => {}
@@ -255,7 +288,17 @@ fn serve(
                             error.kind(),
                             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                         ) => {}
-                    Err(_) => return,
+                    Err(error) => {
+                        // Record what really ended the read side. On Linux a
+                        // client that closes with unread response bytes queued
+                        // makes close send RST, so this is ConnectionReset
+                        // rather than the graceful EOF of `Ok(0)`.
+                        closed
+                            .lock()
+                            .unwrap()
+                            .push((target.clone(), classify_read_end(&error)));
+                        return;
+                    }
                 }
                 let (guard, _) = cond
                     .wait_timeout(lock.lock().unwrap(), Duration::from_millis(10))
@@ -1483,7 +1526,9 @@ fn m7p_cancelled_download_keeps_the_old_pending_and_a_fresh_run_succeeds() {
 
     assert!(
         m6::wait_for(Duration::from_secs(10), || server.peer_eof(&payload_target)),
-        "the cancelled request kept its connection open"
+        "the cancelled request kept its connection open: peer_read_ends={:?} flushed_body_bytes={} body_bytes={payload_len}",
+        server.peer_ends(&payload_target),
+        server.partial(&payload_target),
     );
     assert_eq!(
         std::fs::read(pending_path(install.path())).expect("pending"),
@@ -1501,6 +1546,109 @@ fn m7p_cancelled_download_keeps_the_old_pending_and_a_fresh_run_succeeds() {
     assert_ne!(
         std::fs::read(pending_path(install.path())).expect("pending"),
         before
+    );
+}
+
+#[test]
+#[ignore = "explicit calibration probe for the loopback fixture's read-end observation"]
+fn m7p_peer_read_end_calibration_for_close_with_unread_response() {
+    // Close over a real, unconsumed response: the fixture recorded its body
+    // prefix, the bytes are queued on the client's receive side, and nothing is
+    // read before the drop.
+    let unread = Server::start(vec![]);
+    let unread_target = "/calibrate/unread-close";
+    unread.set(unread_target, Route::holding(vec![b'x'; 4096], 64));
+    let mut client = TcpStream::connect(("127.0.0.1", unread.port)).expect("connect unread");
+    client
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout");
+    client
+        .write_all(
+            format!("GET {unread_target} HTTP/1.1\r\nHost: fixture\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .expect("send request");
+    client.flush().expect("flush request");
+    assert!(
+        m6::wait_for(Duration::from_secs(10), || unread.partial(unread_target)
+            > 0),
+        "the fixture never wrote the held body prefix"
+    );
+    let mut probe = [0u8; 1];
+    let queued = client.peek(&mut probe).expect("peek the response");
+    assert!(queued > 0, "no response bytes were queued to close over");
+    // A live, uncancelled connection records no terminal read state at all.
+    assert!(
+        unread.peer_ends(unread_target).is_empty(),
+        "a live connection recorded a terminal read state: {:?}",
+        unread.peer_ends(unread_target)
+    );
+    drop(client);
+    assert!(
+        m6::wait_for(Duration::from_secs(10), || !unread
+            .peer_ends(unread_target)
+            .is_empty()),
+        "the fixture never recorded how the unread close ended"
+    );
+    let unread_ends = unread.peer_ends(unread_target);
+    assert_eq!(
+        unread_ends,
+        vec![PeerReadEnd::Reset],
+        "closing over a queued response must surface as ConnectionReset, not EOF"
+    );
+    assert!(
+        !unread.peer_eof(unread_target),
+        "a reset must not satisfy the graceful-EOF check"
+    );
+
+    // Control: the same holding route, but the client consumes the whole
+    // response first. An ordinary close must still record the graceful EOF.
+    let consumed = Server::start(vec![]);
+    let consumed_target = "/calibrate/consumed-close";
+    let body = vec![b'y'; 64];
+    consumed.set(consumed_target, Route::holding(body.clone(), body.len()));
+    let mut client = TcpStream::connect(("127.0.0.1", consumed.port)).expect("connect consumed");
+    client
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout");
+    client
+        .write_all(
+            format!("GET {consumed_target} HTTP/1.1\r\nHost: fixture\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .expect("send request");
+    client.flush().expect("flush request");
+    let mut response = Vec::new();
+    let mut chunk = [0u8; 256];
+    loop {
+        let read = client.read(&mut chunk).expect("read response");
+        assert!(read > 0, "the fixture closed before the body was complete");
+        response.extend_from_slice(&chunk[..read]);
+        let body_start = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|head_end| head_end + 4);
+        if body_start.is_some_and(|start| response.len() >= start + body.len()) {
+            break;
+        }
+    }
+    // The loop stops exactly at the advertised body length, so nothing is left
+    // queued in the receive buffer.
+    drop(client);
+    assert!(
+        m6::wait_for(Duration::from_secs(10), || !consumed
+            .peer_ends(consumed_target)
+            .is_empty()),
+        "the fixture never recorded how the consumed close ended"
+    );
+    assert_eq!(
+        consumed.peer_ends(consumed_target),
+        vec![PeerReadEnd::Eof],
+        "an ordinary close after consuming the body must stay a graceful EOF"
+    );
+    assert!(
+        consumed.peer_eof(consumed_target),
+        "an ordinary close must still satisfy the graceful-EOF check"
     );
 }
 
