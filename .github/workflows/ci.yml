@@ -87,6 +87,7 @@ jobs:
           "$XEH_PYTHON" tools/test_update_compat.py
           "$XEH_PYTHON" tools/test_package_dist.py
           "$XEH_PYTHON" tools/test_compat_gallery.py
+          "$XEH_PYTHON" tools/test_native_runtime_gate.py
           "$XEH_PYTHON" tools/browser/test_verify_webui_49.py
           "$XEH_PYTHON" tools/browser/test_export_diagnostics.py
           "$XEH_PYTHON" tools/browser/test_run.py
@@ -239,13 +240,13 @@ jobs:
             ${{ runner.temp }}/compat-evidence/*/round-1/*.log
             ${{ runner.temp }}/compat-evidence/*/round-2/*.log
 
-  # The only native-platform gate: ONE real gallery-read test on each host.
-  # Compile-only was insufficient (see the M8 platform facts); this step runs
-  # the exact production consumer on native macOS and Windows. A failing test
-  # is a behavior failure; a setup/compile failure is recorded as
-  # infrastructure, never as behavior RED. Diagnostics are uploaded either way.
+  # The native-platform gate: two real consumers on each host. The ordinary
+  # gallery read and the signed RSS update both drive the production executable
+  # on native macOS and Windows. A failing test is a behavior failure; a
+  # setup/compile failure is recorded as infrastructure, never as behavior RED.
+  # Diagnostics are uploaded either way.
   native-gallery-read:
-    name: Native gallery read (${{ matrix.os }})
+    name: Native consumers (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -257,26 +258,48 @@ jobs:
     env:
       CARGO_TERM_COLOR: never
       NATIVE_GALLERY_READ_TEST: rpc::server::tests::native_gallery_read_serves_an_ordinary_file_verbatim
+      NATIVE_RSS_UPDATE_TEST: tests::native_rss_update::native_signed_rss_update_uses_the_same_host_and_preserves_non_rss_files
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      # The runner context is unavailable in job-level env, so the allocated
+      # native target and the runner-local temp/cache roots are initialized
+      # once here, before the first Cargo invocation, through GITHUB_ENV.
+      - name: Initialize native runner runtime paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf 'CARGO_TARGET_DIR=%s\n' "$RUNNER_TEMP/cargo-target"
+            printf 'TMPDIR=%s\n' "$RUNNER_TEMP/tmp"
+            printf 'TEMP=%s\n' "$RUNNER_TEMP/tmp"
+            printf 'TMP=%s\n' "$RUNNER_TEMP/tmp"
+            printf 'XDG_CACHE_HOME=%s\n' "$RUNNER_TEMP/cache"
+            printf 'PIP_CACHE_DIR=%s\n' "$RUNNER_TEMP/pip-cache"
+            printf 'UV_CACHE_DIR=%s\n' "$RUNNER_TEMP/uv-cache"
+            printf 'XEH_NPM_CACHE=%s\n' "$RUNNER_TEMP/npm-cache"
+          } >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/tmp" "$RUNNER_TEMP/cache" \
+            "$RUNNER_TEMP/pip-cache" "$RUNNER_TEMP/uv-cache" \
+            "$RUNNER_TEMP/npm-cache" "$RUNNER_TEMP/cargo-target"
       - name: Install Rust 1.99.1
         run: |
           rustup toolchain install 1.99.1 --profile minimal --component clippy
           rustup default 1.99.1
-      - name: Native gallery read (real execution, exact test)
+      - name: Native consumers (real execution, exact tests)
         shell: bash
         timeout-minutes: 45
         run: |
           set -euo pipefail
           python - <<'PY'
           # --- native-gallery-read-gate: begin ---
-          # Run ONE required native gallery-read test and refuse every outcome
-          # that would otherwise look successful without executing it: a
-          # filter matching no test still exits 0, so the executed count and
-          # the exact test name are checked here rather than in the shell.
+          # Run the required native consumer tests and refuse every outcome that
+          # would otherwise look successful without executing them: a filter
+          # matching no test still exits 0, so the executed count, the exact
+          # test name and the verdict are checked per case here rather than in
+          # the shell. Both cases must PASS for this step to succeed.
           import json
           import os
           import pathlib
@@ -287,10 +310,24 @@ jobs:
           sys.stdout.reconfigure(encoding="utf-8", errors="replace")
           sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-          TEST_NAME = os.environ["NATIVE_GALLERY_READ_TEST"]
           WORKSPACE = os.environ["GITHUB_WORKSPACE"]
-          OUTDIR = pathlib.Path(os.environ["RUNNER_TEMP"]) / "native-gallery-read"
-          OUTDIR.mkdir(parents=True, exist_ok=True)
+          RUNNER_TEMP = pathlib.Path(os.environ["RUNNER_TEMP"])
+          TARGET_DIR = os.environ["CARGO_TARGET_DIR"]
+          CASES = [
+              ("native-gallery-read", os.environ["NATIVE_GALLERY_READ_TEST"]),
+              ("native-rss-update", os.environ["NATIVE_RSS_UPDATE_TEST"]),
+          ]
+
+
+          def _text(value):
+              # A TimeoutExpired payload is bytes on some Python versions while
+              # write_text requires str: decode with replacement so the timeout
+              # verdict is recorded instead of a TypeError masking it.
+              if value is None:
+                  return ""
+              if isinstance(value, bytes):
+                  return value.decode("utf-8", "replace")
+              return value
 
 
           def run(argv, **kwargs):
@@ -304,6 +341,26 @@ jobs:
                   errors="replace",
                   **kwargs,
               )
+
+
+          def cargo_argv(test_name, target_dir):
+              # One explicit allocated target plus the bounded build controls;
+              # the exact test name is the only libtest filter.
+              return [
+                  "cargo",
+                  "test",
+                  "--bin",
+                  "xeHentai",
+                  "--locked",
+                  "--jobs",
+                  "2",
+                  "--target-dir",
+                  target_dir,
+                  "--",
+                  "--exact",
+                  test_name,
+                  "--nocapture",
+              ]
 
 
           def classify(stdout, returncode, test_name):
@@ -343,103 +400,127 @@ jobs:
               }
 
 
-          def fail(verdict, detail=None):
-              summary = {"test_name": TEST_NAME, "verdict": verdict}
-              if detail is not None:
-                  summary["detail"] = detail
-              (OUTDIR / "summary.json").write_text(
-                  json.dumps(summary, indent=2) + "\n", encoding="utf-8"
-              )
-              print("native-gallery-read: verdict", verdict)
-              if detail is not None:
-                  print("native-gallery-read:", detail)
-              return 1
-
-
           def main():
               try:
                   head = run(["git", "rev-parse", "HEAD"])
               except OSError as error:
-                  return fail("INFRA_SETUP_OR_COMPILE", f"cannot invoke git: {error}")
+                  print("native-consumers: cannot invoke git:", error)
+                  return 1
               source_sha = head.stdout.strip()
-              (OUTDIR / "source-sha.txt").write_text(source_sha + "\n", encoding="utf-8")
-              (OUTDIR / "git-head.json").write_text(
+              results = []
+              failed = False
+              for label, test_name in CASES:
+                  outdir = RUNNER_TEMP / label
+                  outdir.mkdir(parents=True, exist_ok=True)
+                  (outdir / "source-sha.txt").write_text(
+                      source_sha + "\n", encoding="utf-8"
+                  )
+                  (outdir / "git-head.json").write_text(
+                      json.dumps(
+                          {
+                              "returncode": head.returncode,
+                              "stdout": head.stdout,
+                              "stderr": head.stderr,
+                          },
+                          indent=2,
+                      )
+                      + "\n",
+                      encoding="utf-8",
+                  )
+                  argv = cargo_argv(test_name, TARGET_DIR)
+                  (outdir / "argv.json").write_text(
+                      json.dumps(
+                          {
+                              "test_name": test_name,
+                              "argv": argv,
+                              "cwd": WORKSPACE,
+                              "source_sha": source_sha,
+                              "assigned_target": TARGET_DIR,
+                          },
+                          indent=2,
+                      )
+                      + "\n",
+                      encoding="utf-8",
+                  )
+                  print(f"{label}: source {source_sha}")
+                  print(f"{label}: argv {json.dumps(argv)}")
+                  try:
+                      proc = run(argv, timeout=2400)
+                  except subprocess.TimeoutExpired as error:
+                      (outdir / "stdout.txt").write_text(
+                          _text(error.stdout), encoding="utf-8"
+                      )
+                      (outdir / "stderr.txt").write_text(
+                          _text(error.stderr), encoding="utf-8"
+                      )
+                      result = {
+                          "test_name": test_name,
+                          "verdict": "INFRA_TIMEOUT",
+                          "detail": f"cargo test exceeded the bound: {argv}",
+                      }
+                      print(f"{label}: verdict INFRA_TIMEOUT")
+                      failed = True
+                  except OSError as error:
+                      result = {
+                          "test_name": test_name,
+                          "verdict": "INFRA_SETUP_OR_COMPILE",
+                          "detail": f"cannot invoke cargo: {error}",
+                      }
+                      print(f"{label}: verdict INFRA_SETUP_OR_COMPILE")
+                      failed = True
+                  else:
+                      (outdir / "stdout.txt").write_text(proc.stdout, encoding="utf-8")
+                      (outdir / "stderr.txt").write_text(proc.stderr, encoding="utf-8")
+                      print(f"--- {label} cargo test stdout ---")
+                      print(proc.stdout)
+                      print(f"--- {label} cargo test stderr ---")
+                      print(proc.stderr)
+                      result = classify(proc.stdout, proc.returncode, test_name)
+                      print(f"{label}: verdict {result['verdict']} {json.dumps(result)}")
+                      if result["verdict"] == "PASS":
+                          print(
+                              f"{label}: the required test executed and passed "
+                              "on this platform."
+                          )
+                      elif result["verdict"] == "BEHAVIOR_RED":
+                          print(
+                              f"{label}: the required test executed and FAILED "
+                              "on this platform; that is a behavior failure."
+                          )
+                      elif result["verdict"] == "ZERO_MATCH_REJECTED":
+                          print(
+                              f"{label}: cargo exited 0 without executing the "
+                              "required test; the zero-match pass is refused."
+                          )
+                      elif result["verdict"] == "INFRA_SETUP_OR_COMPILE":
+                          print(
+                              f"{label}: cargo failed before executing the test; "
+                              "treat this as infrastructure/setup, not as behavior RED."
+                          )
+                      failed = failed or result["verdict"] != "PASS"
+                  result["source_sha"] = source_sha
+                  result["argv"] = argv
+                  result["cwd"] = WORKSPACE
+                  result["assigned_target"] = TARGET_DIR
+                  (outdir / "summary.json").write_text(
+                      json.dumps(result, indent=2) + "\n", encoding="utf-8"
+                  )
+                  results.append(result)
+              (RUNNER_TEMP / "native-consumers-summary.json").write_text(
                   json.dumps(
                       {
-                          "returncode": head.returncode,
-                          "stdout": head.stdout,
-                          "stderr": head.stderr,
+                          "source_sha": source_sha,
+                          "target_dir": TARGET_DIR,
+                          "cases": results,
                       },
                       indent=2,
                   )
                   + "\n",
                   encoding="utf-8",
               )
-
-              argv = [
-                  "cargo",
-                  "test",
-                  "--bin",
-                  "xeHentai",
-                  "--locked",
-                  "--",
-                  "--exact",
-                  TEST_NAME,
-                  "--nocapture",
-              ]
-              (OUTDIR / "argv.json").write_text(
-                  json.dumps({"argv": argv, "cwd": WORKSPACE, "source_sha": source_sha}, indent=2)
-                  + "\n",
-                  encoding="utf-8",
-              )
-              print("native-gallery-read: source", source_sha)
-              print("native-gallery-read: argv", json.dumps(argv))
-              try:
-                  proc = run(argv, timeout=2400)
-              except subprocess.TimeoutExpired as error:
-                  (OUTDIR / "stdout.txt").write_text(
-                      error.stdout or "", encoding="utf-8", errors="replace"
-                  )
-                  (OUTDIR / "stderr.txt").write_text(
-                      error.stderr or "", encoding="utf-8", errors="replace"
-                  )
-                  return fail("INFRA_TIMEOUT", f"cargo test exceeded the bound: {argv}")
-              except OSError as error:
-                  return fail("INFRA_SETUP_OR_COMPILE", f"cannot invoke cargo: {error}")
-
-              (OUTDIR / "stdout.txt").write_text(proc.stdout, encoding="utf-8")
-              (OUTDIR / "stderr.txt").write_text(proc.stderr, encoding="utf-8")
-              print("--- cargo test stdout ---")
-              print(proc.stdout)
-              print("--- cargo test stderr ---")
-              print(proc.stderr)
-
-              result = classify(proc.stdout, proc.returncode, TEST_NAME)
-              result["source_sha"] = source_sha
-              result["argv"] = argv
-              result["cwd"] = WORKSPACE
-              (OUTDIR / "summary.json").write_text(
-                  json.dumps(result, indent=2) + "\n", encoding="utf-8"
-              )
-              print("native-gallery-read: verdict", result["verdict"], json.dumps(result))
-              if result["verdict"] == "PASS":
-                  return 0
-              if result["verdict"] == "BEHAVIOR_RED":
-                  print(
-                      "native-gallery-read: the required test executed and FAILED "
-                      "on this platform; that is a behavior failure."
-                  )
-              elif result["verdict"] == "ZERO_MATCH_REJECTED":
-                  print(
-                      "native-gallery-read: cargo exited 0 without executing the "
-                      "required test; the zero-match pass is refused."
-                  )
-              elif result["verdict"] == "INFRA_SETUP_OR_COMPILE":
-                  print(
-                      "native-gallery-read: cargo failed before executing the test; "
-                      "treat this as infrastructure/setup, not as behavior RED."
-                  )
-              return 1
+              if failed:
+                  print("native-consumers: at least one required case did not PASS")
+              return 1 if failed else 0
 
 
           if __name__ == "__main__":
@@ -448,11 +529,17 @@ jobs:
           PY
       - name: Strict Clippy (all targets)
         run: cargo clippy --all-targets --locked -- -D warnings
-      - name: Upload native gallery read diagnostics
+      # Only the two cases' Cargo output, argv, source receipt and verdicts are
+      # published; child business state, private logs and credentials stay on
+      # the runner.
+      - name: Upload native consumer diagnostics
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: native-gallery-read-${{ matrix.os }}
-          path: ${{ runner.temp }}/native-gallery-read
+          name: native-consumers-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/native-gallery-read
+            ${{ runner.temp }}/native-rss-update
+            ${{ runner.temp }}/native-consumers-summary.json
           retention-days: 7
           if-no-files-found: warn

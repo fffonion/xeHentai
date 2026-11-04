@@ -12667,10 +12667,26 @@ mod m6 {
                     .and_then(Path::parent)
                     .expect("target/debug")
                     .to_path_buf();
-                let binary = debug.join("xeHentai");
+                // The current test executable's own build target wins unless an
+                // explicit non-empty CARGO_TARGET_DIR was assigned to this run.
+                let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+                    .or_else(|| debug.parent().map(Path::to_path_buf))
+                    .expect("target directory");
+                let binary = debug.join(format!("xeHentai{}", std::env::consts::EXE_SUFFIX));
                 if !fresh(&binary) {
                     let output = Command::new(env!("CARGO"))
-                        .args(["build", "--bin", "xeHentai", "--jobs", "2"])
+                        .args([
+                            "build",
+                            "--bin",
+                            "xeHentai",
+                            "--jobs",
+                            "2",
+                            "--locked",
+                            "--target-dir",
+                        ])
+                        .arg(&target_dir)
                         .current_dir(MANIFEST)
                         .output()
                         .expect("run cargo build");
@@ -15161,5 +15177,14 @@ mod m7 {
 mod m7p;
 
 // M8: the updater's own native transport (trusted origin tuples, redirects,
-// strict UTF-8 and the real public consumer).
+// strict UTF-8 and the real public consumer). Its fixtures reuse the request
+// type and commits document declared in `m7`, which is POSIX-only, so the
+// module is compiled where those declarations exist. The cross-platform native
+// consumer lives in `native_rss_update` below.
+#[cfg(unix)]
 mod m8;
+
+// M8: one real signed RSS update applied to the ordinary executable. Fully
+// cross-platform: loopback std sockets, a copied host and the existing
+// interactive/URL-completion exit path; no POSIX signal or permission API.
+mod native_rss_update;
