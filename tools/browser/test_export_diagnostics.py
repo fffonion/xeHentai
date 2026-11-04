@@ -11,6 +11,7 @@ are not application results. Run with:
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -348,11 +349,38 @@ class ExporterTests(unittest.TestCase):
         script_path.write_text(script, encoding="utf-8")
         env = dict(os.environ)
         env["RUNNER_TEMP"] = str(runner_temp)
-        env["XEH_PYTHON"] = sys.executable
+        # Reproduce the real runner precondition: the step is ``if: always()``,
+        # so it still runs when the "Install Python and browser test
+        # dependencies" step was skipped and $RUNNER_TEMP/venv never exists.
+        # The interpreter named by XEH_PYTHON is therefore deliberately absent
+        # and must stay absent -- the block itself must not need it.
+        env["XEH_PYTHON"] = str(runner_temp / "venv" / "bin" / "python")
+        self.assertFalse(Path(env["XEH_PYTHON"]).exists(),
+                         "the fake venv interpreter must never be created")
         return subprocess.run(
             ["bash", "-euo", "pipefail", str(script_path)],
             capture_output=True, text=True, timeout=60,
             cwd=str(ROOT), env=env)
+
+    def test_project_diagnostics_block_runs_without_install_venv(self):
+        """The always-step projects through the runner's PATH python3."""
+        python3 = shutil.which("python3")
+        self.assertIsNotNone(python3, "runner PATH must provide python3")
+        version = subprocess.run([python3, "--version"],
+                                 capture_output=True, text=True, timeout=60)
+        self.assertEqual(version.returncode, 0, version.stderr)
+        self.assertRegex(version.stdout or version.stderr, r"^Python 3\.\d+")
+        script = self.extract_project_diagnostics_script()
+        runner_temp = self.work / "runner-no-venv"
+        (runner_temp / "browser-run").mkdir(parents=True, exist_ok=True)
+        self.assertFalse((runner_temp / "venv").exists())
+        proc = self.run_project_diagnostics_script(script, runner_temp)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        out = runner_temp / "ci-diagnostics" / "browser-report-public.json"
+        payload = json.loads(out.read_text(encoding="utf-8"))
+        self.assertEqual(payload["status"], "report-absent")
+        self.assertEqual(payload["check_count"], 0)
+        self.assertEqual(payload["trace_count"], 0)
 
     def test_project_browser_diagnostics_workflow_argv_executes(self):
         script = self.extract_project_diagnostics_script()
