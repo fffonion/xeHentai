@@ -15159,3 +15159,6 @@ mod m7 {
 // POSIX signals and real child processes, so Unix only.
 #[cfg(unix)]
 mod m7p;
+
+// M8 focused proof: terminal HTTP worker exit notification vs the awaiting VM.
+mod http_worker_exit;
