@@ -12,6 +12,8 @@ native verdicts come only from the workflow run itself.
 """
 
 import ast
+import contextlib
+import os
 import sys
 import textwrap
 import traceback
@@ -28,6 +30,9 @@ GALLERY_TEST = (
 RSS_TEST = (
     "tests::native_rss_update::"
     "native_signed_rss_update_uses_the_same_host_and_preserves_non_rss_files"
+)
+RSS_HOLD_TEST = (
+    "tests::native_rss_update::native_held_gallery_times_out_then_auto_exits"
 )
 
 
@@ -55,6 +60,43 @@ def gate_functions(*names):
     source = "import re\n\n\n" + "\n\n\n".join(found[name] for name in names)
     namespace = {}
     exec(compile(source, str(WORKFLOW), "exec"), namespace)  # noqa: S102 - own workflow source
+    return namespace
+
+
+GATE_ENV = {
+    "GITHUB_WORKSPACE": "/gate/workspace",
+    "RUNNER_TEMP": "/gate/runner-temp",
+    "CARGO_TARGET_DIR": "/gate/target",
+    "NATIVE_GALLERY_READ_TEST": GALLERY_TEST,
+    "NATIVE_RSS_UPDATE_TEST": RSS_TEST,
+    "NATIVE_RSS_HOLD_CONTROL_TEST": RSS_HOLD_TEST,
+}
+
+
+@contextlib.contextmanager
+def gate_environ():
+    saved = {name: os.environ.get(name) for name in GATE_ENV}
+    os.environ.update(GATE_ENV)
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def gate_module():
+    """Execute the REAL gate block and return what it built.
+
+    Only the environment is controlled; the block's own code decides the case
+    list. This host is not Windows, so the executed list is the two original
+    cases and the Windows-only append is asserted from the branch source.
+    """
+    namespace = {"__name__": "native_gate_under_test"}
+    with gate_environ():
+        exec(compile(gate_block(), str(WORKFLOW), "exec"), namespace)  # noqa: S102
     return namespace
 
 
@@ -161,6 +203,52 @@ def test_workflow_keeps_both_native_matrix_hosts():
     assert "native-gallery-read:" in text
 
 
+def test_cargo_argv_places_ignored_after_the_libtest_separator():
+    cargo_argv = gate_functions("cargo_argv")["cargo_argv"]
+    argv = cargo_argv(RSS_HOLD_TEST, "/runner/temp/cargo-target", True)
+    assert argv[:2] == ["cargo", "test"]
+    assert argv.index("--exact") > argv.index("--")
+    assert argv[argv.index("--exact") + 1] == RSS_HOLD_TEST
+    assert argv.index("--ignored") > argv.index("--exact")
+    assert argv.count("--ignored") == 1
+    assert argv[-1] == "--nocapture"
+    assert argv[argv.index("--target-dir") + 1] == "/runner/temp/cargo-target"
+
+
+def test_the_two_original_cases_are_unchanged_and_never_ignored():
+    module = gate_module()
+    cases = module["CASES"]
+    assert [case[0] for case in cases] == ["native-gallery-read", "native-rss-update"]
+    assert [case[1] for case in cases] == [GALLERY_TEST, RSS_TEST]
+    assert [case[2] for case in cases] == [False, False]
+    argv = module["cargo_argv"](RSS_TEST, "/runner/temp/cargo-target")
+    assert "--ignored" not in argv
+    assert argv[-3:] == ["--exact", RSS_TEST, "--nocapture"]
+
+
+def test_the_ignored_control_is_appended_only_in_the_windows_branch():
+    tree = ast.parse(gate_block())
+    branches = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.If) and "os.name" in ast.unparse(node.test)
+    ]
+    assert len(branches) == 1, [
+        ast.unparse(node.test) for node in tree.body if isinstance(node, ast.If)
+    ]
+    assert ast.unparse(branches[0].test) in ('os.name == "nt"', "os.name == 'nt'")
+    body = "\n".join(ast.unparse(node) for node in branches[0].body)
+    assert "native-rss-hold-control" in body
+    assert "NATIVE_RSS_HOLD_CONTROL_TEST" in body
+    assert "True" in body
+    for node in tree.body:
+        if isinstance(node, ast.If) and node is not branches[0]:
+            assert "CASES.append" not in ast.unparse(node)
+    text = workflow_text()
+    assert f"NATIVE_RSS_HOLD_CONTROL_TEST: {RSS_HOLD_TEST}" in text
+    assert "${{ runner.temp }}/native-rss-hold-control" in text
+
+
 TESTS = [
     test_libtest_pass_is_the_only_pass_verdict,
     test_zero_match_is_rejected_even_with_exit_zero,
@@ -171,6 +259,9 @@ TESTS = [
     test_timeout_text_is_decoded_with_replacement,
     test_gate_requires_both_cases_and_the_exact_rss_name,
     test_workflow_keeps_both_native_matrix_hosts,
+    test_cargo_argv_places_ignored_after_the_libtest_separator,
+    test_the_two_original_cases_are_unchanged_and_never_ignored,
+    test_the_ignored_control_is_appended_only_in_the_windows_branch,
 ]
 
 

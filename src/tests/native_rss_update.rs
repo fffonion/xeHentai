@@ -645,6 +645,21 @@ fn install_facts(install: &Path, expected: Option<&[(String, Vec<u8>)]>) -> Stri
     }
 }
 
+/// The true successful-apply boundary: the private v2 record naming this
+/// candidate. `updater/install.rs` replaces the four live scripts first and
+/// writes this record last, inside the same apply closure, so a partial apply
+/// leaves the four files at release B without ever satisfying this condition.
+/// An unreadable path or unparseable document is `false`, never a success.
+fn applied_record_matches(install: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(install.join(AREA).join("state.json")) else {
+        return false;
+    };
+    let Ok(state) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    state["v"] == 2 && state["active"]["update_id"] == UPDATE_ID
+}
+
 /// What the fixture already observed: counts per known update path (never the
 /// URL or headers) and the held gallery's request count and release state.
 fn fixture_facts(origin: &Server, since: usize, gallery: &Gallery) -> String {
@@ -717,6 +732,11 @@ fn spawn(install: &Path, args: &[&str]) -> Run {
     ] {
         command.env_remove(name);
     }
+    // The fixed-label scan needs the C-locale message text. `LC_MESSAGES`
+    // overrides `LANG`/`LC_ALL=C` for gettext-style message catalogues, so a
+    // caller's locale must not reach the host; the product locale logic is
+    // unchanged.
+    command.env_remove("LC_MESSAGES");
     // Keep the platform runtime variables (SystemRoot/PATH/...); only the
     // per-case user/temp roots are redirected into this case's own install.
     command
@@ -999,6 +1019,68 @@ fn same_bytes(left: &Path, right: &Path) -> bool {
 
 // MARK: - the one cross-platform consumer
 
+/// The real phase-B start shared by the success case and the held-gallery
+/// control: the same install, the same already-published pending candidate, the
+/// same argv and prompt answers, and a newly held gallery. Only the behaviour
+/// after this point differs between the two cases.
+struct PhaseB {
+    run: Run,
+    gallery: Gallery,
+    seen_before: usize,
+}
+
+fn start_phase_b(install: &Path, origin: &Server) -> PhaseB {
+    origin.set(COMMITS_TARGET_B, COMMITS.as_bytes().to_vec());
+    let seen_before = origin.requests().len();
+    let gallery = Gallery::start();
+    let mut run = spawn(install, &["-i", "-c", COOKIE, "--auto-update", "check"]);
+    run.answer(&format!(
+        "{GALLERY_URL}\nn\n{}\ndl-b\nn\nn\nn\n\n",
+        gallery.proxy()
+    ));
+    PhaseB {
+        run,
+        gallery,
+        seen_before,
+    }
+}
+
+/// Wait for the true successful-apply boundary: the private v2 applied record
+/// naming this candidate AND the four live scripts equal to B. The production
+/// installer writes the record after the four replacements inside the same
+/// apply closure, so this is the records boundary, not merely on-disk bytes;
+/// the later four-byte assert stays exactly as it was.
+fn wait_applied_record(
+    run: &mut Run,
+    install: &Path,
+    origin: &Server,
+    seen_before: usize,
+    gallery: &Gallery,
+    files: &[(String, Vec<u8>)],
+) {
+    let expected: BTreeMap<String, Vec<u8>> = files.iter().cloned().collect();
+    wait_event(
+        run,
+        Duration::from_secs(120),
+        "phase B startup apply",
+        || {
+            applied_record_matches(install)
+                && expected.iter().all(|(path, body)| {
+                    std::fs::read(install.join(path))
+                        .map(|live| &live == body)
+                        .unwrap_or(false)
+                })
+        },
+        || {
+            format!(
+                "{} {}",
+                install_facts(install, Some(files)),
+                fixture_facts(origin, seen_before, gallery)
+            )
+        },
+    );
+}
+
 #[test]
 fn native_signed_rss_update_uses_the_same_host_and_preserves_non_rss_files() {
     let root = tempfile::tempdir().expect("case root");
@@ -1100,33 +1182,22 @@ fn native_signed_rss_update_uses_the_same_host_and_preserves_non_rss_files() {
 
     // Release B: the next ordinary start applies the candidate through the OLD
     // startup controller, then the NEW business module really drives a request.
-    origin.set(COMMITS_TARGET_B, COMMITS.as_bytes().to_vec());
-    let seen_before = origin.requests().len();
-    let gallery_b = Gallery::start();
-    let mut run = spawn(&install, &["-i", "-c", COOKIE, "--auto-update", "check"]);
-    run.answer(&format!(
-        "{GALLERY_URL}\nn\n{}\ndl-b\nn\nn\nn\n\n",
-        gallery_b.proxy()
-    ));
-    let expected: BTreeMap<String, Vec<u8>> = files.iter().cloned().collect();
-    wait_event(
+    let PhaseB {
+        mut run,
+        gallery: gallery_b,
+        seen_before,
+    } = start_phase_b(&install, &origin);
+    wait_applied_record(
         &mut run,
-        Duration::from_secs(120),
-        "phase B startup apply",
-        || {
-            expected.iter().all(|(path, body)| {
-                std::fs::read(install.join(path))
-                    .map(|live| &live == body)
-                    .unwrap_or(false)
-            })
-        },
-        || {
-            format!(
-                "{} {}",
-                install_facts(&install, Some(files.as_slice())),
-                fixture_facts(&origin, seen_before, &gallery_b)
-            )
-        },
+        &install,
+        &origin,
+        seen_before,
+        &gallery_b,
+        files.as_slice(),
+    );
+    assert!(
+        applied_record_matches(&install),
+        "phase B: the successful apply must publish its v2 applied record"
     );
     wait_event(
         &mut run,
@@ -1235,7 +1306,188 @@ fn native_signed_rss_update_uses_the_same_host_and_preserves_non_rss_files() {
     );
 }
 
+// MARK: - the explicit long-running held-gallery control
+
+/// The negative lifecycle control from the early-exit investigation: one REAL
+/// phase-A download publishes the signed pending candidate, the ordinary second
+/// host applies it, and from the true applied-record boundary on the gallery is
+/// never released. The production producer timeout/retry/proxy-pool failure is
+/// then allowed to fail the task on its own, so the Runtime's AutoExit can end
+/// the host naturally.
+///
+/// This proves the ordinary producer-timeout/AutoExit path and its exit-0
+/// semantics only. It neither reproduces nor excludes any historical early
+/// exit, it does not require `commits_b` to be zero (that count is observed
+/// only) and a killed child is never reported as a natural exit.
+#[test]
+#[ignore = "explicit long-running lifecycle control"]
+fn native_held_gallery_times_out_then_auto_exits() {
+    let root = tempfile::tempdir().expect("case root");
+    let origin = Arc::new(Server::start(Vec::new()));
+    let files = candidate(&origin.origin());
+    let (info, sig, payload) = signed_package(&files);
+    origin.set(COMMITS_TARGET, COMMITS.as_bytes().to_vec());
+    origin.set(&package_target(&origin.origin(), ""), payload.clone());
+    origin.set(&package_target(&origin.origin(), ".manifest.json"), info);
+    origin.set(&package_target(&origin.origin(), ".sig"), sig);
+    let (_exe, _binding_a) = installed_host(root.path(), &origin.origin());
+    let install = root.path().join("install");
+
+    // Phase A: the same real download publishes the signed pending candidate.
+    let gallery_a = Gallery::start();
+    let mut run_a = spawn(&install, &["-i", "-c", COOKIE, "--auto-update", "download"]);
+    run_a.answer(&format!(
+        "{GALLERY_URL}\nn\n{}\ndl-a\nn\nn\nn\n\n",
+        gallery_a.proxy()
+    ));
+    wait_event(
+        &mut run_a,
+        Duration::from_secs(120),
+        "control phase A pending publication",
+        || pending_path(&install).is_file(),
+        || install_facts(&install, None),
+    );
+    assert!(
+        run_a.running(),
+        "control phase A: the host must still be running when the pending candidate is published"
+    );
+    run_a.stdin.take();
+    gallery_a.release();
+    let status_a = run_a
+        .wait_exit(Duration::from_secs(120))
+        .expect("control phase A: the ordinary host must exit after its URL completed");
+    run_a.collect();
+    assert_eq!(status_a.code(), Some(0), "control phase A: exit status");
+
+    // Phase B: the ordinary second start applies the candidate. The gallery is
+    // held from here on, `commits_b` is not a wait condition and nothing is
+    // released.
+    let PhaseB {
+        mut run,
+        gallery,
+        seen_before,
+    } = start_phase_b(&install, &origin);
+    wait_applied_record(
+        &mut run,
+        &install,
+        &origin,
+        seen_before,
+        &gallery,
+        files.as_slice(),
+    );
+
+    let started = Instant::now();
+    let status = run.wait_exit(Duration::from_secs(150));
+    let elapsed = started.elapsed();
+    run.collect();
+    let exit_facts = run.exit_facts();
+    let install_state = install_facts(&install, Some(files.as_slice()));
+    let fixture = fixture_facts(&origin, seen_before, &gallery);
+    let held_connections = gallery.paths().len();
+    let released = gallery.released();
+
+    assert!(
+        !released,
+        "control: this case must never release the held gallery"
+    );
+    // The producer retries the held metadata request; MAX_FAIL=5 removes the
+    // proxy after the fifth failure, so at least five real attempts must have
+    // reached the fixture. A platform that never gets there fails for real.
+    assert!(
+        held_connections >= 5,
+        "control: the held gallery saw {held_connections} connections, fewer than the \
+         five failing attempts this path needs; {install_state} {fixture} {exit_facts}"
+    );
+
+    let Some(status) = status else {
+        let _ = run.child.kill();
+        let _ = run.child.wait();
+        panic!(
+            "control: no natural exit within 150s, so the AutoExit path is unproven \
+             (the child was killed, not observed to exit); elapsed_ms={} \
+             held_connections={held_connections} {install_state} {fixture} {exit_facts}",
+            elapsed.as_millis()
+        );
+    };
+    // Fixed safe fields only: no child output, URL, header or credential.
+    eprintln!(
+        "held-gallery control: elapsed_ms={} held_connections={held_connections} \
+         gallery_released={released} {exit_facts} {install_state} {fixture}",
+        elapsed.as_millis()
+    );
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "control: the natural AutoExit must exit 0; {exit_facts}"
+    );
+    assert!(
+        run.labels.contains(&"loop_finished"),
+        "control: the natural AutoExit must finish the application task loop; {exit_facts}"
+    );
+    assert!(
+        applied_record_matches(&install),
+        "control: the applied record must still name this candidate after the natural exit"
+    );
+}
+
 // MARK: - diagnostics controls
+
+/// The apply boundary must treat a missing, unreadable or foreign record as
+/// "not applied": folding any of those into success is exactly the
+/// misattribution this boundary exists to prevent.
+#[cfg(test)]
+mod apply_boundary {
+    use super::*;
+
+    #[test]
+    fn only_a_valid_v2_record_with_this_identity_counts_as_applied() {
+        let root = tempfile::tempdir().expect("root");
+        assert!(
+            !applied_record_matches(root.path()),
+            "a missing applied record must not count as a successful apply"
+        );
+
+        let area = root.path().join(AREA);
+        std::fs::create_dir_all(&area).expect("area");
+        let state = area.join("state.json");
+        std::fs::write(&state, b"{not json").expect("malformed fixture");
+        assert!(
+            !applied_record_matches(root.path()),
+            "an unparseable applied record must not count as a successful apply"
+        );
+
+        std::fs::write(
+            &state,
+            serde_json::json!({ "v": 1, "active": { "update_id": UPDATE_ID } }).to_string(),
+        )
+        .expect("v1 fixture");
+        assert!(
+            !applied_record_matches(root.path()),
+            "a pre-v2 record must not count as this apply"
+        );
+
+        std::fs::write(
+            &state,
+            serde_json::json!({ "v": 2, "active": { "update_id": "another-candidate" } })
+                .to_string(),
+        )
+        .expect("foreign fixture");
+        assert!(
+            !applied_record_matches(root.path()),
+            "another candidate's record must not count as this apply"
+        );
+
+        std::fs::write(
+            &state,
+            serde_json::json!({ "v": 2, "active": { "update_id": UPDATE_ID } }).to_string(),
+        )
+        .expect("matching fixture");
+        assert!(
+            applied_record_matches(root.path()),
+            "the exact v2 identity is the applied boundary"
+        );
+    }
+}
 
 /// Pure-data controls for the early-exit report: it must carry the code and the
 /// recognised fixed labels, and must never carry captured bytes. These do not

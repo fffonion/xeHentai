@@ -240,11 +240,12 @@ jobs:
             ${{ runner.temp }}/compat-evidence/*/round-1/*.log
             ${{ runner.temp }}/compat-evidence/*/round-2/*.log
 
-  # The native-platform gate: two real consumers on each host. The ordinary
-  # gallery read and the signed RSS update both drive the production executable
-  # on native macOS and Windows. A failing test is a behavior failure; a
-  # setup/compile failure is recorded as infrastructure, never as behavior RED.
-  # Diagnostics are uploaded either way.
+  # The native-platform gate: two real consumers on each host, plus one explicit
+  # long-running lifecycle control on Windows only. The ordinary gallery read and
+  # the signed RSS update drive the production executable on native macOS and
+  # Windows. A failing test is a behavior failure; a setup/compile failure is
+  # recorded as infrastructure, never as behavior RED. Diagnostics are uploaded
+  # either way.
   native-gallery-read:
     name: Native consumers (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -259,6 +260,7 @@ jobs:
       CARGO_TERM_COLOR: never
       NATIVE_GALLERY_READ_TEST: rpc::server::tests::native_gallery_read_serves_an_ordinary_file_verbatim
       NATIVE_RSS_UPDATE_TEST: tests::native_rss_update::native_signed_rss_update_uses_the_same_host_and_preserves_non_rss_files
+      NATIVE_RSS_HOLD_CONTROL_TEST: tests::native_rss_update::native_held_gallery_times_out_then_auto_exits
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -299,7 +301,9 @@ jobs:
           # would otherwise look successful without executing them: a filter
           # matching no test still exits 0, so the executed count, the exact
           # test name and the verdict are checked per case here rather than in
-          # the shell. Both cases must PASS for this step to succeed.
+          # the shell. Every case in CASES must PASS for this step to succeed;
+          # Windows carries the extra ignored long-running control, the other
+          # hosts run the same two cases as before.
           import json
           import os
           import pathlib
@@ -314,9 +318,20 @@ jobs:
           RUNNER_TEMP = pathlib.Path(os.environ["RUNNER_TEMP"])
           TARGET_DIR = os.environ["CARGO_TARGET_DIR"]
           CASES = [
-              ("native-gallery-read", os.environ["NATIVE_GALLERY_READ_TEST"]),
-              ("native-rss-update", os.environ["NATIVE_RSS_UPDATE_TEST"]),
+              ("native-gallery-read", os.environ["NATIVE_GALLERY_READ_TEST"], False),
+              ("native-rss-update", os.environ["NATIVE_RSS_UPDATE_TEST"], False),
           ]
+          if os.name == "nt":
+              # This explicit long-running lifecycle control is required on
+              # Windows only; it is marked #[ignore] so it never joins the
+              # default test gate, and is selected here with --ignored.
+              CASES.append(
+                  (
+                      "native-rss-hold-control",
+                      os.environ["NATIVE_RSS_HOLD_CONTROL_TEST"],
+                      True,
+                  )
+              )
 
 
           def _text(value):
@@ -343,10 +358,12 @@ jobs:
               )
 
 
-          def cargo_argv(test_name, target_dir):
+          def cargo_argv(test_name, target_dir, ignored=False):
               # One explicit allocated target plus the bounded build controls;
-              # the exact test name is the only libtest filter.
-              return [
+              # the exact test name is the only libtest filter. An ignored case
+              # gets --ignored AFTER the libtest separator; the two original
+              # cases keep exactly the argv they always had.
+              argv = [
                   "cargo",
                   "test",
                   "--bin",
@@ -359,8 +376,11 @@ jobs:
                   "--",
                   "--exact",
                   test_name,
-                  "--nocapture",
               ]
+              if ignored:
+                  argv.append("--ignored")
+              argv.append("--nocapture")
+              return argv
 
 
           def classify(stdout, returncode, test_name):
@@ -409,7 +429,7 @@ jobs:
               source_sha = head.stdout.strip()
               results = []
               failed = False
-              for label, test_name in CASES:
+              for label, test_name, ignored in CASES:
                   outdir = RUNNER_TEMP / label
                   outdir.mkdir(parents=True, exist_ok=True)
                   (outdir / "source-sha.txt").write_text(
@@ -427,11 +447,12 @@ jobs:
                       + "\n",
                       encoding="utf-8",
                   )
-                  argv = cargo_argv(test_name, TARGET_DIR)
+                  argv = cargo_argv(test_name, TARGET_DIR, ignored)
                   (outdir / "argv.json").write_text(
                       json.dumps(
                           {
                               "test_name": test_name,
+                              "ignored": ignored,
                               "argv": argv,
                               "cwd": WORKSPACE,
                               "source_sha": source_sha,
@@ -499,6 +520,7 @@ jobs:
                           )
                       failed = failed or result["verdict"] != "PASS"
                   result["source_sha"] = source_sha
+                  result["ignored"] = ignored
                   result["argv"] = argv
                   result["cwd"] = WORKSPACE
                   result["assigned_target"] = TARGET_DIR
@@ -529,8 +551,8 @@ jobs:
           PY
       - name: Strict Clippy (all targets)
         run: cargo clippy --all-targets --locked -- -D warnings
-      # Only the two cases' Cargo output, argv, source receipt and verdicts are
-      # published; child business state, private logs and credentials stay on
+      # Only the required cases' Cargo output, argv, source receipt and verdicts
+      # are published; child business state, private logs and credentials stay on
       # the runner.
       - name: Upload native consumer diagnostics
         if: always()
@@ -540,6 +562,7 @@ jobs:
           path: |
             ${{ runner.temp }}/native-gallery-read
             ${{ runner.temp }}/native-rss-update
+            ${{ runner.temp }}/native-rss-hold-control
             ${{ runner.temp }}/native-consumers-summary.json
           retention-days: 7
           if-no-files-found: warn
