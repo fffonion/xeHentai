@@ -833,6 +833,23 @@ impl Run {
         }
     }
 
+    /// Bounded exit observation followed by the reader joins. Both captured
+    /// readers block in `read_to_end` until the pipe reaches EOF, and only the
+    /// child's exit closes it: a child that did not finish within `timeout`
+    /// must therefore be killed and reaped BEFORE `collect`, or the join would
+    /// outlast the deadline and the promised failure would never be reached.
+    /// A killed child is never a natural exit — `None` is returned unchanged
+    /// and `note_exit` is not called, so `exited` stays false.
+    fn wait_exit_then_collect(&mut self, timeout: Duration) -> Option<ExitStatus> {
+        let status = self.wait_exit(timeout);
+        if status.is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+        self.collect();
+        status
+    }
+
     /// Join both readers, keep only the lengths and the fixed labels, and drop
     /// the captured bytes so no raw output can reach a report.
     fn collect(&mut self) {
@@ -1377,9 +1394,8 @@ fn native_held_gallery_times_out_then_auto_exits() {
     );
 
     let started = Instant::now();
-    let status = run.wait_exit(Duration::from_secs(150));
+    let status = run.wait_exit_then_collect(Duration::from_secs(150));
     let elapsed = started.elapsed();
-    run.collect();
     let exit_facts = run.exit_facts();
     let install_state = install_facts(&install, Some(files.as_slice()));
     let fixture = fixture_facts(&origin, seen_before, &gallery);
@@ -1400,11 +1416,9 @@ fn native_held_gallery_times_out_then_auto_exits() {
     );
 
     let Some(status) = status else {
-        let _ = run.child.kill();
-        let _ = run.child.wait();
         panic!(
             "control: no natural exit within 150s, so the AutoExit path is unproven \
-             (the child was killed, not observed to exit); elapsed_ms={} \
+             (the child was killed and reaped, not observed to exit); elapsed_ms={} \
              held_connections={held_connections} {install_state} {fixture} {exit_facts}",
             elapsed.as_millis()
         );
@@ -1427,6 +1441,63 @@ fn native_held_gallery_times_out_then_auto_exits() {
     assert!(
         applied_record_matches(&install),
         "control: the applied record must still name this candidate after the natural exit"
+    );
+}
+
+// MARK: - the bounded timeout-cleanup regression
+
+/// The same bounded wait/cleanup helper the held-gallery control ends with,
+/// exercised against the same real ordinary host on a deadline that expires
+/// first: an interactive run with no URL and no answer keeps the prompt blocked
+/// on the still-open stdin, so the child is genuinely alive at the deadline.
+/// The regression requires `None` (the original observation is preserved), the
+/// child to be reaped, both captured readers to be joined and taken, and no
+/// natural exit to be claimed. If the host exits earlier the case fails as it
+/// should; nothing here fakes a live child or a natural exit.
+#[test]
+#[ignore = "explicit bounded timeout-cleanup regression"]
+fn native_timeout_cleanup_reaps_the_child_before_collecting() {
+    let root = tempfile::tempdir().expect("case root");
+    let origin = Arc::new(Server::start(Vec::new()));
+    let (_exe, _binding_a) = installed_host(root.path(), &origin.origin());
+    let install = root.path().join("install");
+
+    // `--auto-update off` keeps startup network-free; the production prompt
+    // prints its question and waits for a line this case never writes.
+    let mut run = spawn(&install, &["-i", "-c", COOKIE, "--auto-update", "off"]);
+    let started = Instant::now();
+    let status = run.wait_exit_then_collect(Duration::from_millis(50));
+    let elapsed = started.elapsed();
+
+    assert!(
+        status.is_none(),
+        "the host left before the deadline, so this regression cannot observe the \
+         timeout cleanup: {}",
+        run.exit_facts()
+    );
+    assert!(
+        matches!(run.child.try_wait(), Ok(Some(_))),
+        "the timed-out child was not killed and reaped"
+    );
+    assert!(
+        run.stdout.is_none() && run.stderr.is_none(),
+        "the captured readers were not joined and taken before the case ended"
+    );
+    assert!(
+        !run.exited && run.exit_code.is_none(),
+        "a killed child must not be recorded as a natural exit: {}",
+        run.exit_facts()
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "the timeout cleanup was not bounded: elapsed_ms={}",
+        elapsed.as_millis()
+    );
+    // Fixed fields only: no child output, URL, header or credential.
+    eprintln!(
+        "timeout cleanup: status=none reaped=yes readers_joined=yes elapsed_ms={} {}",
+        elapsed.as_millis(),
+        run.exit_facts()
     );
 }
 
