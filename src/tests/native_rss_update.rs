@@ -822,6 +822,10 @@ fn native_signed_rss_update_uses_the_same_host_and_preserves_non_rss_files() {
         "phase A: a fresh install must not have a pending candidate"
     );
     let before = snapshot(&install);
+    assert!(
+        before.get("rss/updater/github.rss") == Some(&binding_a),
+        "phase A: the preserved baseline must be the bound release A script"
+    );
 
     // Release A: publish the signed pending candidate while A still runs.
     let gallery_a = Gallery::start();
@@ -840,11 +844,15 @@ fn native_signed_rss_update_uses_the_same_host_and_preserves_non_rss_files() {
         run.running(),
         "phase A: the host must still be running when the pending candidate is published"
     );
-    let live_a = std::fs::read(install.join("rss/updater/github.rss")).expect("live A");
-    assert_eq!(
-        live_a, binding_a,
-        "phase A: a download must not change the live release"
-    );
+    // Pending publication must leave every live script exactly at release A,
+    // not just the updater script bound to the fixture source.
+    for path in RSS_FILES {
+        let live = std::fs::read(install.join(path)).expect("phase A: live RSS script");
+        assert!(
+            before.get(path) == Some(&live),
+            "phase A: the live script {path} changed while release A was still running"
+        );
+    }
     let requests_a = origin.requests();
     let targets_a: Vec<&str> = requests_a
         .iter()
@@ -925,9 +933,9 @@ fn native_signed_rss_update_uses_the_same_host_and_preserves_non_rss_files() {
         run.running(),
         "phase B: the host must still be running when release B drives its request"
     );
-    assert_eq!(
-        std::fs::read(install.join("h.json")).expect("session read by B"),
-        session_after_a,
+    let session_read_by_b = std::fs::read(install.join("h.json")).expect("session read by B");
+    assert!(
+        session_read_by_b == session_after_a,
         "phase B: the previous session must be readable and unchanged"
     );
     run.stdin.take();
@@ -959,9 +967,9 @@ fn native_signed_rss_update_uses_the_same_host_and_preserves_non_rss_files() {
         state["active"]["update_id"], UPDATE_ID,
         "phase B: applied record identity"
     );
-    assert_eq!(
-        std::fs::read(install.join("h.json")).expect("session after B"),
-        session_after_a,
+    let session_after_b = std::fs::read(install.join("h.json")).expect("session after B");
+    assert!(
+        session_after_b == session_after_a,
         "phase B: the user session changed across the RSS-only update"
     );
 
