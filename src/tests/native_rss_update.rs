@@ -552,11 +552,21 @@ fn installed_host(root: &Path, api: &str) -> (PathBuf, Vec<u8>) {
 // MARK: - early-exit facts (test-only diagnostics)
 
 /// The only child-output facts this case reports. Each entry is a fixed message
-/// that `src/main.rs`, the startup controller, the prompt or the Rust runtime
-/// emit verbatim; nothing else is classified and the captured bytes are dropped
-/// after the scan.
-const OUTPUT_LABELS: [(&str, &str); 6] = [
+/// that `src/main.rs`, the startup controller, the prompt, the Rust runtime or
+/// the producer's pool failure path emit verbatim; nothing else is classified
+/// and the captured bytes are dropped after the scan.
+///
+/// `proxy_pool_exhausted` is the production `ProxyError::NoProxy` Display text
+/// (`src/proxy.rs`), surfaced unchanged by `HttpError::Pool` (`src/worker.rs`)
+/// and logged by the producer as `task #<guid> error: <error>`
+/// (`src/core/runtime.rs`). The `avaliable` spelling is the production text and
+/// must not be corrected here.
+const OUTPUT_LABELS: [(&str, &str); 7] = [
     ("loop_finished", "application task loop finished"),
+    (
+        "proxy_pool_exhausted",
+        "try to use proxy but no proxies avaliable",
+    ),
     ("update_failed", "Failure when updating program:"),
     ("prompt_io", "xeHentai: cannot read input:"),
     ("startup_stopped", "xeHentai: update startup stopped"),
@@ -1328,14 +1338,21 @@ fn native_signed_rss_update_uses_the_same_host_and_preserves_non_rss_files() {
 /// The negative lifecycle control from the early-exit investigation: one REAL
 /// phase-A download publishes the signed pending candidate, the ordinary second
 /// host applies it, and from the true applied-record boundary on the gallery is
-/// never released. The production producer timeout/retry/proxy-pool failure is
-/// then allowed to fail the task on its own, so the Runtime's AutoExit can end
-/// the host naturally.
+/// never released. Holding every response consumes the producer's proxies, so
+/// the pool itself fails with `ProxyError::NoProxy`, the task fails on its own,
+/// and the Runtime's AutoExit ends the host naturally.
 ///
-/// This proves the ordinary producer-timeout/AutoExit path and its exit-0
-/// semantics only. It neither reproduces nor excludes any historical early
-/// exit, it does not require `commits_b` to be zero (that count is observed
-/// only) and a killed child is never reported as a natural exit.
+/// The proof of exhaustion is the closed `proxy_pool_exhausted` label on the
+/// captured output together with the natural exit 0 and the finished loop, not
+/// a count of HTTP requests: `held_requests` is `Gallery::paths`, i.e. requests
+/// whose head the fixture actually read. A connect that fails before reaching
+/// the fixture — including the pool-exhaustion error — adds no entry, so this
+/// count is not, and must not be read as, the producer's pool-failure count.
+///
+/// This proves the ordinary pool-failure/AutoExit path and its exit-0 semantics
+/// only. It neither reproduces nor excludes any historical early exit, and
+/// `commits_b` is observed only, never required to be zero or one. A killed
+/// child is never reported as a natural exit.
 #[test]
 #[ignore = "explicit long-running lifecycle control"]
 fn native_held_gallery_times_out_then_auto_exits() {
@@ -1399,35 +1416,30 @@ fn native_held_gallery_times_out_then_auto_exits() {
     let exit_facts = run.exit_facts();
     let install_state = install_facts(&install, Some(files.as_slice()));
     let fixture = fixture_facts(&origin, seen_before, &gallery);
-    let held_connections = gallery.paths().len();
+    // `Gallery::paths` records only requests whose head actually reached the
+    // fixture; a failed connect, including the pool-exhaustion error, leaves no
+    // entry. This is a counted set of real held requests, not a pool-attempt
+    // count, and it is deliberately not compared against MAX_FAIL.
+    let held_requests = gallery.paths().len();
     let released = gallery.released();
-
-    assert!(
-        !released,
-        "control: this case must never release the held gallery"
-    );
-    // The producer retries the held metadata request; MAX_FAIL=5 removes the
-    // proxy after the fifth failure, so at least five real attempts must have
-    // reached the fixture. A platform that never gets there fails for real.
-    assert!(
-        held_connections >= 5,
-        "control: the held gallery saw {held_connections} connections, fewer than the \
-         five failing attempts this path needs; {install_state} {fixture} {exit_facts}"
-    );
 
     let Some(status) = status else {
         panic!(
             "control: no natural exit within 150s, so the AutoExit path is unproven \
              (the child was killed and reaped, not observed to exit); elapsed_ms={} \
-             held_connections={held_connections} {install_state} {fixture} {exit_facts}",
+             held_requests={held_requests} {install_state} {fixture} {exit_facts}",
             elapsed.as_millis()
         );
     };
     // Fixed safe fields only: no child output, URL, header or credential.
     eprintln!(
-        "held-gallery control: elapsed_ms={} held_connections={held_connections} \
+        "held-gallery control: elapsed_ms={} held_requests={held_requests} \
          gallery_released={released} {exit_facts} {install_state} {fixture}",
         elapsed.as_millis()
+    );
+    assert!(
+        !released,
+        "control: this case must never release the held gallery"
     );
     assert_eq!(
         status.code(),
@@ -1437,6 +1449,24 @@ fn native_held_gallery_times_out_then_auto_exits() {
     assert!(
         run.labels.contains(&"loop_finished"),
         "control: the natural AutoExit must finish the application task loop; {exit_facts}"
+    );
+    // The closed production pool error is the causal evidence: the task failed
+    // because no proxy was available, not because a request never arrived.
+    assert!(
+        run.labels.contains(&"proxy_pool_exhausted"),
+        "control: the natural exit was not preceded by the production \
+         ProxyError::NoProxy failure this control requires; {exit_facts}"
+    );
+    assert!(
+        held_requests >= 1,
+        "control: the held gallery read no request head, so no request was \
+         actually held; {install_state} {fixture} {exit_facts}"
+    );
+    assert_eq!(
+        release_b_state(&install, files.as_slice()),
+        "yes",
+        "control: all four live scripts must be release B after the natural exit; \
+         {install_state} {exit_facts}"
     );
     assert!(
         applied_record_matches(&install),
@@ -1601,6 +1631,24 @@ mod early_exit_diagnostics {
         );
         assert!(scan_labels(b"xeHentai: session error: bad\n").contains(&"session_error"));
         assert!(scan_labels(b"ordinary output\n").is_empty());
+    }
+
+    /// The producer logs the pool failure as `task #<guid> error: <error>`, and
+    /// `ProxyError::NoProxy`'s production Display text is the only closed label
+    /// for it. This pins that scan contract and the report's containment; it is
+    /// not evidence that the long control actually reached the pool failure.
+    #[test]
+    fn proxy_pool_exhaustion_is_recognised_only_as_a_closed_label() {
+        let secret = "ipb_pass_hash=cafebabe";
+        let message = crate::proxy::ProxyError::NoProxy.to_string();
+        let stderr =
+            format!("ERROR- [00:00:00] task #t1 error: {message}\n{secret}\n").into_bytes();
+        let labels = scan_labels(&stderr);
+        assert_eq!(labels, vec!["proxy_pool_exhausted"], "{labels:?}");
+        let report = exit_facts_text(true, Some(0), 0, stderr.len(), &labels);
+        assert!(report.contains("proxy_pool_exhausted"), "{report}");
+        assert!(!report.contains("avaliable"), "raw text leaked: {report}");
+        assert!(!report.contains(secret), "{report}");
     }
 
     #[test]
