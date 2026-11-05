@@ -12852,6 +12852,61 @@ mod m6 {
         }
     }
 
+    /// Real RPC readiness: a `xeH.getInfo` answer through the production
+    /// dispatcher, which only serves after `signal_stream` is registered. A
+    /// mere `started.` log line or an open TCP port is NOT enough; the
+    /// response bytes must arrive. Bounded by `timeout`; every
+    /// connect/write/read inside is bounded by the remaining deadline.
+    #[cfg(unix)]
+    fn rpc_get_info_ready(port: u16, timeout: Duration) -> bool {
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        let body = br#"{"method":"xeH.getInfo","id":"m6","params":[[],{}]}"#;
+        let request = format!(
+            "POST /jsonrpc HTTP/1.0\r\nHost: x\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            let remaining = deadline - Instant::now();
+            let step = remaining.min(Duration::from_secs(5));
+            if let Ok(mut stream) =
+                TcpStream::connect_timeout(&addr, step.min(Duration::from_millis(500)))
+                && stream.set_read_timeout(Some(step)).is_ok()
+                && stream.set_write_timeout(Some(step)).is_ok()
+                && stream.write_all(request.as_bytes()).is_ok()
+                && stream.write_all(body).is_ok()
+            {
+                // Bounded read: the small JSON body arrives far below this
+                // cap; `read_to_end` would wait on HTTP keep-alive instead.
+                let mut response = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    match stream.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(read) => {
+                            response.extend_from_slice(&chunk[..read]);
+                            let text = String::from_utf8_lossy(&response);
+                            if text.contains("\"version\"") || response.len() >= 65_536 {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let text = String::from_utf8_lossy(&response);
+                if text.starts_with("HTTP/1.")
+                    && text.contains("200")
+                    && text.contains("\"m6\"")
+                    && text.contains("\"version\"")
+                {
+                    return true;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
     pub(super) fn image_files(root: &Path) -> Vec<PathBuf> {
         let mut out = Vec::new();
         let mut stack = vec![root.to_path_buf()];
@@ -13257,35 +13312,74 @@ mod m6 {
         );
     }
 
+    /// Gate calibration (fixture only, never the product): a held listener
+    /// that accepts TCP but never answers RPC must NOT pass the readiness
+    /// gate. This proves the case below waits on a real dispatcher answer,
+    /// not on log text or a bare open port.
+    #[cfg(unix)]
+    #[test]
+    fn m6_rpc_readiness_gate_rejects_a_silent_port() {
+        let silent = TcpListener::bind(("127.0.0.1", 0)).expect("silent port");
+        let port = silent.local_addr().expect("port").port();
+        assert!(
+            !rpc_get_info_ready(port, Duration::from_secs(2)),
+            "a silent port must not satisfy RPC readiness"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn m6_binary_second_interrupt_is_a_bounded_exit() {
         let root = tempfile::tempdir().expect("root");
-        let mut child = base_command(root.path())
+        // Owned loopback RPC: the real dispatcher answers `xeH.getInfo` only
+        // after `signal_stream` is registered, so a response proves the
+        // signal handlers exist before either SIGINT is sent.
+        let probe = TcpListener::bind(("127.0.0.1", 0)).expect("free port");
+        let port = probe.local_addr().expect("port").port();
+        drop(probe);
+        std::fs::write(
+            root.path().join("config.py"),
+            format!(
+                "rpc_interface = \"127.0.0.1\"\nrpc_port = {port}\nrpc_open_browser = False\nauto_update = \"off\"\n"
+            ),
+        )
+        .expect("rpc config");
+        let child = base_command(root.path())
             .args(["--auto-update", "off"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn");
+        // This case alone owns, signals and reaps this child.
+        struct Reap(Child);
+        impl Drop for Reap {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = Reap(child);
         let log_path = root.path().join("eh.log");
-        assert!(
-            wait_for(Duration::from_secs(20), || std::fs::read_to_string(
-                &log_path
-            )
-            .map(|log| log.contains("started."))
-            .unwrap_or(false)),
-            "startup line never appeared"
-        );
-        let pid = nix::unistd::Pid::from_raw(child.id() as i32);
+        if !rpc_get_info_ready(port, Duration::from_secs(20)) {
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            panic!("the RPC dispatcher never answered getInfo; log: {log:?}");
+        }
+        let pid = nix::unistd::Pid::from_raw(child.0.id() as i32);
         nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGINT).expect("first SIGINT");
         std::thread::sleep(Duration::from_millis(2));
         let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGINT);
-        let status = wait_exit(&mut child, Duration::from_secs(30))
+        let status = wait_exit(&mut child.0, Duration::from_secs(30))
             .expect("the second interrupt must not hang the process");
-        assert_eq!(status.code(), Some(0));
-        if child.try_wait().expect("try_wait").is_none() {
-            let _ = child.kill();
+        {
+            use std::os::unix::process::ExitStatusExt as _;
+            assert_eq!(
+                status.code(),
+                Some(0),
+                "the second interrupt must exit 0; status={status:?} signal={:?} log={:?}",
+                status.signal(),
+                std::fs::read_to_string(&log_path).unwrap_or_default()
+            );
         }
     }
 
