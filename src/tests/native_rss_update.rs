@@ -631,9 +631,11 @@ const TRANSPORT_DETAIL_LITERALS: [(&str, &str); 9] = [
 /// The closed transport detail for a captured stream: one of the
 /// `TRANSPORT_DETAIL_LITERALS` labels, `transport_request_other` when the
 /// request-failure marker is present but no typed literal matches, else
-/// `unknown`. Only the fragment after the first request-failure producer
-/// marker is inspected, so unrelated gallery text can never set the stage;
-/// when the outer chain deadline is present the detail stays `unknown` and
+/// `unknown`. Only the producer's own record is inspected: the fragment
+/// after the first request-failure marker is cropped at the first CR/LF,
+/// matching the logger's one-record-per-line format (`src/util/logger.rs`
+/// `log_at`), so a later gallery line can never set the stage; when the
+/// outer chain deadline is present the detail stays `unknown` and
 /// the outer category keeps its meaning. Returns only the closed label.
 fn scan_transport_detail(bytes: &[u8]) -> &'static str {
     if contains(bytes, TRANSPORT_DEADLINE_MARKER.as_bytes()) {
@@ -647,9 +649,14 @@ fn scan_transport_detail(bytes: &[u8]) -> &'static str {
         return "unknown";
     };
     let fragment = &bytes[offset + marker.len()..];
+    let record_end = fragment
+        .iter()
+        .position(|byte| *byte == b'\r' || *byte == b'\n')
+        .unwrap_or(fragment.len());
+    let record = &fragment[..record_end];
     TRANSPORT_DETAIL_LITERALS
         .iter()
-        .find(|(_, needle)| contains(fragment, needle.as_bytes()))
+        .find(|(_, needle)| contains(record, needle.as_bytes()))
         .map(|(name, _)| *name)
         .unwrap_or("transport_request_other")
 }
@@ -807,8 +814,10 @@ struct Run {
     /// else `unknown`. Closed labels only; no raw text is retained.
     update_failure: &'static str,
     /// The first closed transport detail seen in the captured streams, else
-    /// `unknown`. Scanned only from the request-failure producer fragment and
-    /// rendered as a closed label; no raw text is retained.
+    /// `unknown`. Scanned only from the request-failure producer record and
+    /// rendered as a closed label; no raw text is retained. The outer chain
+    /// deadline anywhere in the run clears and then blocks it, so an inner
+    /// detail is never paired with the outer category.
     transport_detail: &'static str,
 }
 
@@ -978,6 +987,20 @@ impl Run {
             if !self.labels.contains(&label) {
                 self.labels.push(label);
             }
+        }
+        // The outer chain deadline is a Run-global priority: when any
+        // captured stream carries it, the generic category becomes the outer
+        // one and no inner detail may be paired with it, including one an
+        // earlier stream already recorded. A later ordinary stream must not
+        // re-attach an inner detail to it; without the outer marker anywhere,
+        // ordinary first-wins behavior is unchanged.
+        if contains(bytes, TRANSPORT_DEADLINE_MARKER.as_bytes()) {
+            self.update_failure = "transport_deadline";
+            self.transport_detail = "unknown";
+            return;
+        }
+        if self.update_failure == "transport_deadline" {
+            return;
         }
         let failure = scan_update_failure(bytes);
         if failure != "unknown" && self.update_failure == "unknown" {
@@ -1933,6 +1956,191 @@ mod early_exit_diagnostics {
         .into_bytes();
         assert_eq!(scan_update_failure(&outer), "transport_deadline");
         assert_eq!(scan_transport_detail(&outer), "unknown");
+    }
+
+    /// A minimal owned dummy child so Run-level regressions drive the real
+    /// accumulation/render path (`note_labels` + `collect` + `exit_facts`).
+    /// Its own pipes stay empty; synthetic bytes are fed via `note_labels`.
+    /// This exercises diagnostic precedence only: no network, no platform
+    /// behavior and no platform claim.
+    fn dummy_run() -> Run {
+        #[cfg(unix)]
+        fn spawn_quiet() -> Child {
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg("exit 0")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("dummy child")
+        }
+        #[cfg(windows)]
+        fn spawn_quiet() -> Child {
+            Command::new("cmd")
+                .args(["/C", "exit 0"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("dummy child")
+        }
+        let mut child = spawn_quiet();
+        let stdout = child.stdout.take().map(|mut pipe| {
+            std::thread::spawn(move || {
+                let mut sink = Vec::new();
+                let _ = pipe.read_to_end(&mut sink);
+                sink
+            })
+        });
+        let stderr = child.stderr.take().map(|mut pipe| {
+            std::thread::spawn(move || {
+                let mut sink = Vec::new();
+                let _ = pipe.read_to_end(&mut sink);
+                sink
+            })
+        });
+        Run {
+            child,
+            stdin: None,
+            stdout,
+            stderr,
+            exited: false,
+            exit_code: None,
+            out_len: 0,
+            err_len: 0,
+            labels: Vec::new(),
+            update_failure: "unknown",
+            transport_detail: "unknown",
+        }
+    }
+
+    /// A request failure without a typed stage must not inherit a stage from
+    /// a LATER gallery line in the same stream: only the producer's own
+    /// record (up to the first line break) classifies. Driven through the
+    /// real Run accumulation and final render, with a secret-looking suffix
+    /// on the trailing line proving the report still leaks nothing.
+    #[test]
+    fn transport_detail_ignores_gallery_lines_after_the_request_record() {
+        use crate::worker::HttpError;
+
+        let error = HttpError::Header("synthetic".into());
+        for ending in ["\n", "\r\n"] {
+            let stdout = format!(
+                "WARN - [00:00:00] Failure when updating program: transport: request failed: {error}{ending}\
+                 ERROR- [00:00:00] task #t1 error: connection error: synthetic stall ipb_pass_hash=cafebabe{ending}"
+            )
+            .into_bytes();
+            assert_eq!(
+                scan_transport_detail(&stdout),
+                "transport_request_other",
+                "line ending {ending:?}"
+            );
+            let mut run = dummy_run();
+            run.note_labels(&stdout);
+            run.collect();
+            let facts = run.exit_facts();
+            assert!(
+                facts.contains("failure_category=transport_request"),
+                "{facts}"
+            );
+            assert!(
+                facts.contains("transport_detail=transport_request_other"),
+                "{facts}"
+            );
+            assert!(!facts.contains("transport_connect"), "{facts}");
+            assert!(!facts.contains("cafebabe"), "{facts}");
+        }
+    }
+
+    /// The outer deadline in the OTHER stream is a Run-global priority: an
+    /// inner detail already recorded from stdout is cleared back to
+    /// `unknown` and the category becomes the outer one. Real Run path plus
+    /// the final render.
+    #[test]
+    fn run_outer_deadline_in_stderr_overrides_stdout_inner_detail() {
+        use crate::worker::HttpError;
+
+        let inner = format!(
+            "WARN - [00:00:00] Failure when updating program: transport: request failed: {}\n",
+            HttpError::Dns("synthetic".into())
+        )
+        .into_bytes();
+        let outer = format!(
+            "WARN - [00:00:00] Failure when updating program: {TRANSPORT_DEADLINE_MARKER}\n"
+        )
+        .into_bytes();
+        let mut run = dummy_run();
+        run.note_labels(&inner);
+        assert_eq!(run.transport_detail, "transport_dns");
+        run.note_labels(&outer);
+        run.collect();
+        let facts = run.exit_facts();
+        assert!(
+            facts.contains("failure_category=transport_deadline"),
+            "{facts}"
+        );
+        assert!(facts.contains("transport_detail=unknown"), "{facts}");
+        assert!(!facts.contains("transport_dns"), "{facts}");
+    }
+
+    /// The reverse order: outer first, then an ordinary inner stream. The
+    /// later stream must not re-attach an inner detail to the outer
+    /// category. Real Run path plus the final render.
+    #[test]
+    fn run_inner_stream_cannot_reattach_detail_after_outer() {
+        use crate::worker::HttpError;
+
+        let outer = format!(
+            "WARN - [00:00:00] Failure when updating program: {TRANSPORT_DEADLINE_MARKER}\n"
+        )
+        .into_bytes();
+        let inner = format!(
+            "WARN - [00:00:00] Failure when updating program: transport: request failed: {}\n",
+            HttpError::Tls("synthetic".into())
+        )
+        .into_bytes();
+        let mut run = dummy_run();
+        run.note_labels(&outer);
+        run.note_labels(&inner);
+        run.collect();
+        let facts = run.exit_facts();
+        assert!(
+            facts.contains("failure_category=transport_deadline"),
+            "{facts}"
+        );
+        assert!(facts.contains("transport_detail=unknown"), "{facts}");
+        assert!(!facts.contains("transport_tls"), "{facts}");
+    }
+
+    /// Without any outer marker, ordinary details keep first-wins across the
+    /// two streams. Real Run path plus the final render; a stability pin for
+    /// the new outer precedence.
+    #[test]
+    fn run_ordinary_details_keep_first_wins_without_outer() {
+        use crate::worker::HttpError;
+
+        let first = format!(
+            "WARN - [00:00:00] Failure when updating program: transport: request failed: {}\n",
+            HttpError::Dns("synthetic".into())
+        )
+        .into_bytes();
+        let second = format!(
+            "WARN - [00:00:00] Failure when updating program: transport: request failed: {}\n",
+            HttpError::Tls("synthetic".into())
+        )
+        .into_bytes();
+        let mut run = dummy_run();
+        run.note_labels(&first);
+        run.note_labels(&second);
+        run.collect();
+        let facts = run.exit_facts();
+        assert!(
+            facts.contains("failure_category=transport_request"),
+            "{facts}"
+        );
+        assert!(facts.contains("transport_detail=transport_dns"), "{facts}");
+        assert!(!facts.contains("transport_tls"), "{facts}");
     }
 
     /// The final safe report renders only closed labels, byte counts and the
