@@ -299,6 +299,35 @@ async fn run_supervised(
     let publisher = updater::install::Publisher::new();
     let update_task = spawn_update_check(handle.clone(), resource, locale, publisher.clone());
     let rpc_enabled = handle.borrow_app(|app| app.cfg.rpc_port.is_some());
+    let (want_browser, rpc_interface, rpc_port) = handle.borrow_app(|app| {
+        (
+            app.cfg.rpc_open_browser,
+            app.cfg.rpc_interface.clone(),
+            app.cfg.rpc_port,
+        )
+    });
+    let browser_port = rpc_browser_port(rpc_enabled, want_browser, rpc_port);
+    let browser_handle = handle.clone();
+    let mut browser_settled = browser_port.is_none();
+    let browser_open = async move {
+        let Some(port) = browser_port else {
+            return;
+        };
+        match open_webui_when_listening(&rpc_interface, port, BROWSER_OPEN_BUDGET, &spawn_browser)
+            .await
+        {
+            // A server that never listened has already reported its real bind
+            // error on the RPC path; there is nothing to open.
+            Ok(()) | Err(BrowserOpenError::NotListening) => {}
+            Err(BrowserOpenError::Spawn(error)) => {
+                let message = format!("cannot open the WebUI browser: {error}");
+                let written = browser_handle.borrow_app_mut(|app| app.logger_mut().warn(&message));
+                if written.is_err() {
+                    eprintln!("xeHentai: {message}");
+                }
+            }
+        }
+    };
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let rpc_handle = handle.clone();
     let rpc_future = async move {
@@ -328,12 +357,18 @@ async fn run_supervised(
     };
     tokio::pin!(task_loop);
     tokio::pin!(rpc_future);
+    tokio::pin!(browser_open);
     let has_urls = !urls.is_empty();
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut rpc_result = None;
     let stopped = loop {
         tokio::select! {
+            // One-shot: after the opener settles the branch disables itself,
+            // so the page is opened at most once per run.
+            _ = &mut browser_open, if !browser_settled => {
+                browser_settled = true;
+            }
             result = &mut rpc_future => {
                 rpc_result = result;
                 break Stop::RpcDone;
@@ -589,6 +624,149 @@ async fn terminate_signal(signals: Option<&mut SignalStream>) -> Option<()> {
         Some(signals) => signals.recv().await,
         None => std::future::pending().await,
     }
+}
+
+// MARK: - RPC WebUI browser opener
+
+/// How long the opener waits for the RPC listener to accept a probe
+/// connection. `serve_rpc` binds before it serves, so the first successful
+/// probe is proof that the real listener is live; a bind failure never probes.
+const BROWSER_OPEN_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Interval between probe attempts while the listener binds.
+const BROWSER_OPEN_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// Outcome of the one-shot WebUI launch.
+enum BrowserOpenError {
+    /// The server never reached its accept loop (resolve or bind failure).
+    NotListening,
+    /// The OS opener program could not be started.
+    Spawn(std::io::Error),
+}
+
+/// The port the WebUI should open, or `None` when the reference config/CLI
+/// switches it off. The same `1..=65535` range `serve_rpc` enforces: an
+/// invalid port is never bound, so there is no page to open.
+fn rpc_browser_port(rpc_enabled: bool, open_browser: bool, port: Option<i64>) -> Option<u16> {
+    if !rpc_enabled || !open_browser {
+        return None;
+    }
+    let port = port?;
+    if !(1..=65535).contains(&port) {
+        return None;
+    }
+    Some(port as u16)
+}
+
+/// The platform's URL opener: `explorer.exe` on Windows (it hands the URL to
+/// the default browser), `open` on macOS and Linux. One program, one URL
+/// argument, never a shell command line.
+fn browser_opener_program() -> &'static str {
+    #[cfg(windows)]
+    {
+        "explorer.exe"
+    }
+    #[cfg(not(windows))]
+    {
+        "open"
+    }
+}
+
+/// Real runner: spawn the opener and do not wait for it. A failed launch is a
+/// convenience failure, reported by the caller, never a run failure.
+fn spawn_browser(command: &mut std::process::Command) -> std::io::Result<()> {
+    command.spawn().map(|_| ())
+}
+
+/// Build the opener invocation and hand it to `launch`. The runner is injected
+/// so tests can assert the exact program and single URL argument without
+/// starting a browser.
+fn open_browser(
+    url: &str,
+    launch: &dyn Fn(&mut std::process::Command) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let mut command = std::process::Command::new(browser_opener_program());
+    command.arg(url);
+    launch(&mut command)
+}
+
+/// A wildcard bind address is not browsable; the UI is reached through the
+/// loopback address of the same family. Explicit addresses are kept verbatim.
+fn browsable_addr(addr: std::net::SocketAddr) -> std::net::SocketAddr {
+    let ip = match addr.ip() {
+        std::net::IpAddr::V4(v4) if v4.is_unspecified() => {
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        }
+        std::net::IpAddr::V6(v6) if v6.is_unspecified() => {
+            std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+        }
+        ip => ip,
+    };
+    std::net::SocketAddr::new(ip, addr.port())
+}
+
+/// The WebUI page of the live listener. `SocketAddr` formats IPv6 with the
+/// required brackets, and the port always comes from the accepted connection,
+/// never from the configured request (a port-0 listener reports its real port).
+fn browser_url(addr: std::net::SocketAddr) -> String {
+    format!("http://{}/ui/", browsable_addr(addr))
+}
+
+/// Addresses to probe for the configured interface, mirroring
+/// `rpc::server::bind`: an IP literal is used exactly, a host name prefers its
+/// first IPv4 answer (the default `localhost` resolves to the AF_INET bind).
+async fn listen_probe_targets(
+    interface: &str,
+    port: u16,
+) -> std::io::Result<Vec<std::net::SocketAddr>> {
+    if let Ok(ip) = interface.parse::<std::net::IpAddr>() {
+        return Ok(vec![std::net::SocketAddr::new(ip, port)]);
+    }
+    let mut targets: Vec<std::net::SocketAddr> =
+        tokio::net::lookup_host((interface, port)).await?.collect();
+    targets.sort_by_key(|target| !target.is_ipv4());
+    Ok(targets)
+}
+
+/// Wait until the RPC listener accepts a connection, then return the address
+/// the listener itself reports for it. Probing is bounded and read-only: the
+/// connection carries no bytes and is dropped immediately.
+async fn rpc_listener_addr(
+    interface: &str,
+    port: u16,
+    budget: std::time::Duration,
+) -> Option<std::net::SocketAddr> {
+    let targets = listen_probe_targets(interface, port).await.ok()?;
+    if targets.is_empty() {
+        return None;
+    }
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        for target in &targets {
+            let probe = browsable_addr(*target);
+            if let Ok(stream) = tokio::net::TcpStream::connect(probe).await {
+                return Some(stream.peer_addr().unwrap_or(probe));
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(BROWSER_OPEN_PROBE_INTERVAL).await;
+    }
+}
+
+/// The ONE WebUI launch: wait for the real listener, then open `<addr>/ui/`.
+/// The page never carries `rpc_secret`; the UI asks for it itself.
+async fn open_webui_when_listening(
+    interface: &str,
+    port: u16,
+    budget: std::time::Duration,
+    launch: &dyn Fn(&mut std::process::Command) -> std::io::Result<()>,
+) -> Result<(), BrowserOpenError> {
+    let addr = rpc_listener_addr(interface, port, budget)
+        .await
+        .ok_or(BrowserOpenError::NotListening)?;
+    open_browser(&browser_url(addr), launch).map_err(BrowserOpenError::Spawn)
 }
 
 /// Project the parsed command line onto the reference `update_config(**vars)`

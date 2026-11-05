@@ -15167,3 +15167,7 @@ mod m8;
 // cross-platform: loopback std sockets, a copied host and the existing
 // interactive/URL-completion exit path; no POSIX signal or permission API.
 mod native_rss_update;
+
+// `--rpc-open-browser`: the one-shot native WebUI opener (platform command,
+// live listener address, non-fatal spawn failure).
+mod rpc_browser_open;
