@@ -1,0 +1,138 @@
+ERR_NOMSG: undefined error message with code %{0}
+PROXY_CANDIDATE_CNT: proxy pool has %{0} candidates
+PROXY_DISABLE_BANNED: disable a banned proxy, expire in about %{0}s
+PS_DOWNLOAD_DIR: 'Download to (default: %{0})
+
+  press enter or enter new > '
+PS_DOWNLOAD_ORI: 'Download original (y/n, default:%{0})? > '
+PS_DOWNLOAD_RANGE: 'Download range, press enter to download all > '
+PS_JPN_TITLE: 'Use Japanese title (y/n, default:%{0})? > '
+PS_LOGIN: 'login to exhentai (y/n)? > '
+PS_MAKE_ARCHIVE: 'Make archive (y/n, default:%{0})? > '
+PS_PASSWD: 'Password > '
+PS_PROXY: 'Proxy (optional) > '
+PS_RENAME_ORI: 'Rename to original name (y/n, default:%{0})? > '
+PS_URL: 'URL (seperate with ,)> '
+PS_USERNAME: 'Username > '
+QUEUE: queue
+RPC_CANNOT_BIND: 'RPC server can''t listen on requested address: %{0}'
+RPC_STARTED: RPC server listening on %{0}:%{1}
+RPC_TOO_OPEN: RPC server is listening on public interface (%{0}) but no rpc_secret defined, which is not safe
+RPC_WEBUI_PATH: WebUI is accessible at %{0} or https://xehentai.yooooo.us
+SESSION_LOAD_EXCEPTION: 'exception occurs when loading saved session: %{0}'
+SESSION_WRITE_EXCEPTION: 'exception occurs when writing saved session: %{0}'
+TASK_ERROR: 'task #%{0} error: %{1}'
+TASK_FINISHED: 'task #%{0} download finished'
+TASK_MAKE_ARCHIVE_FINISHED: 'task #%{0} archive saved at: %{1}, use %{2}s'
+TASK_MIGRATE_EXH: 'task #%{0} migrate to exhentai.org'
+TASK_PUT_INTO_WAIT: 'task #%{0} already exists, put into waiting state'
+TASK_SLOW: 'task #%{0} is slow, maybe image is too large or connection is too slow, consider use a proxy'
+TASK_START: 'task #%{0} start'
+TASK_START_MAKE_ARCHIVE: 'task #%{0} start making archive'
+TASK_START_PAGE_RESCAN: 'task #%{0} resample detected, start full scan'
+TASK_STOP_QUOTA_EXCEEDED: 'task #%{0} quota exceeded'
+TASK_STUCK: 'task #%{0} is stuck, there may be some bugs in xeHentai, or the connection is too slow'
+TASK_TITLE: 'task #%{0} title %{1}'
+TASK_UNFINISHED: 'task #%{0} remaining these files undownloaded: %{1}'
+TASK_WILL_DOWNLOAD_CNT: 'task #%{0} will download %{1}/%{2} files'
+THREAD: thread
+THREAD_MAY_BECOME_ZOMBIE: thread-%{0} may became zombie
+THREAD_SPEED_TOO_LOW: 'thread-%{0} retry because of low download speed: %{1}/s less than threshold %{2}/s'
+THREAD_SWEEP_OUT: thread-%{0} is dead, deref it
+THREAD_UNCAUGHT_EXCEPTION: 'thread-%{0} uncaught exception
+
+  %{1}'
+UPDATE_AVAILABLE: 'Update available: %{0} "%{1}" (%{2})'
+UPDATE_CHANNEL: 'Update channel is: %{0}'
+UPDATE_COMPLETE: Update is complete, it will take effect on next run
+UPDATE_APPLIED: 'Update files installed: %{0}'
+UPDATE_PENDING_ID: 'Pending update %{0} is ready for the next start'
+UPDATE_DEV_CHANNEL: dev
+UPDATE_DOWNLOAD_MANUALLY: You can download update from https://dl.yooooo.us/share/xeHentai/
+UPDATE_FAILED: 'Failure when updating program: %{0}'
+UPDATE_NO_UPDATE: Program is up-to-date
+UPDATE_RELEASE_CHANNEL: release
+XEH_CLEANUP: cleaning up...
+XEH_CRITICAL_ERROR: 'xeHentai throws critical error:
+
+  %{0}'
+XEH_DAEMON_START: daemon start at PID %{0}
+XEH_DOWNLOAD_HAS_ERROR: 'thread-%{0} retry #%{1} because of error: %{2}'
+XEH_DOWNLOAD_ORI_NEED_LOGIN: haven't login, so I won't download original images
+XEH_FILE_DOWNLOADED: 'file downloaded by thread-%{0} #%{1} %{2}'
+XEH_LOAD_OLD_COOKIE: load cookie from legacy cookie file
+XEH_LOAD_TASKS_CNT: load %{0} tasks from saved session
+XEH_LOGIN_EXHENTAI: login exhentai
+XEH_LOGIN_FAILED: 'can''t login exhentai, check your credentials or try another account.
+
+  It''s recommended to login in browser and use RPC to transfer cookie to xeHentai (see http://t.cn/Rctr4Pf)'
+XEH_LOGIN_OK: login exhentai successfully
+XEH_LOOP_FINISHED: application task loop finished
+XEH_OPT_DESC: xeHentai Downloader NG
+XEH_OPT_EPILOG: Values shown as current is read from config.py and can be overriden by command line options. Discuss and bug reporting at https://yooooo.us/2013/xehentai
+XEH_OPT_IGNORING_I: ignoring -i option in daemon mode
+XEH_OPT_URLS: gallery url(s) to download
+XEH_OPT_a: 'make an archive (.zip) after download and delete directory (current: %{0})'
+XEH_OPT_auto_update: 'check or download update automatically (current: %{0})'
+XEH_OPT_c: cookie string, will be overriden if given -u and -k
+XEH_OPT_d: 'set download directory (current: %{0})'
+XEH_OPT_daemon: 'daemon mode, can''t use with -i (current: %{0})'
+XEH_OPT_delete_task_files: 'delete downloaded files when deleting a task (current: %{0})'
+XEH_OPT_download_range: 'specify ranges of images to be downloaded, in format start-end, or single index, use comma to concat multiple ranges, e.g.: 5-10,15,20-25, default to download all images'
+XEH_OPT_f: 'download regardless of quota exceeded warning (current: %{0})'
+XEH_OPT_h: show this help message and exit
+XEH_OPT_i: 'interactive mode, will be ignored in daemon mode (current: %{0})'
+XEH_OPT_j: 'use Japanese title, use English/Romaji title if turned off (current: %{0})'
+XEH_OPT_k: password
+XEH_OPT_l: 'define log path (current: %{0})'
+XEH_OPT_low_speed: 'retry download if speed is lower than specified value (current: %{0} KB/s)'
+XEH_OPT_o: 'download original images, needs to login (current: %{0})'
+XEH_OPT_p: 'set download proxies, can be used multiple times, currenlty supported: socks5/4a, http(s), glype. Proxies are only used on webpages by default (current: %{0})'
+XEH_OPT_proxy_image: 'use proxies on images and webpages (current: %{0})'
+XEH_OPT_proxy_image_only: 'only use proxies on images, not webpages (current: %{0})'
+XEH_OPT_r: 'rename gallery image to original name, use sequence name if turned off  (current: %{0})'
+XEH_OPT_rpc_interface: 'bind jsonrpc server to this address (current: %{0})'
+XEH_OPT_rpc_open_browser: 'automatically open browser after RPC server starts (current: %{0})'
+XEH_OPT_rpc_port: 'bind jsonrpc server to this port (current: %{0})'
+XEH_OPT_rpc_secret: 'jsonrpc secret string (current: %{0})'
+XEH_OPT_t: 'download threads count (current: %{0})'
+XEH_OPT_timeout: 'set image download timeout (current: %{0}s)'
+XEH_OPT_u: username
+XEH_OPT_update_beta_channel: 'check update upon beta channel (current: %{0})'
+XEH_OPT_v: 'show more detailed log (current: %{0})'
+XEH_OPT_version: show program's version number and exit
+XEH_PLATFORM_NO_DAEMON: 'daemon mode is not supported on platform: %{0}'
+XEH_RENAME_HAS_ERRORS: 'some files are not renamed:
+
+  %{0}'
+XEH_SCAN_FAILED: '%{0} scan page %{1} failed: %{2}'
+XEH_STARTED: xeHentai %{0} started.
+err:
+  err_rpc_invalid_request: Invalid request.
+  err_rpc_method_not_found: Method not found.
+  err_rpc_invalid_params: Invalid method parameter(s).
+  err_rpc_exec_error: ''
+  err_rpc_parse_error: Parse error.
+  err_url_not_recognized: url not recognized
+  err_cant_download_exh: can't download exhentai.org without login
+  err_only_visible_exh: this gallery is only visible in exhentai.org
+  err_malformed_hathdl: malformed .hathdl, can't parse
+  err_gallery_removed: this gallery has been removed, may be visible in exhentai
+  err_quota_exceeded: quota exceeded
+  err_key_expired: image url is expired
+  err_no_pageurl_found: no page url found, change of site structure?
+  err_connection_error: a connection problem occurs
+  err_ip_banned: IP has been banned, retry in %{0}
+  err_image_broken: downloaded image is broken
+  err_scan_regex_failed: page parsing failed
+  err_task_not_found: no such task guid
+  err_save_session_failed: ''
+  err_task_level_undef: task filter level unknown
+  err_delete_running_task: can't delete a running task
+  err_task_cannot_pause: this task can't be paused
+  err_task_cannot_resume: this task can't be resumed
+  err_rpc_unauthorized: Unauthorized
+  err_cannot_create_dir: can't create directory %{0}
+  err_cannot_make_archive: can't make archive %{0}
+  err_not_range_format: '''%{0}'' is not a range format, expecting ''1-2'' or ''3'''
+z_test_fallback_probe: english fallback probe
