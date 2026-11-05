@@ -64,6 +64,16 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$TAG"
+          # The tag also names the package directory and the release assets, so
+          # it has to be a single flat path component: a `/` would silently move
+          # the archive into a subdirectory that the upload and publish steps do
+          # not look at.
+          case "$TAG" in
+            */*|*" "*|*$'\t'*)
+              echo "release tag must be one flat path component: '$TAG'" >&2
+              exit 1
+              ;;
+          esac
           head="$(git rev-parse HEAD)"
           # A workflow_dispatch run must package the tag it names, not a branch
           # tip that happens to share the name.
