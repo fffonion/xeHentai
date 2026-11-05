@@ -1,0 +1,30 @@
+# Frozen original WebUI pack — provenance (no content hashes recorded here)
+#
+# Upstream: https://github.com/fffonion/xeHentai-webui
+# Revision: 4e3738ef463fef344e96df613de9a81b4cda4b4e (fixed M5 baseline)
+# Tarball: https://codeload.github.com/fffonion/xeHentai-webui/tar.gz/4e3738ef463fef344e96df613de9a81b4cda4b4e
+#
+# Build: upstream `npm run build` (webpack 3) executed in an isolated TEMP
+# checkout. One local deviation was required: node-sass 4.x ships no native
+# binary for the build runtime, so its postinstall was skipped
+# (`--ignore-scripts`) and `node_modules/node-sass` was replaced by a shim
+# re-exporting dart-sass `renderSync` (same Sass language, same .scss
+# sources, no source changes). The shim lives only in the TEMP checkout,
+# never in this pack.
+#
+# Pack contents: the servable build output only (`index.html`, `static/js`,
+# `static/css`, `static/fonts`). Webpack `*.map` debug files are excluded as
+# dev-only (never requested by the UI).
+#
+# Verification: file names and byte sizes are listed below. No digest was
+# computed for this file (standing execution rule); sameness is established
+# by byte comparison against the TEMP build output in tests, not by hashes.
+#
+# Files (name, bytes):
+#   index.html 516
+#   static/css/app.6027935ff9f1e3bed9935438c6be1f38.css 238206
+#   static/fonts/element-icons.535877f.woff 28200
+#   static/fonts/element-icons.732389d.ttf 55956
+#   static/js/app.b712f314a32fe45ff793.js 61256
+#   static/js/manifest.2ae2e69a05c33dfc65f8.js 857
+#   static/js/vendor.24bda49bb1d1d931b8b0.js 1300791
