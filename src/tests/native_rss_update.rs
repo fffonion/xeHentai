@@ -574,15 +574,21 @@ const OUTPUT_LABELS: [(&str, &str); 7] = [
     ("child_panic", "panicked at"),
 ];
 
+/// The updater request-failure producer marker (`src/updater/http.rs`
+/// `Transport::hop` wraps the native `HttpError` Display as
+/// `transport: request failed: {error}`).
+const REQUEST_FAILED_MARKER: &str = "transport: request failed:";
+/// The outer whole-chain deadline marker (`src/updater/http.rs`
+/// `TIMEOUT_ERROR`). It owns its own generic category and is never an inner
+/// transport detail.
+const TRANSPORT_DEADLINE_MARKER: &str = "transport: update transport deadline exceeded";
+
 /// Fixed closed categories for the existing updater error text. Only these
 /// five producer strings are recognised; everything else stays `unknown`, so a
 /// diagnostic never carries raw error text, a path or a URL.
 const UPDATE_FAILURE_LABELS: [(&str, &str); 5] = [
-    (
-        "transport_deadline",
-        "transport: update transport deadline exceeded",
-    ),
-    ("transport_request", "transport: request failed:"),
+    ("transport_deadline", TRANSPORT_DEADLINE_MARKER),
+    ("transport_request", REQUEST_FAILED_MARKER),
     ("package_rejected", "update package rejected:"),
     ("installation_failed", "update installation failed:"),
     ("source_binding_error", "update source binding error:"),
@@ -596,6 +602,63 @@ fn scan_update_failure(bytes: &[u8]) -> &'static str {
         .find(|(_, needle)| contains(bytes, needle.as_bytes()))
         .map(|(name, _)| *name)
         .unwrap_or("unknown")
+}
+
+/// Closed transport-stage detail for one recognised updater request failure.
+/// Every literal is a stable producer spelling: the `HttpError` Display
+/// prefixes (`src/worker.rs`) and the timeout sites there (route
+/// establishment, handshake, request, connect, bounded-body read).
+/// `ProxyError` conversions wrap their own rendering inside
+/// `connection error: ` (`src/worker.rs` `From<ProxyError>`), so nested
+/// `dns error:` / `tls error:` fragments still match their typed literal
+/// before the generic connect fallback. Order is classification order:
+/// specific timeouts, typed stages, generic connect and protocol.
+/// Refused/reset OS prose has no stable spelling through the `Display` chain,
+/// so it is deliberately not distinguished: it falls back to the generic
+/// connect detail rather than a guessed code.
+const TRANSPORT_DETAIL_LITERALS: [(&str, &str); 9] = [
+    ("transport_route_timeout", "route establishment timed out"),
+    ("transport_handshake_timeout", "handshake timed out"),
+    ("transport_request_timeout", "request timed out"),
+    ("transport_read_timeout", "read timed out"),
+    ("transport_connect_timeout", "connect timed out"),
+    ("transport_dns", "dns error:"),
+    ("transport_tls", "tls error:"),
+    ("transport_connect", "connection error:"),
+    ("transport_protocol", "http protocol error:"),
+];
+
+/// The closed transport detail for a captured stream: one of the
+/// `TRANSPORT_DETAIL_LITERALS` labels, `transport_request_other` when the
+/// request-failure marker is present but no typed literal matches, else
+/// `unknown`. Only the fragment after the first request-failure producer
+/// marker is inspected, so unrelated gallery text can never set the stage;
+/// when the outer chain deadline is present the detail stays `unknown` and
+/// the outer category keeps its meaning. Returns only the closed label.
+fn scan_transport_detail(bytes: &[u8]) -> &'static str {
+    if contains(bytes, TRANSPORT_DEADLINE_MARKER.as_bytes()) {
+        return "unknown";
+    }
+    let marker = REQUEST_FAILED_MARKER.as_bytes();
+    let Some(offset) = bytes
+        .windows(marker.len())
+        .position(|window| window == marker)
+    else {
+        return "unknown";
+    };
+    let fragment = &bytes[offset + marker.len()..];
+    TRANSPORT_DETAIL_LITERALS
+        .iter()
+        .find(|(_, needle)| contains(fragment, needle.as_bytes()))
+        .map(|(name, _)| *name)
+        .unwrap_or("transport_request_other")
+}
+
+/// Render the closed updater facts: the generic failure category and the
+/// transport detail. Both inputs are closed labels, so the text can carry no
+/// raw error bytes, endpoint, URL, query or credential.
+fn update_facts_text(update_failure: &str, transport_detail: &str) -> String {
+    format!("failure_category={update_failure} transport_detail={transport_detail}")
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -743,6 +806,10 @@ struct Run {
     /// The first fixed updater failure category seen in the captured streams,
     /// else `unknown`. Closed labels only; no raw text is retained.
     update_failure: &'static str,
+    /// The first closed transport detail seen in the captured streams, else
+    /// `unknown`. Scanned only from the request-failure producer fragment and
+    /// rendered as a closed label; no raw text is retained.
+    transport_detail: &'static str,
 }
 
 fn spawn(install: &Path, args: &[&str]) -> Run {
@@ -814,6 +881,7 @@ fn spawn(install: &Path, args: &[&str]) -> Run {
         err_len: 0,
         labels: Vec::new(),
         update_failure: "unknown",
+        transport_detail: "unknown",
     }
 }
 
@@ -915,11 +983,15 @@ impl Run {
         if failure != "unknown" && self.update_failure == "unknown" {
             self.update_failure = failure;
         }
+        let detail = scan_transport_detail(bytes);
+        if detail != "unknown" && self.transport_detail == "unknown" {
+            self.transport_detail = detail;
+        }
     }
 
     fn exit_facts(&self) -> String {
         format!(
-            "{} failure_category={}",
+            "{} {}",
             exit_facts_text(
                 self.exited,
                 self.exit_code,
@@ -927,7 +999,7 @@ impl Run {
                 self.err_len,
                 &self.labels,
             ),
-            self.update_failure
+            update_facts_text(self.update_failure, self.transport_detail)
         )
     }
 }
@@ -1736,6 +1808,179 @@ mod early_exit_diagnostics {
         assert!(report.contains("proxy_pool_exhausted"), "{report}");
         assert!(!report.contains("avaliable"), "raw text leaked: {report}");
         assert!(!report.contains(secret), "{report}");
+    }
+
+    /// The transport detail resolves real producer `Display` chains to closed
+    /// labels. Every message below is built from the actual `HttpError` /
+    /// `ProxyError` types, so the test pins source spellings, never invented
+    /// text. These synthetic fixtures only calibrate the classifier; they are
+    /// not a Windows network reproduction and prove no platform stage.
+    #[test]
+    fn transport_detail_classifies_real_producer_displays() {
+        use crate::proxy::ProxyError;
+        use crate::worker::HttpError;
+
+        fn updater_line(error: &dyn std::fmt::Display) -> Vec<u8> {
+            format!(
+                "WARN - [00:00:00] Failure when updating program: transport: request failed: {error}\n"
+            )
+            .into_bytes()
+        }
+
+        let nested_route =
+            HttpError::from(ProxyError::Connect("route establishment timed out".into()));
+        let nested_dns = HttpError::from(ProxyError::Dns("synthetic".into()));
+        let nested_tls = HttpError::from(ProxyError::Tls("synthetic".into()));
+        let cases: [(&str, String); 13] = [
+            (
+                "transport_route_timeout",
+                HttpError::Connect("route establishment timed out".into()).to_string(),
+            ),
+            ("transport_route_timeout", nested_route.to_string()),
+            (
+                "transport_handshake_timeout",
+                HttpError::Connect("handshake timed out".into()).to_string(),
+            ),
+            (
+                "transport_request_timeout",
+                HttpError::Connect("request timed out".into()).to_string(),
+            ),
+            (
+                "transport_read_timeout",
+                HttpError::Connect("read timed out".into()).to_string(),
+            ),
+            (
+                "transport_connect_timeout",
+                HttpError::Connect("connect timed out".into()).to_string(),
+            ),
+            (
+                "transport_dns",
+                HttpError::Dns("synthetic".into()).to_string(),
+            ),
+            ("transport_dns", nested_dns.to_string()),
+            (
+                "transport_tls",
+                HttpError::Tls("synthetic".into()).to_string(),
+            ),
+            ("transport_tls", nested_tls.to_string()),
+            (
+                "transport_connect",
+                HttpError::Connect("synthetic stall".into()).to_string(),
+            ),
+            (
+                "transport_protocol",
+                HttpError::Protocol("synthetic".into()).to_string(),
+            ),
+            (
+                "transport_request_other",
+                HttpError::Header("synthetic".into()).to_string(),
+            ),
+        ];
+        for (expected, rendered) in cases {
+            let bytes = updater_line(&rendered);
+            assert_eq!(
+                scan_update_failure(&bytes),
+                "transport_request",
+                "generic category must survive: {rendered}"
+            );
+            assert_eq!(
+                scan_transport_detail(&bytes),
+                expected,
+                "producer text: {rendered}"
+            );
+        }
+        // The bounded-body oversize producer is a request failure without a
+        // typed stage: it must stay the closed `other`, never `unknown`.
+        let oversize = updater_line(&HttpError::BodyTooLarge { limit: 8 });
+        assert_eq!(scan_transport_detail(&oversize), "transport_request_other");
+        // A detail label is a closed identifier: no separator, path or URL
+        // characters may appear in it.
+        for (name, _) in TRANSPORT_DETAIL_LITERALS {
+            assert!(
+                !name
+                    .chars()
+                    .any(|character| matches!(character, ':' | '/' | ' ')),
+                "a detail must be a closed identifier: {name}"
+            );
+        }
+    }
+
+    /// Only the request-failure producer fragment may set the stage. Gallery
+    /// text, unrelated output and the outer chain deadline all stay
+    /// `unknown`, even when they carry stage-like words.
+    #[test]
+    fn transport_detail_stays_unknown_outside_the_request_fragment() {
+        // Gallery-path text carries stage words but no updater producer
+        // marker; it must never set the transport stage.
+        let gallery =
+            b"ERROR- [00:00:00] task #t1 error: connection error: dns error: synthetic\n".to_vec();
+        assert_eq!(scan_transport_detail(&gallery), "unknown");
+        let gallery_timeout =
+            b"ERROR- [00:00:00] task #t1 error: connection error: handshake timed out\n".to_vec();
+        assert_eq!(scan_transport_detail(&gallery_timeout), "unknown");
+        assert_eq!(scan_transport_detail(b"ordinary output\n"), "unknown");
+        // Stage words before the producer marker belong to another line; only
+        // the fragment after the marker classifies.
+        let before = b"ERROR- [00:00:00] task #t1 error: dns error: synthetic\nWARN - [00:00:00] Failure when updating program: transport: request failed: connection error: synthetic stall\n".to_vec();
+        assert_eq!(scan_transport_detail(&before), "transport_connect");
+        // The outer chain deadline keeps its own generic category: an inner
+        // timeout must not rename it, and no inner detail is reported.
+        let outer = format!(
+            "WARN - [00:00:00] Failure when updating program: {} {secret}\nWARN - [00:00:00] Failure when updating program: transport: request failed: connection error: dns error: synthetic\n",
+            TRANSPORT_DEADLINE_MARKER,
+            secret = "ipb_pass_hash=cafebabe",
+        )
+        .into_bytes();
+        assert_eq!(scan_update_failure(&outer), "transport_deadline");
+        assert_eq!(scan_transport_detail(&outer), "unknown");
+    }
+
+    /// The final safe report renders only closed labels, byte counts and the
+    /// existing fixed facts: a secret-laden request failure must surface as
+    /// labels alone, with no endpoint, URL, query, header or credential text.
+    #[test]
+    fn transport_detail_report_renders_only_closed_labels_and_counts() {
+        use crate::worker::HttpError;
+
+        let secret = "http://127.0.0.1:9/repos?q=1&token=hidden ipb_pass_hash=cafebabe";
+        let error = HttpError::Dns("synthetic".into());
+        let bytes = format!(
+            "WARN - [00:00:00] Failure when updating program: transport: request failed: {error} {secret}\n"
+        )
+        .into_bytes();
+        let failure = scan_update_failure(&bytes);
+        let detail = scan_transport_detail(&bytes);
+        assert_eq!(failure, "transport_request");
+        assert_eq!(detail, "transport_dns");
+        let labels = scan_labels(&bytes);
+        assert!(labels.contains(&"update_failed"), "{labels:?}");
+        let report = format!(
+            "{} {}",
+            exit_facts_text(true, Some(0), bytes.len(), 0, &labels),
+            update_facts_text(failure, detail)
+        );
+        assert!(
+            report.contains("failure_category=transport_request"),
+            "{report}"
+        );
+        assert!(
+            report.contains("transport_detail=transport_dns"),
+            "{report}"
+        );
+        assert!(
+            report.contains(&format!("stdout_bytes={}", bytes.len())),
+            "{report}"
+        );
+        for leak in [
+            "cafebabe",
+            "token=hidden",
+            "http://",
+            "127.0.0.1",
+            "dns error:",
+            "synthetic",
+        ] {
+            assert!(!report.contains(leak), "raw text leaked: {report}");
+        }
     }
 
     #[test]
