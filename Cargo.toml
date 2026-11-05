@@ -1,0 +1,78 @@
+[package]
+name = "xehentai"
+version = "2.23.0"
+edition = "2024"
+description = "xeHentai downloader, Rust + RustScript rewrite"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/fffonion/xeHentai"
+
+[[bin]]
+name = "xeHentai"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6", default-features = false, features = ["std", "help", "usage", "error-context", "suggestions", "string"] }
+pd-vm = { git = "https://github.com/rustscript-lang/rustscript.git", rev = "cdb0b798d631cd7ffab6dfed3fe4b69381ed3340", default-features = false, features = ["runtime", "http-client"] }
+regex = "1"
+rust-i18n = "4"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "io-util", "io-std", "signal", "time", "fs"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+indexmap = "2"
+uuid = { version = "1", features = ["v4"] }
+zip = { version = "2.4", default-features = false }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+http = "1"
+bytes = "1"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12", "logging"] }
+webpki-roots = "1"
+url = "2"
+# Public-unicast address classification for the updater's own native transport.
+# The std `IpAddr::is_global` is not stable on the pinned toolchain, so the one
+# reviewed classifier crate is bound under the app-local name `ip`. Only
+# `std` is enabled: no HTTP stack, no optional `ipnet`/`proptest` features.
+ip = { package = "generic-ip", version = "=0.1.1", default-features = false, features = ["std"] }
+fastrand = "2"
+httparse = "1"
+percent-encoding = "2"
+image = "0.25"
+md5 = "0.7"
+tempfile = "3"
+# Signed RSS update packages: standard integrity/authenticity primitives only.
+# `sha2` and `ed25519-dalek` are the mature crates the reference authorization
+# names. An automatic update replaces the four RSS scripts in place; the running
+# host executable is never rewritten, so no self-replacement helper is needed.
+sha2 = "0.10"
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "pkcs8", "pem"] }
+hex = "0.4"
+# The confined gallery/archive opens use the reviewed `cap-primitives` 4.0.3
+# resolver on all supported hosts (Linux, macOS, Windows). Its Unix and
+# Windows backends are both reached through this one dependency; `rustix` and
+# `nix` below stay Unix-only because only the Unix backend needs raw
+# `openat`/`fcntl` and the POSIX daemon.
+cap-primitives = "=4.0.3"
+
+# Only the Unix leaf/entry primitives (`rustix::fs` `openat`/`fcntl`, and the
+# `nix` daemon/PTY bindings) are Unix-only; `src/task/file_ops.rs` keeps them
+# behind `cfg(unix)` and uses the resolver's own relative open on Windows.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs", "thread"] }
+# POSIX daemon startup and the real-PTY lifecycle tests use the mature nix
+# bindings; the product only needs `fork`/`_exit` and standard descriptors.
+nix = { version = "0.31", features = ["process", "signal", "term", "fs", "user"] }
+
+# The adopted dependency is the reviewed 4.0.3 source tree in `vendor/`, not a
+# rewritten or fetcher-substituted manifest: `Cargo.toml`, `Cargo.toml.orig`,
+# licenses and version are the original published bytes plus the accepted
+# absolute-prefix policy, extended to the three supported confined hosts.
+# Path wiring here (rather than editing the vendor manifest's optional
+# dependencies) keeps the vendor tree intact.
+[patch.crates-io]
+cap-primitives = { path = "vendor/cap-primitives-4.0.3" }
+
+[dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }

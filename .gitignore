@@ -9,3 +9,7 @@
 /.env
 /evidence/
 /compat/upstream/
+/config.rss
+/config.rss.stage-*
+__pycache__/
+*.pyc
