@@ -954,6 +954,7 @@ impl Drop for Run {
 /// a live script changing). The condition is the evidence; the poll is only a
 /// transfer mechanism, and an early child exit is reported as its own phase
 /// together with the authoritative exit code and the fixture/private facts.
+#[cfg(unix)]
 fn wait_event<F, C>(run: &mut Run, timeout: Duration, phase: &str, check: F, facts: C)
 where
     F: FnMut() -> bool,
