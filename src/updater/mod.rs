@@ -425,7 +425,30 @@ impl Updater {
     pub fn load(resource_root: &Path) -> Result<Self, UpdateError> {
         let github_source = read_script(resource_root, GITHUB_RSS)?;
         let updater_source = read_script(resource_root, UPDATER_RSS)?;
-        let mut github = compile(GITHUB_RSS, &github_source)?;
+        Self::load_sources(resource_root, &github_source, &updater_source)
+    }
+
+    /// Load installed RSS overrides, using bundled scripts when a file is absent.
+    pub fn load_with_embedded(resource_root: &Path) -> Result<Self, UpdateError> {
+        let github_source = read_script_with_embedded(
+            resource_root,
+            GITHUB_RSS,
+            include_str!("../../rss/updater/github.rss"),
+        )?;
+        let updater_source = read_script_with_embedded(
+            resource_root,
+            UPDATER_RSS,
+            include_str!("../../rss/updater/updater.rss"),
+        )?;
+        Self::load_sources(resource_root, &github_source, &updater_source)
+    }
+
+    fn load_sources(
+        resource_root: &Path,
+        github_source: &str,
+        updater_source: &str,
+    ) -> Result<Self, UpdateError> {
+        let mut github = compile(GITHUB_RSS, github_source)?;
         let github_binding = callable(&github, GITHUB_RSS, "gh_binding")?;
         let github_plan = callable(&github, GITHUB_RSS, "gh_plan")?;
         let github_parse = callable(&github, GITHUB_RSS, "gh_parse")?;
@@ -455,7 +478,7 @@ impl Updater {
 
         // The business module is compiled for its pure decisions only: the
         // transport lives here and the script performs no network call.
-        let updater = compile(UPDATER_RSS, &updater_source)?;
+        let updater = compile(UPDATER_RSS, updater_source)?;
         let updater_decide = callable(&updater, UPDATER_RSS, "upd_decide")?;
         let updater_failure = callable(&updater, UPDATER_RSS, "upd_failure")?;
         let updater_mode = callable(&updater, UPDATER_RSS, "upd_mode")?;
@@ -803,6 +826,18 @@ fn read_script(root: &Path, relative: &'static str) -> Result<String, UpdateErro
     })
 }
 
+fn read_script_with_embedded(
+    root: &Path,
+    relative: &'static str,
+    embedded: &'static str,
+) -> Result<String, UpdateError> {
+    let path = root.join(relative);
+    crate::resources::read_rss_source(root, relative, embedded).map_err(|error| UpdateError::Io {
+        path,
+        message: error.to_string(),
+    })
+}
+
 /// What the pre-business-App startup controller did, in terms `main` can log
 /// and act on. A successful application changes the four RSS scripts in place;
 /// the running host keeps executing and simply loads the new scripts through
@@ -909,7 +944,7 @@ pub fn startup(install_root: &Path) -> StartupReport {
         }
     };
 
-    let mut updater = match Updater::load(install_root) {
+    let mut updater = match Updater::load_with_embedded(install_root) {
         Ok(updater) => updater,
         Err(error) => return StartupReport::failed(error.to_string()),
     };

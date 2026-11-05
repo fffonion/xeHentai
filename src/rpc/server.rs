@@ -1179,8 +1179,8 @@ impl SharedRpc {
         secret: Option<String>,
         static_origin: String,
     ) -> Result<Self, ServerError> {
-        let rpc = RpcDispatcher::load(resource_root)?;
-        let login_filters = crate::filters::Filters::load(resource_root)
+        let rpc = RpcDispatcher::load_with_embedded(resource_root)?;
+        let login_filters = crate::filters::Filters::load_with_embedded(resource_root)
             .map_err(|error| ServerError::Shape(error.to_string()))?;
         let cache = StaticCache::load(&cache_dir.join(STATIC_CACHE_NAME), Arc::clone(&clock));
         let pack = FrozenPack::load(resource_root);

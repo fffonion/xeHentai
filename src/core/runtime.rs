@@ -1642,7 +1642,8 @@ impl App {
 
 /// One filters VM for a worker of this run: the existing per-worker live load.
 fn task_filters(inner: &RuntimeInner) -> Result<Filters, AppError> {
-    Filters::load(&inner.resource_root).map_err(|error| AppError::Filter(error.to_string()))
+    Filters::load_with_embedded(&inner.resource_root)
+        .map_err(|error| AppError::Filter(error.to_string()))
 }
 
 fn producer_filters(inner: &RuntimeInner) -> Result<Filters, AppError> {

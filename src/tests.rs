@@ -15366,3 +15366,6 @@ mod native_rss_update;
 // `--rpc-open-browser`: the one-shot native WebUI opener (platform command,
 // live listener address, non-fatal spawn failure).
 mod rpc_browser_open;
+
+// Compile-time RSS defaults, runtime disk overrides, and all four script loaders.
+mod rss_embedded;

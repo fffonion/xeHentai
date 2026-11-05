@@ -29,8 +29,9 @@ ROOT = Path(__file__).resolve().parent.parent
 # behavior and is the Unix default; `zip` is the Windows default.
 ARCHIVE_SUFFIXES = {"tar.gz": ".tar.gz", "zip": ".zip"}
 
-# Runtime files the executable loads from its own directory. `locales` is
-# compiled into the binary, but the plan ships the translation resources.
+# RSS sources are embedded at build time and shipped as runtime overrides so
+# signed updates can replace them. Locale YAML is embedded by rust-i18n; the
+# distribution keeps its translation resources as well.
 REQUIRED_FILES = (
     "rss/rpc/handlers.rss",
     "rss/filters/match.rss",

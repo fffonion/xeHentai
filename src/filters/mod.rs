@@ -422,6 +422,20 @@ impl Filters {
         Self::from_source(&source)
     }
 
+    pub fn load_with_embedded(resource_root: &Path) -> Result<Self, FilterError> {
+        let path = resource_root.join(FILTER_RSS);
+        let source = crate::resources::read_rss_source(
+            resource_root,
+            FILTER_RSS,
+            include_str!("../../rss/filters/match.rss"),
+        )
+        .map_err(|error| FilterError::Io {
+            path,
+            message: error.to_string(),
+        })?;
+        Self::from_source(&source)
+    }
+
     pub fn from_source(source: &str) -> Result<Self, FilterError> {
         let vm = compile_module(source)?;
         let resolve = |vm: &Vm, name: &str| {

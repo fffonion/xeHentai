@@ -16,6 +16,7 @@ mod core;
 mod filters;
 mod i18n;
 mod proxy;
+mod resources;
 mod rpc;
 mod task;
 mod updater;
@@ -221,7 +222,7 @@ async fn application(mut app: App, resource: &Path, opts: &Opts, locale: Locale)
     // prompt uses it when logged out, and the download prompts need it even
     // when a valid cookie was restored); credential login needs it too.
     let mut filters = if needs_login || active_interactive {
-        match filters::Filters::load(resource) {
+        match filters::Filters::load_with_embedded(resource) {
             Ok(filters) => Some(filters),
             Err(error) => {
                 eprintln!("xeHentai: filter error: {error}");
@@ -532,7 +533,7 @@ fn spawn_update_check(
     }
     let beta = app.borrow_app(|app| app.cfg.update_beta_channel);
     Some(tokio::task::spawn_local(async move {
-        let mut updater = match updater::Updater::load(&resource) {
+        let mut updater = match updater::Updater::load_with_embedded(&resource) {
             Ok(updater) => updater,
             Err(error) => {
                 log_update_failure(&app, locale, &error.to_string());

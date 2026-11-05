@@ -216,6 +216,20 @@ impl RpcDispatcher {
         Self::from_source(&source)
     }
 
+    pub fn load_with_embedded(resource_root: &Path) -> Result<Self, RpcError> {
+        let path = resource_root.join(RPC_RSS);
+        let source = crate::resources::read_rss_source(
+            resource_root,
+            RPC_RSS,
+            include_str!("../../rss/rpc/handlers.rss"),
+        )
+        .map_err(|error| RpcError::Io {
+            path,
+            message: error.to_string(),
+        })?;
+        Self::from_source(&source)
+    }
+
     pub fn from_source(source: &str) -> Result<Self, RpcError> {
         let vm = compile_module(source)?;
         let resolve = |vm: &Vm, name: &str| {
