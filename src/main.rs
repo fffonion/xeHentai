@@ -37,7 +37,13 @@ use util::logger::Logger;
 const EXIT_UPDATE_BUSY: i32 = 75;
 
 fn main() {
-    let root = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    let root = match std::env::current_dir() {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("xeHentai: cannot resolve current directory: {error}");
+            std::process::exit(1);
+        }
+    };
     std::process::exit(run(&root));
 }
 
@@ -660,17 +666,17 @@ fn rpc_browser_port(rpc_enabled: bool, open_browser: bool, port: Option<i64>) ->
     Some(port as u16)
 }
 
-/// The platform's URL opener: `explorer.exe` on Windows (it hands the URL to
-/// the default browser), `open` on macOS and Linux. One program, one URL
-/// argument, never a shell command line.
-fn browser_opener_program() -> &'static str {
-    #[cfg(windows)]
-    {
-        "explorer.exe"
-    }
-    #[cfg(not(windows))]
-    {
-        "open"
+/// Choose a native opener invocation without a shell. Windows' Explorer treats
+/// fragments containing `=` ambiguously, so delegate URL handling to the
+/// registered protocol handler through `rundll32.exe`.
+fn browser_opener_invocation(windows: bool, url: &str) -> (&'static str, Vec<String>) {
+    if windows {
+        (
+            "rundll32.exe",
+            vec!["url.dll,FileProtocolHandler".to_string(), url.to_string()],
+        )
+    } else {
+        ("open", vec![url.to_string()])
     }
 }
 
@@ -681,14 +687,15 @@ fn spawn_browser(command: &mut std::process::Command) -> std::io::Result<()> {
 }
 
 /// Build the opener invocation and hand it to `launch`. The runner is injected
-/// so tests can assert the exact program and single URL argument without
-/// starting a browser.
+/// so tests can assert the exact program and arguments without starting a
+/// browser.
 fn open_browser(
     url: &str,
     launch: &dyn Fn(&mut std::process::Command) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-    let mut command = std::process::Command::new(browser_opener_program());
-    command.arg(url);
+    let (program, args) = browser_opener_invocation(cfg!(windows), url);
+    let mut command = std::process::Command::new(program);
+    command.args(args);
     launch(&mut command)
 }
 

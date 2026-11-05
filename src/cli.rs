@@ -833,12 +833,19 @@ pub fn command(program: &str, defaults: &Config, locale: Locale) -> Command {
 /// Reference `os.path.abspath`: resolve against the process cwd without
 /// following symlinks and normalize `.`/`..` lexically.
 pub fn abspath(path: &Path) -> String {
+    let cwd = std::env::current_dir().ok();
+    abspath_with_cwd(path, cwd.as_deref())
+}
+
+fn abspath_with_cwd(path: &Path, cwd: Option<&Path>) -> String {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
+    } else if let Some(cwd) = cwd {
+        cwd.join(path)
     } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(path)
+        // Keep the relative path relative to the process working directory;
+        // never turn a failed cwd lookup into a root or home-directory path.
+        return path.to_string_lossy().into_owned();
     };
     lexically_normal(&absolute).to_string_lossy().into_owned()
 }
@@ -1010,6 +1017,20 @@ mod tests {
             Parsed::Opts(opts) => opts,
             other => panic!("expected options, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn abspath_uses_supplied_current_directory_for_dot() {
+        let cwd = tempfile::tempdir().expect("cwd");
+        assert_eq!(
+            abspath_with_cwd(Path::new("."), Some(cwd.path())),
+            cwd.path().to_string_lossy().into_owned()
+        );
+    }
+
+    #[test]
+    fn abspath_preserves_dot_when_current_directory_is_unavailable() {
+        assert_eq!(abspath_with_cwd(Path::new("."), None), ".");
     }
 
     #[test]

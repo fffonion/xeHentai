@@ -16,7 +16,8 @@ use tokio::sync::{oneshot, watch};
 
 use crate::rpc::server::{bind as bind_rpc, serve};
 use crate::{
-    BrowserOpenError, browser_opener_program, browser_url, open_webui_when_ready, rpc_browser_port,
+    BrowserOpenError, browser_opener_invocation, browser_url, open_webui_when_ready,
+    rpc_browser_port,
 };
 
 /// `(program, args)` of one launched opener.
@@ -49,28 +50,43 @@ fn browser_opens_only_when_both_switches_allow_it() {
     assert_eq!(rpc_browser_port(true, true, Some(65536)), None);
 }
 
-/// The platform program is chosen at build time; a Windows CI run selects the
-/// `explorer.exe` branch, every Unix run `open`.
 #[test]
-fn opener_program_matches_the_platform() {
-    #[cfg(windows)]
-    assert_eq!(browser_opener_program(), "explorer.exe");
-    #[cfg(not(windows))]
-    assert_eq!(browser_opener_program(), "open");
+fn windows_opener_uses_the_url_protocol_handler() {
+    const URL: &str = "http://127.0.0.1:7000/ui/#host=127.0.0.1,port=7000,https=no";
+    let (program, args) = crate::browser_opener_invocation(true, URL);
+
+    assert_eq!(program, "rundll32.exe");
+    assert_eq!(
+        args,
+        ["url.dll,FileProtocolHandler".to_string(), URL.to_string()]
+    );
 }
 
-/// One program, one URL argument -- never a shell command line. The fragment's
-/// commas and `#` stay inside that single argument.
+/// The platform program is chosen at build time; Windows uses the system URL
+/// handler, and non-Windows builds use `open`.
 #[test]
-fn opener_command_carries_exactly_one_url_argument() {
+fn opener_program_matches_the_platform() {
+    let (program, _) = browser_opener_invocation(cfg!(windows), "http://127.0.0.1/");
+    #[cfg(windows)]
+    assert_eq!(program, "rundll32.exe");
+    #[cfg(not(windows))]
+    assert_eq!(program, "open");
+}
+
+/// Preserve the complete URL as one argument after any platform-specific
+/// opener arguments; never build a shell command line.
+#[test]
+fn opener_command_preserves_the_url_and_platform_arguments() {
     let invocations = Mutex::new(Vec::new());
     let launch = record(&invocations);
     let url = "http://[::1]:7000/ui/#host=[::1],port=7000,https=no";
+    let (expected_program, expected_args) = browser_opener_invocation(cfg!(windows), url);
     crate::open_browser(url, &launch).expect("injected runner");
     let invocations = invocations.lock().unwrap();
     assert_eq!(invocations.len(), 1);
-    assert_eq!(invocations[0].0, browser_opener_program());
-    assert_eq!(invocations[0].1, vec![url.to_string()]);
+    assert_eq!(invocations[0].0, expected_program);
+    assert_eq!(invocations[0].1, expected_args);
+    assert_eq!(invocations[0].1.last().map(String::as_str), Some(url));
 }
 
 /// The frozen WebUI only takes its connection from the URL fragment
@@ -174,15 +190,14 @@ async fn readiness_hands_off_the_bound_listener_after_server_init() {
     assert_ne!(addr.port(), 0);
     let recorded = invocations.lock().unwrap().clone();
     assert_eq!(recorded.len(), 1, "exactly one launch: {recorded:?}");
-    assert_eq!(recorded[0].0, browser_opener_program());
-    assert_eq!(
-        recorded[0].1,
-        vec![format!(
-            "http://127.0.0.1:{0}/ui/#host=127.0.0.1,port={0},https=no",
-            addr.port()
-        )]
+    let url = format!(
+        "http://127.0.0.1:{0}/ui/#host=127.0.0.1,port={0},https=no",
+        addr.port()
     );
-    assert_eq!(recorded[0].1.len(), 1, "one URL argument, no shell");
+    let (expected_program, expected_args) = browser_opener_invocation(cfg!(windows), &url);
+    assert_eq!(recorded[0].0, expected_program);
+    assert_eq!(recorded[0].1, expected_args);
+    assert_eq!(recorded[0].1.last().map(String::as_str), Some(url.as_str()));
 
     let _ = shutdown_tx.send(true);
     server.as_mut().await.expect("clean shutdown");
