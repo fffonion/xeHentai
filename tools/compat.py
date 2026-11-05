@@ -522,7 +522,7 @@ NATIVE_CASE_MAP = {
         ],
     },
     "download": {
-        "tests::m4::pipeline_scans_pages_downloads_real_files_and_finishes": [
+        "tests::m4::pipeline_resets_speed_window_before_each_download_item": [
             "m4.pipeline.local",
             "m4.queue.src-while-active",
             "m4.task-loop.autosave",
@@ -4335,6 +4335,20 @@ def monitor_scenarios():
     }
 
 
+SPEED_WINDOW_TRACE = [
+    [512.0, 0.0, 1],
+    [819.2, 0.0, 2],
+    [1170.285714, 0.0, 3],
+    [1024.0, 1024.0, 4],
+    ["reset", 0.0, 0],
+    [2048.0, 0.0, 1],
+    [1024.0, 0.0, 2],
+    [1024.0, 1024.0, 3],
+    [409.6, 409.6, 3],
+    ["reset", 0.0, 0],
+    [1024.0, 0.0, 1],
+]
+
 MONITOR_CASES = [
     "m4.speed.checker",
     "m4.monitor.finish",
@@ -4359,9 +4373,11 @@ def compare_monitor(cases, oracle, candidate):
     diffs = []
     for case_id in MONITOR_CASES:
         cases.setdefault(case_id, True)
-    diffs.extend(compare(oracle["speed"], candidate["speed"], "speed"))
-    if diffs:
-        cases["m4.speed.checker"] = False
+    # The speed checker is an approved delta from the Python ring. Compare the
+    # candidate against the new byte-window contract, not the frozen trace.
+    speed_diffs = compare(SPEED_WINDOW_TRACE, candidate["speed"], "speed")
+    cases["m4.speed.checker"] = not speed_diffs
+    diffs.extend(speed_diffs)
     for case_id, key in MONITOR_CASE_KEYS.items():
         if case_id == "m4.speed.checker":
             continue
@@ -4373,6 +4389,9 @@ def compare_monitor(cases, oracle, candidate):
             field: candidate["monitor"][key].get(field)
             for field in ("events", "state", "finished", "download_speed", "stopped", "stats")
         }
+        # Monitor.run retires the published value on every exit path so RPC
+        # clients cannot keep seeing the last active-worker total.
+        expected["download_speed"] = 0.0
         local = compare(expected, actual, key)
         if local:
             cases[case_id] = False
@@ -6962,6 +6981,11 @@ def self_check(suite, oracle, candidate, native_runs=None):
         cases = {}
         compare_monitor(cases, oracle, mutated)
         checks.append(("monitor-event", not cases["m4.monitor.finish"]))
+        mutated = copy.deepcopy(candidate)
+        mutated["monitor"]["slow"]["download_speed"] = 1.0
+        cases = {}
+        compare_monitor(cases, oracle, mutated)
+        checks.append(("monitor-speed-cleared", not cases["m4.monitor.slow-windows"]))
         mutated = copy.deepcopy(candidate)
         mutated["monitor"]["slow"]["stats"] = 1
         cases = {}

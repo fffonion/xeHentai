@@ -2982,15 +2982,15 @@
     },
     {
       "id": "m4.speed.checker",
-      "status": "implemented",
+      "status": "delta",
       "source": "M4 contract (worker.py/core.py/task.py)",
-      "target": "src/core/runtime.rs + src/tests.rs",
+      "target": "src/worker.rs + src/core/runtime.rs + src/tests.rs",
       "suite": "monitor",
       "inputs": [],
       "assertions": [
-        "Five-sample ring, strict >1s samples, full/zero calculation and idle reset match frozen speed_checker."
+        "The rolling cnt-second rate is bytes observed in the window divided by its duration; old samples expire without new chunks."
       ],
-      "delta": null
+      "delta": "delta.speed-window-bytes-over-time: replaces worker.py:141-171 arithmetic-mean interval rates."
     },
     {
       "id": "m4.monitor.finish",
@@ -3006,15 +3006,16 @@
     },
     {
       "id": "m4.monitor.slow-windows",
-      "status": "implemented",
+      "status": "delta",
       "source": "M4 contract (worker.py/core.py/task.py)",
       "target": "src/core/runtime.rs + src/tests.rs",
       "suite": "monitor",
       "inputs": [],
       "assertions": [
-        "Two consecutive positive-speed slow windows reset last_change and keep running."
+        "Two consecutive positive-speed slow windows reset last_change and keep running.",
+        "Published speed sums live workers and clears to zero after monitor exit."
       ],
-      "delta": null
+      "delta": "delta.monitor-speed-cleared-on-exit: avoids retaining a stale total after the monitor stops."
     },
     {
       "id": "m4.monitor.stuck",

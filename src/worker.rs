@@ -285,71 +285,132 @@ impl HttpClock for TickClock {
 
 // --- speed checker ---------------------------------------------------------
 
-/// `speed_checker` from `worker.py:141-169`. A sample is only appended when
-/// strictly more than one second of reference time passed since the previous
-/// sample; `calc(full=True)` is zero until the five-sample ring is full.
+/// A rolling byte-count window backed by fixed 100 ms buckets. `cnt` is the
+/// window length in seconds; the buckets bound per-chunk work while still
+/// expiring old observations when no new chunks arrive.
+const SPEED_BUCKET_SECONDS: f64 = 0.1;
+
 pub struct SpeedChecker {
     pub cnt: usize,
-    buffer: std::collections::VecDeque<f64>,
-    last_tm: f64,
-    last_bytes: i64,
-    current_bytes: i64,
-    current_tm: f64,
+    samples: std::collections::VecDeque<(i64, i64)>,
+    started_at: Option<f64>,
     clock: Arc<dyn HttpClock>,
 }
 
 impl SpeedChecker {
     pub fn new(cnt: usize, clock: Arc<dyn HttpClock>) -> Self {
-        let mut checker = Self {
+        Self {
             cnt,
-            buffer: std::collections::VecDeque::new(),
-            last_tm: 0.0,
-            last_bytes: 0,
-            current_bytes: 0,
-            current_tm: 0.0,
+            samples: std::collections::VecDeque::new(),
+            started_at: None,
             clock,
-        };
-        checker.reset();
-        checker
+        }
+    }
+
+    fn window_seconds(&self) -> f64 {
+        self.cnt as f64
+    }
+
+    fn bucket_index(timestamp: f64) -> i64 {
+        (timestamp / SPEED_BUCKET_SECONDS).floor() as i64
+    }
+
+    fn expire_before(&mut self, cutoff_bucket: i64) {
+        while self
+            .samples
+            .front()
+            .is_some_and(|(bucket, _)| *bucket < cutoff_bucket)
+        {
+            self.samples.pop_front();
+        }
     }
 
     pub fn check(&mut self, len: usize) {
-        self.current_bytes += len as i64;
-        self.current_tm = self.clock.now();
-        let elapsed = self.current_tm - self.last_tm;
-        if elapsed > 1.0 {
-            self.buffer
-                .push_back((self.current_bytes - self.last_bytes) as f64 / elapsed);
-            while self.buffer.len() > self.cnt {
-                self.buffer.pop_front();
-            }
-            self.last_tm = self.current_tm;
-            self.last_bytes = self.current_bytes;
+        if self.cnt == 0 {
+            return;
         }
+        let now = self.clock.now();
+        if !matches!(self.started_at, Some(started_at) if now >= started_at) {
+            self.reset_at(now);
+        }
+        let bucket = Self::bucket_index(now);
+        if self
+            .samples
+            .back()
+            .is_some_and(|(last_bucket, _)| bucket < *last_bucket)
+        {
+            self.reset_at(now);
+        }
+        let same_bucket = self
+            .samples
+            .back()
+            .is_some_and(|(last_bucket, _)| bucket == *last_bucket);
+        if same_bucket {
+            if let Some((_, bytes)) = self.samples.back_mut() {
+                *bytes += len as i64;
+            }
+        } else {
+            self.samples.push_back((bucket, len as i64));
+        }
+        let cutoff_bucket = Self::bucket_index(now - self.window_seconds());
+        self.expire_before(cutoff_bucket);
     }
 
     pub fn calc(&self, full: bool) -> f64 {
-        if self.buffer.is_empty() {
+        if self.cnt == 0 {
             return 0.0;
         }
-        if full && self.buffer.len() < self.cnt {
+        let now = self.clock.now();
+        let Some(started_at) = self.started_at else {
+            return 0.0;
+        };
+        if now < started_at {
             return 0.0;
         }
-        self.buffer.iter().sum::<f64>() / self.buffer.len() as f64
+        let elapsed = now - started_at;
+        let window = self.window_seconds();
+        if (full && elapsed < window) || (!full && elapsed < 1.0) {
+            return 0.0;
+        }
+        let cutoff_bucket = Self::bucket_index(now - window);
+        let bytes: i64 = self
+            .samples
+            .iter()
+            .filter(|(bucket, _)| *bucket >= cutoff_bucket)
+            .map(|(_, bytes)| *bytes)
+            .sum();
+        if bytes <= 0 {
+            return 0.0;
+        }
+        bytes as f64 / elapsed.min(window)
     }
 
     pub fn reset(&mut self) {
-        self.last_tm = self.clock.now();
-        self.last_bytes = 0;
-        self.current_bytes = 0;
-        self.current_tm = 0.0;
-        if !self.buffer.is_empty() {
-            self.buffer.clear();
-        }
+        self.started_at = None;
+        self.samples.clear();
+    }
+
+    fn reset_at(&mut self, now: f64) {
+        self.started_at = Some(now);
+        self.samples.clear();
     }
 
     pub fn sample_count(&self) -> usize {
-        self.buffer.len()
+        if self.cnt == 0 {
+            return 0;
+        }
+        let now = self.clock.now();
+        let Some(started_at) = self.started_at else {
+            return 0;
+        };
+        if now < started_at {
+            return 0;
+        }
+        let cutoff_bucket = Self::bucket_index(now - self.window_seconds());
+        self.samples
+            .iter()
+            .filter(|(bucket, _)| *bucket >= cutoff_bucket)
+            .count()
     }
 }
 

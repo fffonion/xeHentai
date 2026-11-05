@@ -668,9 +668,10 @@ fn compat_monitor(inputs: &serde_json::Value) -> serde_json::Value {
                         let speed = if sample == 0 {
                             None
                         } else {
-                            let clock = std::sync::Arc::new(StepClock::new(0.0, 1.1));
-                            let mut checker = SpeedChecker::new(5, clock);
-                            for _ in 0..5 {
+                            let clock = std::sync::Arc::new(StepClock::new(0.0, 0.0));
+                            let mut checker = SpeedChecker::new(5, clock.clone());
+                            for index in 1..=5 {
+                                clock.set_now(index as f64 * 1.1);
                                 checker.check(sample);
                             }
                             Some(std::sync::Arc::new(std::sync::Mutex::new(checker)))
@@ -7533,7 +7534,7 @@ mod m4 {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn pipeline_scans_pages_downloads_real_files_and_finishes() {
+    async fn pipeline_resets_speed_window_before_each_download_item() {
         let image_hash_a = "0123456789abcdef0123456789abcdef01234567";
         let image_hash_b = "89abcdef0123456789abcdef0123456789abcdef";
         let image_hash10_a = "0123456789";
@@ -7584,6 +7585,7 @@ mod m4 {
                     } else if path.contains(image_hash_a) {
                         respond(&mut socket, "200 OK", "image/jpeg", &image_a).await;
                     } else if path.contains(image_hash_b) {
+                        tokio::time::sleep(Duration::from_secs(6)).await;
                         respond(&mut socket, "200 OK", "image/jpeg", &image_b).await;
                     } else {
                         respond(&mut socket, "404 Not Found", "text/html", b"missing").await;
@@ -7593,13 +7595,14 @@ mod m4 {
         });
 
         let root = tempfile::tempdir().unwrap();
-        let mut config = m4_config(root.path(), 2, 2);
-        config.download_timeout = 5;
+        let mut config = m4_config(root.path(), 2, 1);
+        config.download_timeout = 15;
+        config.low_speed_threshold = 1;
         let mut app = m4_app(root.path(), config);
         let guid = {
             let mut kwargs = serde_json::Map::new();
             kwargs.insert("scan_thread_cnt".into(), serde_json::json!(2));
-            kwargs.insert("download_thread_cnt".into(), serde_json::json!(2));
+            kwargs.insert("download_thread_cnt".into(), serde_json::json!(1));
             m4_task(
                 &mut app,
                 root.path(),
@@ -7642,14 +7645,16 @@ mod m4 {
                     "{trace:?}"
                 );
                 assert!(
-                    trace
-                        .iter()
-                        .any(|event| event.kind == "worker.download.saved"),
+                    trace.iter().any(|event| event.kind == "worker.download.saved"),
                     "{trace:?}"
                 );
                 assert!(
                     trace.iter().any(|event| event.kind == "monitor.finished"),
                     "{trace:?}"
+                );
+                assert!(
+                    !trace.iter().any(|event| event.kind == "worker.download.fail"),
+                    "a fresh item's first chunk must not inherit the previous item's low rate: {trace:?}"
                 );
             })
             .await;
@@ -7659,12 +7664,12 @@ mod m4 {
             requests.iter().any(|path| path.contains("/img/")),
             "{requests:?}"
         );
-        assert!(
+        assert_eq!(
             requests
                 .iter()
                 .filter(|path| path.starts_with("/s/"))
-                .count()
-                == 2,
+                .count(),
+            2,
             "{requests:?}"
         );
     }
@@ -7681,6 +7686,65 @@ mod m4 {
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingYieldClock {
+        sleeps: std::sync::Mutex<Vec<f64>>,
+    }
+
+    impl crate::worker::HttpClock for RecordingYieldClock {
+        fn random(&self) -> f64 {
+            0.5
+        }
+
+        fn sleep<'a>(&'a self, seconds: f64) -> crate::worker::SleepFuture<'a> {
+            self.sleeps.lock().unwrap().push(seconds);
+            Box::pin(tokio::time::sleep(std::time::Duration::from_millis(5)))
+        }
+
+        fn now(&self) -> f64 {
+            100.0
+        }
+    }
+
+    #[tokio::test]
+    async fn task_queue_idle_poll_uses_injected_one_second_sleep() {
+        let root = tempfile::tempdir().unwrap();
+        let clock = Arc::new(RecordingYieldClock::default());
+        let mut app = m4_app(root.path(), m4_config(root.path(), 0, 2));
+        app.set_session_config(SessionConfig {
+            clock: clock.clone(),
+            ..SessionConfig::default()
+        });
+        let runtime = Runtime::new(app, Path::new(MANIFEST).to_path_buf());
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let (run, handle) = runtime.spawn();
+                let stop_handle = handle.clone();
+                let stop = tokio::task::spawn_local(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    stop_handle.borrow_app_mut(|app| {
+                        app.set_exit(consts::XEH_STATE_SOFT_EXIT);
+                    });
+                });
+                tokio::time::timeout(std::time::Duration::from_secs(2), run)
+                    .await
+                    .expect("task loop should stop")
+                    .expect("task loop join");
+                stop.await.expect("stop task");
+                let sleeps = clock.sleeps.lock().unwrap().clone();
+                assert!(
+                    !sleeps.is_empty(),
+                    "task polling must use the injected clock"
+                );
+                assert!(
+                    sleeps.iter().all(|duration| *duration == 1.0),
+                    "idle task polling is one second: {sleeps:?}"
+                );
+            })
+            .await;
     }
 
     fn monitor_fixture(root: &Path, total: i64, ignored: Vec<i64>) -> (Runtime, String) {
@@ -7713,11 +7777,87 @@ mod m4 {
     }
 
     fn speed_ref(bytes: usize) -> Arc<Mutex<SpeedChecker>> {
-        let mut checker = SpeedChecker::new(5, Arc::new(StepClock::new(0.0, 1.1)));
-        for _ in 0..5 {
+        let clock = Arc::new(StepClock::new(0.0, 0.0));
+        let mut checker = SpeedChecker::new(5, clock.clone());
+        for index in 1..=5 {
+            clock.set_now(index as f64 * 1.1);
             checker.check(bytes);
         }
         Arc::new(Mutex::new(checker))
+    }
+
+    #[test]
+    fn speed_checker_uses_recent_byte_count_over_window_time() {
+        const MIB: usize = 1024 * 1024;
+        let clock = Arc::new(StepClock::new(0.0, 0.0));
+        let mut checker = SpeedChecker::new(5, clock.clone());
+        clock.set_now(1.1);
+        checker.check(10 * MIB);
+        clock.set_now(11.1);
+        checker.check(MIB);
+
+        let expected = MIB as f64 / 5.0;
+        let actual = checker.calc(false);
+        assert!(
+            (actual - expected).abs() < 1e-6,
+            "recent 5-second bytes/time should be {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn speed_checker_expires_samples_after_an_idle_window() {
+        const MIB: usize = 1024 * 1024;
+        let clock = Arc::new(StepClock::new(0.0, 0.0));
+        let mut checker = SpeedChecker::new(5, clock.clone());
+        clock.set_now(1.1);
+        checker.check(MIB);
+        clock.set_now(6.2);
+
+        assert_eq!(checker.calc(false), 0.0);
+        assert_eq!(checker.sample_count(), 0);
+    }
+
+    #[test]
+    fn speed_checker_slides_forward_after_a_stall() {
+        const MIB: usize = 1024 * 1024;
+        let clock = Arc::new(StepClock::new(0.0, 0.0));
+        let mut checker = SpeedChecker::new(5, clock.clone());
+        clock.set_now(1.1);
+        checker.check(10 * MIB);
+        clock.set_now(7.0);
+        checker.check(MIB);
+
+        let expected = MIB as f64 / 5.0;
+        let actual = checker.calc(false);
+        assert!(
+            (actual - expected).abs() < 1e-6,
+            "pre-stall bytes must expire from the window; expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn speed_checker_does_not_treat_idle_gap_as_download_age() {
+        let clock = Arc::new(StepClock::new(0.0, 0.0));
+        let mut checker = SpeedChecker::new(5, clock.clone());
+        clock.set_now(100.0);
+        checker.check(1);
+
+        let full_speed = checker.calc(true);
+        assert_eq!(full_speed, 0.0);
+        assert!(!crate::worker::is_low_speed(full_speed, 10));
+    }
+
+    #[test]
+    fn speed_checker_coalesces_chunks_within_a_subsecond_bucket() {
+        let clock = Arc::new(StepClock::new(0.0, 0.0));
+        let mut checker = SpeedChecker::new(5, clock.clone());
+        clock.set_now(1.25);
+        checker.check(4096);
+        checker.check(4096);
+        clock.set_now(2.5);
+
+        assert_eq!(checker.sample_count(), 1);
+        assert_eq!(checker.calc(false), 8192.0 / 1.25);
     }
 
     #[tokio::test]
@@ -7774,6 +7914,61 @@ mod m4 {
                     Some(consts::TASK_STATE_DOWNLOAD),
                     "stuck leaves the task unfinished"
                 );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn monitor_sums_worker_speeds_and_clears_the_total_on_exit() {
+        let root = tempfile::tempdir().unwrap();
+        let (runtime, guid) = monitor_fixture(root.path(), 10, Vec::new());
+        let names: Vec<String> = vec!["down-1".into(), "down-2".into()];
+        let local = LocalSet::new();
+        local
+            .run_until(async {
+                let (monitor, join) = runtime.start_monitor_for_test(&guid, &names);
+                let refs: Vec<WorkerRef> = names
+                    .iter()
+                    .zip([20_000usize, 30_000usize])
+                    .map(|(name, bytes)| WorkerRef {
+                        name: name.clone(),
+                        alive: Arc::new(AtomicBool::new(true)),
+                        speed: Some(speed_ref(bytes)),
+                        zombie_threshold: 1.0e9,
+                    })
+                    .collect();
+                for reference in &refs {
+                    monitor.register(reference.clone());
+                }
+                let handle = runtime.handle();
+                handle.borrow_app_mut(|app| {
+                    app.task_mut(&guid)
+                        .unwrap()
+                        .img_q
+                        .as_mut()
+                        .unwrap()
+                        .push_back("pending".into());
+                });
+                wait_trace_count(&handle, "monitor.stats", 1).await;
+                let expected: f64 = refs
+                    .iter()
+                    .filter_map(|reference| {
+                        reference
+                            .speed
+                            .as_ref()
+                            .map(|speed| speed.lock().unwrap().calc(false))
+                    })
+                    .sum();
+                assert_eq!(monitor.download_speed(), expected);
+                assert_eq!(
+                    handle.get_info()["download_speed"],
+                    serde_json::json!(expected)
+                );
+
+                monitor.request_exit();
+                let _ = join.await;
+                assert_eq!(monitor.download_speed(), 0.0);
+                assert_eq!(handle.get_info()["download_speed"], serde_json::json!(0.0));
             })
             .await;
     }

@@ -526,7 +526,7 @@ impl Runtime {
             }
             let guid = inner.app.borrow_mut().pop_queued_task(&mut current);
             let Some(guid) = guid else {
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                inner.clock.sleep(1.0).await;
                 cnt += 1;
                 continue;
             };
@@ -2029,6 +2029,7 @@ impl Monitor {
                 }
             }
         }
+        self.download_speed.set(0.0);
         let paused = self.inner.state(&self.guid) == Some(consts::TASK_STATE_PAUSED);
         if self.inner.finished(&self.guid) == self.inner.total(&self.guid) && !paused {
             self.rename_and_finish();
@@ -2315,6 +2316,7 @@ async fn download_worker(
             cancel: Some(&mut cancel),
             stage_drain: Some(inner.stage.clone()),
         };
+        speed.lock().unwrap_or_else(|e| e.into_inner()).reset();
         let result = run_download(
             &mut port,
             &mut session,

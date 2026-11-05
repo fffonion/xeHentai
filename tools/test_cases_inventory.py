@@ -2,7 +2,7 @@
 """Durable feature-inventory integrity tests for the production loader.
 
 Under test is the production entry point ``compat.load_cases()`` with the
-real ``tools/cases.json``. The catalog is a closed inventory: 376 unique
+real ``tools/cases.json``. The catalog is a closed inventory: 373 unique
 feature rows after the six known duplicate IDs were consolidated into one
 row per ID, keeping BOTH original assertion legs. These tests pin the
 post-consolidation counts, the literal identifiers, and the retained
@@ -45,10 +45,10 @@ DUPLICATE_IDS = (
 WIRE_SOURCE = "xeHentai/rpc.py do_POST/do_GET wire contract"
 NATIVE_SOURCE = "xeHentai/rpc.py unit contract"
 RPC_TARGET = "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss"
-EXPECTED_UNIQUE_ROWS = 376
+EXPECTED_UNIQUE_ROWS = 373
 EXPECTED_RPC_UNIQUE = 106
-EXPECTED_IMPLEMENTED = 362
-EXPECTED_DELTA = 14
+EXPECTED_IMPLEMENTED = 358
+EXPECTED_DELTA = 15
 EXPECTED_UNIMPLEMENTED = 0
 CLI_IMPLEMENTED = 30
 UPDATE_ROWS = 5
@@ -129,6 +129,22 @@ def test_current_catalog_ids_are_unique_and_strict():
     rpc_ids = [row["id"] for row in cases if row["suite"] == "rpc"]
     assert len(rpc_ids) == EXPECTED_RPC_UNIQUE, len(rpc_ids)
     assert len(set(rpc_ids)) == EXPECTED_RPC_UNIQUE, len(set(rpc_ids))
+
+
+def test_speed_deltas_are_explicit_in_the_inventory():
+    document = compat.load_cases()
+    rows = {row["id"]: row for row in document["cases"]}
+
+    speed = rows["m4.speed.checker"]
+    assert speed["status"] == "delta", speed
+    assert "delta.speed-window-bytes-over-time" in speed["delta"], speed
+    assert "src/worker.rs" in speed["target"], speed
+    assert any("cnt-second" in assertion for assertion in speed["assertions"]), speed
+
+    monitor = rows["m4.monitor.slow-windows"]
+    assert monitor["status"] == "delta", monitor
+    assert "delta.monitor-speed-cleared-on-exit" in monitor["delta"], monitor
+    assert any("clears to zero" in assertion for assertion in monitor["assertions"]), monitor
 
 
 def test_six_merged_ids_keep_both_original_legs():
@@ -359,6 +375,7 @@ def test_rpc_native_filters_select_every_required_mapped_name():
 
 TESTS = [
     test_current_catalog_ids_are_unique_and_strict,
+    test_speed_deltas_are_explicit_in_the_inventory,
     test_six_merged_ids_keep_both_original_legs,
     test_cli_rows_are_implemented_and_update_rows_are_promoted,
     test_duplicate_id_is_rejected_before_any_case_map,
