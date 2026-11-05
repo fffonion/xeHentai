@@ -1951,12 +1951,14 @@ fn base64_body(text: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Frozen original WebUI pack (`ui/`): the built assets of the fixed
-/// upstream revision, served when the static origin is unreachable and no
-/// cache entry exists. The reference answers invalid-request JSON in that
-/// situation; the candidate serves the frozen offline baseline instead
-/// (recorded delta) and keeps the invalid-request body only when the pack
-/// itself has no such asset.
+/// Optional local WebUI pack (`ui/` beside the executable): a materialized
+/// build of the fixed upstream revision. The repository does not track it;
+/// the host proxies `/ui/` and `/static/` from the fixed origin and caches the
+/// answers, and this pack is only the offline fallback when the origin is
+/// unreachable and no cache entry exists. The reference answers invalid-request
+/// JSON in that situation; the candidate serves the frozen offline baseline
+/// instead (recorded delta) and keeps the invalid-request body only when the
+/// pack itself has no such asset.
 #[derive(Clone, Debug)]
 pub struct FrozenPack {
     files: Vec<(String, Vec<u8>, String)>,

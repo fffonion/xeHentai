@@ -525,7 +525,22 @@ fn installed_host(root: &Path, api: &str) -> (PathBuf, Vec<u8>) {
         &Path::new(MANIFEST).join("locales"),
         &install.join("locales"),
     );
-    m6::copy_tree(&Path::new(MANIFEST).join("ui"), &install.join("ui"));
+    // The built WebUI is not tracked in this repository (the runtime proxies
+    // `/ui/` and `/static/` from the fixed origin). This case only asserts that
+    // an installed UI tree survives an RSS update byte-for-byte, so an owned
+    // two-file fixture is used instead of the release pack.
+    let ui = install.join("ui");
+    std::fs::create_dir_all(ui.join("static/js")).expect("ui dir");
+    std::fs::write(
+        ui.join("index.html"),
+        b"<!DOCTYPE html>\n<title>update fixture</title>\n<script src=\"/static/js/app.js\"></script>\n",
+    )
+    .expect("ui index");
+    std::fs::write(
+        ui.join("static/js/app.js"),
+        b"window.updateFixture = true;\n",
+    )
+    .expect("ui asset");
     std::fs::copy(
         Path::new(MANIFEST).join("config.example.rss"),
         install.join("config.rss"),

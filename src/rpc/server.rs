@@ -2750,6 +2750,18 @@ mod tests {
     }
 
     fn roundtrip(request: &[u8], secret: Option<String>) -> Vec<u8> {
+        roundtrip_with_pack(request, secret, None)
+    }
+
+    /// Serve one request against the real server path with an explicit
+    /// optional frozen pack root. `None` means the host has no local pack at
+    /// all, so `/ui/` and `/static/` fall through to the static origin (which
+    /// is unreachable here) and then to the reference invalid-request body.
+    fn roundtrip_with_pack(
+        request: &[u8],
+        secret: Option<String>,
+        pack_root: Option<std::path::PathBuf>,
+    ) -> Vec<u8> {
         block_on(async move {
             let (mut client, mut server) = tokio::io::duplex(256 * 1024);
             {
@@ -2758,16 +2770,16 @@ mod tests {
             }
             let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
             let cache_dir = tempfile::tempdir().expect("cache").keep();
-            let shared = Rc::new(RefCell::new(
-                SharedRpc::new(
-                    manifest,
-                    &cache_dir,
-                    Arc::new(crate::worker::RealClock),
-                    secret,
-                    "http://127.0.0.1:9".to_string(),
-                )
-                .expect("shared"),
-            ));
+            let mut shared_rpc = SharedRpc::new(
+                manifest,
+                &cache_dir,
+                Arc::new(crate::worker::RealClock),
+                secret,
+                "http://127.0.0.1:9".to_string(),
+            )
+            .expect("shared");
+            shared_rpc.pack = pack_root.as_deref().and_then(crate::rpc::FrozenPack::load);
+            let shared = Rc::new(RefCell::new(shared_rpc));
             // A live handle without a spawned task loop: direct App ops and
             // the dispatch path behave exactly like the mounted server.
             let runtime = crate::core::Runtime::new(test_app(), manifest.to_path_buf());
@@ -2903,10 +2915,18 @@ mod tests {
             "{headers:?}"
         );
         assert!(body.is_empty());
-        // GET /ui/ with no cache and no reachable origin serves the frozen
-        // offline pack (recorded delta from the reference invalid-request
-        // JSON): the real built index of the fixed WebUI revision.
-        let raw = roundtrip(b"GET /ui/ HTTP/1.0\r\nHost: x\r\n\r\n", None);
+        // GET /ui/ with no cache and an unreachable origin serves the frozen
+        // offline pack from an owned synthetic build (the repository no longer
+        // tracks `ui/`; the real pack reaches a release from the remote origin
+        // at run time). The recorded delta from the reference invalid-request
+        // JSON still applies whenever a pack is present.
+        let pack_dir = tempfile::tempdir().expect("pack temp root");
+        let pack_root = synthetic_pack_root(pack_dir.path());
+        let raw = roundtrip_with_pack(
+            b"GET /ui/ HTTP/1.0\r\nHost: x\r\n\r\n",
+            None,
+            Some(pack_root),
+        );
         let (status, headers, body) = split_response(&raw);
         assert!(status.contains("200"), "{status}");
         assert_eq!(
@@ -2919,30 +2939,92 @@ mod tests {
         let text = String::from_utf8_lossy(&body).into_owned();
         assert!(text.contains("<title"), "{text}");
         assert!(text.contains("/static/js/app"), "{text}");
+        assert!(text.contains("synthetic webui pack"), "{text}");
+        // With no local pack at all, the same request proxies to the static
+        // origin and, with that origin unreachable, answers the reference
+        // invalid-request JSON instead of an empty body.
+        drop(pack_dir);
+        let raw = roundtrip_with_pack(b"GET /ui/ HTTP/1.0\r\nHost: x\r\n\r\n", None, None);
+        let (status, headers, body) = split_response(&raw);
+        assert!(status.contains("200"), "{status}");
+        assert_eq!(
+            headers
+                .iter()
+                .find(|(name, _)| name == "content-type")
+                .map(|(_, value)| value.as_str()),
+            Some("text/html")
+        );
+        let envelope: Value = serde_json::from_slice(&body).expect("envelope");
+        assert_eq!(envelope.get("jsonrpc").and_then(Value::as_str), Some("2.0"));
+        assert_eq!(
+            envelope
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_i64),
+            Some(consts::ERR_RPC_INVALID_REQUEST)
+        );
+    }
+
+    /// Write the smallest servable WebUI pack under `root/ui`.
+    ///
+    /// The pack tests exercise the serving contract (names, MIME, traversal),
+    /// not the upstream bytes: this repository deliberately does not track the
+    /// built WebUI. The runtime fetches `/ui/` and `/static/` from the fixed
+    /// origin and only falls back to a pack when one is installed beside the
+    /// executable.
+    fn synthetic_pack_root(root: &std::path::Path) -> std::path::PathBuf {
+        let ui = root.join("ui");
+        std::fs::create_dir_all(ui.join("static/js")).expect("ui js dir");
+        std::fs::create_dir_all(ui.join("static/css")).expect("ui css dir");
+        std::fs::write(
+            ui.join("index.html"),
+            b"<!DOCTYPE html>\n<html><head><title>synthetic webui pack</title></head>\
+              <body><div id=\"app\"></div><script src=\"/static/js/app.js\"></script></body></html>\n",
+        )
+        .expect("index");
+        std::fs::write(
+            ui.join("static/js/app.js"),
+            b"window.syntheticPack = true;\n",
+        )
+        .expect("app js");
+        std::fs::write(ui.join("static/css/app.css"), b"#app { margin: 0; }\n").expect("css");
+        root.to_path_buf()
     }
 
     #[test]
     fn frozen_pack_serves_assets_and_rejects_traversal() {
         use crate::rpc::FrozenPack;
-        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let pack = FrozenPack::load(manifest).expect("frozen pack must exist");
+        let dir = tempfile::tempdir().expect("pack temp root");
+        let root = synthetic_pack_root(dir.path());
+        let pack = FrozenPack::load(&root).expect("synthetic pack must load");
         let (index, mime) = pack.get("/").expect("index");
         assert_eq!(mime, "text/html");
-        assert!(index.starts_with(b"<!DOCTYPE html>"));
-        let (app_js, mime) = pack
-            .get("/static/js/app.b712f314a32fe45ff793.js")
-            .expect("app js");
+        let index = String::from_utf8_lossy(index);
+        assert!(index.starts_with("<!DOCTYPE html>"), "{index}");
+        assert!(
+            index.contains("<title>synthetic webui pack</title>"),
+            "{index}"
+        );
+        assert!(index.contains("/static/js/app.js"), "{index}");
+        let (app_js, mime) = pack.get("/static/js/app.js").expect("app js");
         assert_eq!(mime, "application/javascript");
-        assert!(!app_js.is_empty());
-        let (css, mime) = pack
-            .get("/static/css/app.6027935ff9f1e3bed9935438c6be1f38.css")
-            .expect("css");
+        assert_eq!(app_js, b"window.syntheticPack = true;\n");
+        let (css, mime) = pack.get("/static/css/app.css").expect("css");
         assert_eq!(mime, "text/css");
-        assert!(!css.is_empty());
+        assert_eq!(css, b"#app { margin: 0; }\n");
         assert!(pack.get("/../secret").is_none());
         assert!(pack.get("/static/../../x").is_none());
         assert!(pack.get("/static/js/nope.js").is_none());
         assert!(FrozenPack::load(std::path::Path::new("/nonexistent-root")).is_none());
+        // An index without the `static/` tree is not a usable pack.
+        let partial = tempfile::tempdir().expect("partial root");
+        std::fs::create_dir_all(partial.path().join("ui")).expect("ui dir");
+        std::fs::write(
+            partial.path().join("ui/index.html"),
+            b"<title>partial</title>\n",
+        )
+        .expect("index");
+        assert!(FrozenPack::load(partial.path()).is_none());
     }
 
     #[test]

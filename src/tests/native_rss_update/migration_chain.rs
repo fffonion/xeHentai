@@ -229,6 +229,9 @@ fn migration_install(root: &Path, api: &str) -> PathBuf {
         &Path::new(MANIFEST).join("locales"),
         &install.join("locales"),
     );
+    // This browser proof drives the original UI. CI materializes the fixed
+    // upstream build into the untracked `ui/` directory before the unit and
+    // browser steps; a checkout without that pack cannot run this ignored case.
     m6::copy_tree(&Path::new(MANIFEST).join("ui"), &install.join("ui"));
     let github = install.join("rss/updater/github.rss");
     let source = std::fs::read_to_string(&github).expect("github.rss");
