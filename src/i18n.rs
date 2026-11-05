@@ -37,12 +37,62 @@ impl Locale {
     }
 }
 
-/// Reference locale detection: the environment's preferred locale tag with any
-/// codeset/modifier removed (`zh_CN.UTF-8` / `zh_CN.utf8@mod` -> `zh_cn`).
-/// Unknown or missing values fall back to English, like `i18n` itself.
-pub fn detect_locale() -> Locale {
+/// Map a Windows UI language identifier (the `LANGID` reported by
+/// `GetUserDefaultUILanguage`) to a supported locale.
+///
+/// Windows names Chinese as a language plus a sublanguage, so the region — not
+/// a script suffix — decides simplified versus traditional. The neutral tags
+/// Windows can also report are `0x0004` (`zh`, documented as `zh-Hans`) and
+/// `0x7C04` (`zh-Hant`). Every other language, including a Chinese `LANGID`
+/// whose sublanguage this table does not define, falls back to English rather
+/// than guessing a script, matching [`Locale::from_tag`].
+pub fn locale_from_windows_langid(langid: u16) -> Locale {
+    match langid {
+        // zh (neutral, documented zh-Hans), zh-CN, zh-SG
+        0x0004 | 0x0804 | 0x1004 => Locale::ZhHans,
+        // zh-TW, zh-HK, zh-MO, zh-Hant (neutral traditional)
+        0x0404 | 0x0C04 | 0x1404 | 0x7C04 => Locale::ZhHant,
+        _ => Locale::EnUs,
+    }
+}
+
+// `LANGID WINAPI GetUserDefaultUILanguage(void);` — no arguments, and `LANGID`
+// is a `WORD`, hence `u16`. `extern "system"` is the `WINAPI` calling
+// convention (`__stdcall` on 32-bit x86, the platform ABI elsewhere);
+// `kernel32` is always linked by `std`, and `#[link]` only states it. Plain
+// comments: rustdoc does not document extern blocks, and `unused_doc_comments`
+// is denied.
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    #[link_name = "GetUserDefaultUILanguage"]
+    fn get_user_default_ui_language() -> u16;
+}
+
+/// The user's Windows UI language (their MUI preference, not the install-time
+/// system default). `None` on other hosts, and `None` when Windows reports
+/// `LANG_NEUTRAL` (`0`) because no language is installed.
+#[cfg(windows)]
+fn windows_ui_langid() -> Option<u16> {
+    // SAFETY: the call takes no arguments, reads no Rust memory, and returns a
+    // plain `LANGID`. It cannot fail; zero means "no language installed".
+    let langid = unsafe { get_user_default_ui_language() };
+    (langid != 0).then_some(langid)
+}
+
+#[cfg(not(windows))]
+fn windows_ui_langid() -> Option<u16> {
+    None
+}
+
+/// Reduce the environment's preferred locale tag to a bare language tag
+/// (`zh_CN.UTF-8` / `zh_CN.utf8@mod` -> `zh_cn`), keeping the reference
+/// precedence `LC_ALL`, then `LC_MESSAGES`, then `LANG`. Empty, `C` and
+/// `POSIX` values count as unset and the next variable is consulted. `None`
+/// means no variable chose a locale at all.
+fn locale_from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Option<Locale> {
     for name in ["LC_ALL", "LC_MESSAGES", "LANG"] {
-        let Ok(value) = std::env::var(name) else {
+        let Some(value) = lookup(name) else {
             continue;
         };
         let value = value.trim();
@@ -54,9 +104,36 @@ pub fn detect_locale() -> Locale {
             .next()
             .unwrap_or(value)
             .replace('-', "_");
-        return Locale::from_tag(&tag);
+        return Some(Locale::from_tag(&tag));
+    }
+    None
+}
+
+/// Locale precedence as plain data: an explicitly configured environment
+/// locale always wins, then the operating system's UI language, then English.
+/// On non-Windows hosts `ui_langid` is always `None`, so this is exactly the
+/// previous behaviour there.
+fn resolve_locale(env: Option<Locale>, ui_langid: Option<u16>) -> Locale {
+    if let Some(locale) = env {
+        return locale;
+    }
+    if let Some(langid) = ui_langid {
+        return locale_from_windows_langid(langid);
     }
     Locale::EnUs
+}
+
+/// Locale detection: the environment's preferred tag first (`LC_ALL`,
+/// `LC_MESSAGES`, `LANG`), which keeps every existing host and configuration
+/// working and lets an explicitly set variable override the system language.
+/// When none is set — the usual Windows case, since those variables do not
+/// exist there — the Windows UI language decides, and English is the last
+/// resort for unsupported languages.
+pub fn detect_locale() -> Locale {
+    resolve_locale(
+        locale_from_lookup(|name| std::env::var(name).ok()),
+        windows_ui_langid(),
+    )
 }
 
 pub fn available_locales() -> Vec<String> {
@@ -252,6 +329,128 @@ mod tests {
         for (tag, expected) in cases {
             assert_eq!(Locale::from_tag(tag), expected, "tag {tag}");
         }
+    }
+
+    #[test]
+    fn windows_langids_pick_the_right_chinese_script() {
+        let cases = [
+            // zh (neutral, documented zh-Hans), zh-CN, zh-SG
+            (0x0004, Locale::ZhHans),
+            (0x0804, Locale::ZhHans),
+            (0x1004, Locale::ZhHans),
+            // zh-TW, zh-HK, zh-MO, zh-Hant (neutral traditional)
+            (0x0404, Locale::ZhHant),
+            (0x0C04, Locale::ZhHant),
+            (0x1404, Locale::ZhHant),
+            (0x7C04, Locale::ZhHant),
+            // Unsupported languages, including English, stay English.
+            (0x0409, Locale::EnUs),
+            (0x0809, Locale::EnUs),
+            (0x0411, Locale::EnUs),
+            // A Chinese sublanguage outside the table is not guessed at.
+            (0x2404, Locale::EnUs),
+            (0x8004, Locale::EnUs),
+            // LANG_NEUTRAL and garbage.
+            (0x0000, Locale::EnUs),
+            (0xFFFF, Locale::EnUs),
+        ];
+        for (langid, expected) in cases {
+            assert_eq!(
+                locale_from_windows_langid(langid),
+                expected,
+                "langid {langid:#06x}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_environment_locale_beats_the_system_ui_language() {
+        let cases = [
+            // LC_ALL=zh_TW (or any configured value) wins over a simplified
+            // Windows UI: the user asked for that language explicitly.
+            (Some(Locale::ZhHant), Some(0x0804), Locale::ZhHant),
+            (Some(Locale::EnUs), Some(0x0804), Locale::EnUs),
+            (Some(Locale::ZhHans), Some(0x0404), Locale::ZhHans),
+            // No usable variable: the Windows UI language decides.
+            (None, Some(0x0804), Locale::ZhHans),
+            (None, Some(0x0404), Locale::ZhHant),
+            (None, Some(0x0411), Locale::EnUs),
+            (None, Some(0x0000), Locale::EnUs),
+            // No environment and no UI language at all.
+            (None, None, Locale::EnUs),
+        ];
+        for (env, langid, expected) in cases {
+            assert_eq!(
+                resolve_locale(env, langid),
+                expected,
+                "env {env:?} langid {langid:?}"
+            );
+        }
+    }
+
+    /// A `std::env::var` stand-in over a fixed table, so the precedence tests
+    /// never mutate the real (process-global) environment.
+    fn lookup(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        move |name| {
+            vars.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_string())
+        }
+    }
+
+    #[test]
+    fn environment_lookup_keeps_its_variable_precedence() {
+        // LC_ALL beats LC_MESSAGES beats LANG, codeset and modifier stripped.
+        assert_eq!(
+            locale_from_lookup(lookup(&[
+                ("LC_ALL", "zh_CN.UTF-8"),
+                ("LANG", "zh_TW.UTF-8")
+            ])),
+            Some(Locale::ZhHans)
+        );
+        assert_eq!(
+            locale_from_lookup(lookup(&[
+                ("LC_MESSAGES", "zh_HK.UTF-8"),
+                ("LANG", "zh_CN.UTF-8")
+            ])),
+            Some(Locale::ZhHant)
+        );
+        assert_eq!(
+            locale_from_lookup(lookup(&[("LANG", "zh_CN.utf8@mod")])),
+            Some(Locale::ZhHans)
+        );
+        // C/POSIX/empty are unset, so the next variable is consulted.
+        assert_eq!(
+            locale_from_lookup(lookup(&[("LC_ALL", "C"), ("LANG", "zh_TW.UTF-8")])),
+            Some(Locale::ZhHant)
+        );
+        assert_eq!(
+            locale_from_lookup(lookup(&[
+                ("LC_ALL", "POSIX"),
+                ("LC_MESSAGES", "zh_SG.UTF-8")
+            ])),
+            Some(Locale::ZhHans)
+        );
+        assert_eq!(
+            locale_from_lookup(lookup(&[("LC_ALL", "  "), ("LANG", "en_US.UTF-8")])),
+            Some(Locale::EnUs)
+        );
+        // An explicitly set but unsupported value is still an explicit choice:
+        // it resolves to English and suppresses the Windows UI language.
+        assert_eq!(
+            locale_from_lookup(lookup(&[("LANG", "fr_FR.UTF-8")])),
+            Some(Locale::EnUs)
+        );
+        // Nothing set at all: the caller may consult the OS.
+        assert_eq!(locale_from_lookup(lookup(&[])), None);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_non_windows_host_has_no_ui_language_to_consult() {
+        assert_eq!(windows_ui_langid(), None);
+        let expected = locale_from_lookup(|name| std::env::var(name).ok()).unwrap_or(Locale::EnUs);
+        assert_eq!(detect_locale(), expected);
     }
 
     #[test]
