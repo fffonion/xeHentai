@@ -12866,25 +12866,83 @@ mod m6 {
             body.len()
         );
         let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            let remaining = deadline - Instant::now();
-            let step = remaining.min(Duration::from_secs(5));
-            if let Ok(mut stream) =
-                TcpStream::connect_timeout(&addr, step.min(Duration::from_millis(500)))
-                && stream.set_read_timeout(Some(step)).is_ok()
-                && stream.set_write_timeout(Some(step)).is_ok()
-                && stream.write_all(request.as_bytes()).is_ok()
-                && stream.write_all(body).is_ok()
-            {
+        loop {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+            if remaining.is_zero() {
+                return false;
+            }
+            let connect_budget = remaining.min(Duration::from_millis(500));
+            let Ok(stream) = TcpStream::connect_timeout(&addr, connect_budget) else {
+                if let Some(left) = deadline.checked_duration_since(Instant::now()) {
+                    std::thread::sleep(left.min(Duration::from_millis(20)));
+                }
+                continue;
+            };
+            let mut stream = stream;
+            // Every connect/write/read below shares this one deadline: socket
+            // timeouts are recomputed from the remaining time before each
+            // call, expiry is rechecked between chunks, and the retry sleep
+            // never runs past the deadline.
+            let mut attempt_ok = true;
+            for piece in [request.as_bytes(), &body[..]] {
+                let mut pos = 0;
+                while pos < piece.len() {
+                    let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                        return false;
+                    };
+                    if left.is_zero() {
+                        return false;
+                    }
+                    if stream
+                        .set_write_timeout(Some(left.min(Duration::from_secs(5))))
+                        .is_err()
+                    {
+                        attempt_ok = false;
+                        break;
+                    }
+                    match stream.write(&piece[pos..]) {
+                        Ok(0) => {
+                            attempt_ok = false;
+                            break;
+                        }
+                        Ok(sent) => pos += sent,
+                        Err(_) => {
+                            attempt_ok = false;
+                            break;
+                        }
+                    }
+                }
+                if !attempt_ok {
+                    break;
+                }
+            }
+            if attempt_ok {
                 // Bounded read: the small JSON body arrives far below this
                 // cap; `read_to_end` would wait on HTTP keep-alive instead.
                 let mut response = Vec::new();
                 let mut chunk = [0u8; 4096];
                 loop {
+                    let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                        return false;
+                    };
+                    if left.is_zero() {
+                        return false;
+                    }
+                    if stream
+                        .set_read_timeout(Some(left.min(Duration::from_secs(5))))
+                        .is_err()
+                    {
+                        break;
+                    }
                     match stream.read(&mut chunk) {
                         Ok(0) => break,
                         Ok(read) => {
                             response.extend_from_slice(&chunk[..read]);
+                            if deadline.checked_duration_since(Instant::now()).is_none() {
+                                return false;
+                            }
                             let text = String::from_utf8_lossy(&response);
                             if text.contains("\"version\"") || response.len() >= 65_536 {
                                 break;
@@ -12892,6 +12950,9 @@ mod m6 {
                         }
                         Err(_) => break,
                     }
+                }
+                if deadline.checked_duration_since(Instant::now()).is_none() {
+                    return false;
                 }
                 let text = String::from_utf8_lossy(&response);
                 if text.starts_with("HTTP/1.")
@@ -12902,9 +12963,13 @@ mod m6 {
                     return true;
                 }
             }
-            std::thread::sleep(Duration::from_millis(20));
+            if let Some(left) = deadline.checked_duration_since(Instant::now()) {
+                if left.is_zero() {
+                    return false;
+                }
+                std::thread::sleep(left.min(Duration::from_millis(20)));
+            }
         }
-        false
     }
 
     pub(super) fn image_files(root: &Path) -> Vec<PathBuf> {
@@ -13324,6 +13389,71 @@ mod m6 {
         assert!(
             !rpc_get_info_ready(port, Duration::from_secs(2)),
             "a silent port must not satisfy RPC readiness"
+        );
+    }
+
+    /// Slow-drip calibration (fixture only, never the product): an accepted
+    /// loopback peer that keeps sending response bytes WITHOUT `"version"`,
+    /// each chunk well within any single socket timeout and for much longer
+    /// than the helper budget, must NOT hold the readiness gate past its
+    /// total deadline. The silent-port control above never enters the read
+    /// loop, so only this fixture exercises per-chunk deadline accounting.
+    #[cfg(unix)]
+    #[test]
+    fn m6_rpc_readiness_gate_rejects_a_slow_drip_within_socket_timeouts() {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::mpsc::RecvTimeoutError;
+
+        const CHUNKS: usize = 80;
+        const INTERVAL: Duration = Duration::from_millis(25);
+        const BUDGET: Duration = Duration::from_millis(300);
+        // The helper must give up near its budget, far below the fixture's
+        // natural ~2 s close, with room for scheduler jitter.
+        const ELAPSED_LIMIT: Duration = Duration::from_millis(1500);
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("drip port");
+        let port = listener.local_addr().expect("port").port();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+        let sent = Arc::new(AtomicUsize::new(0));
+        let sent_by_fixture = Arc::clone(&sent);
+        let handle = std::thread::spawn(move || {
+            let Ok((mut conn, _)) = listener.accept() else {
+                return;
+            };
+            let _ = conn.set_write_timeout(Some(Duration::from_millis(500)));
+            let piece = [b'x'; 64];
+            for _ in 0..CHUNKS {
+                match stop_rx.recv_timeout(INTERVAL) {
+                    Ok(_) | Err(RecvTimeoutError::Disconnected) => break,
+                    Err(RecvTimeoutError::Timeout) => {
+                        if conn.write_all(&piece).is_err() {
+                            break;
+                        }
+                        sent_by_fixture.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }
+        });
+        let start = Instant::now();
+        let ready = rpc_get_info_ready(port, BUDGET);
+        let elapsed = start.elapsed();
+        let streamed = sent.load(Ordering::SeqCst);
+        let _ = stop_tx.send(());
+        handle.join().expect("drip fixture joins");
+        assert!(
+            !ready,
+            "a version-less drip must not satisfy RPC readiness \
+             (elapsed={elapsed:?} streamed={streamed}/{CHUNKS})"
+        );
+        assert!(
+            streamed < CHUNKS,
+            "the helper must give up while the drip is still streaming \
+             (elapsed={elapsed:?} streamed={streamed}/{CHUNKS})"
+        );
+        assert!(
+            elapsed < ELAPSED_LIMIT,
+            "the helper must respect its {BUDGET:?} total deadline \
+             (elapsed={elapsed:?} streamed={streamed}/{CHUNKS})"
         );
     }
 
