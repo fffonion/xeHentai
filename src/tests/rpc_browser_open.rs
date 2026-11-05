@@ -59,37 +59,63 @@ fn opener_program_matches_the_platform() {
     assert_eq!(browser_opener_program(), "open");
 }
 
-/// One program, one URL argument -- never a shell command line.
+/// One program, one URL argument -- never a shell command line. The fragment's
+/// commas and `#` stay inside that single argument.
 #[test]
 fn opener_command_carries_exactly_one_url_argument() {
     let invocations = Mutex::new(Vec::new());
     let launch = record(&invocations);
-    crate::open_browser("http://[::1]:7000/ui/", &launch).expect("injected runner");
+    let url = "http://[::1]:7000/ui/#host=[::1],port=7000,https=no";
+    crate::open_browser(url, &launch).expect("injected runner");
     let invocations = invocations.lock().unwrap();
     assert_eq!(invocations.len(), 1);
     assert_eq!(invocations[0].0, browser_opener_program());
-    assert_eq!(invocations[0].1, vec!["http://[::1]:7000/ui/".to_string()]);
+    assert_eq!(invocations[0].1, vec![url.to_string()]);
 }
 
+/// The frozen WebUI only takes its connection from the URL fragment
+/// (`host + ':' + port`). Both values must be the listener's own, so a custom
+/// or ephemeral port is used instead of the UI's 8010/persisted fallback.
 #[test]
-fn browser_url_uses_the_live_address_with_ipv6_brackets() {
+fn browser_url_pins_the_bound_host_and_port_in_the_webui_fragment() {
     assert_eq!(
         browser_url(SocketAddr::from((Ipv4Addr::LOCALHOST, 7000))),
-        "http://127.0.0.1:7000/ui/"
+        "http://127.0.0.1:7000/ui/#host=127.0.0.1,port=7000,https=no"
     );
+    // The WebUI concatenates `host + ':' + port`, so the fragment host keeps
+    // the brackets even though the URL authority already has them.
     assert_eq!(
         browser_url(SocketAddr::from((Ipv6Addr::LOCALHOST, 7001))),
-        "http://[::1]:7001/ui/"
+        "http://[::1]:7001/ui/#host=[::1],port=7001,https=no"
     );
     // Wildcard binds are not browsable; the loopback of the same family is.
     assert_eq!(
         browser_url(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 7002))),
-        "http://127.0.0.1:7002/ui/"
+        "http://127.0.0.1:7002/ui/#host=127.0.0.1,port=7002,https=no"
     );
     assert_eq!(
         browser_url(SocketAddr::from((Ipv6Addr::UNSPECIFIED, 7003))),
-        "http://[::1]:7003/ui/"
+        "http://[::1]:7003/ui/#host=[::1],port=7003,https=no"
     );
+}
+
+/// `rpc_secret` never enters the URL. The WebUI's fragment parser reads a
+/// `token` key, so a secret here would both expose the opener argv and
+/// overwrite the UI's stored secret; the config dialog owns it instead.
+#[test]
+fn browser_url_never_carries_the_rpc_secret() {
+    const SECRET: &str = "dummy-secret-8f3a1c";
+    let url = browser_url(SocketAddr::from((Ipv4Addr::LOCALHOST, 7000)));
+    assert!(!url.contains(SECRET));
+    assert!(!url.contains("token="));
+    let keys: Vec<&str> = url
+        .split_once('#')
+        .expect("fragment")
+        .1
+        .split(',')
+        .map(|pair| pair.split('=').next().expect("key"))
+        .collect();
+    assert_eq!(keys, ["host", "port", "https"]);
 }
 
 /// A port-0 listener is assigned a real port; the URL must name that port.
@@ -100,7 +126,10 @@ async fn browser_url_never_keeps_a_zero_port() {
     assert_ne!(bound.port(), 0);
     assert_eq!(
         browser_url(bound),
-        format!("http://127.0.0.1:{}/ui/", bound.port())
+        format!(
+            "http://127.0.0.1:{0}/ui/#host=127.0.0.1,port={0},https=no",
+            bound.port()
+        )
     );
 }
 
@@ -148,7 +177,10 @@ async fn readiness_hands_off_the_bound_listener_after_server_init() {
     assert_eq!(recorded[0].0, browser_opener_program());
     assert_eq!(
         recorded[0].1,
-        vec![format!("http://127.0.0.1:{}/ui/", addr.port())]
+        vec![format!(
+            "http://127.0.0.1:{0}/ui/#host=127.0.0.1,port={0},https=no",
+            addr.port()
+        )]
     );
     assert_eq!(recorded[0].1.len(), 1, "one URL argument, no shell");
 

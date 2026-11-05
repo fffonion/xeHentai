@@ -707,11 +707,26 @@ fn browsable_addr(addr: std::net::SocketAddr) -> std::net::SocketAddr {
     std::net::SocketAddr::new(ip, addr.port())
 }
 
-/// The WebUI page of this process's listener. `SocketAddr` formats IPv6 with
-/// the required brackets, and the port always comes from the bound listener,
-/// never from the configured request (a port-0 listener reports its real port).
+/// The WebUI page of this process's listener. The fragment is the frozen
+/// WebUI's forced connection config (`Config.vue` reads `host`, `port` and
+/// `https` from `location.href` and concatenates `host + ':' + port`); without
+/// it the UI falls back to port 8010 or a persisted connection and can point at
+/// the wrong server. Both values come from the bound listener, never from the
+/// configured request (a port-0 listener reports its real port), and an IPv6
+/// host keeps the brackets that concatenation requires. The host is an
+/// `IpAddr`, so it cannot smuggle userinfo or path separators into the URL.
+/// `rpc_secret` is deliberately absent: the opener argv is visible in the
+/// process list, and the WebUI's config dialog is where a secret belongs.
 fn browser_url(addr: std::net::SocketAddr) -> String {
-    format!("http://{}/ui/", browsable_addr(addr))
+    let addr = browsable_addr(addr);
+    let host = match addr.ip() {
+        std::net::IpAddr::V4(ip) => ip.to_string(),
+        std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+    };
+    format!(
+        "http://{addr}/ui/#host={host},port={},https=no",
+        addr.port()
+    )
 }
 
 /// The ONE WebUI launch: wait for the owned startup handoff, then open the
