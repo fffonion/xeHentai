@@ -1,10 +1,12 @@
-//! Proxy pool, protocol connectors and Glype handling from `xeHentai/proxy.py`.
+//! Proxy pool and protocol connectors from `xeHentai/proxy.py`.
 //!
 //! The pool keeps the reference insertion order, first-available selection,
 //! success/fail counters, `MAX_FAIL` policy and ban expiry. Every proxy kind
 //! has a real local protocol path: HTTP(S) proxy (origin/absolute-form or
-//! CONNECT), SOCKS4/4a/5/5h handshakes and Glype URL rewriting. TLS
-//! verification is never disabled; tests inject a test CA and DNS mapping.
+//! CONNECT) and SOCKS4/4a/5/5h handshakes. Glype was removed; a `glype://`
+//! spelling or a legacy Glype rewrite URL is rejected explicitly instead of
+//! being treated as a direct connection. TLS verification is never disabled;
+//! tests inject a test CA and DNS mapping.
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
@@ -30,69 +32,37 @@ pub const MAX_FAIL: i64 = 5;
 pub struct ProxySpec {
     pub addr: String,
     pub kind: ProxyKind,
-    /// Glype handler state (`g_session`) is shared by every request through
-    /// this pooled proxy, like the reference closure.
-    pub glype: Option<Arc<Mutex<GlypeState>>>,
 }
 
 #[derive(Clone, Debug)]
 pub enum ProxyKind {
     Http { tls: bool },
     Socks { version: u8, remote_dns: bool },
-    Glype(GlypeSpec),
-}
-
-#[derive(Clone)]
-pub struct GlypeState {
-    pub s: Option<String>,
-}
-
-impl fmt::Debug for GlypeState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("GlypeState").field("s", &self.s).finish()
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct GlypeSpec {
-    pub server: String,
-    pub inst_loc: String,
-    pub script: String,
-    pub argname: String,
-    pub bval: String,
-    pub url_re: Regex,
-    pub error_re: Regex,
 }
 
 #[derive(Debug)]
 pub enum ProxyError {
     Address(String),
+    Unsupported(String),
     NoProxy,
     Dns(String),
     Connect(String),
     Handshake(String),
     Tls(String),
     Http(String),
-    Glype(String),
-    GlypeMissingContentType,
-    GlypeDecode(String),
 }
 
 impl fmt::Display for ProxyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Address(value) => write!(f, "{value} is not an acceptable proxy address"),
+            Self::Unsupported(value) => write!(f, "{value} proxies are not supported"),
             Self::NoProxy => write!(f, "try to use proxy but no proxies avaliable"),
             Self::Dns(message) => write!(f, "dns error: {message}"),
             Self::Connect(message) => write!(f, "connection error: {message}"),
             Self::Handshake(message) => write!(f, "proxy handshake error: {message}"),
             Self::Tls(message) => write!(f, "tls error: {message}"),
             Self::Http(message) => write!(f, "proxy http error: {message}"),
-            Self::Glype(message) => write!(f, "{message}"),
-            Self::GlypeMissingContentType => {
-                write!(f, "'NoneType' object has no attribute 'startswith'")
-            }
-            Self::GlypeDecode(message) => write!(f, "glype body decode error: {message}"),
         }
     }
 }
@@ -262,18 +232,16 @@ impl Pool {
 /// understands 4a/5h for remote DNS. We keep the accepted spellings and treat
 /// a trailing `a` (v4) / `h` (v5) as the remote-DNS variant.
 pub fn parse_proxy(addr: &str) -> Result<ProxySpec, ProxyError> {
+    if is_glype_address(addr) {
+        return Err(ProxyError::Unsupported("glype".to_string()));
+    }
     static SOCKS: OnceLock<Regex> = OnceLock::new();
     static HTTP: OnceLock<Regex> = OnceLock::new();
-    static GLYPE: OnceLock<Regex> = OnceLock::new();
     let socks = SOCKS.get_or_init(|| {
         Regex::new(r"^socks[45][ah]*://([^:^/]+)(:\d{1,5})*/*$").expect("socks regex")
     });
     let http =
         HTTP.get_or_init(|| Regex::new(r"^https*://([^:^/]+)(:\d{1,5})*/*$").expect("http regex"));
-    let glype = GLYPE.get_or_init(|| {
-        Regex::new(r"^https*://([^:^/]+)(:\d{1,5})*/(.*?)([^/]+\.php)\?.*b=.+")
-            .expect("glype regex")
-    });
 
     if let Some(captures) = socks.captures(addr) {
         let scheme = addr
@@ -296,15 +264,6 @@ pub fn parse_proxy(addr: &str) -> Result<ProxySpec, ProxyError> {
                 version,
                 remote_dns,
             },
-            glype: None,
-        });
-    }
-    if glype.is_match(addr) {
-        let spec = parse_glype(addr)?;
-        return Ok(ProxySpec {
-            addr: addr.to_string(),
-            kind: ProxyKind::Glype(spec),
-            glype: Some(Arc::new(Mutex::new(GlypeState { s: None }))),
         });
     }
     if http.is_match(addr) {
@@ -313,206 +272,30 @@ pub fn parse_proxy(addr: &str) -> Result<ProxySpec, ProxyError> {
             kind: ProxyKind::Http {
                 tls: addr.starts_with("https://"),
             },
-            glype: None,
         });
     }
     Err(ProxyError::Address(addr.to_string()))
 }
 
-fn parse_glype(addr: &str) -> Result<GlypeSpec, ProxyError> {
-    let parts = Regex::new(r"(https*://[^/]+)/(.*?)([^/]+\.php)")
-        .expect("glype parts")
-        .captures(addr)
-        .ok_or_else(|| ProxyError::Address(addr.to_string()))?;
-    let server = parts[1].to_string();
-    let inst_loc = parts[2].to_string();
-    let script = parts[3].to_string();
-    let argname = Regex::new(r"[&?]([a-zA-Z._]+)=[^\d]*")
-        .expect("glype arg")
-        .captures(addr)
-        .map(|captures| captures[1].to_string())
-        .ok_or_else(|| ProxyError::Address(addr.to_string()))?;
-    let bval = Regex::new(r"[&?]b=(\d*)")
-        .expect("glype b")
-        .captures(addr)
-        .map(|captures| captures[1].to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "4".to_string());
-    let url_re = Regex::new(&format!("/{}{}\\?u=([^&\"']+)&[^\"']+", inst_loc, script))
-        .map_err(|error| ProxyError::Glype(error.to_string()))?;
-    let error_re = Regex::new(r#"<div id="error">(.*?)</div>"#).expect("glype error regex");
-    Ok(GlypeSpec {
-        server,
-        inst_loc,
-        script,
-        argname,
-        bval,
-        url_re,
-        error_re,
-    })
-}
-
-impl GlypeSpec {
-    pub fn mkurl(&self, url: &str) -> String {
-        let encoded: String = url::form_urlencoded::byte_serialize(url.as_bytes()).collect();
-        format!(
-            "{}/{}{}?{}={}&b={}&f=norefer",
-            self.server, self.inst_loc, self.script, self.argname, encoded, self.bval
-        )
-    }
-
-    pub fn script_url(&self) -> String {
-        format!("{}/{}{}", self.server, self.inst_loc, self.script)
-    }
-
-    pub fn process_php_url(&self) -> String {
-        format!(
-            "{}/{}includes/process.php?action=sslagree",
-            self.server, self.inst_loc
-        )
-    }
-
-    /// Rewrite session headers the way `glype_proxy.handle` does: every header
-    /// is copied, Referer points at the Glype script, and an explicit Cookie
-    /// header is re-keyed as `c[site][/][name]` (prefixed by the shared `s`).
-    pub fn rewrite_headers(
-        &self,
-        session_headers: &[(String, String)],
-        target_url: &str,
-        state: &mut GlypeState,
-    ) -> Vec<(String, String)> {
-        let mut headers: Vec<(String, String)> = session_headers.to_vec();
-        upsert_header(&mut headers, "Referer", self.script_url());
-        let Some(cookie_index) = headers
-            .iter()
-            .position(|(name, _)| name.eq_ignore_ascii_case("Cookie"))
-        else {
-            return headers;
-        };
-        let site = Regex::new(r"https*://([^/]+)/*")
-            .expect("site regex")
-            .captures(target_url)
-            .map(|captures| captures[1].to_string())
-            .unwrap_or_default();
-        let old = crate::util::parse_cookie(&headers[cookie_index].1);
-        let mut pairs: Vec<(String, String)> = Vec::new();
-        if let Some(session) = &state.s {
-            pairs.push(("s".to_string(), session.clone()));
-        }
-        for (key, value) in old {
-            let mapped = format!("c[{}][/][{}]", site, key);
-            if let Some(existing) = pairs.iter_mut().find(|(name, _)| *name == mapped) {
-                existing.1 = value;
-            } else {
-                pairs.push((mapped, value));
-            }
-        }
-        headers[cookie_index].1 = crate::util::make_cookie(&pairs);
-        headers
-    }
-
-    /// Decode `text/*` Glype bodies, reject the error div with the full
-    /// `match[0]`, and undo the proxy's URL transformation.
-    pub fn process_text(&self, body: &[u8]) -> Result<Vec<u8>, ProxyError> {
-        let text = std::str::from_utf8(body)
-            .map_err(|error| ProxyError::GlypeDecode(error.to_string()))?;
-        if let Some(captures) = self.error_re.captures(text) {
-            return Err(ProxyError::Glype(format!(
-                "glype returns: {}",
-                &captures[0]
-            )));
-        }
-        let rewritten = self.url_re.replace_all(text, |captures: &regex::Captures| {
-            percent_decode(&captures[1])
-        });
-        Ok(rewritten.into_owned().into_bytes())
-    }
-}
-
-fn percent_decode(value: &str) -> String {
-    percent_encoding::percent_decode_str(value)
-        .decode_utf8_lossy()
-        .into_owned()
-}
-
-/// Apply the reference's reverse Set-Cookie mapping: `c[site][/][name]` pairs
-/// become `name` and the header is rebuilt with `make_cookie`.
-pub fn apply_glype_response_cookies(headers: &mut Vec<(String, String)>, state: &mut GlypeState) {
-    let joined = match joined_header(headers, "set-cookie") {
-        Some(value) => value,
-        None => return,
-    };
-    let mut pairs = crate::util::parse_cookie(&joined.replace(',', ";"));
-    let key_re = Regex::new(r"c\[[^]]+\]\[[^]]+\]\[([^]]+)\]").expect("cookie map regex");
-    let original = pairs.clone();
-    for (key, value) in original {
-        if let Some(captures) = key_re.captures(&key) {
-            let short = captures[1].to_string();
-            if short == "s" {
-                state.s = Some(value.clone());
-            }
-            if let Some(existing) = pairs.iter_mut().find(|(name, _)| *name == short) {
-                existing.1 = value;
-            } else {
-                pairs.push((short, value));
-            }
-        }
-    }
-    let rebuilt = crate::util::make_cookie(&pairs);
-    set_single_header(headers, "set-cookie", rebuilt);
-}
-
-fn joined_header(headers: &[(String, String)], name: &str) -> Option<String> {
-    let mut out: Option<String> = None;
-    for (header_name, value) in headers {
-        if header_name.eq_ignore_ascii_case(name) {
-            match &mut out {
-                Some(current) => {
-                    current.push_str(", ");
-                    current.push_str(value);
-                }
-                None => out = Some(value.clone()),
-            }
-        }
-    }
-    out
-}
-
-fn upsert_header(headers: &mut Vec<(String, String)>, name: &str, value: String) {
-    if let Some(entry) = headers
-        .iter_mut()
-        .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+/// Glype was an HTTP URL-rewriting proxy: either a `glype://` shorthand or a
+/// legacy `http(s)://.../browse.php?...&b=N` endpoint. Both are rejected with
+/// a dedicated error so a stale configuration fails loudly instead of falling
+/// through to a direct connection.
+fn is_glype_address(addr: &str) -> bool {
+    if addr
+        .split_once("://")
+        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("glype"))
     {
-        entry.1 = value;
-    } else {
-        headers.push((name.to_string(), value));
+        return true;
     }
-}
-
-fn set_single_header(headers: &mut Vec<(String, String)>, name: &str, value: String) {
-    let mut first = true;
-    headers.retain_mut(|(header_name, header_value)| {
-        if !header_name.eq_ignore_ascii_case(name) {
-            return true;
-        }
-        if first {
-            *header_value = value.clone();
-            first = false;
-            true
-        } else {
-            false
-        }
-    });
-    if first {
-        headers.push((name.to_string(), value));
+    let Ok(url) = url::Url::parse(addr) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
     }
-}
-
-/// `verify_peer` for HTTPS proxy CONNECT: a healthy proxy may answer 403 to
-/// the tunnel request; that is a proxy error in requests, not a filter
-/// response. Only the CONNECT handshake status is interpreted here.
-pub fn ssl_agree_marker() -> &'static str {
-    "<input type=\"hidden\" name=\"action\" value=\"sslagree\">"
+    url.path().to_ascii_lowercase().ends_with(".php")
+        && url.query_pairs().any(|(key, _)| key == "b" || key == "u")
 }
 
 // --- DNS and TLS -----------------------------------------------------------
@@ -803,9 +586,6 @@ async fn open_route_inner(
                 Ok((Box::new(stream), RequestForm::Origin))
             }
         }
-        ProxyKind::Glype(_) => Err(ProxyError::Glype(
-            "glype uses the rewritten-request path".into(),
-        )),
     }
 }
 
@@ -1181,111 +961,36 @@ mod tests {
             parse_proxy("https://127.0.0.1:8443").unwrap().kind,
             ProxyKind::Http { tls: true }
         ));
-        let glype = parse_proxy("http://proxy.test/glype/browse.php?u=x&b=2").unwrap();
-        match glype.kind {
-            ProxyKind::Glype(spec) => {
-                assert_eq!(spec.argname, "u");
-                assert_eq!(spec.bval, "2");
-                assert_eq!(spec.inst_loc, "glype/");
-                assert_eq!(spec.script, "browse.php");
-            }
-            other => panic!("expected glype, got {other:?}"),
-        }
+        assert!(matches!(
+            parse_proxy("glype://proxy.test:8080"),
+            Err(ProxyError::Unsupported(_))
+        ));
+        assert!(matches!(
+            parse_proxy("http://proxy.test/glype/browse.php?u=x&b=2"),
+            Err(ProxyError::Unsupported(_))
+        ));
         assert!(parse_proxy("ftp://127.0.0.1").is_err());
         assert!(parse_proxy("http://host/path").is_err());
     }
 
     #[test]
-    fn glype_mkurl_and_text_rewrite_follow_the_reference() {
-        let spec = match parse_proxy("http://proxy.test/glype/browse.php?u=x&b=2")
-            .unwrap()
-            .kind
-        {
-            ProxyKind::Glype(spec) => spec,
-            _ => unreachable!(),
-        };
-        assert_eq!(
-            spec.mkurl("https://e-hentai.org/s/a b/1-2"),
-            "http://proxy.test/glype/browse.php?u=https%3A%2F%2Fe-hentai.org%2Fs%2Fa+b%2F1-2&b=2&f=norefer"
-        );
-        let body = b"<a href=\"/glype/browse.php?u=https%3A%2F%2Fe-hentai.org%2Fg%2F1&b=2&f=norefer\">x</a>";
-        let rewritten = spec.process_text(body).unwrap();
-        assert_eq!(
-            String::from_utf8(rewritten).unwrap(),
-            "<a href=\"https://e-hentai.org/g/1\">x</a>"
-        );
-        let err = spec
-            .process_text(b"<div id=\"error\">bad proxy &amp; thing</div>")
-            .expect_err("error div");
-        assert_eq!(
-            err.to_string(),
-            "glype returns: <div id=\"error\">bad proxy &amp; thing</div>"
-        );
-        assert!(matches!(
-            spec.process_text(b"\xff"),
-            Err(ProxyError::GlypeDecode(_))
-        ));
-    }
-
-    #[test]
-    fn glype_cookie_header_is_rekeyed_for_the_target_site() {
-        let spec = match parse_proxy("http://proxy.test/browse.php?u=x&b=4")
-            .unwrap()
-            .kind
-        {
-            ProxyKind::Glype(spec) => spec,
-            _ => unreachable!(),
-        };
-        let mut state = GlypeState {
-            s: Some("session".into()),
-        };
-        let headers = spec.rewrite_headers(
-            &[
-                ("Cookie".into(), "a=1; b=2".into()),
-                ("Referer".into(), "old".into()),
-            ],
-            "https://e-hentai.org/g/1/",
-            &mut state,
-        );
-        assert_eq!(
-            headers
-                .iter()
-                .find(|(name, _)| name == "Referer")
-                .map(|(_, value)| value.as_str()),
-            Some("http://proxy.test/browse.php")
-        );
-        assert_eq!(
-            headers
-                .iter()
-                .find(|(name, _)| name == "Cookie")
-                .map(|(_, value)| value.as_str()),
-            Some("s=session;c[e-hentai.org][/][a]=1;c[e-hentai.org][/][b]=2")
-        );
-    }
-
-    #[test]
-    fn glype_reverse_set_cookie_mapping_extracts_short_names() {
-        let spec = match parse_proxy("http://proxy.test/browse.php?u=x&b=4")
-            .unwrap()
-            .kind
-        {
-            ProxyKind::Glype(spec) => spec,
-            _ => unreachable!(),
-        };
-        let _ = spec;
-        let mut state = GlypeState { s: None };
-        let mut headers = vec![(
-            "Set-Cookie".into(),
-            "c[proxy][/][s]=abc; c[site][/][foo]=bar".into(),
-        )];
-        apply_glype_response_cookies(&mut headers, &mut state);
-        assert_eq!(state.s.as_deref(), Some("abc"));
-        assert_eq!(
-            headers,
-            vec![(
-                "Set-Cookie".to_string(),
-                "c[proxy][/][s]=abc;c[site][/][foo]=bar;s=abc;foo=bar".to_string()
-            )]
-        );
+    fn glype_addresses_are_rejected_explicitly() {
+        for addr in [
+            "glype://proxy.test:8080",
+            "GLYPE://proxy.test:8080",
+            "http://proxy.test/glype/browse.php?u=https%3A%2F%2Fe-hentai.org&b=4",
+            "https://proxy.test/browse.php?b=2&u=x",
+        ] {
+            let error = parse_proxy(addr).expect_err(addr);
+            assert!(
+                matches!(error, ProxyError::Unsupported(ref kind) if kind == "glype"),
+                "{addr}: {error}"
+            );
+            assert_eq!(error.to_string(), "glype proxies are not supported");
+        }
+        let mut pool = Pool::new();
+        assert!(pool.add_proxy("glype://proxy.test:8080").is_err());
+        assert!(matches!(pool.select(), Err(ProxyError::NoProxy)));
+        assert!(pool.has_available_proxies());
     }
 }

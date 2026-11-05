@@ -466,7 +466,9 @@ impl RuntimeInner {
             .iter()
             .map(|header| (header.name.clone(), header.value.clone()))
             .collect();
-        Session::new(headers, app.proxy_pool(), policy, config)
+        let mut session = Session::new(headers, app.proxy_pool(), policy, config);
+        session.set_logger(app.logger.clone());
+        session
     }
 }
 

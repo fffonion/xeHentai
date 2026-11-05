@@ -825,15 +825,6 @@ NATIVE_CASE_MAP = {
             "proxy.socks5",
             "proxy.socks5h",
         ],
-        "tests::m3_transport::glype_rewrites_sslagree_cookie_and_text_then_streams_binary": [
-            "proxy.glype"
-        ],
-        "tests::m3_transport::glype_403_binary_streams_real_bytes_instead_of_empty_success": [
-            "proxy.glype"
-        ],
-        "tests::m3_transport::glype_error_div_is_a_pool_exception_not_a_transport_failure": [
-            "proxy.glype"
-        ],
         "tests::m3_transport::fallback_ip_forces_tls_with_original_host_and_skips_dns": [
             "proxy.fallback-ip"
         ],
@@ -1154,7 +1145,6 @@ NATIVE_COMMANDS = {
         ["cargo", "test", "--bin", "xeHentai", "proxy::"],
         ["cargo", "test", "--bin", "xeHentai", "tests::m3_transport::proxy_"],
         ["cargo", "test", "--bin", "xeHentai", "tests::m3_transport::socks"],
-        ["cargo", "test", "--bin", "xeHentai", "tests::m3_transport::glype_"],
         ["cargo", "test", "--bin", "xeHentai", "tests::m3_transport::fallback_"],
         ["cargo", "test", "--bin", "xeHentai", "tests::m3_transport::image_only_"],
     ],
@@ -1295,11 +1285,6 @@ PROXY_CASES = {
     "proxy.ban-expiry": ["steps"],
     "proxy.add-validation": ["steps"],
     "proxy.has-available": ["steps"],
-    "proxy.glype-runtime": [
-        "glype.normal",
-        "glype.sslagree-fixed",
-        "glype.post-fixed",
-    ],
 }
 
 SITE_CASES = {
@@ -2421,8 +2406,6 @@ def proxy_scenarios():
     c = "socks4a://127.0.0.1:1082"
     return {
         "clock": 100.0,
-        "glype_addr": "http://proxy.test/glype/browse.php?u=x&b=4",
-        "glype_target": "https://e-hentai.org/g/1/",
         "steps": [
             {"op": "add", "addr": a},
             {"op": "add", "addr": b},
@@ -2520,147 +2503,7 @@ def oracle_proxy(upstream, request):
         record["has_available"] = pool.has_available_proxies()
         out.append(record)
     out = {"steps": out}
-    out["glype"] = _oracle_glype(request, upstream)
     return out
-
-
-def _oracle_glype(request, upstream):
-    sys.path.insert(0, str(upstream))
-    import xeHentai.proxy as proxy_module
-    from xeHentai import util
-
-    class FakeResponse:
-        def __init__(self, body, headers=None, status=200):
-            self.status_code = status
-            self.url = request["glype_target"]
-            self._real_url = request["glype_target"]
-            self.headers = dict(headers or {"content-type": "text/html; charset=utf-8"})
-            self._content = body.encode("utf-8")
-
-        @property
-        def content(self):
-            return self._content
-
-        @property
-        def text(self):
-            return self._content.decode("utf-8")
-
-    class FakeSession:
-        def __init__(self, responses):
-            self.headers = {
-                "User-Agent": "xeHentai-test",
-                "Cookie": "a=1",
-            }
-            self.responses = list(responses)
-            self.calls = []
-
-        def request(self, *args, **kwargs):
-            from urllib.parse import urlencode
-
-            headers = {
-                key.lower(): value for key, value in kwargs.get("headers", {}).items()
-            }
-            data = kwargs.get("data")
-            if isinstance(data, (list, tuple, dict)):
-                body = urlencode(data)
-            elif data is None:
-                body = ""
-            else:
-                body = str(data)
-            self.calls.append(
-                {
-                    "method": args[0],
-                    "url": args[1],
-                    "referer": headers.get("referer"),
-                    "cookie": headers.get("cookie", ""),
-                    "body": body,
-                }
-            )
-            return self.responses.pop(0)
-
-    def run(responses, with_caller_kwargs, method="GET", data=None):
-        session = FakeSession(responses)
-        handler = proxy_module.glype_proxy(
-            request["glype_addr"], lambda addr, **kwargs: (lambda fn: fn)
-        )
-        fn = handler(session)
-        kwargs = {"stream": False, "data": data, "timeout": 3}
-        if with_caller_kwargs:
-            kwargs["allow_redirects"] = False
-        from urllib.parse import urlsplit
-
-        def norm_calls(calls):
-            out_calls = []
-            for call in calls:
-                parsed = urlsplit(call["url"])
-                path = parsed.path + (("?" + parsed.query) if parsed.query else "")
-                referer = call.get("referer")
-                if referer:
-                    referer = urlsplit(referer).path
-                out_calls.append(
-                    {
-                        "method": call["method"],
-                        "path": path,
-                        "referer": referer,
-                        "cookie": call.get("cookie", ""),
-                        "body": call.get("body", ""),
-                    }
-                )
-            return out_calls
-
-        try:
-            result = fn(method, request["glype_target"], **kwargs)
-            return {
-                "exception": None,
-                "status": result.status_code,
-                "text": result._content.decode("utf-8"),
-                "set_cookie": result.headers.get("set-cookie"),
-                "calls": norm_calls(session.calls),
-            }
-        except Exception as error:  # noqa: BLE001
-            return {
-                "exception": type(error).__name__,
-                "calls": norm_calls(session.calls),
-            }
-
-    normal_body = '<a href="/glype/browse.php?u=https%3A%2F%2Fe-hentai.org%2Fg%2F1&b=4&f=norefer">x</a>'
-    normal = run(
-        [
-            FakeResponse(
-                normal_body,
-                {
-                    "content-type": "text/html; charset=utf-8",
-                    "set-cookie": "c[proxy][/][foo]=bar",
-                },
-            )
-        ],
-        True,
-    )
-    ssl_agree = '<input type="hidden" name="action" value="sslagree">'
-    ssl_responses = [
-        lambda: FakeResponse(ssl_agree),
-        lambda: FakeResponse("ok", {"content-type": "text/html", "set-cookie": "s=abc"}),
-        lambda: FakeResponse(
-            normal_body,
-            {
-                "content-type": "text/html; charset=utf-8",
-                "set-cookie": "c[proxy][/][foo]=bar",
-            },
-        ),
-    ]
-    fixed = run([factory() for factory in ssl_responses], False)
-    caller = run([factory() for factory in ssl_responses], True)
-    post_data = [
-        ("username", "synthetic-user"),
-        ("password", "synthetic-pass"),
-    ]
-    post = run([factory() for factory in ssl_responses], False, "POST", post_data)
-    return {
-        "normal": normal,
-        "sslagree_fixed": fixed,
-        "sslagree_caller": caller,
-        "post_fixed": post,
-    }
 
 
 def compare_proxy(cases, oracle, candidate):
@@ -2703,43 +2546,9 @@ def compare_proxy(cases, oracle, candidate):
                 oracle_step["disabled"] = candidate_step["disabled"]
                 oracle_step["has_available"] = candidate_step["has_available"]
     cases["delta.proxy-expiry-cleanup-crash"] = expiry_ok
-    oracle_glype = copy.deepcopy(oracle.get("glype", {}))
-    candidate_glype = copy.deepcopy(candidate.get("glype", {}))
-    glype_normal_oracle = oracle_glype.pop("normal", None)
-    glype_normal_candidate = candidate_glype.pop("normal", None)
-    glype_fixed_oracle = oracle_glype.pop("sslagree_fixed", None)
-    glype_fixed_candidate = candidate_glype.pop("sslagree_fixed", None)
-    glype_caller_oracle = oracle_glype.pop("sslagree_caller", {})
-    glype_caller_candidate = candidate_glype.pop("sslagree_caller", {})
-    glype_post_oracle = oracle_glype.pop("post_fixed", None)
-    glype_post_candidate = candidate_glype.pop("post_fixed", None)
     diffs, flags = _compare_scenarios(
         {"steps": oracle_steps}, {"steps": candidate_steps}, "proxy"
     )
-    glype_flags = {}
-    for name, expected, actual in (
-        ("glype.normal", glype_normal_oracle, glype_normal_candidate),
-        ("glype.sslagree-fixed", glype_fixed_oracle, glype_fixed_candidate),
-        ("glype.post-fixed", glype_post_oracle, glype_post_candidate),
-    ):
-        section = compare(expected, actual, f"proxy.{name}")
-        diffs.extend(section)
-        glype_flags[name] = not section
-    flags.update(glype_flags)
-    # Reference quirk: the real glype handler passes allow_redirects twice to
-    # its own sslagree follow-up, so CPython raises TypeError after the first
-    # request. The candidate fixes that crash; both complete states are
-    # asserted and the success state must equal the no-caller-kwargs flow.
-    caller_delta_ok = (
-        glype_caller_oracle.get("exception") == "TypeError"
-        and len(glype_caller_oracle.get("calls", [])) == 1
-        and "status" not in glype_caller_oracle
-        and glype_caller_candidate.get("exception") is None
-        and glype_caller_candidate.get("status") == glype_fixed_candidate.get("status")
-        and glype_caller_candidate.get("text") == glype_fixed_candidate.get("text")
-        and glype_caller_candidate.get("calls") == glype_fixed_candidate.get("calls")
-    )
-    cases["delta.proxy-glype-allow-redirects-crash"] = caller_delta_ok
     _mark_cases(cases, PROXY_CASES, flags)
     return diffs
 
@@ -7095,21 +6904,6 @@ def self_check(suite, oracle, candidate, native_runs=None):
         cases = {}
         compare_proxy(cases, oracle, mutated)
         checks.append(("inverted-availability", not cases["proxy.has-available"]))
-        mutated = copy.deepcopy(candidate)
-        mutated["glype"]["sslagree_fixed"]["text"] = "mutated"
-        cases = {}
-        compare_proxy(cases, oracle, mutated)
-        checks.append(("glype-rewrite", not cases["proxy.glype-runtime"]))
-        mutated = copy.deepcopy(candidate)
-        mutated["glype"]["post_fixed"]["calls"][0]["method"] = "GET"
-        cases = {}
-        compare_proxy(cases, oracle, mutated)
-        checks.append(("glype-post-method", not cases["proxy.glype-runtime"]))
-        mutated = copy.deepcopy(candidate)
-        mutated["glype"]["post_fixed"]["calls"][0]["body"] = ""
-        cases = {}
-        compare_proxy(cases, oracle, mutated)
-        checks.append(("glype-post-body", not cases["proxy.glype-runtime"]))
     elif suite == "site":
         mutated = copy.deepcopy(candidate)
         mutated["login.ok"]["callbacks"] = []

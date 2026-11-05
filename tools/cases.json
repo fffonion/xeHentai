@@ -2498,20 +2498,6 @@
       "delta": null
     },
     {
-      "id": "proxy.glype",
-      "source": "proxy.py glype_proxy",
-      "target": "src/proxy.rs + rss/filters/match.rss",
-      "suite": "proxy",
-      "inputs": [
-        "native m3_transport"
-      ],
-      "assertions": [
-        "Glype URL encoding/referer/cookies/sslagree/text rewrite/error div/403 binary stream/POST method+form body."
-      ],
-      "status": "implemented",
-      "delta": null
-    },
-    {
       "id": "update.channel",
       "source": "updater/github.py:17-35",
       "target": "src/updater/ + rss/updater/",
@@ -2863,7 +2849,7 @@
         "scripts"
       ],
       "assertions": [
-        "socks4/4a/5/5h, http/https and glype address classification plus ValueError."
+        "socks4/4a/5/5h and http/https address classification plus ValueError; glype is rejected explicitly."
       ],
       "status": "implemented",
       "delta": null
@@ -2993,34 +2979,6 @@
       ],
       "status": "implemented",
       "delta": null
-    },
-    {
-      "id": "proxy.glype-runtime",
-      "source": "proxy.py glype_proxy",
-      "target": "src/proxy.rs + src/worker.rs",
-      "suite": "proxy",
-      "inputs": [
-        "glype scenarios"
-      ],
-      "assertions": [
-        "URL encoding, Referer, POST method/form bytes, c[site] cookies, sslagree GET/replayed POST and text rewrite."
-      ],
-      "status": "implemented",
-      "delta": null
-    },
-    {
-      "id": "delta.proxy-glype-allow-redirects-crash",
-      "source": "proxy.py glype_proxy",
-      "target": "src/proxy.rs + src/worker.rs",
-      "suite": "proxy",
-      "inputs": [
-        "glype scenarios"
-      ],
-      "assertions": [
-        "Both complete caller-shaped states asserted separately."
-      ],
-      "status": "delta",
-      "delta": "Reference glype sslagree follow-up passes allow_redirects twice and raises TypeError after the first request; candidate omits the duplicate and completes with the same cookie/text state as the no-kwargs flow."
     },
     {
       "id": "m4.speed.checker",

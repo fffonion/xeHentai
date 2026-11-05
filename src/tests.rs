@@ -1259,204 +1259,7 @@ fn compat_proxy(inputs: &serde_json::Value) -> serde_json::Value {
         );
         out.push(serde_json::Value::Object(record));
     }
-    let glype = compat_glype(inputs);
-    serde_json::json!({"steps": out, "glype": glype})
-}
-
-fn compat_glype(_inputs: &serde_json::Value) -> serde_json::Value {
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-
-    use crate::proxy::{MapResolver, Pool, TlsClient};
-    use crate::util::ProxyPolicy;
-    use crate::worker::{FallbackMap, Session, SessionConfig, TestClock};
-
-    async fn run_scenario(
-        responses: Vec<Vec<u8>>,
-        method: &str,
-        data: Option<Vec<(String, String)>>,
-    ) -> serde_json::Value {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let recorded = Arc::new(Mutex::new(Vec::new()));
-        let seen = Arc::clone(&recorded);
-        let server = tokio::spawn(async move {
-            for response in responses {
-                let Ok((mut socket, _)) = listener.accept().await else {
-                    return;
-                };
-                let mut request = Vec::new();
-                let mut byte = [0u8; 1];
-                loop {
-                    let read = socket.read(&mut byte).await.unwrap();
-                    if read == 0 {
-                        break;
-                    }
-                    request.push(byte[0]);
-                    if request.ends_with(b"\r\n\r\n") {
-                        break;
-                    }
-                }
-                let head = String::from_utf8_lossy(&request).into_owned();
-                let length = head
-                    .lines()
-                    .find_map(|line| {
-                        let lower = line.to_ascii_lowercase();
-                        lower
-                            .strip_prefix("content-length:")
-                            .and_then(|value| value.trim().parse::<usize>().ok())
-                    })
-                    .unwrap_or(0);
-                let mut body = vec![0u8; length];
-                if length > 0 {
-                    socket.read_exact(&mut body).await.unwrap();
-                }
-                seen.lock()
-                    .unwrap()
-                    .push((head, String::from_utf8_lossy(&body).into_owned()));
-                socket.write_all(&response).await.unwrap();
-                socket.shutdown().await.unwrap();
-            }
-        });
-        let addr = format!("http://127.0.0.1:{port}/glype/browse.php?u=x&b=4");
-        let mut pool = Pool::new();
-        pool.add_proxy(&addr).unwrap();
-        let mut client = Session::new(
-            vec![
-                ("User-Agent".into(), Some("xeHentai-test".into())),
-                ("Cookie".into(), Some("a=1".into())),
-            ],
-            Some(Arc::new(Mutex::new(pool))),
-            ProxyPolicy::All,
-            SessionConfig {
-                retry: 1,
-                timeout: Duration::from_secs(3),
-                tls: TlsClient::production(),
-                resolver: Arc::new(MapResolver::default()),
-                fallback: FallbackMap::empty(),
-                clock: Arc::new(TestClock::new(0.0)),
-                ..SessionConfig::default()
-            },
-        );
-        let outcome = client
-            .request(method, "https://e-hentai.org/g/1/", data, false)
-            .await;
-        let observation = match outcome {
-            Ok(outcome) => {
-                let mut calls = Vec::new();
-                for (head, body) in recorded.lock().unwrap().iter() {
-                    let line = head.lines().next().unwrap_or("");
-                    let mut parts = line.split_whitespace();
-                    let request_method = parts.next().unwrap_or("").to_string();
-                    let path = parts.next().unwrap_or("").to_string();
-                    let lower = head.to_ascii_lowercase();
-                    let referer = lower
-                        .lines()
-                        .find_map(|header| header.strip_prefix("referer: "))
-                        .map(|value| {
-                            url::Url::parse(value.trim())
-                                .map(|url| match url.query() {
-                                    Some(query) => format!("{}?{query}", url.path()),
-                                    None => url.path().to_string(),
-                                })
-                                .unwrap_or_else(|_| value.trim().to_string())
-                        });
-                    let cookie = lower
-                        .lines()
-                        .find_map(|header| header.strip_prefix("cookie: "))
-                        .unwrap_or("")
-                        .to_string();
-                    calls.push(serde_json::json!({
-                        "method": request_method,
-                        "path": path,
-                        "referer": referer,
-                        "cookie": cookie,
-                        "body": body,
-                    }));
-                }
-                serde_json::json!({
-                    "exception": serde_json::Value::Null,
-                    "status": outcome.response.status,
-                    "text": outcome.response.text,
-                    "set_cookie": outcome.response.headers.joined("set-cookie"),
-                    "calls": calls,
-                })
-            }
-            Err(error) => serde_json::json!({
-                "exception": "HttpError",
-                "calls": [],
-                "error": error.to_string(),
-            }),
-        };
-        server.await.unwrap();
-        observation
-    }
-
-    let normal_body =
-        b"<a href=\"/glype/browse.php?u=https%3A%2F%2Fe-hentai.org%2Fg%2F1&b=4&f=norefer\">x</a>";
-    let mut normal_response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nSet-Cookie: c[proxy][/][foo]=bar\r\nContent-Length: {}\r\n\r\n",
-        normal_body.len()
-    )
-    .into_bytes();
-    normal_response.extend_from_slice(normal_body);
-    let ssl_agree = b"<input type=\"hidden\" name=\"action\" value=\"sslagree\">";
-    let mut ssl_page = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n",
-        ssl_agree.len()
-    )
-    .into_bytes();
-    ssl_page.extend_from_slice(ssl_agree);
-    let process_response = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nSet-Cookie: s=abc\r\nContent-Length: 2\r\n\r\nok".to_vec();
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(2)
-        .build()
-        .unwrap();
-    runtime.block_on(async move {
-        let normal = run_scenario(vec![normal_response.clone()], "GET", None).await;
-        let fixed = run_scenario(
-            vec![
-                ssl_page.clone(),
-                process_response.clone(),
-                normal_response.clone(),
-            ],
-            "GET",
-            None,
-        )
-        .await;
-        let caller = run_scenario(
-            vec![
-                ssl_page.clone(),
-                process_response.clone(),
-                normal_response.clone(),
-            ],
-            "GET",
-            None,
-        )
-        .await;
-        let post = run_scenario(
-            vec![
-                ssl_page.clone(),
-                process_response.clone(),
-                normal_response.clone(),
-            ],
-            "POST",
-            Some(vec![
-                ("username".to_string(), "synthetic-user".to_string()),
-                ("password".to_string(), "synthetic-pass".to_string()),
-            ]),
-        )
-        .await;
-        serde_json::json!({
-            "normal": normal,
-            "sslagree_fixed": fixed,
-            "sslagree_caller": caller,
-            "post_fixed": post,
-        })
-    })
+    serde_json::json!({"steps": out})
 }
 
 fn compat_transport(inputs: &serde_json::Value) -> serde_json::Value {
@@ -5281,25 +5084,6 @@ mod m3_transport {
         request
     }
 
-    async fn read_request_with_body<S: AsyncRead + Unpin>(stream: &mut S) -> (String, Vec<u8>) {
-        let head = read_headers(stream).await;
-        let text = String::from_utf8_lossy(&head).into_owned();
-        let length = text
-            .lines()
-            .find_map(|line| {
-                let lower = line.to_ascii_lowercase();
-                lower
-                    .strip_prefix("content-length:")
-                    .and_then(|value| value.trim().parse::<usize>().ok())
-            })
-            .unwrap_or(0);
-        let mut body = vec![0u8; length];
-        if length > 0 {
-            stream.read_exact(&mut body).await.unwrap();
-        }
-        (text, body)
-    }
-
     async fn respond_http<S: AsyncWrite + Unpin>(stream: &mut S, body: &str, status: &str) {
         let response = format!(
             "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{body}",
@@ -7045,333 +6829,6 @@ mod m3_transport {
     }
 
     #[tokio::test]
-    async fn glype_rewrites_sslagree_cookie_and_text_then_streams_binary() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let record = Arc::clone(&requests);
-        let server = tokio::spawn(async move {
-            for step in 0..3 {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let request = read_headers(&mut socket).await;
-                let text = String::from_utf8_lossy(&request).into_owned();
-                record.lock().unwrap().push(text.clone());
-                if step == 0 {
-                    assert!(text.contains(
-                        "browse.php?u=https%3A%2F%2Fe-hentai.org%2Fg%2F1%2F&b=4&f=norefer"
-                    ));
-                    let body = "<input type=\"hidden\" name=\"action\" value=\"sslagree\">";
-                    respond_http(&mut socket, body, "200 OK").await;
-                } else if step == 1 {
-                    assert!(
-                        text.starts_with(
-                            "GET /glype/includes/process.php?action=sslagree HTTP/1.1"
-                        )
-                    );
-                    let response = "HTTP/1.1 200 OK\r\nSet-Cookie: s=abc\r\nContent-Type: text/html\r\nContent-Length: 2\r\n\r\nok";
-                    socket.write_all(response.as_bytes()).await.unwrap();
-                    socket.shutdown().await.unwrap();
-                } else {
-                    assert!(
-                        text.to_ascii_lowercase().contains("cookie: s=abc"),
-                        "{text}"
-                    );
-                    let body = "<a href=\"/glype/browse.php?u=https%3A%2F%2Fe-hentai.org%2Fg%2F1&b=4&f=norefer\">done</a>";
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nSet-Cookie: c[proxy][/][foo]=bar\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{body}",
-                        body.len()
-                    );
-                    socket.write_all(response.as_bytes()).await.unwrap();
-                    socket.shutdown().await.unwrap();
-                }
-            }
-        });
-        let mut pool = Pool::new();
-        let addr = format!("http://127.0.0.1:{port}/glype/browse.php?u=x&b=4");
-        pool.add_proxy(&addr).unwrap();
-        let pool = Arc::new(Mutex::new(pool));
-        let mut session = session(
-            Some(pool.clone()),
-            Arc::new(MapResolver::default()),
-            FallbackMap::empty(),
-            TlsClient::production(),
-            ProxyPolicy::All,
-        );
-        let outcome = session
-            .request("GET", "https://e-hentai.org/g/1/", None, false)
-            .await
-            .expect("glype request");
-        assert!(
-            outcome
-                .response
-                .text
-                .contains("<a href=\"https://e-hentai.org/g/1\">done</a>"),
-            "{}",
-            outcome.response.text
-        );
-        let set_cookie = outcome.response.headers.joined("set-cookie").unwrap();
-        assert!(set_cookie.contains("foo=bar"), "{set_cookie}");
-        {
-            let pool = pool.lock().unwrap();
-            let entry = &pool.proxies[&addr];
-            let state = entry.spec.glype.as_ref().unwrap().lock().unwrap();
-            assert_eq!(state.s.as_deref(), Some("abc"));
-        }
-        server.await.unwrap();
-        assert_eq!(requests.lock().unwrap().len(), 3);
-    }
-
-    #[tokio::test]
-    async fn glype_forwards_post_method_form_body_and_content_headers() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let recorded = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
-        let record = Arc::clone(&recorded);
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let (head, body) = read_request_with_body(&mut socket).await;
-            record.lock().unwrap().push((head, body));
-            let payload = b"png-bytes";
-            let mut response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
-                payload.len()
-            )
-            .into_bytes();
-            response.extend_from_slice(payload);
-            socket.write_all(&response).await.unwrap();
-            socket.shutdown().await.unwrap();
-        });
-        let mut pool = Pool::new();
-        let addr = format!("http://127.0.0.1:{port}/glype/browse.php?u=x&b=4");
-        pool.add_proxy(&addr).unwrap();
-        let mut session = Session::new(
-            vec![
-                ("User-Agent".into(), Some("xeHentai-test".into())),
-                ("Cookie".into(), Some("a=1".into())),
-            ],
-            Some(Arc::new(Mutex::new(pool))),
-            ProxyPolicy::All,
-            SessionConfig {
-                retry: 1,
-                timeout: Duration::from_secs(3),
-                tls: TlsClient::production(),
-                resolver: Arc::new(MapResolver::default()),
-                fallback: FallbackMap::empty(),
-                clock: Arc::new(TestClock::new(0.0)),
-                ..SessionConfig::default()
-            },
-        );
-        let data = vec![
-            ("username".to_string(), "synthetic-user".to_string()),
-            ("password".to_string(), "synthetic-pass".to_string()),
-            ("submit".to_string(), "login".to_string()),
-        ];
-        let outcome = session
-            .request("POST", "https://e-hentai.org/g/1/", Some(data), false)
-            .await
-            .expect("glype post request");
-        assert_eq!(outcome.response.status, 200);
-        assert_eq!(outcome.response.body, b"png-bytes");
-        server.await.unwrap();
-        let (head, body) = recorded.lock().unwrap()[0].clone();
-        let mut lines = head.lines();
-        let request_line = lines.next().unwrap_or("");
-        assert!(
-            request_line.starts_with(
-                "POST /glype/browse.php?u=https%3A%2F%2Fe-hentai.org%2Fg%2F1%2F&b=4&f=norefer HTTP/1.1"
-            ),
-            "{request_line}"
-        );
-        let lower = head.to_ascii_lowercase();
-        assert!(
-            lower.contains("content-type: application/x-www-form-urlencoded"),
-            "{head}"
-        );
-        assert!(
-            lower.contains(&format!("content-length: {}", body.len())),
-            "{head}"
-        );
-        assert!(
-            lower.contains("referer: http://127.0.0.1:"),
-            "glype referer must point at the script: {head}"
-        );
-        assert!(
-            lower.contains("cookie: c[e-hentai.org][/][a]=1"),
-            "glype cookie must be re-keyed: {head}"
-        );
-        assert_eq!(
-            body,
-            b"username=synthetic-user&password=synthetic-pass&submit=login"
-        );
-    }
-
-    #[tokio::test]
-    async fn glype_sslagree_keeps_post_body_and_replays_it_on_the_same_session() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let recorded = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
-        let record = Arc::clone(&recorded);
-        let server = tokio::spawn(async move {
-            for step in 0..3 {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let (head, body) = read_request_with_body(&mut socket).await;
-                record.lock().unwrap().push((head.clone(), body.clone()));
-                let request_line = head.lines().next().unwrap_or("").to_string();
-                match step {
-                    0 => {
-                        assert!(
-                            request_line.starts_with("POST /glype/browse.php?"),
-                            "{head}"
-                        );
-                        assert_eq!(
-                            body, b"username=synthetic-user&password=synthetic-pass",
-                            "the primary glype hop must keep the caller body"
-                        );
-                        let marker = b"<input type=\"hidden\" name=\"action\" value=\"sslagree\">";
-                        let mut response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n",
-                            marker.len()
-                        )
-                        .into_bytes();
-                        response.extend_from_slice(marker);
-                        socket.write_all(&response).await.unwrap();
-                        socket.shutdown().await.unwrap();
-                    }
-                    1 => {
-                        assert!(
-                            request_line.starts_with(
-                                "GET /glype/includes/process.php?action=sslagree HTTP/1.1"
-                            ),
-                            "{head}"
-                        );
-                        assert_eq!(
-                            body, b"username=synthetic-user&password=synthetic-pass",
-                            "the reference forwards the caller kwargs to the agreement GET"
-                        );
-                        let response = "HTTP/1.1 200 OK\r\nSet-Cookie: s=abc\r\nContent-Type: text/html\r\nContent-Length: 2\r\n\r\nok";
-                        socket.write_all(response.as_bytes()).await.unwrap();
-                        socket.shutdown().await.unwrap();
-                    }
-                    _ => {
-                        assert!(
-                            request_line.starts_with("POST /glype/browse.php?"),
-                            "{head}"
-                        );
-                        assert_eq!(
-                            body, b"username=synthetic-user&password=synthetic-pass",
-                            "the replayed hop must stay POST with its body"
-                        );
-                        assert!(
-                            head.to_ascii_lowercase().contains("cookie: s=abc"),
-                            "the agreement cookie must be replayed: {head}"
-                        );
-                        let payload = b"done";
-                        let mut response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
-                            payload.len()
-                        )
-                        .into_bytes();
-                        response.extend_from_slice(payload);
-                        socket.write_all(&response).await.unwrap();
-                        socket.shutdown().await.unwrap();
-                    }
-                }
-            }
-        });
-        let mut pool = Pool::new();
-        let addr = format!("http://127.0.0.1:{port}/glype/browse.php?u=x&b=4");
-        pool.add_proxy(&addr).unwrap();
-        let mut session = session(
-            Some(Arc::new(Mutex::new(pool))),
-            Arc::new(MapResolver::default()),
-            FallbackMap::empty(),
-            TlsClient::production(),
-            ProxyPolicy::All,
-        );
-        let data = vec![
-            ("username".to_string(), "synthetic-user".to_string()),
-            ("password".to_string(), "synthetic-pass".to_string()),
-        ];
-        let outcome = session
-            .request("POST", "https://e-hentai.org/g/1/", Some(data), false)
-            .await
-            .expect("glype sslagree post");
-        assert_eq!(outcome.response.body, b"done");
-        assert_eq!(outcome.response.status, 200);
-        server.await.unwrap();
-        assert_eq!(recorded.lock().unwrap().len(), 3);
-    }
-
-    #[tokio::test]
-    async fn app_login_post_through_glype_keeps_form_and_session_effects() {
-        use crate::filters::Filters;
-        use crate::worker::SessionConfig;
-        use std::path::Path;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let recorded = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
-        let record = Arc::clone(&recorded);
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let (head, body) = read_request_with_body(&mut socket).await;
-            record.lock().unwrap().push((head, body));
-            let response = "HTTP/1.1 200 OK\r\nSet-Cookie: ipb_member_id=42; path=/\r\nSet-Cookie: ipb_pass_hash=deadbeef; path=/\r\nSet-Cookie: c[proxy][/][keep]=1\r\nContent-Type: text/html\r\nContent-Length: 0\r\n\r\n";
-            socket.write_all(response.as_bytes()).await.unwrap();
-            socket.shutdown().await.unwrap();
-        });
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join("downloads")).unwrap();
-        let mut app = super::test_app(root.path(), &[]);
-        app.set_session_config(SessionConfig {
-            retry: 1,
-            timeout: Duration::from_secs(5),
-            resolver: Arc::new(MapResolver::default()),
-            fallback: FallbackMap::empty(),
-            clock: Arc::new(TestClock::new(0.0)),
-            ..SessionConfig::default()
-        });
-        app.update_config(
-            serde_json::json!({"proxy": [format!("http://127.0.0.1:{port}/glype/browse.php?u=x&b=4")]})
-                .as_object()
-                .unwrap()
-                .clone(),
-        )
-        .unwrap();
-        let mut filters = Filters::load(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
-        let outcome = app
-            .login_exhentai(&mut filters, "synthetic-user", "synthetic-pass")
-            .await
-            .unwrap();
-        assert!(outcome.cookies.is_some());
-        assert!(app.has_login());
-        assert_eq!(app.cookie("ipb_member_id"), Some("42"));
-        assert_eq!(app.cookie("ipb_pass_hash"), Some("deadbeef"));
-        let session_text = std::fs::read_to_string(root.path().join("h.json")).unwrap();
-        assert!(session_text.contains("ipb_member_id"), "{session_text}");
-        assert!(session_text.contains("ipb_pass_hash"), "{session_text}");
-        server.await.unwrap();
-        let (head, body) = recorded.lock().unwrap()[0].clone();
-        let request_line = head.lines().next().unwrap_or("");
-        assert!(
-            request_line.starts_with(
-                "POST /glype/browse.php?u=https%3A%2F%2Fforums.e-hentai.org%2Findex.php%3Fact%3DLogin%26CODE%3D01&b=4&f=norefer HTTP/1.1"
-            ),
-            "login must reach glype as POST: {request_line}"
-        );
-        let lower = head.to_ascii_lowercase();
-        assert!(
-            lower.contains("content-type: application/x-www-form-urlencoded"),
-            "{head}"
-        );
-        assert!(lower.contains("referer: http://127.0.0.1:"), "{head}");
-        let text = String::from_utf8_lossy(&body);
-        assert!(text.contains("UserName=synthetic-user"), "{text}");
-        assert!(text.contains("PassWord=synthetic-pass"), "{text}");
-        assert!(text.contains("returntype=8"), "{text}");
-    }
-
-    #[tokio::test]
     async fn login_filter_updates_app_cookies_header_and_session_file() {
         use crate::filters::Filters;
         use crate::worker::SessionConfig;
@@ -7676,52 +7133,6 @@ mod m3_transport {
     }
 
     #[tokio::test]
-    async fn glype_403_binary_streams_real_bytes_instead_of_empty_success() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let body = vec![0x5au8; 2 * 1024 * 1024];
-        let expected = body.clone();
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            read_headers(&mut socket).await;
-            let mut response = format!(
-                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
-                body.len()
-            )
-            .into_bytes();
-            response.extend_from_slice(&body);
-            socket.write_all(&response).await.unwrap();
-            socket.shutdown().await.unwrap();
-        });
-        let mut pool = Pool::new();
-        let addr = format!("http://127.0.0.1:{port}/browse.php?u=x&b=4");
-        pool.add_proxy(&addr).unwrap();
-        let mut session = session(
-            Some(Arc::new(Mutex::new(pool))),
-            Arc::new(MapResolver::default()),
-            FallbackMap::empty(),
-            TlsClient::production(),
-            ProxyPolicy::All,
-        );
-        let outcome = session
-            .request("GET", "https://img.test/big.jpg", None, true)
-            .await
-            .expect("glype binary");
-        assert_eq!(outcome.response.status, 403);
-        assert_eq!(outcome.response.content_length, expected.len() as i64);
-        assert!(outcome.response.body.is_empty());
-        let mut stream = outcome.response.stream.expect("stream");
-        let mut read = Vec::new();
-        while let Some(chunk) = stream.next_chunk().await.expect("chunk") {
-            read.extend_from_slice(&chunk);
-        }
-        assert_eq!(read.len(), expected.len());
-        assert_eq!(read, expected);
-        stream.close().await;
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
     async fn image_only_policy_proxies_non_webpage_urls() {
         let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_port = proxy_listener.local_addr().unwrap().port();
@@ -7755,44 +7166,93 @@ mod m3_transport {
     }
 
     #[tokio::test]
-    async fn glype_error_div_is_a_pool_exception_not_a_transport_failure() {
+    async fn verbose_request_logging_obeys_the_live_verbosity() {
+        let root = tempfile::tempdir().unwrap();
+        let output = super::CapturedOutput::default();
+        let logger = crate::util::logger::Logger::with_output(Box::new(output.clone()), false);
+        let mut config = crate::config::Config::default();
+        config.dir = root.path().join("downloads").to_string_lossy().into_owned();
+        let mut app = crate::core::App::with_guid_source(
+            config,
+            logger,
+            root.path(),
+            root.path(),
+            Box::new(crate::core::FixedGuids::new(Vec::<String>::new())),
+        )
+        .unwrap();
+        app.set_session_config(SessionConfig {
+            retry: 1,
+            timeout: Duration::from_secs(3),
+            tls: TlsClient::production(),
+            resolver: Arc::new(MapResolver::default()),
+            fallback: FallbackMap::empty(),
+            clock: Arc::new(TestClock::new(0.0)),
+            ..SessionConfig::default()
+        });
+        // The CLI `-v` patch raises log_verbose to 3, which enables VERB.
+        app.update_config(
+            serde_json::json!({"log_verbose": 3})
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let head = read_headers(&mut socket).await;
+            respond_http(&mut socket, "ok", "200 OK").await;
+            head
+        });
+        let outcome = app
+            .http_session(ProxyPolicy::All)
+            .request(
+                "GET",
+                &format!("http://127.0.0.1:{port}/page?token=top-secret&page=2"),
+                None,
+                false,
+            )
+            .await
+            .expect("request");
+        assert_eq!(outcome.response.status, 200);
+        server.await.unwrap();
+        let log = output.text();
+        assert!(log.contains("VERB - ["), "{log}");
+        assert!(log.contains("http request start: method=GET"), "{log}");
+        assert!(log.contains("http request done:"), "{log}");
+        assert!(log.contains("status=200"), "{log}");
+        assert!(log.contains("route=direct"), "{log}");
+        assert!(log.contains("token=REDACTED"), "{log}");
+        assert!(!log.contains("top-secret"), "{log}");
+
+        // The default log_verbose is 2: requests must stay silent at VERB.
+        app.update_config(
+            serde_json::json!({"log_verbose": 2})
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let before = output.text().len();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             read_headers(&mut socket).await;
-            respond_http(
-                &mut socket,
-                "<div id=\"error\">proxy says no</div>",
-                "200 OK",
-            )
-            .await;
+            respond_http(&mut socket, "ok", "200 OK").await;
         });
-        let mut pool = Pool::new();
-        let addr = format!("http://127.0.0.1:{port}/browse.php?u=x&b=4");
-        pool.add_proxy(&addr).unwrap();
-        let pool = Arc::new(Mutex::new(pool));
-        let mut session = session(
-            Some(pool.clone()),
-            Arc::new(MapResolver::default()),
-            FallbackMap::empty(),
-            TlsClient::production(),
-            ProxyPolicy::All,
-        );
-        let error = match session
-            .request("GET", "https://e-hentai.org/g/1/", None, false)
+        app.http_session(ProxyPolicy::All)
+            .request("GET", &format!("http://127.0.0.1:{port}/page"), None, false)
             .await
-        {
-            Ok(_) => panic!("expected glype error"),
-            Err(error) => error,
-        };
-        assert!(matches!(error, HttpError::Glype(_)), "{error}");
-        assert_eq!(
-            pool.lock().unwrap().counts(&addr),
-            Some((0, 0)),
-            "PoolException is not counted as a proxy failure"
-        );
+            .expect("request");
         server.await.unwrap();
+        let appended = output.text()[before..].to_string();
+        assert!(
+            !appended.contains("VERB - ["),
+            "default verbosity must not emit request VERB lines: {appended}"
+        );
     }
 }
 

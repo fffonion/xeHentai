@@ -87,7 +87,7 @@ XEH_OPT_k: password
 XEH_OPT_l: 'define log path (current: %{0})'
 XEH_OPT_low_speed: 'retry download if speed is lower than specified value (current: %{0} KB/s)'
 XEH_OPT_o: 'download original images, needs to login (current: %{0})'
-XEH_OPT_p: 'set download proxies, can be used multiple times, currenlty supported: socks5/4a, http(s), glype. Proxies are only used on webpages by default (current: %{0})'
+XEH_OPT_p: 'set download proxies, can be used multiple times, currenlty supported: socks5/4a, http(s). Proxies are only used on webpages by default (current: %{0})'
 XEH_OPT_proxy_image: 'use proxies on images and webpages (current: %{0})'
 XEH_OPT_proxy_image_only: 'only use proxies on images, not webpages (current: %{0})'
 XEH_OPT_r: 'rename gallery image to original name, use sequence name if turned off  (current: %{0})'

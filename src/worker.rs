@@ -30,9 +30,10 @@ use tokio::task::JoinHandle;
 
 use crate::r#const as consts;
 use crate::proxy::{
-    self, BoxStream, GlypeSpec, GlypeState, MapResolver, Pool, ProxyError, ProxyKind, ProxySpec,
-    RequestForm, Resolver, SystemResolver, TlsClient,
+    self, BoxStream, MapResolver, Pool, ProxyError, ProxyKind, ProxySpec, RequestForm, Resolver,
+    SystemResolver, TlsClient,
 };
+use crate::util::logger::{Logger, safe_url};
 use crate::util::{ProxyPolicy, parse_human_time};
 
 pub const CONTROL_BODY_LIMIT: usize = 8 * 1024 * 1024;
@@ -645,7 +646,6 @@ pub enum HttpError {
     BodyTooLarge { limit: usize },
     InvalidContentLength(String),
     Pool(ProxyError),
-    Glype(String),
 }
 
 impl fmt::Display for HttpError {
@@ -664,7 +664,6 @@ impl fmt::Display for HttpError {
                 write!(f, "invalid literal for int() with base 10: '{value}'")
             }
             Self::Pool(error) => write!(f, "{error}"),
-            Self::Glype(message) => write!(f, "{message}"),
         }
     }
 }
@@ -692,6 +691,24 @@ impl HttpError {
 
     pub fn is_bad_status_line(&self) -> bool {
         matches!(self, Self::Connect(message) if message.contains("BadStatusLine"))
+    }
+
+    /// Stable, low-cardinality class for a verbose request line. The raw
+    /// message is deliberately not part of it: it can repeat a URL, a header
+    /// name or a peer reply and the log line must stay secret-free.
+    pub fn class(&self) -> &'static str {
+        match self {
+            Self::Url(_) => "url",
+            Self::Connect(_) => "connect",
+            Self::Dns(_) => "dns",
+            Self::Tls(_) => "tls",
+            Self::Protocol(_) => "protocol",
+            Self::Header(_) => "header",
+            Self::BodyTooLarge { .. } => "body_limit",
+            Self::InvalidContentLength(_) => "content_length",
+            Self::Pool(ProxyError::NoProxy) => "proxy_unavailable",
+            Self::Pool(_) => "proxy",
+        }
     }
 }
 
@@ -877,6 +894,9 @@ pub struct Session {
     pub proxy: Option<Arc<Mutex<Pool>>>,
     pub proxy_policy: ProxyPolicy,
     pub config: SessionConfig,
+    /// Shared with the App logger when this session comes from an App; test
+    /// sessions and the updater's private transport leave it unset.
+    logger: Option<Logger>,
 }
 
 impl Session {
@@ -892,6 +912,20 @@ impl Session {
             proxy,
             proxy_policy,
             config,
+            logger: None,
+        }
+    }
+
+    /// Attach the App's shared logger. The clone shares level, file and
+    /// output, so `-v` decisions stay in one place.
+    pub fn set_logger(&mut self, logger: Logger) {
+        self.logger = Some(logger);
+    }
+
+    fn log_verbose(&self, message: &str) {
+        if let Some(logger) = &self.logger {
+            let mut logger = logger.clone();
+            let _ = logger.verbose(message);
         }
     }
 
@@ -1139,20 +1173,6 @@ impl Session {
             .ok_or_else(|| HttpError::Url("missing port".into()))?;
         let target_tls = scheme == "https";
 
-        if let Some(ProxySpec {
-            kind: ProxyKind::Glype(spec),
-            glype,
-            ..
-        }) = selected
-        {
-            let state = glype
-                .clone()
-                .ok_or_else(|| HttpError::Glype("glype state missing".into()))?;
-            return self
-                .fetch_glype_hop(&url, spec, Arc::clone(&state), method, data, stream)
-                .await;
-        }
-
         let fallback = selected
             .is_none()
             .then(|| self.config.fallback.choose(&host))
@@ -1199,227 +1219,89 @@ impl Session {
             path
         };
 
-        let (io, form) = if let Some(ip) = fallback {
-            let address: IpAddr = ip
-                .parse()
-                .map_err(|error| HttpError::Dns(format!("{ip}: {error}")))?;
-            let socket = SocketAddr::new(address, fallback_port);
-            // DNS is skipped for a pinned fallback IP, but TCP + TLS still
-            // share the caller's route-establishment deadline.
-            match tokio::time::timeout(connect_timeout, async {
-                let stream = connect_socket(socket, connect_timeout).await?;
-                let tls = self
-                    .config
-                    .tls
-                    .connect(&host, stream)
-                    .await
-                    .map_err(|error| HttpError::Tls(error.to_string()))?;
-                Ok::<BoxStream, HttpError>(Box::new(tls))
-            })
-            .await
-            {
-                Ok(result) => (result?, RequestForm::Origin),
-                Err(_) => {
-                    return Err(HttpError::Connect("route establishment timed out".into()));
-                }
-            }
-        } else if let Some(spec) = selected {
-            let absolute = proxy::absolute_url(&scheme, &authority, port, &path);
-            proxy::open_route(
-                Some(spec),
-                &absolute,
-                &host,
-                port,
-                target_tls,
-                self.config.resolver.as_ref(),
-                &self.config.tls,
-                connect_timeout,
-            )
-            .await?
+        let route = if fallback.is_some() {
+            "fallback-ip".to_string()
         } else {
-            proxy::open_route(
-                None,
-                "",
-                &host,
-                port,
-                target_tls,
-                self.config.resolver.as_ref(),
-                &self.config.tls,
-                connect_timeout,
-            )
-            .await?
+            route_label(selected)
         };
-        let absolute = proxy::absolute_url(&scheme, &authority, port, &path);
-        let exchange = self
-            .exchange(io, form, method, &path, &absolute, &headers, body, stream)
-            .await?;
-        Ok(FetchedResponse {
-            status: exchange.status,
-            url: url.to_string(),
-            real_url: url.to_string(),
-            headers: exchange.headers,
-            content_length: 0,
-            body: exchange.body,
-            text: exchange.text,
-            stream: exchange.stream,
-            proxy: None,
-        })
-    }
-
-    async fn fetch_glype_hop(
-        &mut self,
-        url: &url::Url,
-        spec: &GlypeSpec,
-        state: Arc<Mutex<GlypeState>>,
-        method: &str,
-        data: Option<&[(String, String)]>,
-        stream: bool,
-    ) -> Result<FetchedResponse, HttpError> {
-        let server =
-            url::Url::parse(&spec.server).map_err(|error| HttpError::Url(error.to_string()))?;
-        let host = server
-            .host_str()
-            .ok_or_else(|| HttpError::Url("glype host".into()))?
-            .to_string();
-        let port = server.port_or_known_default().unwrap_or(80);
-        let proxy_tls = server.scheme() == "https";
-
-        let mut headers = {
-            let mut guard = state.lock().unwrap();
-            spec.rewrite_headers(&self.business_headers(), url.as_str(), &mut guard)
-        };
-        // `requests` prepares the caller `data=` as a form body for every hop
-        // the glype handler forwards, including the sslagree follow-up. The
-        // reference rewrites only args[1], so the method and body survive.
-        let body = match data {
-            Some(pairs) => {
-                let body = url::form_urlencoded::Serializer::<String>::new(String::new())
-                    .extend_pairs(pairs)
-                    .finish()
-                    .into_bytes();
-                if !headers
-                    .iter()
-                    .any(|(name, _)| name.eq_ignore_ascii_case("Content-Type"))
+        let safe = safe_url(url_text);
+        let started = std::time::Instant::now();
+        self.log_verbose(&format!(
+            "http request start: method={method} url={safe} route={route}"
+        ));
+        let outcome: Result<Exchange, HttpError> = async {
+            let (io, form) = if let Some(ip) = fallback {
+                let address: IpAddr = ip
+                    .parse()
+                    .map_err(|error| HttpError::Dns(format!("{ip}: {error}")))?;
+                let socket = SocketAddr::new(address, fallback_port);
+                // DNS is skipped for a pinned fallback IP, but TCP + TLS still
+                // share the caller's route-establishment deadline.
+                match tokio::time::timeout(connect_timeout, async {
+                    let stream = connect_socket(socket, connect_timeout).await?;
+                    let tls = self
+                        .config
+                        .tls
+                        .connect(&host, stream)
+                        .await
+                        .map_err(|error| HttpError::Tls(error.to_string()))?;
+                    Ok::<BoxStream, HttpError>(Box::new(tls))
+                })
+                .await
                 {
-                    headers.push((
-                        "Content-Type".into(),
-                        "application/x-www-form-urlencoded".into(),
-                    ));
+                    Ok(result) => (result?, RequestForm::Origin),
+                    Err(_) => {
+                        return Err(HttpError::Connect("route establishment timed out".into()));
+                    }
                 }
-                if !headers
-                    .iter()
-                    .any(|(name, _)| name.eq_ignore_ascii_case("Content-Length"))
-                {
-                    headers.push(("Content-Length".into(), body.len().to_string()));
-                }
-                body
-            }
-            None => Vec::new(),
-        };
-        let mut tried = 0usize;
-        let mut exchange = loop {
-            if tried == 2 {
-                return Err(HttpError::Glype("can't bypass glype https warning".into()));
-            }
-            let target = spec.mkurl(url.as_str());
-            let target_url =
-                url::Url::parse(&target).map_err(|error| HttpError::Url(error.to_string()))?;
-            let path = path_and_query(&target_url);
-            let (io, form) = proxy::open_route(
-                None,
-                "",
-                &host,
-                port,
-                proxy_tls,
-                self.config.resolver.as_ref(),
-                &self.config.tls,
-                self.config.timeout,
-            )
-            .await?;
-            let exchange = self
-                .exchange(
-                    io,
-                    form,
-                    method,
-                    &path,
-                    &target,
-                    &headers,
-                    body.clone(),
-                    stream,
+            } else if let Some(spec) = selected {
+                let absolute = proxy::absolute_url(&scheme, &authority, port, &path);
+                proxy::open_route(
+                    Some(spec),
+                    &absolute,
+                    &host,
+                    port,
+                    target_tls,
+                    self.config.resolver.as_ref(),
+                    &self.config.tls,
+                    connect_timeout,
                 )
-                .await?;
-            if exchange.text.contains(proxy::ssl_agree_marker()) {
-                drop(exchange);
-                let follow_url = spec.process_php_url();
-                let follow_parsed = url::Url::parse(&follow_url)
-                    .map_err(|error| HttpError::Url(error.to_string()))?;
-                let (io, form) = proxy::open_route(
+                .await?
+            } else {
+                proxy::open_route(
                     None,
                     "",
                     &host,
                     port,
-                    proxy_tls,
+                    target_tls,
                     self.config.resolver.as_ref(),
                     &self.config.tls,
-                    self.config.timeout,
+                    connect_timeout,
                 )
-                .await?;
-                let follow = self
-                    .exchange(
-                        io,
-                        form,
-                        "GET",
-                        &path_and_query(&follow_parsed),
-                        &follow_url,
-                        &headers,
-                        body.clone(),
-                        false,
-                    )
-                    .await?;
-                if let Some(cookie) = follow.headers.joined("set-cookie") {
-                    merge_glype_cookie(&mut headers, &cookie, &state);
-                }
-                tried += 1;
-                continue;
-            }
-            break exchange;
-        };
-
-        let content_type = exchange.headers.joined("content-type");
-        match content_type {
-            None => {
-                return Err(HttpError::Glype(
-                    ProxyError::GlypeMissingContentType.to_string(),
+                .await?
+            };
+            let absolute = proxy::absolute_url(&scheme, &authority, port, &path);
+            self.exchange(io, form, method, &path, &absolute, &headers, body, stream)
+                .await
+        }
+        .await;
+        let elapsed = started.elapsed().as_secs_f64();
+        let exchange = match outcome {
+            Ok(exchange) => {
+                self.log_verbose(&format!(
+                    "http request done: method={method} url={safe} status={} elapsed={elapsed:.3}s route={route}",
+                    exchange.status
                 ));
+                exchange
             }
-            Some(value) if value.starts_with("text") => {
-                if exchange.stream.is_some() {
-                    if let Some(stream_body) = exchange.stream.take() {
-                        stream_body.close().await;
-                    }
-                    return Err(HttpError::Glype(
-                        "'NoneType' object has no attribute 'decode'".into(),
-                    ));
-                }
-                let processed = spec
-                    .process_text(&exchange.body)
-                    .map_err(|error| HttpError::Glype(error.to_string()))?;
-                exchange.body = processed;
-                exchange.text = String::from_utf8_lossy(&exchange.body).into_owned();
+            Err(error) => {
+                self.log_verbose(&format!(
+                    "http request failed: method={method} url={safe} class={} elapsed={elapsed:.3}s route={route}",
+                    error.class()
+                ));
+                return Err(error);
             }
-            Some(_) => {}
-        }
-
-        let mut business = exchange.headers.business_view();
-        {
-            let mut guard = state.lock().unwrap();
-            proxy::apply_glype_response_cookies(&mut business, &mut guard);
-        }
-        let mut entries = Vec::with_capacity(business.len());
-        for (name, value) in business {
-            entries.push((latin1_bytes(&name)?, latin1_bytes(&value)?));
-        }
-        exchange.headers = ResponseHeaders::from_raw(entries);
+        };
         Ok(FetchedResponse {
             status: exchange.status,
             url: url.to_string(),
@@ -1577,31 +1459,33 @@ fn path_and_query(url: &url::Url) -> String {
     path
 }
 
-fn merge_glype_cookie(
-    headers: &mut Vec<(String, String)>,
-    set_cookie: &str,
-    state: &Arc<Mutex<GlypeState>>,
-) {
-    let index = headers
-        .iter()
-        .position(|(name, _)| name.eq_ignore_ascii_case("Cookie"));
-    let mut pairs = index
-        .map(|index| crate::util::parse_cookie(&headers[index].1))
-        .unwrap_or_default();
-    for (key, value) in crate::util::parse_cookie(&set_cookie.replace(',', ";")) {
-        if let Some(existing) = pairs.iter_mut().find(|(name, _)| *name == key) {
-            existing.1 = value.clone();
-        } else {
-            pairs.push((key.clone(), value.clone()));
+/// The safe request type name for a verbose line: `direct`, an HTTP proxy or
+/// a SOCKS variant. The endpoint is redacted like any other URL.
+fn route_label(selected: Option<&ProxySpec>) -> String {
+    let Some(spec) = selected else {
+        return "direct".to_string();
+    };
+    let endpoint = safe_url(&spec.addr);
+    match &spec.kind {
+        ProxyKind::Http { tls } => {
+            if *tls {
+                format!("https-proxy endpoint={endpoint}")
+            } else {
+                format!("http-proxy endpoint={endpoint}")
+            }
         }
-        if key == "s" {
-            state.lock().unwrap().s = Some(value);
+        ProxyKind::Socks {
+            version,
+            remote_dns,
+        } => {
+            let name = match (version, remote_dns) {
+                (4, false) => "socks4",
+                (4, true) => "socks4a",
+                (_, false) => "socks5",
+                (_, true) => "socks5h",
+            };
+            format!("{name} endpoint={endpoint}")
         }
-    }
-    let rebuilt = crate::util::make_cookie(&pairs);
-    match index {
-        Some(index) => headers[index].1 = rebuilt,
-        None => headers.push(("Cookie".into(), rebuilt)),
     }
 }
 
@@ -1801,6 +1685,29 @@ mod tests {
                 ..SessionConfig::default()
             },
         )
+    }
+
+    #[test]
+    fn route_labels_name_the_protocol_without_credentials() {
+        assert_eq!(route_label(None), "direct");
+        let http = ProxySpec {
+            addr: "http://user:secret@proxy.test:8080".into(),
+            kind: ProxyKind::Http { tls: false },
+        };
+        let label = route_label(Some(&http));
+        assert_eq!(label, "http-proxy endpoint=http://proxy.test:8080/");
+        assert!(!label.contains("secret"), "{label}");
+        let socks = ProxySpec {
+            addr: "socks5h://user:secret@127.0.0.1:1080".into(),
+            kind: ProxyKind::Socks {
+                version: 5,
+                remote_dns: true,
+            },
+        };
+        assert_eq!(
+            route_label(Some(&socks)),
+            "socks5h endpoint=socks5h://127.0.0.1:1080"
+        );
     }
 
     async fn serve_once(

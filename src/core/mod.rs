@@ -1225,12 +1225,14 @@ impl App {
             .iter()
             .map(|header| (header.name.clone(), header.value.clone()))
             .collect();
-        Session::new(
+        let mut session = Session::new(
             headers,
             self.proxy.clone(),
             policy,
             self.session_config.clone(),
-        )
+        );
+        session.set_logger(self.logger.clone());
+        session
     }
 
     /// Move the App-level session out so a sequential call can borrow `self`
@@ -1332,12 +1334,14 @@ impl App {
                 .iter()
                 .map(|header| (header.name.clone(), header.value.clone()))
                 .collect();
-            self.session = Some(Session::new(
+            let mut session = Session::new(
                 headers,
                 self.proxy.clone(),
                 policy,
                 self.session_config.clone(),
-            ));
+            );
+            session.set_logger(self.logger.clone());
+            self.session = Some(session);
         }
         let session = self.session.as_mut().expect("session");
         session.proxy_policy = policy;
