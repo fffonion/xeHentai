@@ -1,0 +1,973 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux runtime gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    steps:
+      # The runner context is not available in job-level env, so the six
+      # runtime paths derived from it are initialized here (once, as the first
+      # step) through GITHUB_ENV. Every later step receives the same values the
+      # job env used to carry, and the gate commands below are unchanged.
+      - name: Initialize runner runtime paths
+        run: |
+          set -euo pipefail
+          {
+            printf 'TMPDIR=%s\n' "$RUNNER_TEMP"
+            printf 'XEH_PYTHON=%s\n' "$RUNNER_TEMP/venv/bin/python"
+            printf 'XEH_UPSTREAM=%s\n' "$RUNNER_TEMP/oracle"
+            printf 'XEH_UPDATE_ORACLE=%s\n' "$RUNNER_TEMP/oracle"
+            printf 'XEH_WEBUI_CHECKOUT=%s\n' "$RUNNER_TEMP/webui/dist"
+            printf 'XEH_BROWSER_REPORT=%s\n' "$RUNNER_TEMP/browser-run/browser-report.json"
+          } >> "$GITHUB_ENV"
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install Rust 1.99.1
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
+          rustup default 1.99.1
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Strict Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Unit tests
+        timeout-minutes: 15
+        run: cargo test --locked
+      - name: Install Python and browser test dependencies
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$XEH_PYTHON" -m pip install --disable-pip-version-check \
+            pillow==13.0.0 requests==2.34.2 PySocks==1.7.1 playwright==1.64.1
+          "$XEH_PYTHON" -m playwright install --with-deps chromium
+          # The migration chain takes the browser executable explicitly; resolve
+          # the one this step installed instead of guessing a cache path. The
+          # value is exported for later steps AND checked in this shell.
+          chromium="$("$XEH_PYTHON" - <<'PY'
+          from playwright.sync_api import sync_playwright
+          with sync_playwright() as playwright:
+              print(playwright.chromium.executable_path)
+          PY
+          )"
+          test -f "$chromium"
+          printf 'XEH_CHROMIUM=%s\n' "$chromium" >> "$GITHUB_ENV"
+      - name: Fetch fixed Python oracle
+        run: |
+          set -euo pipefail
+          mkdir -p "$XEH_UPSTREAM"
+          curl -fsSL "https://codeload.github.com/fffonion/xeHentai/tar.gz/43fc55c0c662f195d048becf6276a26ce06b09d9" \
+            -o "$RUNNER_TEMP/oracle.tar.gz"
+          tar -xzf "$RUNNER_TEMP/oracle.tar.gz" -C "$XEH_UPSTREAM" --strip-components=1
+          test -f "$XEH_UPSTREAM/xeHentai/config.py"
+      - name: Rebuild the original WebUI pack
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/webui" "$RUNNER_TEMP/npm-cache"
+          curl -fsSL "https://codeload.github.com/fffonion/xeHentai-webui/tar.gz/4e3738ef463fef344e96df613de9a81b4cda4b4e" \
+            -o "$RUNNER_TEMP/webui.tar.gz"
+          tar -xzf "$RUNNER_TEMP/webui.tar.gz" -C "$RUNNER_TEMP/webui" --strip-components=1
+          cd "$RUNNER_TEMP/webui"
+          export NODE_OPTIONS=--openssl-legacy-provider
+          export npm_config_cache="$RUNNER_TEMP/npm-cache"
+          npm install --ignore-scripts --no-audit --no-fund
+          npm install --no-save --ignore-scripts --no-audit --no-fund sass@1.107.1
+          mv node_modules/node-sass node_modules/node-sass-broken
+          mkdir node_modules/node-sass
+          printf "module.exports = require('sass')\n" > node_modules/node-sass/index.js
+          npm run build
+          "$XEH_PYTHON" "$GITHUB_WORKSPACE/tools/browser/compare_webui_pack.py" \
+            --dist dist --candidate "$GITHUB_WORKSPACE/ui" --expected-count 7
+      - name: Python tool tests
+        run: |
+          set -euo pipefail
+          "$XEH_PYTHON" tools/test_cases_inventory.py
+          "$XEH_PYTHON" tools/test_update_compat.py
+          "$XEH_PYTHON" tools/test_package_dist.py
+          "$XEH_PYTHON" tools/test_compat_gallery.py
+          "$XEH_PYTHON" tools/test_native_runtime_gate.py
+          "$XEH_PYTHON" tools/test_m6_windows_console.py
+          "$XEH_PYTHON" tools/browser/test_verify_webui_49.py
+          "$XEH_PYTHON" tools/browser/test_export_diagnostics.py
+          "$XEH_PYTHON" tools/browser/test_run.py
+          "$XEH_PYTHON" tools/browser/test_migration_probe.py
+      - name: Release build
+        run: cargo build --release --locked
+      - name: Package and offline smoke
+        run: |
+          set -euo pipefail
+          package="$RUNNER_TEMP/dist/xehentai-linux-x86_64"
+          python3 tools/package_dist.py --binary target/release/xeHentai --output "$package"
+          test -f "$package/rss/rpc/handlers.rss"
+          test -f "$package/ui/index.html"
+          mkdir -p "$RUNNER_TEMP/unpacked" "$RUNNER_TEMP/run"
+          tar -xzf "$package.tar.gz" -C "$RUNNER_TEMP/unpacked"
+          dist="$RUNNER_TEMP/unpacked/xehentai-linux-x86_64"
+          cd "$RUNNER_TEMP/run"
+          "$dist/xeHentai" --auto-update off --rpc-port 18010 --rpc-secret ci-smoke-secret &
+          pid=$!
+          trap 'kill -TERM "$pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 60); do
+            if curl -fsS -X POST -H 'Content-Type: application/json' \
+              --data '{"method":"xeH.getInfo","id":0,"params":[[],{}]}' \
+              http://127.0.0.1:18010/jsonrpc >/dev/null; then
+              break
+            fi
+            sleep 0.5
+          done
+          curl -fsS -X POST -H 'Content-Type: application/json' \
+            --data '{"method":"xeH.getConfig","id":1,"params":[["token:ci-smoke-secret"],{}]}' \
+            http://127.0.0.1:18010/jsonrpc | grep -q '"result"'
+          kill -TERM "$pid"
+          wait "$pid"
+          trap - EXIT
+      - name: Record browser child-env provenance (observation only)
+        run: |
+          set -euo pipefail
+          dest="$RUNNER_TEMP/ci-diagnostics"
+          mkdir -p "$dest"
+          "$XEH_PYTHON" - "$dest" <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          worktree = Path(os.environ.get("GITHUB_WORKSPACE", ".")).resolve()
+          sys.path.insert(0, str(worktree / "tools" / "browser"))
+          import run as browser_run
+
+          dest = Path(sys.argv[1])
+          # Sibling of browser-run: this probe path is never created and the
+          # real browser run root is never pre-created here.
+          probe_root = dest / "_child_env_probe"
+          target = Path(os.environ["CARGO_TARGET_DIR"]).resolve()
+          child = browser_run._child_env(probe_root, target)
+          caller = {
+              name: os.environ.get(name)
+              for name in ("HOME", "RUSTUP_HOME", "CARGO_HOME", "RUSTUP_TOOLCHAIN")
+          }
+          resolved = {
+              name: child.get(name)
+              for name in (
+                  "HOME",
+                  "RUSTUP_HOME",
+                  "CARGO_HOME",
+                  "CARGO_TARGET_DIR",
+                  "RUSTUP_TOOLCHAIN",
+              )
+          }
+          head = subprocess.run(
+              ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+              capture_output=True, text=True, check=True,
+          ).stdout.strip()
+          record = {
+              "tool": "tools/browser/run.py::_child_env",
+              "caller_env_allowlist": caller,
+              "child_env_allowlist": resolved,
+              "assigned_target": str(target),
+              "source_head": head,
+          }
+          (dest / "child-env-provenance.json").write_text(
+              json.dumps(record, indent=1) + "\n", encoding="utf-8")
+          print(json.dumps(record, indent=1))
+          PY
+      - name: Browser evidence, original UI (49 checks)
+        run: |
+          set -euo pipefail
+          "$XEH_PYTHON" tools/browser/run.py \
+            --run-root "$RUNNER_TEMP/browser-run" \
+            --temp-root "$RUNNER_TEMP" \
+            --worktree "$GITHUB_WORKSPACE" \
+            --port 8010
+      # One real end-to-end migration chain on the ordinary host: reference
+      # Python half-session, two concurrently missing image bodies, rename and
+      # archive, the ORIGINAL WebUI through the product persisted cache, a
+      # memory-only settings change, graceful SIGTERM save, then the SAME
+      # executable applying signed release B and reading the saved task and
+      # archived images over the real RPC server. The ignored test is selected
+      # explicitly; a zero-match cargo pass is refused, and success exists only
+      # as a fresh report that the production verifier accepts.
+      - name: Migration chain (real host, original UI, ignored exact)
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          # --- migration-chain-gate: begin ---
+          import json
+          import os
+          import pathlib
+          import re
+          import subprocess
+          import sys
+
+          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+          sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+          WORKSPACE = os.environ["GITHUB_WORKSPACE"]
+          RUNNER_TEMP = pathlib.Path(os.environ["RUNNER_TEMP"])
+          TARGET_DIR = os.environ["CARGO_TARGET_DIR"]
+          PYTHON = os.environ["XEH_PYTHON"]
+          CASE = (
+              "tests::native_rss_update::migration_chain::"
+              "native_legacy_session_to_archived_ui_and_rss_b_same_host"
+          )
+          RUN_ROOT = RUNNER_TEMP / "migration-run"
+          REPORT = RUN_ROOT / "migration-report.json"
+          GATE_DIR = RUNNER_TEMP / "migration-gate"
+          VERIFIER = pathlib.Path(WORKSPACE) / "tools" / "browser" / "migration_probe.py"
+          HEAD_PATTERN = re.compile(r"[0-9a-f]{40}")
+
+
+          def run(argv, timeout):
+              return subprocess.run(
+                  argv,
+                  cwd=WORKSPACE,
+                  stdin=subprocess.DEVNULL,
+                  capture_output=True,
+                  text=True,
+                  encoding="utf-8",
+                  errors="replace",
+                  timeout=timeout,
+              )
+
+
+          # Every Git read is a real command whose exit status and output shape
+          # are checked; the trusted HEAD/worktree always comes from the actual
+          # checkout, never from the report being validated.
+          def git(args, what, timeout=60):
+              proc = run(["git"] + args, timeout)
+              if proc.returncode != 0:
+                  raise RuntimeError(f"git {what} exited {proc.returncode}")
+              return proc.stdout
+
+
+          def checkout_head(what):
+              value = git(["rev-parse", "HEAD"], what).strip()
+              if not HEAD_PATTERN.fullmatch(value):
+                  raise RuntimeError(f"git {what} did not return a full revision")
+              return value
+
+
+          def checkout_status(what):
+              # Tracked and untracked files both count: a generated report or an
+              # edited product file must show up here.
+              return git(["status", "--porcelain", "--untracked-files=all"], what)
+
+
+          def checkout_identity(what):
+              top = pathlib.Path(git(["rev-parse", "--show-toplevel"], what).strip())
+              if not top.is_absolute():
+                  raise RuntimeError("the git worktree identity is not absolute")
+              top = top.resolve()
+              if top != pathlib.Path(WORKSPACE).resolve():
+                  raise RuntimeError("the git worktree is not the workflow workspace")
+              return {
+                  "head": checkout_head(what),
+                  "worktree": str(top),
+                  "status": checkout_status(what),
+              }
+
+
+          def cargo_argv_chain(test_name, target_dir):
+              return [
+                  "cargo",
+                  "test",
+                  "--bin",
+                  "xeHentai",
+                  "--locked",
+                  "--jobs",
+                  "2",
+                  "--target-dir",
+                  target_dir,
+                  "--",
+                  "--exact",
+                  test_name,
+                  "--ignored",
+                  "--nocapture",
+              ]
+
+
+          def classify_chain(stdout, returncode, test_name):
+              running = [
+                  int(count)
+                  for count in re.findall(r"^running (\d+) tests?$", stdout, re.M)
+              ]
+              summary = re.search(
+                  r"^test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; "
+                  r"(\d+) ignored;",
+                  stdout,
+                  re.M,
+              )
+              exact = (
+                  re.search(r"^test " + re.escape(test_name) + r" \.\.\. ok$", stdout, re.M)
+                  is not None
+              )
+              executed = running[0] if running else 0
+              passed = int(summary.group(1)) if summary else 0
+              failed = int(summary.group(2)) if summary else -1
+              if executed == 0:
+                  verdict = "ZERO_MATCH_REJECTED" if returncode == 0 else "INFRA_SETUP_OR_COMPILE"
+              elif returncode == 0 and failed == 0 and passed >= 1 and passed == executed and exact:
+                  verdict = "PASS"
+              elif returncode != 0:
+                  verdict = "BEHAVIOR_RED"
+              else:
+                  verdict = "INVALID_LIBTEST_SUMMARY"
+              return {
+                  "test_name": test_name,
+                  "executed": executed,
+                  "passed": passed,
+                  "failed": failed,
+                  "exact_test_name_observed": exact,
+                  "returncode": returncode,
+                  "verdict": verdict,
+              }
+
+
+          def verifier_entry(expected):
+              present = REPORT.is_file()
+              proc = run(
+                  [
+                      PYTHON,
+                      str(VERIFIER),
+                      "--verify-report",
+                      str(REPORT),
+                      "--expected-root",
+                      str(RUN_ROOT),
+                      "--expected-head",
+                      expected["head"],
+                      "--expected-worktree",
+                      expected["worktree"],
+                      "--require-clean",
+                  ],
+                  120,
+              )
+              accepted = (
+                  present
+                  and proc.returncode == 0
+                  and proc.stdout.strip() == "migration report: ACCEPTED"
+              )
+              if accepted:
+                  verdict = "ACCEPTED"
+              elif not present:
+                  verdict = "REPORT_MISSING"
+              else:
+                  verdict = "REJECTED"
+              return {
+                  "report_present": present,
+                  "expected_head": expected["head"],
+                  "expected_worktree": expected["worktree"],
+                  "returncode": proc.returncode,
+                  "stdout": proc.stdout.strip(),
+                  "stderr_bytes": len(proc.stderr or ""),
+                  "verdict": verdict,
+              }
+
+
+          def verify(record, expected):
+              entry = verifier_entry(expected)
+              record["verifier"] = entry
+              return entry["verdict"] == "ACCEPTED"
+
+
+          def main():
+              GATE_DIR.mkdir(parents=True, exist_ok=True)
+              if RUN_ROOT.exists():
+                  print("migration-chain: run root already exists; refusing a stale report")
+                  return 1
+              RUN_ROOT.mkdir(parents=True)
+              os.environ["XEH_MIGRATION_RUN_ROOT"] = str(RUN_ROOT)
+              os.environ["XEH_MIGRATION_REPORT"] = str(REPORT)
+              started = checkout_identity("checkout before the chain")
+              github_sha = os.environ.get("GITHUB_SHA", "").strip()
+              record = {
+                  "case": CASE,
+                  "source_sha": started["head"],
+                  "source_worktree": started["worktree"],
+                  "source_status_empty": started["status"] == "",
+                  "github_sha": github_sha or None,
+                  "github_sha_matches": None if not github_sha else github_sha == started["head"],
+                  "assigned_target": TARGET_DIR,
+                  "run_root": str(RUN_ROOT),
+                  "report": str(REPORT),
+                  "argv": cargo_argv_chain(CASE, TARGET_DIR),
+              }
+              print("migration-chain: argv " + json.dumps(record["argv"]))
+              if github_sha and github_sha != started["head"]:
+                  # This workflow runs on the pushed commit, not a PR merge
+                  # head; a checkout that is not the triggering commit cannot
+                  # bind the report.
+                  record["verdict"] = "GITHUB_SHA_MISMATCH"
+                  (GATE_DIR / "gate.json").write_text(
+                      json.dumps(record, indent=1) + "\n", encoding="utf-8")
+                  print("migration-chain: checkout HEAD is not GITHUB_SHA")
+                  return 1
+              if not record["source_status_empty"]:
+                  record["verdict"] = "SOURCE_DIRTY"
+                  (GATE_DIR / "gate.json").write_text(
+                      json.dumps(record, indent=1) + "\n", encoding="utf-8")
+                  print("migration-chain: source tree is not clean")
+                  return 1
+              # A real zero-match control proves this parser refuses a cargo pass
+              # that executed no test. It is a gate control, not a product case.
+              zero_name = CASE + "_zero_match_probe_absent"
+              zero = run(cargo_argv_chain(zero_name, TARGET_DIR), 600)
+              zero_result = classify_chain(zero.stdout, zero.returncode, zero_name)
+              record["zero_match_probe"] = zero_result
+              (GATE_DIR / "zero-match.stdout.txt").write_text(
+                  zero.stdout, encoding="utf-8")
+              if zero_result["verdict"] != "ZERO_MATCH_REJECTED":
+                  record["verdict"] = "ZERO_MATCH_CONTROL_INVALID"
+                  # The trusted values are still handed to the production
+                  # verifier, which must refuse the absent/stale report instead
+                  # of trusting anything the run wrote.
+                  record["zero_match_verifier"] = verifier_entry(started)
+                  (GATE_DIR / "gate.json").write_text(
+                      json.dumps(record, indent=1) + "\n", encoding="utf-8")
+                  print("migration-chain: zero-match control did not behave as required")
+                  return 1
+              try:
+                  proc = run(cargo_argv_chain(CASE, TARGET_DIR), 2400)
+              except subprocess.TimeoutExpired:
+                  record["verdict"] = "INFRA_TIMEOUT"
+                  record["detail"] = "the bounded chain run exceeded 2400s"
+                  (GATE_DIR / "gate.json").write_text(
+                      json.dumps(record, indent=1) + "\n", encoding="utf-8")
+                  print("migration-chain: verdict INFRA_TIMEOUT")
+                  return 1
+              (GATE_DIR / "cargo.stdout.txt").write_text(proc.stdout, encoding="utf-8")
+              (GATE_DIR / "cargo.stderr.txt").write_text(proc.stderr, encoding="utf-8")
+              result = classify_chain(proc.stdout, proc.returncode, CASE)
+              record["chain"] = result
+              print("migration-chain: verdict " + result["verdict"])
+              accepted = verify(record, started)
+              if result["verdict"] != "PASS":
+                  record["verdict"] = result["verdict"]
+              elif not accepted:
+                  record["verdict"] = "REPORT_REJECTED"
+              else:
+                  record["verdict"] = "PASS"
+              after = checkout_identity("checkout after the chain")
+              record["checkout_after"] = {
+                  "head": after["head"],
+                  "status_empty": after["status"] == "",
+                  "unchanged": (
+                      after["head"] == started["head"]
+                      and after["status"] == started["status"]
+                  ),
+              }
+              if record["verdict"] == "PASS" and not record["checkout_after"]["unchanged"]:
+                  record["verdict"] = "SOURCE_CHANGED"
+              (GATE_DIR / "gate.json").write_text(
+                  json.dumps(record, indent=1) + "\n", encoding="utf-8")
+              if record["verdict"] != "PASS":
+                  print("migration-chain: " + record["verdict"])
+                  return 1
+              print("migration-chain: the exact ignored case executed, passed and its fresh report was accepted")
+              return 0
+
+
+          if __name__ == "__main__":
+              sys.exit(main())
+          # --- migration-chain-gate: end ---
+          PY
+      - name: Differential evidence (all suites, two internal rounds)
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/compat-evidence"
+          before_head="$(git rev-parse HEAD)"
+          before_status="$(git status --porcelain)"
+          test -z "$before_status"
+          "$XEH_PYTHON" tools/compat.py --suite all --output "$evidence"
+          after_head="$(git rev-parse HEAD)"
+          after_status="$(git status --porcelain)"
+          test "$before_head" = "$after_head"
+          test -z "$after_status"
+          "$XEH_PYTHON" - "$evidence/manifest.json" "$before_head" <<'PY'
+          import json
+          import sys
+          manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+          assert manifest["head"] == sys.argv[2], (manifest["head"], sys.argv[2])
+          assert manifest["dirty"] is False, manifest["dirty"]
+          assert len(manifest["suites"]) == 18, manifest["suites"]
+          print("manifest bound to", manifest["head"], "dirty", manifest["dirty"])
+          PY
+          "$XEH_PYTHON" tools/compat.py --verify-all --evidence "$evidence"
+      # Public-only projection of the browser report: the runner-local original
+      # embeds the synthetic test credential (request post params/bodies and
+      # raw URLs), so it is never uploaded. This step runs right before the
+      # always-upload and writes only the allowlisted projection; when no
+      # report exists it writes a small report-absent status instead of
+      # fabricating checks or trace. A malformed present report fails this
+      # step with a fixed safe error and no raw dump.
+      - name: Project browser diagnostics (public allowlist only)
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ci-diagnostics"
+          python3 tools/browser/export_diagnostics.py \
+            "$RUNNER_TEMP/browser-run/browser-report.json" \
+            --out "$RUNNER_TEMP/ci-diagnostics/browser-report-public.json"
+      - name: Upload Linux diagnostics (observation only)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-diagnostics-${{ github.sha }}-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/ci-diagnostics/child-env-provenance.json
+            ${{ runner.temp }}/ci-diagnostics/browser-report-public.json
+            ${{ runner.temp }}/browser-run/receipt.json
+            ${{ runner.temp }}/browser-run/backend.stdout.log
+            ${{ runner.temp }}/browser-run/backend.stderr.log
+            ${{ runner.temp }}/browser-run/driver.log
+            ${{ runner.temp }}/browser-run/verifier.log
+            ${{ runner.temp }}/browser-run/*.png
+            ${{ runner.temp }}/migration-run/migration-report.json
+            ${{ runner.temp }}/migration-run/probe-report.json
+            ${{ runner.temp }}/migration-gate/gate.json
+            ${{ runner.temp }}/migration-gate/cargo.stdout.txt
+            ${{ runner.temp }}/migration-gate/zero-match.stdout.txt
+            ${{ runner.temp }}/compat-evidence/manifest.json
+            ${{ runner.temp }}/compat-evidence/*/self-check.json
+            ${{ runner.temp }}/compat-evidence/*/round-1/comparison.json
+            ${{ runner.temp }}/compat-evidence/*/round-2/comparison.json
+            ${{ runner.temp }}/compat-evidence/*/round-1/*.log
+            ${{ runner.temp }}/compat-evidence/*/round-2/*.log
+
+  # The native-platform gate: seven real consumers on each host, plus one
+  # explicit long-running lifecycle control on Windows only. The six gallery
+  # and archive consumers (ordinary read, sibling-ZIP fallback, on-demand
+  # archive, real ZIP thumbnail, private-alias denial, root-alias denial) and
+  # the signed RSS update drive the production executable on native macOS and
+  # Windows. A failing test is a behavior failure; a setup/compile failure is
+  # recorded as infrastructure, never as behavior RED. Diagnostics are uploaded
+  # either way.
+  native-gallery-read:
+    name: Native consumers (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-15-intel
+          - windows-2022
+    env:
+      CARGO_TERM_COLOR: never
+      NATIVE_GALLERY_READ_TEST: rpc::server::tests::native_gallery_read_serves_an_ordinary_file_verbatim
+      NATIVE_GALLERY_ZIP_FALLBACK_TEST: rpc::server::tests::gallery_reads_fall_back_to_sibling_zip
+      NATIVE_GALLERY_ARCHIVE_TEST: rpc::server::tests::archive_builds_on_demand_and_reuses
+      NATIVE_GALLERY_ZIP_THUMBNAIL_TEST: rpc::server::tests::gallery_zip_thumbnail_serves_resized_entry
+      NATIVE_GALLERY_PRIVATE_HARDLINK_TEST: rpc::server::tests::native_gallery_private_hardlink_alias_is_denied
+      NATIVE_GALLERY_ROOT_ALIAS_TEST: rpc::server::tests::native_gallery_root_alias_escape_is_denied
+      NATIVE_RSS_UPDATE_TEST: tests::native_rss_update::native_signed_rss_update_uses_the_same_host_and_preserves_non_rss_files
+      NATIVE_RSS_HOLD_CONTROL_TEST: tests::native_rss_update::native_held_gallery_times_out_then_auto_exits
+      M6_COMMON_CLI_SURFACE_TEST: tests::m6::m6_binary_reports_version_help_and_usage_errors
+      M6_COMMON_URL_DOWNLOAD_TEST: tests::m6::m6_binary_downloads_urls_then_exits_zero
+      M6_UNIX_RESIDENT_TEST: tests::m6::m6_binary_without_urls_stays_resident_until_sigterm
+      M6_UNIX_SECOND_INTERRUPT_TEST: tests::m6::m6_binary_second_interrupt_is_a_bounded_exit
+      M6_UNIX_PTY_PROMPTS_TEST: tests::m6::m6_pty_prompts_in_reference_order_and_answers_drive_the_download
+      M6_UNIX_PTY_CTRL_C_TEST: tests::m6::m6_pty_ctrl_c_at_the_login_prompt_cleans_up_and_exits_zero
+      M6_UNIX_DAEMON_TEST: tests::m6::m6_daemon_forks_once_and_the_child_runs_the_real_app
+      M6_WINDOWS_DAEMON_TEST: tests::m6::m6_daemon_reports_unsupported_on_this_platform
+      M6_WINDOWS_CONSOLE_RESIDENT_TEST: tests::m6::m6_windows_resident_exits_cleanly_on_console_ctrl_c
+      M6_WINDOWS_CONSOLE_PROMPT_TEST: tests::m6::m6_windows_login_prompt_exits_cleanly_on_console_ctrl_c
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      # The runner context is unavailable in job-level env, so the allocated
+      # native target and the runner-local temp/cache roots are initialized
+      # once here, before the first Cargo invocation, through GITHUB_ENV.
+      - name: Initialize native runner runtime paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf 'CARGO_TARGET_DIR=%s\n' "$RUNNER_TEMP/cargo-target"
+            printf 'TMPDIR=%s\n' "$RUNNER_TEMP/tmp"
+            printf 'TEMP=%s\n' "$RUNNER_TEMP/tmp"
+            printf 'TMP=%s\n' "$RUNNER_TEMP/tmp"
+            printf 'XDG_CACHE_HOME=%s\n' "$RUNNER_TEMP/cache"
+            printf 'PIP_CACHE_DIR=%s\n' "$RUNNER_TEMP/pip-cache"
+            printf 'UV_CACHE_DIR=%s\n' "$RUNNER_TEMP/uv-cache"
+            printf 'XEH_NPM_CACHE=%s\n' "$RUNNER_TEMP/npm-cache"
+          } >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/tmp" "$RUNNER_TEMP/cache" \
+            "$RUNNER_TEMP/pip-cache" "$RUNNER_TEMP/uv-cache" \
+            "$RUNNER_TEMP/npm-cache" "$RUNNER_TEMP/cargo-target"
+      - name: Install Rust 1.99.1
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup default 1.99.1
+      - name: Native consumers (real execution, exact tests)
+        shell: bash
+        timeout-minutes: 45
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          # --- native-gallery-read-gate: begin ---
+          # Run the required native consumer tests and refuse every outcome that
+          # would otherwise look successful without executing them: a filter
+          # matching no test still exits 0, so the executed count, the exact
+          # test name and the verdict are checked per case here rather than in
+          # the shell. Every case in CASES must PASS for this step to succeed;
+          # the ordinary read and signed RSS update keep their original place,
+          # the five gallery/archive consumers follow them, and Windows carries
+          # the extra ignored long-running control.
+          import json
+          import os
+          import pathlib
+          import re
+          import subprocess
+          import sys
+
+          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+          sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+          WORKSPACE = os.environ["GITHUB_WORKSPACE"]
+          RUNNER_TEMP = pathlib.Path(os.environ["RUNNER_TEMP"])
+          TARGET_DIR = os.environ["CARGO_TARGET_DIR"]
+          CASES = [
+              ("native-gallery-read", os.environ["NATIVE_GALLERY_READ_TEST"], False),
+              ("native-rss-update", os.environ["NATIVE_RSS_UPDATE_TEST"], False),
+              (
+                  "native-gallery-zip-fallback",
+                  os.environ["NATIVE_GALLERY_ZIP_FALLBACK_TEST"],
+                  False,
+              ),
+              (
+                  "native-gallery-archive",
+                  os.environ["NATIVE_GALLERY_ARCHIVE_TEST"],
+                  False,
+              ),
+              (
+                  "native-gallery-zip-thumbnail",
+                  os.environ["NATIVE_GALLERY_ZIP_THUMBNAIL_TEST"],
+                  False,
+              ),
+              (
+                  "native-gallery-private-hardlink",
+                  os.environ["NATIVE_GALLERY_PRIVATE_HARDLINK_TEST"],
+                  False,
+              ),
+              (
+                  "native-gallery-root-alias",
+                  os.environ["NATIVE_GALLERY_ROOT_ALIAS_TEST"],
+                  False,
+              ),
+          ]
+          # The M6 native platform supplement reuses this exact-case loop: the
+          # two portable CLI/download cases run on both hosts, the existing
+          # Unix lifecycle/PTY/daemon cases on macOS, and three Windows-only
+          # cases (the documented unsupported daemon branch and the isolated
+          # real console Ctrl-C resident/login-prompt cases).
+          M6_COMMON_CASES = [
+              ("m6-cli-surface", os.environ["M6_COMMON_CLI_SURFACE_TEST"]),
+              ("m6-url-download", os.environ["M6_COMMON_URL_DOWNLOAD_TEST"]),
+          ]
+          M6_UNIX_CASES = [
+              ("m6-resident", os.environ["M6_UNIX_RESIDENT_TEST"]),
+              ("m6-second-interrupt", os.environ["M6_UNIX_SECOND_INTERRUPT_TEST"]),
+              ("m6-pty-prompts", os.environ["M6_UNIX_PTY_PROMPTS_TEST"]),
+              ("m6-pty-ctrl-c", os.environ["M6_UNIX_PTY_CTRL_C_TEST"]),
+              ("m6-daemon", os.environ["M6_UNIX_DAEMON_TEST"]),
+          ]
+          M6_WINDOWS_CASES = [
+              ("m6-windows-daemon", os.environ["M6_WINDOWS_DAEMON_TEST"]),
+              (
+                  "m6-windows-console-resident",
+                  os.environ["M6_WINDOWS_CONSOLE_RESIDENT_TEST"],
+              ),
+              (
+                  "m6-windows-console-prompt",
+                  os.environ["M6_WINDOWS_CONSOLE_PROMPT_TEST"],
+              ),
+          ]
+          CASES += [(label, test_name, False) for label, test_name in M6_COMMON_CASES]
+          if os.name == "nt":
+              # This explicit long-running lifecycle control is required on
+              # Windows only; it is marked #[ignore] so it never joins the
+              # default test gate, and is selected here with --ignored.
+              CASES.append(
+                  (
+                      "native-rss-hold-control",
+                      os.environ["NATIVE_RSS_HOLD_CONTROL_TEST"],
+                      True,
+                  )
+              )
+              CASES += [
+                  (label, test_name, False) for label, test_name in M6_WINDOWS_CASES
+              ]
+          else:
+              CASES += [(label, test_name, False) for label, test_name in M6_UNIX_CASES]
+
+
+          def _text(value):
+              # A TimeoutExpired payload is bytes on some Python versions while
+              # write_text requires str: decode with replacement so the timeout
+              # verdict is recorded instead of a TypeError masking it.
+              if value is None:
+                  return ""
+              if isinstance(value, bytes):
+                  return value.decode("utf-8", "replace")
+              return value
+
+
+          def run(argv, **kwargs):
+              return subprocess.run(
+                  argv,
+                  cwd=WORKSPACE,
+                  stdin=subprocess.DEVNULL,
+                  capture_output=True,
+                  text=True,
+                  encoding="utf-8",
+                  errors="replace",
+                  **kwargs,
+              )
+
+
+          def cargo_argv(test_name, target_dir, ignored=False):
+              # One explicit allocated target plus the bounded build controls;
+              # the exact test name is the only libtest filter. An ignored case
+              # gets --ignored AFTER the libtest separator; the two original
+              # cases keep exactly the argv they always had.
+              argv = [
+                  "cargo",
+                  "test",
+                  "--bin",
+                  "xeHentai",
+                  "--locked",
+                  "--jobs",
+                  "2",
+                  "--target-dir",
+                  target_dir,
+                  "--",
+                  "--exact",
+                  test_name,
+              ]
+              if ignored:
+                  argv.append("--ignored")
+              argv.append("--nocapture")
+              return argv
+
+
+          def classify(stdout, returncode, test_name):
+              running = [
+                  int(count)
+                  for count in re.findall(r"^running (\d+) tests?$", stdout, re.M)
+              ]
+              summary = re.search(
+                  r"^test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; "
+                  r"(\d+) ignored;",
+                  stdout,
+                  re.M,
+              )
+              exact = (
+                  re.search(r"^test " + re.escape(test_name) + r" \.\.\. ok$", stdout, re.M)
+                  is not None
+              )
+              executed = running[0] if running else 0
+              passed = int(summary.group(1)) if summary else 0
+              failed = int(summary.group(2)) if summary else -1
+              if executed == 0:
+                  verdict = "ZERO_MATCH_REJECTED" if returncode == 0 else "INFRA_SETUP_OR_COMPILE"
+              elif returncode == 0 and failed == 0 and passed >= 1 and passed == executed and exact:
+                  verdict = "PASS"
+              elif returncode != 0:
+                  verdict = "BEHAVIOR_RED"
+              else:
+                  verdict = "INVALID_LIBTEST_SUMMARY"
+              return {
+                  "test_name": test_name,
+                  "executed": executed,
+                  "passed": passed,
+                  "failed": failed,
+                  "exact_test_name_observed": exact,
+                  "returncode": returncode,
+                  "verdict": verdict,
+              }
+
+
+          def main():
+              try:
+                  head = run(["git", "rev-parse", "HEAD"])
+              except OSError as error:
+                  print("native-consumers: cannot invoke git:", error)
+                  return 1
+              source_sha = head.stdout.strip()
+              results = []
+              failed = False
+              # The Windows-only console cases take the interpreter this gate
+              # actually runs under; the Rust cases fail (never skip) when it is
+              # absent. No interpreter path is guessed.
+              os.environ["XEH_M6_PYTHON"] = sys.executable
+              for label, test_name, ignored in CASES:
+                  outdir = RUNNER_TEMP / label
+                  outdir.mkdir(parents=True, exist_ok=True)
+                  (outdir / "source-sha.txt").write_text(
+                      source_sha + "\n", encoding="utf-8"
+                  )
+                  (outdir / "git-head.json").write_text(
+                      json.dumps(
+                          {
+                              "returncode": head.returncode,
+                              "stdout": head.stdout,
+                              "stderr": head.stderr,
+                          },
+                          indent=2,
+                      )
+                      + "\n",
+                      encoding="utf-8",
+                  )
+                  argv = cargo_argv(test_name, TARGET_DIR, ignored)
+                  (outdir / "argv.json").write_text(
+                      json.dumps(
+                          {
+                              "test_name": test_name,
+                              "ignored": ignored,
+                              "argv": argv,
+                              "cwd": WORKSPACE,
+                              "source_sha": source_sha,
+                              "assigned_target": TARGET_DIR,
+                          },
+                          indent=2,
+                      )
+                      + "\n",
+                      encoding="utf-8",
+                  )
+                  print(f"{label}: source {source_sha}")
+                  print(f"{label}: argv {json.dumps(argv)}")
+                  try:
+                      proc = run(argv, timeout=2400)
+                  except subprocess.TimeoutExpired as error:
+                      (outdir / "stdout.txt").write_text(
+                          _text(error.stdout), encoding="utf-8"
+                      )
+                      (outdir / "stderr.txt").write_text(
+                          _text(error.stderr), encoding="utf-8"
+                      )
+                      result = {
+                          "test_name": test_name,
+                          "verdict": "INFRA_TIMEOUT",
+                          "detail": f"cargo test exceeded the bound: {argv}",
+                      }
+                      print(f"{label}: verdict INFRA_TIMEOUT")
+                      failed = True
+                  except OSError as error:
+                      result = {
+                          "test_name": test_name,
+                          "verdict": "INFRA_SETUP_OR_COMPILE",
+                          "detail": f"cannot invoke cargo: {error}",
+                      }
+                      print(f"{label}: verdict INFRA_SETUP_OR_COMPILE")
+                      failed = True
+                  else:
+                      (outdir / "stdout.txt").write_text(proc.stdout, encoding="utf-8")
+                      (outdir / "stderr.txt").write_text(proc.stderr, encoding="utf-8")
+                      print(f"--- {label} cargo test stdout ---")
+                      print(proc.stdout)
+                      print(f"--- {label} cargo test stderr ---")
+                      print(proc.stderr)
+                      result = classify(proc.stdout, proc.returncode, test_name)
+                      print(f"{label}: verdict {result['verdict']} {json.dumps(result)}")
+                      if result["verdict"] == "PASS":
+                          print(
+                              f"{label}: the required test executed and passed "
+                              "on this platform."
+                          )
+                      elif result["verdict"] == "BEHAVIOR_RED":
+                          print(
+                              f"{label}: the required test executed and FAILED "
+                              "on this platform; that is a behavior failure."
+                          )
+                      elif result["verdict"] == "ZERO_MATCH_REJECTED":
+                          print(
+                              f"{label}: cargo exited 0 without executing the "
+                              "required test; the zero-match pass is refused."
+                          )
+                      elif result["verdict"] == "INFRA_SETUP_OR_COMPILE":
+                          print(
+                              f"{label}: cargo failed before executing the test; "
+                              "treat this as infrastructure/setup, not as behavior RED."
+                          )
+                      failed = failed or result["verdict"] != "PASS"
+                  result["source_sha"] = source_sha
+                  result["ignored"] = ignored
+                  result["argv"] = argv
+                  result["cwd"] = WORKSPACE
+                  result["assigned_target"] = TARGET_DIR
+                  (outdir / "summary.json").write_text(
+                      json.dumps(result, indent=2) + "\n", encoding="utf-8"
+                  )
+                  results.append(result)
+              (RUNNER_TEMP / "native-consumers-summary.json").write_text(
+                  json.dumps(
+                      {
+                          "source_sha": source_sha,
+                          "target_dir": TARGET_DIR,
+                          "cases": results,
+                      },
+                      indent=2,
+                  )
+                  + "\n",
+                  encoding="utf-8",
+              )
+              if failed:
+                  print("native-consumers: at least one required case did not PASS")
+              return 1 if failed else 0
+
+
+          if __name__ == "__main__":
+              sys.exit(main())
+          # --- native-gallery-read-gate: end ---
+          PY
+      - name: Strict Clippy (all targets)
+        run: cargo clippy --all-targets --locked -- -D warnings
+      # Only the required cases' Cargo output, argv, source receipt and verdicts
+      # are published; child business state, private logs and credentials stay on
+      # the runner.
+      - name: Upload native consumer diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-consumers-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/native-gallery-read
+            ${{ runner.temp }}/native-rss-update
+            ${{ runner.temp }}/native-gallery-zip-fallback
+            ${{ runner.temp }}/native-gallery-archive
+            ${{ runner.temp }}/native-gallery-zip-thumbnail
+            ${{ runner.temp }}/native-gallery-private-hardlink
+            ${{ runner.temp }}/native-gallery-root-alias
+            ${{ runner.temp }}/native-rss-hold-control
+            ${{ runner.temp }}/m6-cli-surface
+            ${{ runner.temp }}/m6-url-download
+            ${{ runner.temp }}/m6-resident
+            ${{ runner.temp }}/m6-second-interrupt
+            ${{ runner.temp }}/m6-pty-prompts
+            ${{ runner.temp }}/m6-pty-ctrl-c
+            ${{ runner.temp }}/m6-daemon
+            ${{ runner.temp }}/m6-windows-daemon
+            ${{ runner.temp }}/m6-windows-console-resident
+            ${{ runner.temp }}/m6-windows-console-prompt
+            ${{ runner.temp }}/native-consumers-summary.json
+          retention-days: 7
+          if-no-files-found: warn
