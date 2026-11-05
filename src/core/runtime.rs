@@ -1244,12 +1244,16 @@ impl AppHandle {
     /// Owned M5 RPC start: bind the configured interface/port and serve the
     /// real dispatcher on this `LocalSet` until `shutdown` fires. Bind errors
     /// are real (an occupied or invalid port errors here); the server is
-    /// never marked started without a listener. A missing `rpc_port` is a
-    /// configuration error, not a silent no-op.
+    /// never marked started without a listener. Startup publishes the actual
+    /// bound address once, after `SharedRpc` is initialized, so an owner (the
+    /// WebUI opener) can act on this process's readiness instead of probing
+    /// the port. A missing `rpc_port` is a configuration error, not a silent
+    /// no-op.
     pub async fn serve_rpc(
         &self,
         shutdown: watch::Receiver<bool>,
         static_origin: String,
+        ready: tokio::sync::oneshot::Sender<std::net::SocketAddr>,
     ) -> Result<(), crate::rpc::ServerError> {
         let (interface, port, secret, base_dir, resource_root, clock) = self
             .inner
@@ -1274,6 +1278,7 @@ impl AppHandle {
             static_origin,
             shutdown,
             self.clone(),
+            ready,
         )
         .await
     }

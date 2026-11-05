@@ -1813,6 +1813,12 @@ async fn accept_one(
 /// Bind the configured listener, load the real dispatcher/filters from the
 /// installed resource tree and serve until `shutdown` fires. Bind/load errors
 /// are real; the server is never reported started without a live listener.
+///
+/// `ready` is the startup handoff owned by the caller: it receives the actual
+/// bound address exactly once, only after `SharedRpc` initialization succeeds
+/// and before the accept loop runs. A bind or initialization failure drops the
+/// sender without publishing, so the receiver can distinguish "this process
+/// is serving" from "some other process owns the port".
 #[allow(clippy::too_many_arguments)]
 pub async fn serve(
     interface: &str,
@@ -1824,8 +1830,10 @@ pub async fn serve(
     static_origin: String,
     shutdown: watch::Receiver<bool>,
     handle: crate::core::runtime::AppHandle,
+    ready: tokio::sync::oneshot::Sender<std::net::SocketAddr>,
 ) -> Result<(), ServerError> {
     let listener = bind(interface, port).await?;
+    let bound = listener.local_addr()?;
     let shared = Rc::new(std::cell::RefCell::new(SharedRpc::new(
         resource_root,
         cache_dir,
@@ -1833,6 +1841,9 @@ pub async fn serve(
         secret,
         static_origin.clone(),
     )?));
+    // Bound AND initialized: this process is really serving. A dropped
+    // receiver (browser opening disabled) is not a startup failure.
+    let _ = ready.send(bound);
     serve_until_closed(listener, shutdown, handle, shared, static_origin).await
 }
 

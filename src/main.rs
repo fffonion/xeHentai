@@ -299,26 +299,24 @@ async fn run_supervised(
     let publisher = updater::install::Publisher::new();
     let update_task = spawn_update_check(handle.clone(), resource, locale, publisher.clone());
     let rpc_enabled = handle.borrow_app(|app| app.cfg.rpc_port.is_some());
-    let (want_browser, rpc_interface, rpc_port) = handle.borrow_app(|app| {
-        (
-            app.cfg.rpc_open_browser,
-            app.cfg.rpc_interface.clone(),
-            app.cfg.rpc_port,
-        )
-    });
-    let browser_port = rpc_browser_port(rpc_enabled, want_browser, rpc_port);
+    let (want_browser, rpc_port) =
+        handle.borrow_app(|app| (app.cfg.rpc_open_browser, app.cfg.rpc_port));
+    let browser_wanted = rpc_browser_port(rpc_enabled, want_browser, rpc_port).is_some();
+    // Startup readiness is owned here: the RPC path publishes this process's
+    // actual bound address exactly once, after the listener binds and
+    // `SharedRpc` initializes. The opener never probes the port, so a foreign
+    // listener on the configured port (our bind fails) can never open.
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let browser_handle = handle.clone();
-    let mut browser_settled = browser_port.is_none();
+    let mut browser_settled = !browser_wanted;
     let browser_open = async move {
-        let Some(port) = browser_port else {
+        if !browser_wanted {
             return;
-        };
-        match open_webui_when_listening(&rpc_interface, port, BROWSER_OPEN_BUDGET, &spawn_browser)
-            .await
-        {
-            // A server that never listened has already reported its real bind
-            // error on the RPC path; there is nothing to open.
-            Ok(()) | Err(BrowserOpenError::NotListening) => {}
+        }
+        match open_webui_when_ready(ready_rx, BROWSER_OPEN_BUDGET, &spawn_browser).await {
+            // Startup failed (bind/init) or the run stopped first: the RPC
+            // path already reports its own error, there is no page to open.
+            Ok(_) | Err(BrowserOpenError::NotReady) => {}
             Err(BrowserOpenError::Spawn(error)) => {
                 let message = format!("cannot open the WebUI browser: {error}");
                 let written = browser_handle.borrow_app_mut(|app| app.logger_mut().warn(&message));
@@ -334,10 +332,15 @@ async fn run_supervised(
         if rpc_enabled {
             Some(
                 rpc_handle
-                    .serve_rpc(shutdown_rx, rpc::PRODUCTION_STATIC_ORIGIN.to_string())
+                    .serve_rpc(
+                        shutdown_rx,
+                        rpc::PRODUCTION_STATIC_ORIGIN.to_string(),
+                        ready_tx,
+                    )
                     .await,
             )
         } else {
+            drop(ready_tx);
             std::future::pending::<Option<Result<(), rpc::ServerError>>>().await
         }
     };
@@ -628,18 +631,17 @@ async fn terminate_signal(signals: Option<&mut SignalStream>) -> Option<()> {
 
 // MARK: - RPC WebUI browser opener
 
-/// How long the opener waits for the RPC listener to accept a probe
-/// connection. `serve_rpc` binds before it serves, so the first successful
-/// probe is proof that the real listener is live; a bind failure never probes.
+/// How long the opener waits for the RPC startup handoff. The real startup
+/// path publishes once, after its listener is bound and `SharedRpc` is
+/// initialized; nothing is probed, so this only bounds a hung startup.
 const BROWSER_OPEN_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Interval between probe attempts while the listener binds.
-const BROWSER_OPEN_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
-
 /// Outcome of the one-shot WebUI launch.
+#[derive(Debug)]
 enum BrowserOpenError {
-    /// The server never reached its accept loop (resolve or bind failure).
-    NotListening,
+    /// Startup never handed off a live listener (bind/init failure, timeout,
+    /// or a stop that won the race).
+    NotReady,
     /// The OS opener program could not be started.
     Spawn(std::io::Error),
 }
@@ -705,68 +707,28 @@ fn browsable_addr(addr: std::net::SocketAddr) -> std::net::SocketAddr {
     std::net::SocketAddr::new(ip, addr.port())
 }
 
-/// The WebUI page of the live listener. `SocketAddr` formats IPv6 with the
-/// required brackets, and the port always comes from the accepted connection,
+/// The WebUI page of this process's listener. `SocketAddr` formats IPv6 with
+/// the required brackets, and the port always comes from the bound listener,
 /// never from the configured request (a port-0 listener reports its real port).
 fn browser_url(addr: std::net::SocketAddr) -> String {
     format!("http://{}/ui/", browsable_addr(addr))
 }
 
-/// Addresses to probe for the configured interface, mirroring
-/// `rpc::server::bind`: an IP literal is used exactly, a host name prefers its
-/// first IPv4 answer (the default `localhost` resolves to the AF_INET bind).
-async fn listen_probe_targets(
-    interface: &str,
-    port: u16,
-) -> std::io::Result<Vec<std::net::SocketAddr>> {
-    if let Ok(ip) = interface.parse::<std::net::IpAddr>() {
-        return Ok(vec![std::net::SocketAddr::new(ip, port)]);
-    }
-    let mut targets: Vec<std::net::SocketAddr> =
-        tokio::net::lookup_host((interface, port)).await?.collect();
-    targets.sort_by_key(|target| !target.is_ipv4());
-    Ok(targets)
-}
-
-/// Wait until the RPC listener accepts a connection, then return the address
-/// the listener itself reports for it. Probing is bounded and read-only: the
-/// connection carries no bytes and is dropped immediately.
-async fn rpc_listener_addr(
-    interface: &str,
-    port: u16,
-    budget: std::time::Duration,
-) -> Option<std::net::SocketAddr> {
-    let targets = listen_probe_targets(interface, port).await.ok()?;
-    if targets.is_empty() {
-        return None;
-    }
-    let deadline = tokio::time::Instant::now() + budget;
-    loop {
-        for target in &targets {
-            let probe = browsable_addr(*target);
-            if let Ok(stream) = tokio::net::TcpStream::connect(probe).await {
-                return Some(stream.peer_addr().unwrap_or(probe));
-            }
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return None;
-        }
-        tokio::time::sleep(BROWSER_OPEN_PROBE_INTERVAL).await;
-    }
-}
-
-/// The ONE WebUI launch: wait for the real listener, then open `<addr>/ui/`.
-/// The page never carries `rpc_secret`; the UI asks for it itself.
-async fn open_webui_when_listening(
-    interface: &str,
-    port: u16,
+/// The ONE WebUI launch: wait for the owned startup handoff, then open the
+/// exact bound address. A dropped sender (bind/init failure) or an expired
+/// budget opens nothing; there is no connection probe and no name resolution
+/// on this side.
+async fn open_webui_when_ready(
+    ready: tokio::sync::oneshot::Receiver<std::net::SocketAddr>,
     budget: std::time::Duration,
     launch: &dyn Fn(&mut std::process::Command) -> std::io::Result<()>,
-) -> Result<(), BrowserOpenError> {
-    let addr = rpc_listener_addr(interface, port, budget)
+) -> Result<std::net::SocketAddr, BrowserOpenError> {
+    let addr = tokio::time::timeout(budget, ready)
         .await
-        .ok_or(BrowserOpenError::NotListening)?;
-    open_browser(&browser_url(addr), launch).map_err(BrowserOpenError::Spawn)
+        .map_err(|_| BrowserOpenError::NotReady)?
+        .map_err(|_| BrowserOpenError::NotReady)?;
+    open_browser(&browser_url(addr), launch).map_err(BrowserOpenError::Spawn)?;
+    Ok(addr)
 }
 
 /// Project the parsed command line onto the reference `update_config(**vars)`

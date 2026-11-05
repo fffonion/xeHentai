@@ -1,19 +1,22 @@
 //! `--rpc-open-browser`: the one-shot native WebUI opener.
 //!
 //! Every launch goes through the injected runner, so no test starts a browser.
-//! The assertions cover the exact OS program, the single URL argument, the
-//! real listener address the URL is built from, and the non-fatal spawn error.
+//! Readiness now comes from the real `rpc::server::serve` startup path: the
+//! bound address is handed off only after the listener binds and `SharedRpc`
+//! initializes. No test (or production branch) probes the port, so a foreign
+//! listener on the configured port can never cause a launch.
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::path::Path;
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::net::TcpListener;
+use tokio::sync::{oneshot, watch};
 
+use crate::rpc::server::{bind as bind_rpc, serve};
 use crate::{
-    BrowserOpenError, browser_opener_program, browser_url, open_webui_when_listening,
-    rpc::server::bind as bind_rpc, rpc_browser_port,
+    BrowserOpenError, browser_opener_program, browser_url, open_webui_when_ready, rpc_browser_port,
 };
 
 /// `(program, args)` of one launched opener.
@@ -101,46 +104,156 @@ async fn browser_url_never_keeps_a_zero_port() {
     );
 }
 
-/// The opener runs only after the production RPC bind accepts, and it runs
-/// once with one URL argument naming the listener's own address.
+/// Real startup path: `serve` binds port 0 and initializes `SharedRpc`, then
+/// publishes the actual bound address. The opener runs once with one URL
+/// argument naming that address -- never the configured request.
 #[tokio::test]
-async fn browser_opens_once_after_the_real_listener_binds() {
-    let listener = bind_rpc("127.0.0.1", 0).await.unwrap();
-    let bound = listener.local_addr().unwrap();
+async fn readiness_hands_off_the_bound_listener_after_server_init() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = tempfile::tempdir().expect("root");
+    let cache = tempfile::tempdir().expect("cache");
+    let runtime =
+        crate::core::Runtime::new(super::test_app(root.path(), &[]), manifest.to_path_buf());
+    let handle = runtime.handle();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let server = serve(
+        "127.0.0.1",
+        0,
+        cache.path(),
+        manifest,
+        Arc::new(crate::worker::RealClock),
+        None,
+        "http://127.0.0.1:9".to_string(),
+        shutdown_rx,
+        handle,
+        ready_tx,
+    );
+    tokio::pin!(server);
+
     let invocations = Mutex::new(Vec::new());
     let launch = record(&invocations);
+    let open = open_webui_when_ready(ready_rx, Duration::from_secs(5), &launch);
+    tokio::pin!(open);
+    let addr = tokio::select! {
+        result = &mut open => result.expect("startup must hand off the bound address"),
+        result = &mut server => panic!("server ended before readiness: {result:?}"),
+    };
 
-    let result =
-        open_webui_when_listening("127.0.0.1", bound.port(), Duration::from_secs(5), &launch).await;
-
-    assert!(result.is_ok());
-    let invocations = invocations.lock().unwrap();
-    assert_eq!(invocations.len(), 1, "exactly one launch: {invocations:?}");
-    assert_eq!(invocations[0].0, browser_opener_program());
+    // The handoff is the listener's own address, not the configured port 0.
+    assert_eq!(addr.ip(), Ipv4Addr::LOCALHOST);
+    assert_ne!(addr.port(), 0);
+    let recorded = invocations.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 1, "exactly one launch: {recorded:?}");
+    assert_eq!(recorded[0].0, browser_opener_program());
     assert_eq!(
-        invocations[0].1,
-        vec![format!("http://127.0.0.1:{}/ui/", bound.port())]
+        recorded[0].1,
+        vec![format!("http://127.0.0.1:{}/ui/", addr.port())]
     );
-    assert_eq!(invocations[0].1.len(), 1, "one URL argument, no shell");
-    #[cfg(not(windows))]
-    assert_eq!(invocations[0].0, "open");
-    #[cfg(windows)]
-    assert_eq!(invocations[0].0, "explorer.exe");
+    assert_eq!(recorded[0].1.len(), 1, "one URL argument, no shell");
+
+    let _ = shutdown_tx.send(true);
+    server.as_mut().await.expect("clean shutdown");
 }
 
-/// A listener that never binds (bind failure) leaves the default browser shut.
+/// A foreign process already owns the requested port. This app's real bind
+/// fails, no readiness is published, and the browser never launches -- even
+/// though the foreign listener is happily accepting connections.
 #[tokio::test]
-async fn browser_stays_shut_when_nothing_listens() {
-    let probe = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let port = probe.local_addr().unwrap().port();
-    drop(probe);
+async fn foreign_listener_on_the_configured_port_never_opens_the_browser() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = tempfile::tempdir().expect("root");
+    let cache = tempfile::tempdir().expect("cache");
+    let foreign = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("foreign owner");
+    let port = foreign.local_addr().expect("foreign addr").port();
+    let runtime =
+        crate::core::Runtime::new(super::test_app(root.path(), &[]), manifest.to_path_buf());
+    let handle = runtime.handle();
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let server = serve(
+        "127.0.0.1",
+        port,
+        cache.path(),
+        manifest,
+        Arc::new(crate::worker::RealClock),
+        None,
+        "http://127.0.0.1:9".to_string(),
+        shutdown_rx,
+        handle,
+        ready_tx,
+    );
+    tokio::pin!(server);
+
+    let invocations = Mutex::new(Vec::new());
+    let launch = record(&invocations);
+    let open = open_webui_when_ready(ready_rx, Duration::from_secs(5), &launch);
+    tokio::pin!(open);
+    let (server_result, open_result) = tokio::join!(server.as_mut(), open);
+
+    assert!(
+        server_result.is_err(),
+        "the app bind must fail against the foreign owner"
+    );
+    assert!(matches!(open_result, Err(BrowserOpenError::NotReady)));
+    assert!(
+        invocations.lock().unwrap().is_empty(),
+        "a foreign listener must never be opened"
+    );
+    drop(foreign);
+}
+
+/// Bind succeeds but `SharedRpc` initialization fails. Readiness is published
+/// only after initialization, so the opener observes no handoff and stays
+/// shut; the server error remains the real startup result.
+#[tokio::test]
+async fn failed_server_init_after_bind_never_opens_the_browser() {
+    let empty = tempfile::tempdir().expect("empty resource root");
+    let root = tempfile::tempdir().expect("root");
+    let cache = tempfile::tempdir().expect("cache");
+    let runtime = crate::core::Runtime::new(
+        super::test_app(root.path(), &[]),
+        empty.path().to_path_buf(),
+    );
+    let handle = runtime.handle();
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let server = serve(
+        "127.0.0.1",
+        0,
+        cache.path(),
+        empty.path(),
+        Arc::new(crate::worker::RealClock),
+        None,
+        "http://127.0.0.1:9".to_string(),
+        shutdown_rx,
+        handle,
+        ready_tx,
+    );
+    tokio::pin!(server);
+
+    let invocations = Mutex::new(Vec::new());
+    let launch = record(&invocations);
+    let open = open_webui_when_ready(ready_rx, Duration::from_secs(5), &launch);
+    tokio::pin!(open);
+    let (server_result, open_result) = tokio::join!(server.as_mut(), open);
+
+    assert!(server_result.is_err(), "init must fail on an empty root");
+    assert!(matches!(open_result, Err(BrowserOpenError::NotReady)));
+    assert!(invocations.lock().unwrap().is_empty());
+}
+
+/// No readiness within the budget (startup hung) opens nothing and does not
+/// wait past the budget.
+#[tokio::test]
+async fn no_launch_when_readiness_never_arrives() {
+    let (_ready_tx, ready_rx) = oneshot::channel::<SocketAddr>();
     let invocations = Mutex::new(Vec::new());
     let launch = record(&invocations);
 
-    let result =
-        open_webui_when_listening("127.0.0.1", port, Duration::from_millis(150), &launch).await;
+    let result = open_webui_when_ready(ready_rx, Duration::from_millis(50), &launch).await;
 
-    assert!(matches!(result, Err(BrowserOpenError::NotListening)));
+    assert!(matches!(result, Err(BrowserOpenError::NotReady)));
     assert!(invocations.lock().unwrap().is_empty());
 }
 
@@ -148,21 +261,13 @@ async fn browser_stays_shut_when_nothing_listens() {
 /// run failure: the caller only logs it.
 #[tokio::test]
 async fn a_failed_opener_is_reported_and_not_fatal() {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let bound = listener.local_addr().unwrap();
+    let (ready_tx, ready_rx) = oneshot::channel();
+    ready_tx
+        .send(SocketAddr::from((Ipv4Addr::LOCALHOST, 7000)))
+        .expect("ready receiver");
+    let launch = |_: &mut Command| Err(std::io::Error::other("no opener"));
 
-    let result =
-        open_webui_when_listening("127.0.0.1", bound.port(), Duration::from_secs(5), &|_| {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "no opener on this host",
-            ))
-        })
-        .await;
+    let result = open_webui_when_ready(ready_rx, Duration::from_secs(1), &launch).await;
 
-    if let Err(BrowserOpenError::Spawn(error)) = result {
-        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
-    } else {
-        panic!("a failed opener must surface as a spawn error");
-    }
+    assert!(matches!(result, Err(BrowserOpenError::Spawn(_))));
 }
