@@ -1,0 +1,196 @@
+name: Release
+
+# A tag push is the only thing that produces distributable packages: one
+# self-contained archive per supported desktop platform, published together on
+# a GitHub release. Branch and pull-request CI stays on the Linux gates in
+# `ci.yml`; the native consumers there also run only for a tag.
+on:
+  push:
+    tags:
+      - "**"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to package and publish
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Package ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            label: linux-x86_64
+            archive: tar.gz
+            binary: target/release/xeHentai
+          - os: macos-15-intel
+            label: macos-x86_64
+            archive: tar.gz
+            binary: target/release/xeHentai
+          - os: windows-2022
+            label: windows-x86_64
+            archive: zip
+            binary: target/release/xeHentai.exe
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install Rust 1.99.1
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
+      - name: Check out the tagged source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$TAG"
+          head="$(git rev-parse HEAD)"
+          # A workflow_dispatch run must package the tag it names, not a branch
+          # tip that happens to share the name.
+          test "$head" = "$(git rev-parse "refs/tags/$TAG^{commit}")"
+          printf 'tag=%s head=%s\n' "$TAG" "$head"
+      - name: Build the release executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The compiled identifier is the tag, so the shipped binary reports
+          # `xeHentai v<display>+<tag>` and two tag builds stay distinguishable.
+          XEH_BUILD_ID="$TAG" cargo build --release --locked
+      - name: Verify the executable and its version label
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${{ matrix.binary }}" --version | tee version.txt
+          grep -F "$TAG" version.txt
+      - name: Assemble the package
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/package_dist.py \
+            --binary "${{ matrix.binary }}" \
+            --output "dist/xehentai-$TAG-${{ matrix.label }}" \
+            --format "${{ matrix.archive }}"
+          ls -l "dist/xehentai-$TAG-${{ matrix.label }}.${{ matrix.archive }}"
+      # The package must start outside the checkout with its own resource tree,
+      # exactly like the Linux offline smoke in `ci.yml`. Extraction and the
+      # version check go through the standard library so one step covers
+      # tar.gz and zip without depending on `unzip` being installed.
+      - name: Offline startup smoke
+        shell: bash
+        env:
+          ARCHIVE: dist/xehentai-${{ github.event.inputs.tag || github.ref_name }}-${{ matrix.label }}.${{ matrix.archive }}
+          PACKAGE_NAME: xehentai-${{ github.event.inputs.tag || github.ref_name }}-${{ matrix.label }}
+          EXECUTABLE: xeHentai${{ matrix.archive == 'zip' && '.exe' || '' }}
+          EXPECTED_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/smoke"
+          python - <<'PY'
+          import os
+          import subprocess
+          import tarfile
+          import zipfile
+          from pathlib import Path
+
+          archive = Path(os.environ["ARCHIVE"]).resolve()
+          package_name = os.environ["PACKAGE_NAME"]
+          executable_name = os.environ["EXECUTABLE"]
+          expected = os.environ["EXPECTED_TAG"]
+          root = Path(os.environ["RUNNER_TEMP"]) / "smoke" / package_name
+          if archive.name.endswith(".zip"):
+              with zipfile.ZipFile(archive) as package:
+                  for info in package.infolist():
+                      target = (Path(os.environ["RUNNER_TEMP"]) / "smoke" / info.filename).resolve()
+                      assert str(target).startswith(str(root.resolve())), info.filename
+                      package.extract(info, Path(os.environ["RUNNER_TEMP"]) / "smoke")
+          else:
+              with tarfile.open(archive, "r:gz") as package:
+                  package.extractall(Path(os.environ["RUNNER_TEMP"]) / "smoke", filter="data")
+          executable = root / executable_name
+          assert executable.is_file(), executable
+          assert (root / "rss/rpc/handlers.rss").is_file()
+          # The WebUI is proxied from the fixed upstream origin at run time;
+          # a release package must never carry a `ui/` tree.
+          assert not (root / "ui").exists()
+          # Run from the unpacked directory so the resources are the ones the
+          # package actually shipped, not the checkout's.
+          result = subprocess.run([str(executable), "--version"], cwd=root, capture_output=True, text=True)
+          print(result.stdout.strip(), result.stderr.strip())
+          assert result.returncode == 0, result.returncode
+          assert expected in result.stdout, result.stdout
+          PY
+      - name: Upload the package
+        uses: actions/upload-artifact@v7
+        with:
+          name: package-${{ matrix.label }}
+          path: dist/xehentai-${{ env.TAG }}-${{ matrix.label }}.${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish the release
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Download every platform package
+        uses: actions/download-artifact@v7
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+      - name: Check the asset set
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -l dist
+          # One archive per platform, no duplicates, and nothing unexpected.
+          ls dist/xehentai-*-linux-x86_64.tar.gz
+          ls dist/xehentai-*-macos-x86_64.tar.gz
+          ls dist/xehentai-*-windows-x86_64.zip
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 3
+      - name: Create the GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          # A `-pre`/`-rc` style tag is published as a prerelease; anything else
+          # is a normal release. Re-running the workflow for an existing tag
+          # replaces its assets instead of failing.
+          prerelease=()
+          case "$TAG" in
+            *-*) prerelease=(--prerelease) ;;
+          esac
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" "${prerelease[@]}" --title "$TAG"
+          else
+            gh release create "$TAG" dist/* \
+              --title "$TAG" \
+              --generate-notes \
+              "${prerelease[@]}"
+          fi
+          gh release view "$TAG" --json tagName,isPrerelease,assets \
+            --jq '{tagName, isPrerelease, assets: [.assets[].name]}'

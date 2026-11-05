@@ -13,3 +13,6 @@
 /config.rss.stage-*
 __pycache__/
 *.pyc
+
+# Built WebUI (materialized from the fixed upstream revision; never tracked)
+ui/

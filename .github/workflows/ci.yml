@@ -36,6 +36,39 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      # The built WebUI is not tracked in this repository. Runtime serves
+      # `/ui/` and `/static/` by proxying the fixed public origin and caching
+      # the answers; the browser proofs and the migration chain, however, need
+      # the fixed upstream build on disk. Materialize it into the ignored
+      # `ui/` directory from the same pinned revision the browser suite builds,
+      # before any step (unit tests included) that could otherwise observe a
+      # checkout without it.
+      - name: Materialize the WebUI pack
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/webui" "$RUNNER_TEMP/npm-cache"
+          curl -fsSL "https://codeload.github.com/fffonion/xeHentai-webui/tar.gz/4e3738ef463fef344e96df613de9a81b4cda4b4e" \
+            -o "$RUNNER_TEMP/webui.tar.gz"
+          tar -xzf "$RUNNER_TEMP/webui.tar.gz" -C "$RUNNER_TEMP/webui" --strip-components=1
+          cd "$RUNNER_TEMP/webui"
+          export NODE_OPTIONS=--openssl-legacy-provider
+          export npm_config_cache="$RUNNER_TEMP/npm-cache"
+          npm install --ignore-scripts --no-audit --no-fund
+          npm install --no-save --ignore-scripts --no-audit --no-fund sass@1.107.1
+          mv node_modules/node-sass node_modules/node-sass-broken
+          mkdir node_modules/node-sass
+          printf "module.exports = require('sass')\n" > node_modules/node-sass/index.js
+          npm run build
+          # The pack is served as-is, so keep it to the seven runtime assets the
+          # frozen pack always carried: drop webpack source maps (development
+          # artifacts, never part of the served UI) and refuse any other drift.
+          find dist -name '*.map' -delete
+          test -f dist/index.html
+          test -d dist/static
+          test "$(find dist -type f | wc -l)" -eq 7
+          rm -rf "$GITHUB_WORKSPACE/ui"
+          cp -R dist "$GITHUB_WORKSPACE/ui"
+          test -f "$GITHUB_WORKSPACE/ui/index.html"
       - name: Install Rust 1.99.1
         run: |
           rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
@@ -73,24 +106,6 @@ jobs:
             -o "$RUNNER_TEMP/oracle.tar.gz"
           tar -xzf "$RUNNER_TEMP/oracle.tar.gz" -C "$XEH_UPSTREAM" --strip-components=1
           test -f "$XEH_UPSTREAM/xeHentai/config.py"
-      - name: Rebuild the original WebUI pack
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/webui" "$RUNNER_TEMP/npm-cache"
-          curl -fsSL "https://codeload.github.com/fffonion/xeHentai-webui/tar.gz/4e3738ef463fef344e96df613de9a81b4cda4b4e" \
-            -o "$RUNNER_TEMP/webui.tar.gz"
-          tar -xzf "$RUNNER_TEMP/webui.tar.gz" -C "$RUNNER_TEMP/webui" --strip-components=1
-          cd "$RUNNER_TEMP/webui"
-          export NODE_OPTIONS=--openssl-legacy-provider
-          export npm_config_cache="$RUNNER_TEMP/npm-cache"
-          npm install --ignore-scripts --no-audit --no-fund
-          npm install --no-save --ignore-scripts --no-audit --no-fund sass@1.107.1
-          mv node_modules/node-sass node_modules/node-sass-broken
-          mkdir node_modules/node-sass
-          printf "module.exports = require('sass')\n" > node_modules/node-sass/index.js
-          npm run build
-          "$XEH_PYTHON" "$GITHUB_WORKSPACE/tools/browser/compare_webui_pack.py" \
-            --dist dist --candidate "$GITHUB_WORKSPACE/ui" --expected-count 7
       - name: Python tool tests
         run: |
           set -euo pipefail
@@ -112,7 +127,9 @@ jobs:
           package="$RUNNER_TEMP/dist/xehentai-linux-x86_64"
           python3 tools/package_dist.py --binary target/release/xeHentai --output "$package"
           test -f "$package/rss/rpc/handlers.rss"
-          test -f "$package/ui/index.html"
+          # The release package never carries the WebUI: it is proxied from
+          # the fixed origin at run time.
+          test ! -e "$package/ui"
           mkdir -p "$RUNNER_TEMP/unpacked" "$RUNNER_TEMP/run"
           tar -xzf "$package.tar.gz" -C "$RUNNER_TEMP/unpacked"
           dist="$RUNNER_TEMP/unpacked/xehentai-linux-x86_64"
@@ -561,6 +578,9 @@ jobs:
   native-gallery-read:
     name: Native consumers (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Ordinary branch/PR CI is Linux-only. The macOS and Windows consumers
+    # execute on a release tag, where a distributable package is also built.
+    if: startsWith(github.ref, 'refs/tags/')
     timeout-minutes: 60
     strategy:
       fail-fast: false

@@ -5,7 +5,7 @@ This repository is the Rust + RustScript rewrite of
 remains the behavioural reference.
 
 The application is a single executable. It downloads galleries, keeps a
-session and history, serves the original JSON-RPC API and frozen WebUI, and
+session and history, serves the original JSON-RPC API and WebUI, and
 checks/installs application updates. Page matching, RPC handler decisions and
 update decisions are written in RustScript under `rss/`; native networking,
 configuration, filesystem and process operations live in Rust under `src/`.
@@ -29,12 +29,18 @@ configuration, filesystem and process operations live in Rust under `src/`.
   platforms without a daemon implementation the option is reported as
   unsupported and the process exits normally.
 - **RPC and WebUI.** With `rpc_port` configured (or `--rpc-port`), the server
-  exposes the 13 original JSON-RPC methods at `/jsonrpc`, the original frozen
-  WebUI at `/ui/`, and signed `/img/` and `/zip/` gallery routes. Thumbnails
-  are generated natively; the frozen static pack is served with the original
-  one-hour cache semantics. With `rpc_secret` set, clients pass
-  `token:<secret>` as the first positional parameter, exactly like the Python
-  reference. `--rpc-open-browser` opens the WebUI after the listener is ready.
+  exposes the 13 original JSON-RPC methods at `/jsonrpc`, the original WebUI at
+  `/ui/`, and signed `/img/` and `/zip/` gallery routes. Thumbnails are
+  generated natively. `/ui/` and `/static/` are not read from local files:
+  each request is proxied to the fixed public origin
+  (`http://xehentai.yooooo.us`), and the answers are kept in a local
+  `webui.gz` cache with the original one-hour TTL and `If-Modified-Since`
+  revalidation. If the origin is unreachable and the cache has no usable
+  entry, the original invalid-request JSON is returned. This repository does
+  not track the built WebUI, and a release package does not ship it. With
+  `rpc_secret` set, clients pass `token:<secret>` as the first positional
+  parameter, exactly like the Python reference. `--rpc-open-browser` opens the
+  WebUI after the listener is ready.
 - **RSS business logic.** `rss/rpc/handlers.rss` selects handlers and
   config/task/session/login effects, `rss/filters/match.rss` holds the page
   filters, and `rss/updater/{github.rss,updater.rss}` hold the update
@@ -82,20 +88,25 @@ therefore starts from any working directory and never reads the build tree.
 
 ## Distribution package
 
-`tools/package_dist.py` assembles a self-contained Linux package around an
+`tools/package_dist.py` assembles a self-contained release package around an
 **already built** executable. It is standard-library Python and does not run
-Cargo, sign, or publish anything:
+Cargo, sign, or publish anything. Unix targets get `tar.gz`; Windows gets
+`zip`:
 
 ```shell
 cargo build --release
 python3 tools/package_dist.py \
   --binary target/release/xeHentai \
   --output /path/to/xehentai-linux-x86_64
+python3 tools/package_dist.py \
+  --binary target/release/xeHentai.exe \
+  --output /path/to/xehentai-windows-x86_64 \
+  --format zip
 ```
 
 The output directory must not exist; the packager creates it exclusively and
-also writes `xehentai-linux-x86_64.tar.gz` next to it. A failure removes the
-partial output instead of leaving a mixed tree. The package contains:
+also writes the matching archive next to it. A failure removes the partial
+output instead of leaving a mixed tree. The package contains:
 
 ```
 xeHentai
@@ -103,15 +114,14 @@ rss/rpc/handlers.rss
 rss/filters/match.rss
 rss/updater/github.rss
 rss/updater/updater.rss
-ui/index.html
-ui/static/**
-ui/PROVENANCE
 locales/**
 config.example.rss
 LICENSE.txt
 ```
 
-It never copies `config.rss`, `config.py`, session files, logs, keys, `target/`,
+There is no `ui/` entry: the WebUI is proxied from its fixed upstream origin at
+run time and cached locally, so nothing about the built pack is shipped. It
+never copies `config.rss`, `config.py`, session files, logs, keys, `target/`,
 `.git/` or the source tree. `locales/` is compiled into the executable but is
 also shipped as a language resource, and `config.example.rss` documents the
 configuration fields.
@@ -139,14 +149,19 @@ shipped. `XEH_UPSTREAM` must point at the pinned Python reference checkout;
 
 ## Browser verification
 
-`tools/browser/` runs the frozen original WebUI against the real
+`tools/browser/` runs the fixed original WebUI build against the real
 `tests::browser_fixture_server` and checks the exact 49 browser checks with an
-independent verifier. The backend serves the frozen UI pack, seeds fixture
+independent verifier. The backend serves that local build, seeds fixture
 tasks through the existing comparison seam and runs no downloader task loop.
 
 Required inputs:
 
 - a fresh run root inside an owned temporary directory (it must not exist);
+- the built WebUI at `ui/` inside the worktree: build
+  `fffonion/xeHentai-webui` at `4e3738ef463fef344e96df613de9a81b4cda4b4e`
+  (`npm install`, `npm run build`) and copy its `dist/` to `ui/`. The directory
+  is git-ignored, is never committed and is never packaged; CI materializes it
+  from that pinned revision before the unit tests;
 - Chromium for Playwright: pass `--exe` or set `XEH_CHROMIUM`, otherwise the
   executable is resolved from the installed Playwright package;
 - a Python interpreter with Pillow and Playwright: pass `--python` or set
@@ -182,8 +197,9 @@ historical positive control for the verifier, not current evidence. For the
 differential `webui` suite, set `XEH_WEBUI_CHECKOUT` to an independent build of
 the original WebUI at `4e3738ef463fef344e96df613de9a81b4cda4b4e` and
 `XEH_BROWSER_REPORT` to the report from a browser run.
-`tools/browser/compare_webui_pack.py` byte-compares such a build with `ui/`,
-excluding source maps and `PROVENANCE`.
+`tools/browser/compare_webui_pack.py` byte-compares two such local builds,
+excluding source maps and `PROVENANCE`; it is a development tool and CI no
+longer needs it, because the tracked `ui/` it used to compare against is gone.
 
 The dependency `pd-vm` is pinned to the RustScript revision
 `cdb0b798d631cd7ffab6dfed3fe4b69381ed3340`.
@@ -192,15 +208,19 @@ The dependency `pd-vm` is pinned to the RustScript revision
 
 `.github/workflows/ci.yml` runs on GitHub Actions:
 
-- **Linux**: formatting, strict Clippy, the unit tests, the Python tool tests
-  with the pinned oracle and Pillow, a release build, packaging and a package
-  RPC smoke test, a real browser run of the original UI with the independent
+- **Linux**: formatting, strict Clippy, a materialization of the fixed upstream
+  WebUI build into the ignored `ui/` directory, the unit tests, the Python tool
+  tests with the pinned oracle and Pillow, a release build, packaging and a
+  package RPC smoke test, a real browser run of that UI with the independent
   49-check verifier, and one differential run of all suites (two internal
   rounds) followed by `--verify-all` bound to the checked-out HEAD.
-- **macOS / Windows**: compilation and strict Clippy only. These jobs are not
-  runtime or feature-parity verification.
+- **macOS / Windows**: native consumer execution; these jobs run for a tag.
 
-CI has no deployment, release publishing, push or repository secret access.
+Branch and pull-request CI does no release publishing and uses no repository
+secrets. `.github/workflows/release.yml` runs on a tag push (or an explicit
+dispatch for an existing tag): it builds the release executable, packages one
+archive per platform with `tools/package_dist.py`, smoke-starts the unpacked
+package, and publishes the three assets on the GitHub release for that tag.
 
 ## Platform support
 
@@ -223,7 +243,9 @@ before relying on any non-Linux build.
   `i18n.rs`, `util/`, `worker.rs`, `rpc/`, `filters/`, `updater/`, `task/`).
 - `rss/` — RustScript sources (kept separate from Rust).
 - `locales/` — translated YAML resources (`en_us`, `zh_hans`, `zh_hant`).
-- `ui/` — frozen original WebUI static pack and its provenance notice.
+- `ui/` — not tracked. CI materializes the fixed upstream WebUI build here for
+  the browser proofs; at run time the server proxies `/ui/` and `/static/`
+  instead of reading it.
 - `tools/` — comparison harness, feature inventory, tool tests and the release
   packager.
 - `config.example.rss` — example user configuration.

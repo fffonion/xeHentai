@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Byte-compare a rebuilt original WebUI pack with the frozen candidate pack.
+"""Byte-compare two local builds of the original WebUI.
 
-Both sides exclude source maps; the candidate also excludes its PROVENANCE
+Both sides exclude source maps; the second side also excludes a `PROVENANCE`
 notice, which is pack metadata rather than a served asset. The comparison is
-whole-file byte equality with no hashes or digests.
+whole-file byte equality with no hashes or digests. Both paths are local
+builds: this repository does not track `ui/`.
 
 Usage:
   python tools/browser/compare_webui_pack.py --dist <built/dist> \
-      --candidate <repo/ui> [--expected-count 7]
+      --candidate <materialized/ui> [--expected-count 7]
 """
 import argparse
 import sys

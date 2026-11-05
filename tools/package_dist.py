@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-"""Assemble a self-contained Linux release directory and its tar.gz.
+"""Assemble a self-contained release directory and its archive.
 
 The packager takes an explicitly built executable and the project's runtime
 resources, copies them into an exclusive output directory and writes a
-matching archive next to it. It never builds Cargo, copies the source tree or
-signs/publishes anything. Standard library only:
+matching archive next to it. The WebUI is deliberately not part of a package:
+the host serves `/ui/` and `/static/` by proxying the fixed public origin
+(`http://xehentai.yooooo.us`) and caches the answers locally. Unix hosts get
+`tar.gz`; Windows gets `zip`, so the same tool packages all three release
+platforms. It never builds Cargo, copies the source tree or signs/publishes
+anything. Standard library only:
 
     python3 tools/package_dist.py --binary target/release/xeHentai --output dist/pkg
+    python3 tools/package_dist.py --binary target/release/xeHentai.exe --output dist/pkg --format zip
 """
 
 import argparse
@@ -15,9 +20,14 @@ import shutil
 import sys
 import tarfile
 import tempfile
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# Archive suffixes this tool can produce. `tar.gz` keeps the historical
+# behavior and is the Unix default; `zip` is the Windows default.
+ARCHIVE_SUFFIXES = {"tar.gz": ".tar.gz", "zip": ".zip"}
 
 # Runtime files the executable loads from its own directory. `locales` is
 # compiled into the binary, but the plan ships the translation resources.
@@ -26,12 +36,10 @@ REQUIRED_FILES = (
     "rss/filters/match.rss",
     "rss/updater/github.rss",
     "rss/updater/updater.rss",
-    "ui/index.html",
-    "ui/PROVENANCE",
     "config.example.rss",
     "LICENSE.txt",
 )
-REQUIRED_DIRS = ("ui/static", "locales")
+REQUIRED_DIRS = ("locales",)
 
 
 class PackagingError(Exception):
@@ -69,8 +77,62 @@ def plan(source_root, binary):
     return pairs
 
 
-def build(source_root, binary, output):
-    """Copy the planned resources into `output` and create `output`.tar.gz`.
+def archive_path(output, archive_format):
+    """Return the archive path that belongs beside `output`."""
+    try:
+        suffix = ARCHIVE_SUFFIXES[archive_format]
+    except KeyError as error:
+        raise PackagingError(f"unsupported archive format: {archive_format}") from error
+    return Path(output).with_name(Path(output).name + suffix)
+
+
+def _write_archive(temporary_archive, staged, output, archive_format):
+    if archive_format == "tar.gz":
+        with tarfile.open(temporary_archive, "w:gz") as tar:
+            tar.add(staged, arcname=output.name)
+        return
+    # `zip` stores no Unix mode bits that a Windows host would honor, and the
+    # executable bit has no meaning there; keep the entry names relative to the
+    # package root so both formats unpack to the same tree.
+    with zipfile.ZipFile(
+        temporary_archive, "w", compression=zipfile.ZIP_DEFLATED
+    ) as archive:
+        for path in sorted(p for p in staged.rglob("*") if p.is_file()):
+            archive.write(path, arcname=f"{output.name}/{path.relative_to(staged).as_posix()}")
+
+
+def _publish_archive(temporary_archive, archive, archive_format):
+    """Publish the finished archive without ever overwriting an existing one.
+
+    `tar.gz` keeps its historical atomic hard link. `zip` is published with an
+    exclusive create plus a byte copy, because the Windows host this format
+    targets cannot be assumed to support a hard link on every runner volume;
+    the exclusive create is still the authority that refuses a second writer.
+    """
+    if archive_format == "tar.gz":
+        try:
+            os.link(temporary_archive, archive)
+        except FileExistsError as error:
+            raise PackagingError(f"archive already exists: {archive}") from error
+        return
+    try:
+        descriptor = os.open(archive, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError as error:
+        raise PackagingError(f"archive already exists: {archive}") from error
+    try:
+        with os.fdopen(descriptor, "wb") as destination, open(
+            temporary_archive, "rb"
+        ) as source:
+            shutil.copyfileobj(source, destination)
+            destination.flush()
+            os.fsync(destination.fileno())
+    except BaseException:
+        Path(archive).unlink(missing_ok=True)
+        raise
+
+
+def build(source_root, binary, output, archive_format="tar.gz"):
+    """Copy the planned resources into `output` and create its archive.
 
     The output directory is acquired with a single non-recursive mkdir after
     the input plan is validated; that mkdir is the exclusivity authority, so a
@@ -82,7 +144,7 @@ def build(source_root, binary, output):
     overwriting an archive that appeared while this invocation was staging.
     """
     output = Path(output)
-    archive = output.with_name(output.name + ".tar.gz")
+    archive = archive_path(output, archive_format)
     if output.exists() or output.is_symlink():
         raise PackagingError(f"output already exists: {output}")
     if archive.exists() or archive.is_symlink():
@@ -101,12 +163,11 @@ def build(source_root, binary, output):
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
         handle, temporary_archive = tempfile.mkstemp(
-            prefix=".package-", suffix=".tar.gz", dir=output.parent
+            prefix=".package-", suffix=ARCHIVE_SUFFIXES[archive_format], dir=output.parent
         )
         os.close(handle)
         os.chmod(temporary_archive, 0o644)
-        with tarfile.open(temporary_archive, "w:gz") as tar:
-            tar.add(staged, arcname=output.name)
+        _write_archive(temporary_archive, staged, output, archive_format)
         try:
             output.mkdir()
         except FileExistsError as error:
@@ -116,10 +177,7 @@ def build(source_root, binary, output):
         # staged children in cannot replace anything that already exists.
         for child in sorted(staged.iterdir()):
             os.replace(child, output / child.name)
-        try:
-            os.link(temporary_archive, archive)
-        except FileExistsError as error:
-            raise PackagingError(f"archive already exists: {archive}") from error
+        _publish_archive(temporary_archive, archive, archive_format)
     except BaseException:
         if acquired:
             shutil.rmtree(output, ignore_errors=True)
@@ -137,9 +195,15 @@ def main(argv=None):
     )
     parser.add_argument("--binary", required=True, type=Path, help="built xeHentai executable")
     parser.add_argument("--output", required=True, type=Path, help="new, exclusive package directory")
+    parser.add_argument(
+        "--format",
+        choices=sorted(ARCHIVE_SUFFIXES),
+        default="tar.gz",
+        help="archive format written beside the package directory (default: tar.gz)",
+    )
     arguments = parser.parse_args(argv)
     try:
-        archive = build(ROOT, arguments.binary, arguments.output)
+        archive = build(ROOT, arguments.binary, arguments.output, arguments.format)
     except (PackagingError, OSError) as error:
         print(f"package_dist: {error}", file=sys.stderr)
         return 1

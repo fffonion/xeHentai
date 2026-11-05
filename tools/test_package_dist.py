@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Content and failure tests for the self-contained Linux packager.
+"""Content and failure tests for the self-contained release packager.
 
 The packager is the standard-library entry point that copies an explicitly
 built executable and the project's runtime resources into an exclusive output
-directory and a matching tar.gz. These tests exercise the real repository
+directory and a matching archive. These tests exercise the real repository
 resources and a fake executable only as command input: no Cargo build, no
 network, no signing. Standard library only:
 
@@ -20,6 +20,7 @@ import tarfile
 import tempfile
 import threading
 import traceback
+import zipfile
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parent
@@ -41,6 +42,24 @@ def _tree_files(root):
 def _run(binary, output):
     return subprocess.run(
         [sys.executable, str(SCRIPT), "--binary", str(binary), "--output", str(output)],
+        capture_output=True,
+        text=True,
+        cwd=tempfile.gettempdir(),
+    )
+
+
+def _run_zip(binary, output):
+    return subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--binary",
+            str(binary),
+            "--output",
+            str(output),
+            "--format",
+            "zip",
+        ],
         capture_output=True,
         text=True,
         cwd=tempfile.gettempdir(),
@@ -74,6 +93,8 @@ def test_package_contains_runtime_files_with_exact_bytes():
         assert not (output / "config.py").exists()
         assert not (output / "target").exists()
         assert not (output / ".git").exists()
+        # The WebUI is served from the remote origin, never shipped.
+        assert not (output / "ui").exists()
         archive = output.with_name(output.name + ".tar.gz")
         assert archive.is_file()
         with tarfile.open(archive, "r:gz") as tar:
@@ -84,8 +105,8 @@ def test_package_contains_runtime_files_with_exact_bytes():
             for relative in [
                 "xeHentai",
                 "rss/rpc/handlers.rss",
-                "ui/index.html",
                 "locales/en_us.yml",
+                "config.example.rss",
             ]:
                 archived = tar.extractfile(members[prefix + relative]).read()
                 assert archived == (output / relative).read_bytes(), relative
@@ -333,6 +354,74 @@ def test_overlapping_invocations_yield_one_winner_and_one_refusal():
                 assert archived == (output / relative).read_bytes(), relative
 
 
+def test_zip_format_contains_the_same_tree_with_exact_bytes():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        binary = _fake_binary(tmp, "xeHentai.exe")
+        output = tmp / "dist" / "xehentai-windows-x86_64"
+        result = _run_zip(binary, output)
+        assert result.returncode == 0, result.stderr
+        archive = output.with_name(output.name + ".zip")
+        assert archive.is_file()
+        assert not output.with_name(output.name + ".tar.gz").exists()
+        with zipfile.ZipFile(archive) as package:
+            prefix = output.name + "/"
+            names = {
+                info.filename[len(prefix):]
+                for info in package.infolist()
+                if info.filename.startswith(prefix) and not info.is_dir()
+            }
+            expected = set(_tree_files(output))
+            assert names == expected, sorted(names ^ expected)
+            assert "xeHentai.exe" in names
+            assert not any(name.startswith("ui/") for name in names), sorted(names)
+            for relative in ["xeHentai.exe", "rss/rpc/handlers.rss", "locales/en_us.yml"]:
+                assert package.read(prefix + relative) == (output / relative).read_bytes(), relative
+
+
+def test_existing_zip_archive_is_refused_without_overwrite():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        binary = _fake_binary(tmp, "xeHentai.exe")
+        output = tmp / "dist" / "xehentai-windows-x86_64"
+        output.parent.mkdir(parents=True)
+        archive = output.with_name(output.name + ".zip")
+        archive.write_bytes(b"existing archive\n")
+        result = _run_zip(binary, output)
+        assert result.returncode != 0
+        assert "already exists" in result.stderr, result.stderr
+        assert archive.read_bytes() == b"existing archive\n"
+        assert not output.exists()
+
+
+def test_unknown_archive_format_is_rejected():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        try:
+            package_dist.archive_path(tmp / "pkg", "7z")
+        except package_dist.PackagingError as error:
+            assert "unsupported archive format" in str(error), error
+        else:
+            raise AssertionError("an unknown archive format must be rejected")
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--binary",
+                str(_fake_binary(tmp)),
+                "--output",
+                str(tmp / "dist" / "pkg"),
+                "--format",
+                "7z",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=tempfile.gettempdir(),
+        )
+        assert result.returncode != 0
+        assert "--format" in result.stderr, result.stderr
+
+
 TESTS = [
     test_package_contains_runtime_files_with_exact_bytes,
     test_missing_binary_fails_and_writes_nothing,
@@ -342,6 +431,9 @@ TESTS = [
     test_archive_created_while_staging_is_refused_without_overwrite,
     test_empty_output_directory_created_while_staging_is_preserved,
     test_overlapping_invocations_yield_one_winner_and_one_refusal,
+    test_zip_format_contains_the_same_tree_with_exact_bytes,
+    test_existing_zip_archive_is_refused_without_overwrite,
+    test_unknown_archive_format_is_rejected,
 ]
 
 
