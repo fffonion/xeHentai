@@ -24,6 +24,17 @@ def check_set(names):
     return [{"name": name, "ok": True, "detail": ""} for name in names]
 
 
+HEAD = "b" * 40
+WORKTREE = "/owned/worktree"
+ARCHIVE_ENTRIES = [
+    ".xehdone",
+    "unique-1.jpg",
+    "unique-2.jpg",
+    "unique-3.jpg",
+    "unique-4.jpg",
+]
+
+
 def sample(root):
     probe = Path(root) / "probe-report.json"
     probe.write_text(
@@ -44,7 +55,7 @@ def sample(root):
         "schema": verifier.REPORT_SCHEMA,
         "case": verifier.CASE,
         "run_root": str(Path(root)),
-        "source": {"head": "a" * 40, "dirty": False, "worktree": "/owned/worktree"},
+        "source": {"head": HEAD, "dirty": False, "worktree": WORKTREE},
         "host": {"exe": "xeHentai", "same_exe_path": True},
         "rss": {
             "files": [
@@ -108,14 +119,45 @@ class ReportVerifierTests(unittest.TestCase):
     def tearDown(self):
         self.directory.cleanup()
 
-    def assertRejected(self, report, needle=None, root=None, clean=False):
+    def assertRejected(
+        self, report, needle=None, root=None, clean=False, head=HEAD, worktree=WORKTREE
+    ):
         with self.assertRaises(verifier.VerificationError) as caught:
-            verifier.verify_report(report, root or self.root, require_clean=clean)
+            verifier.verify_report(report, root or self.root, clean, head, worktree)
         if needle:
             self.assertIn(needle, str(caught.exception))
 
     def test_positive_contract_report_is_accepted(self):
-        verifier.verify_report(self.base, self.root)
+        verifier.verify_report(self.base, self.root, False, HEAD, WORKTREE)
+
+    def test_a_report_from_another_clean_commit_is_rejected(self):
+        stale = copy.deepcopy(self.base)
+        stale["source"]["head"] = "c" * 40
+        self.assertRejected(stale, "does not match the checkout")
+
+    def test_a_report_from_another_worktree_is_rejected(self):
+        wrong = copy.deepcopy(self.base)
+        wrong["source"]["worktree"] = str(self.root / "another-worktree")
+        self.assertRejected(wrong, "worktree")
+
+    def test_the_binding_requires_both_trusted_values(self):
+        with self.assertRaises(verifier.VerificationError) as caught:
+            verifier.verify_report(self.base, self.root, False, None, WORKTREE)
+        self.assertIn("expected head and worktree", str(caught.exception))
+        with self.assertRaises(verifier.VerificationError) as caught:
+            verifier.verify_report(self.base, self.root, False, HEAD, None)
+        self.assertIn("expected head and worktree", str(caught.exception))
+
+    def test_a_malformed_expected_head_is_rejected_not_repaired(self):
+        for bad in (HEAD.upper(), " " + HEAD, HEAD[:-1], HEAD + "\n"):
+            with self.assertRaises(verifier.VerificationError) as caught:
+                verifier.verify_report(self.base, self.root, False, bad, WORKTREE)
+            self.assertIn("expected head format", str(caught.exception))
+
+    def test_the_binding_requires_a_clean_source_without_the_flag(self):
+        dirty = copy.deepcopy(self.base)
+        dirty["source"]["dirty"] = True
+        self.assertRejected(dirty, "dirty")
 
     def test_clean_requirement_rejects_a_dirty_report(self):
         dirty = copy.deepcopy(self.base)
@@ -158,10 +200,28 @@ class ReportVerifierTests(unittest.TestCase):
     def test_missing_archive_entry_and_compression_are_rejected(self):
         report = copy.deepcopy(self.base)
         report["archive"]["entries"].remove("unique-3.jpg")
-        self.assertRejected(report, "missing a renamed image")
+        self.assertRejected(report, "archive entry set")
         report = copy.deepcopy(self.base)
         report["archive"]["compression"] = "deflated"
         self.assertRejected(report, "compression")
+
+    def test_the_archive_entry_set_is_exactly_the_marker_and_four_images(self):
+        report = copy.deepcopy(self.base)
+        report["archive"]["entries"].remove(".xehdone")
+        self.assertRejected(report, "archive entry set")
+        report = copy.deepcopy(self.base)
+        report["archive"]["entries"].insert(1, "notes.txt")
+        self.assertRejected(report, "archive entry set")
+        report = copy.deepcopy(self.base)
+        report["archive"]["entries"].insert(1, "unique-2.jpg")
+        self.assertRejected(report, "archive entry set")
+        report = copy.deepcopy(self.base)
+        report["archive"]["entries"] = ["unique-1.jpg", ".xehdone"] + ARCHIVE_ENTRIES[2:]
+        self.assertRejected(report, "archive entry set")
+        report = copy.deepcopy(self.base)
+        report["archive"]["entries"].append("unique-5.jpg")
+        self.assertRejected(report, "archive entry set")
+        self.assertEqual(verifier.ARCHIVE_ENTRIES, ARCHIVE_ENTRIES)
 
     def test_stale_run_root_and_missing_probe_report_are_rejected(self):
         report = copy.deepcopy(self.base)

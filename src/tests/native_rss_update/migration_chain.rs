@@ -841,20 +841,9 @@ fn zip_snapshot<R: Read + Seek>(reader: R) -> Vec<(String, bool, Vec<u8>)> {
 
 fn assert_archive(entries: &[(String, bool, Vec<u8>)], images: &[Vec<u8>]) -> Vec<String> {
     let mut names = Vec::new();
-    for (name, stored, body) in entries {
+    for (name, stored, _) in entries {
         assert!(stored, "archive entry {name} is not STORE");
         names.push(name.clone());
-        if let Some(fid) = name
-            .strip_prefix("unique-")
-            .and_then(|rest| rest.strip_suffix(".jpg"))
-            .and_then(|fid| fid.parse::<usize>().ok())
-        {
-            assert_eq!(
-                body,
-                &images[fid - 1],
-                "archive entry {name} does not carry the downloaded bytes"
-            );
-        }
     }
     let sorted = {
         let mut clone = names.clone();
@@ -862,13 +851,132 @@ fn assert_archive(entries: &[(String, bool, Vec<u8>)], images: &[Vec<u8>]) -> Ve
         clone
     };
     assert_eq!(names, sorted, "archive entries must be bytewise sorted");
-    for fid in 1..=4 {
+    assert_eq!(
+        names,
+        ARCHIVE_ENTRIES.map(str::to_string).to_vec(),
+        "archive entry set must be exactly the completion marker and the four renamed images"
+    );
+    for (index, name) in names.iter().enumerate() {
+        let Some(fid) = name
+            .strip_prefix("unique-")
+            .and_then(|rest| rest.strip_suffix(".jpg"))
+            .and_then(|fid| fid.parse::<usize>().ok())
+        else {
+            continue;
+        };
         assert!(
-            names.contains(&format!("unique-{fid}.jpg")),
-            "archive is missing unique-{fid}.jpg"
+            (1..=images.len()).contains(&fid),
+            "archive entry {name} is not one of the downloaded images"
+        );
+        assert_eq!(
+            entries[index].2,
+            images[fid - 1],
+            "archive entry {name} does not carry the downloaded bytes"
         );
     }
     names
+}
+
+/// The exact archive the real rename/archive step produces: the completion
+/// marker plus the four renamed images, bytewise sorted.
+const ARCHIVE_ENTRIES: [&str; 5] = [
+    ".xehdone",
+    "unique-1.jpg",
+    "unique-2.jpg",
+    "unique-3.jpg",
+    "unique-4.jpg",
+];
+
+/// Negative qualifiers for the archive contract. A synthetic ZIP is only
+/// constructed here to prove the checker refuses a wrong entry set; the real
+/// product archive is the one the chain itself builds and inspects.
+type ZipBytes = zip::ZipWriter<std::io::Cursor<Vec<u8>>>;
+
+fn stored_entry(writer: &mut ZipBytes, name: &str, body: &[u8]) {
+    writer
+        .start_file(
+            name,
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored),
+        )
+        .expect("synthetic zip entry");
+    writer.write_all(body).expect("synthetic zip body");
+}
+
+fn finish_zip(writer: ZipBytes) -> Vec<u8> {
+    writer.finish().expect("synthetic zip finish").into_inner()
+}
+
+fn image_index(name: &str) -> Option<usize> {
+    name.strip_prefix("unique-")
+        .and_then(|rest| rest.strip_suffix(".jpg"))
+        .and_then(|fid| fid.parse().ok())
+}
+
+fn synthetic_archive(names: &[&str], images: &[Vec<u8>]) -> Vec<(String, bool, Vec<u8>)> {
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for name in names {
+        let body: &[u8] = match image_index(name) {
+            Some(fid) => &images[fid - 1],
+            None => b"",
+        };
+        stored_entry(&mut writer, name, body);
+    }
+    zip_snapshot(std::io::Cursor::new(finish_zip(writer)))
+}
+
+fn chain_images() -> Vec<Vec<u8>> {
+    (1..=4usize).map(|fid| vec![fid as u8; 32 + fid]).collect()
+}
+
+#[test]
+fn archive_entry_set_is_exactly_the_marker_and_four_images() {
+    let images = chain_images();
+    let entries = synthetic_archive(&ARCHIVE_ENTRIES, &images);
+    assert_eq!(
+        assert_archive(&entries, &images),
+        ARCHIVE_ENTRIES.map(str::to_string).to_vec()
+    );
+}
+
+#[test]
+#[should_panic(expected = "archive entry set")]
+fn archive_without_the_completion_marker_is_rejected() {
+    let images = chain_images();
+    let entries = synthetic_archive(&ARCHIVE_ENTRIES[1..], &images);
+    assert_archive(&entries, &images);
+}
+
+#[test]
+#[should_panic(expected = "archive entry set")]
+fn archive_with_an_extra_entry_is_rejected() {
+    let images = chain_images();
+    let entries = synthetic_archive(
+        &[
+            ".xehdone",
+            "notes.txt",
+            "unique-1.jpg",
+            "unique-2.jpg",
+            "unique-3.jpg",
+            "unique-4.jpg",
+        ],
+        &images,
+    );
+    assert_archive(&entries, &images);
+}
+
+#[test]
+#[should_panic(expected = "archive entry set")]
+fn archive_with_a_duplicate_entry_is_rejected() {
+    let images = chain_images();
+    let mut entries = synthetic_archive(&ARCHIVE_ENTRIES, &images);
+    // The pinned zip reader keys entries by name, so a repeated
+    // central-directory name is collapsed before this checker sees it. The
+    // control therefore feeds the entry list a per-record reader would hand
+    // over, which is exactly what the ordered-vector contract must refuse.
+    let repeated = entries[2].clone();
+    entries.insert(3, repeated);
+    assert_archive(&entries, &images);
 }
 
 fn task_from_session(bytes: &[u8]) -> Value {
@@ -1470,7 +1578,7 @@ fn native_legacy_session_to_archived_ui_and_rss_b_same_host() {
     );
     report.record(
         "phaseA.rename_archive",
-        archive_names.len() >= 4,
+        archive_names == ARCHIVE_ENTRIES.map(str::to_string).to_vec(),
         format!(
             "STORE archive entries {:?}; loose gallery removed",
             archive_names

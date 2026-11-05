@@ -388,6 +388,46 @@ def test_migration_gate_verifies_a_fresh_report_and_binds_the_run_root():
     assert "${{ runner.temp }}/migration-gate/gate.json" in text
 
 
+def test_migration_gate_binds_the_actual_checkout_not_the_report():
+    block = migration_block()
+    # Trusted identity comes from real Git reads with checked exit status.
+    assert '"--expected-head"' in block
+    assert '"--expected-worktree"' in block
+    assert "returncode != 0" in block
+    assert '"rev-parse", "HEAD"' in block
+    assert '"--show-toplevel"' in block
+    assert '"status", "--porcelain", "--untracked-files=all"' in block
+    assert "GITHUB_SHA" in block
+    assert "SOURCE_CHANGED" in block
+    # A missing report is still rejected through the bound verifier call.
+    assert '"REPORT_MISSING"' in block
+
+
+def test_migration_gate_verifier_argv_carries_the_trusted_identity():
+    namespace = migration_functions("verifier_entry")
+    calls = []
+
+    class Completed:
+        returncode = 0
+        stdout = "migration report: ACCEPTED\n"
+        stderr = ""
+
+    namespace["run"] = lambda argv, timeout: (calls.append(argv), Completed())[1]
+    namespace["REPORT"] = ROOT / "missing-migration-report.json"
+    namespace["RUN_ROOT"] = ROOT
+    namespace["VERIFIER"] = ROOT / "tools" / "browser" / "migration_probe.py"
+    namespace["PYTHON"] = "python3"
+    entry = namespace["verifier_entry"]({"head": "a" * 40, "worktree": "/bound/worktree"})
+    argv = calls[0]
+    assert argv[argv.index("--expected-head") + 1] == "a" * 40
+    assert argv[argv.index("--expected-worktree") + 1] == "/bound/worktree"
+    assert argv[argv.index("--expected-root") + 1] == str(ROOT)
+    # A zero exit from a run without a report is still a refusal.
+    assert entry["report_present"] is False
+    assert entry["returncode"] == 0
+    assert entry["verdict"] == "REPORT_MISSING"
+
+
 TESTS = [
     test_libtest_pass_is_the_only_pass_verdict,
     test_zero_match_is_rejected_even_with_exit_zero,
@@ -405,6 +445,8 @@ TESTS = [
     test_migration_gate_rejects_zero_match_and_accepts_only_exact_pass,
     test_migration_gate_argv_is_ignored_exact_and_target_bound,
     test_migration_gate_verifies_a_fresh_report_and_binds_the_run_root,
+    test_migration_gate_binds_the_actual_checkout_not_the_report,
+    test_migration_gate_verifier_argv_carries_the_trusted_identity,
 ]
 
 

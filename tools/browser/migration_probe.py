@@ -38,6 +38,16 @@ PROBE_SCHEMA = "m8-migration-ui-probe-v1"
 B_MARKER = "&m8=b"
 PYTHON_REVISION = "43fc55c0c662f195d048becf6276a26ce06b09d9"
 UPDATE_ID = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+# The real archive step writes the completion marker plus the four renamed
+# images, bytewise sorted. Missing, extra, duplicated or reordered entries are
+# a contract violation, not a smaller archive.
+ARCHIVE_ENTRIES = [
+    ".xehdone",
+    "unique-1.jpg",
+    "unique-2.jpg",
+    "unique-3.jpg",
+    "unique-4.jpg",
+]
 
 REQUIRED_CHECKS = [
     "oracle.python_session_fixture",
@@ -115,8 +125,20 @@ def _check_list(value, expected_names, what):
             raise VerificationError(f"{what} entry {item['name']} detail shape")
 
 
-def verify_report(report, expected_root, require_clean=False):
-    """Fail closed: any missing, extra, stale or mistyped field is an error."""
+def verify_report(
+    report,
+    expected_root,
+    require_clean=False,
+    expected_head=None,
+    expected_worktree=None,
+):
+    """Fail closed: any missing, extra, stale or mistyped field is an error.
+
+    ``expected_head``/``expected_worktree`` are the caller's trusted checkout
+    identity (never taken from the report itself); both are mandatory and the
+    source must be clean. ``require_clean`` is the older spelling of that same
+    requirement and stays accepted for existing callers.
+    """
     _exact_keys(report, TOP_LEVEL, "report")
     if report["schema"] != REPORT_SCHEMA:
         raise VerificationError("schema identity")
@@ -127,14 +149,26 @@ def verify_report(report, expected_root, require_clean=False):
         raise VerificationError("stale run root")
     source = report["source"]
     _exact_keys(source, {"head", "dirty", "worktree"}, "source")
+    if not expected_head or not expected_worktree:
+        raise VerificationError("source binding requires the expected head and worktree")
+    if not re.fullmatch(r"[0-9a-f]{40}", str(expected_head)):
+        raise VerificationError("expected head format")
     if not re.fullmatch(r"[0-9a-f]{40}", str(source["head"])):
         raise VerificationError("source head")
+    if source["head"] != expected_head:
+        raise VerificationError("source head does not match the checkout")
     if not isinstance(source["dirty"], bool):
         raise VerificationError("source dirty")
-    if require_clean and source["dirty"]:
+    if source["dirty"]:
         raise VerificationError("source is dirty")
-    if not isinstance(source["worktree"], str) or not source["worktree"]:
+    expected_checkout = Path(expected_worktree)
+    if not expected_checkout.is_absolute():
+        raise VerificationError("expected worktree must be absolute")
+    reported_checkout = source["worktree"]
+    if not isinstance(reported_checkout, str) or not reported_checkout:
         raise VerificationError("source worktree")
+    if str(expected_checkout.resolve()) != str(Path(reported_checkout).resolve()):
+        raise VerificationError("source worktree does not match the checkout")
 
     host = report["host"]
     _exact_keys(host, {"exe", "same_exe_path"}, "host")
@@ -166,9 +200,10 @@ def verify_report(report, expected_root, require_clean=False):
         not isinstance(name, str) for name in archive["entries"]
     ):
         raise VerificationError("archive entries shape")
-    required_entries = [f"unique-{fid}.jpg" for fid in (1, 2, 3, 4)]
-    if not all(name in archive["entries"] for name in required_entries):
-        raise VerificationError("archive is missing a renamed image")
+    if archive["entries"] != ARCHIVE_ENTRIES:
+        raise VerificationError(
+            "archive entry set must be exactly " + ", ".join(ARCHIVE_ENTRIES)
+        )
     if archive["compression"] != "stored":
         raise VerificationError("archive compression")
     if archive["four_images_byte_equal"] is not True:
@@ -271,6 +306,8 @@ def parse_args(argv=None):
     parser.add_argument("--report", type=Path, help="fresh probe report path")
     parser.add_argument("--verify-report", type=Path, help="validate a chain report")
     parser.add_argument("--expected-root", type=Path)
+    parser.add_argument("--expected-head", help="trusted checkout revision of this run")
+    parser.add_argument("--expected-worktree", help="trusted checkout path of this run")
     parser.add_argument("--require-clean", action="store_true")
     return parser.parse_args(argv)
 
@@ -497,9 +534,19 @@ def main(argv=None):
     if args.verify_report:
         if args.expected_root is None:
             raise SystemExit("verify: --expected-root is required")
+        if not args.expected_head:
+            raise SystemExit("verify: --expected-head is required")
+        if not args.expected_worktree:
+            raise SystemExit("verify: --expected-worktree is required")
         try:
             report = json.loads(args.verify_report.read_text(encoding="utf-8"))
-            verify_report(report, args.expected_root.resolve(), args.require_clean)
+            verify_report(
+                report,
+                args.expected_root.resolve(),
+                args.require_clean,
+                args.expected_head,
+                args.expected_worktree,
+            )
         except (OSError, ValueError, VerificationError) as error:
             print(f"migration report: REJECTED ({error})")
             return 1

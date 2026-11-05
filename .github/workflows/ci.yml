@@ -102,6 +102,7 @@ jobs:
           "$XEH_PYTHON" tools/browser/test_verify_webui_49.py
           "$XEH_PYTHON" tools/browser/test_export_diagnostics.py
           "$XEH_PYTHON" tools/browser/test_run.py
+          "$XEH_PYTHON" tools/browser/test_migration_probe.py
       - name: Release build
         run: cargo build --release --locked
       - name: Package and offline smoke
@@ -227,6 +228,7 @@ jobs:
           REPORT = RUN_ROOT / "migration-report.json"
           GATE_DIR = RUNNER_TEMP / "migration-gate"
           VERIFIER = pathlib.Path(WORKSPACE) / "tools" / "browser" / "migration_probe.py"
+          HEAD_PATTERN = re.compile(r"[0-9a-f]{40}")
 
 
           def run(argv, timeout):
@@ -240,6 +242,43 @@ jobs:
                   errors="replace",
                   timeout=timeout,
               )
+
+
+          # Every Git read is a real command whose exit status and output shape
+          # are checked; the trusted HEAD/worktree always comes from the actual
+          # checkout, never from the report being validated.
+          def git(args, what, timeout=60):
+              proc = run(["git"] + args, timeout)
+              if proc.returncode != 0:
+                  raise RuntimeError(f"git {what} exited {proc.returncode}")
+              return proc.stdout
+
+
+          def checkout_head(what):
+              value = git(["rev-parse", "HEAD"], what).strip()
+              if not HEAD_PATTERN.fullmatch(value):
+                  raise RuntimeError(f"git {what} did not return a full revision")
+              return value
+
+
+          def checkout_status(what):
+              # Tracked and untracked files both count: a generated report or an
+              # edited product file must show up here.
+              return git(["status", "--porcelain", "--untracked-files=all"], what)
+
+
+          def checkout_identity(what):
+              top = pathlib.Path(git(["rev-parse", "--show-toplevel"], what).strip())
+              if not top.is_absolute():
+                  raise RuntimeError("the git worktree identity is not absolute")
+              top = top.resolve()
+              if top != pathlib.Path(WORKSPACE).resolve():
+                  raise RuntimeError("the git worktree is not the workflow workspace")
+              return {
+                  "head": checkout_head(what),
+                  "worktree": str(top),
+                  "status": checkout_status(what),
+              }
 
 
           def cargo_argv_chain(test_name, target_dir):
@@ -298,10 +337,8 @@ jobs:
               }
 
 
-          def verify(record):
-              if not REPORT.is_file():
-                  record["verifier"] = {"verdict": "REPORT_MISSING"}
-                  return False
+          def verifier_entry(expected):
+              present = REPORT.is_file()
               proc = run(
                   [
                       PYTHON,
@@ -310,16 +347,40 @@ jobs:
                       str(REPORT),
                       "--expected-root",
                       str(RUN_ROOT),
+                      "--expected-head",
+                      expected["head"],
+                      "--expected-worktree",
+                      expected["worktree"],
                       "--require-clean",
                   ],
                   120,
               )
-              record["verifier"] = {
+              accepted = (
+                  present
+                  and proc.returncode == 0
+                  and proc.stdout.strip() == "migration report: ACCEPTED"
+              )
+              if accepted:
+                  verdict = "ACCEPTED"
+              elif not present:
+                  verdict = "REPORT_MISSING"
+              else:
+                  verdict = "REJECTED"
+              return {
+                  "report_present": present,
+                  "expected_head": expected["head"],
+                  "expected_worktree": expected["worktree"],
                   "returncode": proc.returncode,
                   "stdout": proc.stdout.strip(),
                   "stderr_bytes": len(proc.stderr or ""),
+                  "verdict": verdict,
               }
-              return proc.returncode == 0 and "ACCEPTED" in proc.stdout
+
+
+          def verify(record, expected):
+              entry = verifier_entry(expected)
+              record["verifier"] = entry
+              return entry["verdict"] == "ACCEPTED"
 
 
           def main():
@@ -330,19 +391,30 @@ jobs:
               RUN_ROOT.mkdir(parents=True)
               os.environ["XEH_MIGRATION_RUN_ROOT"] = str(RUN_ROOT)
               os.environ["XEH_MIGRATION_REPORT"] = str(REPORT)
-              head_proc = run(["git", "rev-parse", "HEAD"], 60)
-              status_proc = run(["git", "status", "--porcelain"], 60)
-              source_sha = head_proc.stdout.strip()
+              started = checkout_identity("checkout before the chain")
+              github_sha = os.environ.get("GITHUB_SHA", "").strip()
               record = {
                   "case": CASE,
-                  "source_sha": source_sha,
-                  "source_status_empty": status_proc.stdout.strip() == "",
+                  "source_sha": started["head"],
+                  "source_worktree": started["worktree"],
+                  "source_status_empty": started["status"] == "",
+                  "github_sha": github_sha or None,
+                  "github_sha_matches": None if not github_sha else github_sha == started["head"],
                   "assigned_target": TARGET_DIR,
                   "run_root": str(RUN_ROOT),
                   "report": str(REPORT),
                   "argv": cargo_argv_chain(CASE, TARGET_DIR),
               }
               print("migration-chain: argv " + json.dumps(record["argv"]))
+              if github_sha and github_sha != started["head"]:
+                  # This workflow runs on the pushed commit, not a PR merge
+                  # head; a checkout that is not the triggering commit cannot
+                  # bind the report.
+                  record["verdict"] = "GITHUB_SHA_MISMATCH"
+                  (GATE_DIR / "gate.json").write_text(
+                      json.dumps(record, indent=1) + "\n", encoding="utf-8")
+                  print("migration-chain: checkout HEAD is not GITHUB_SHA")
+                  return 1
               if not record["source_status_empty"]:
                   record["verdict"] = "SOURCE_DIRTY"
                   (GATE_DIR / "gate.json").write_text(
@@ -359,6 +431,10 @@ jobs:
                   zero.stdout, encoding="utf-8")
               if zero_result["verdict"] != "ZERO_MATCH_REJECTED":
                   record["verdict"] = "ZERO_MATCH_CONTROL_INVALID"
+                  # The trusted values are still handed to the production
+                  # verifier, which must refuse the absent/stale report instead
+                  # of trusting anything the run wrote.
+                  record["zero_match_verifier"] = verifier_entry(started)
                   (GATE_DIR / "gate.json").write_text(
                       json.dumps(record, indent=1) + "\n", encoding="utf-8")
                   print("migration-chain: zero-match control did not behave as required")
@@ -377,12 +453,24 @@ jobs:
               result = classify_chain(proc.stdout, proc.returncode, CASE)
               record["chain"] = result
               print("migration-chain: verdict " + result["verdict"])
+              accepted = verify(record, started)
               if result["verdict"] != "PASS":
                   record["verdict"] = result["verdict"]
-              elif not verify(record):
+              elif not accepted:
                   record["verdict"] = "REPORT_REJECTED"
               else:
                   record["verdict"] = "PASS"
+              after = checkout_identity("checkout after the chain")
+              record["checkout_after"] = {
+                  "head": after["head"],
+                  "status_empty": after["status"] == "",
+                  "unchanged": (
+                      after["head"] == started["head"]
+                      and after["status"] == started["status"]
+                  ),
+              }
+              if record["verdict"] == "PASS" and not record["checkout_after"]["unchanged"]:
+                  record["verdict"] = "SOURCE_CHANGED"
               (GATE_DIR / "gate.json").write_text(
                   json.dumps(record, indent=1) + "\n", encoding="utf-8")
               if record["verdict"] != "PASS":
