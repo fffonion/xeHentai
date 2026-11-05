@@ -8,9 +8,11 @@
 //!   re-combinable set of schemes, hosts and ports — plus the one explicitly
 //!   authorized CDN origin, which is admitted ONLY as a redirect target of a
 //!   package request;
-//! * per-hop public-unicast address classification (URL literals before the
-//!   request, DNS answers before the connect) with a loopback exception only
-//!   for the one binding that is itself a loopback literal;
+//! * per-hop address classification (URL literals before the request, DNS
+//!   answers before the connect) with a loopback exception only for the one
+//!   binding that is itself a loopback literal, and the proxy-synthesized
+//!   fake-ip range admitted because a local DNS proxy answers it and carries
+//!   the real connection through its tunnel;
 //! * the 5-redirect chain, relative `Location`, and an immediate refusal on the
 //!   sixth redirect in a row;
 //! * the response body bound (`MAX_PAYLOAD_BYTES` + 1 MiB) and strict UTF-8 for
@@ -201,6 +203,16 @@ impl Transport {
         resolver: Arc<dyn Resolver>,
     ) -> Result<Self, UpdateError> {
         Self::build(api_origin, package_origin, cdn_origin, limit, resolver)
+    }
+
+    /// The per-hop guard this transport installs, so a test can assert one
+    /// named answer's fate without opening the connect that answer would cause.
+    #[cfg(all(test, unix))]
+    pub(crate) fn guard_for_test(&self, allow_loopback: bool) -> Arc<dyn Resolver> {
+        Arc::new(GuardedResolver {
+            inner: Arc::clone(&self.resolver),
+            allow_loopback,
+        })
     }
 
     /// Commit metadata: exactly the API origin. The CDN is never authorized
@@ -400,18 +412,38 @@ fn runtime_error(message: String) -> UpdateError {
     }
 }
 
-/// True only for a public unicast address. An IPv4-mapped IPv6 address is
-/// normalized to IPv4 first, so a mapped private address is never classified as
-/// an IPv6 special case.
-pub(crate) fn is_public_address(address: IpAddr) -> bool {
-    let canonical = match address {
+/// The one address normalization both classifiers share: an IPv4-mapped IPv6
+/// address is judged as the IPv4 address it carries, never as an IPv6 special
+/// case.
+fn canonical_ip(address: IpAddr) -> IpAddr {
+    match address {
         IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
             Some(v4) => IpAddr::V4(v4),
             None => IpAddr::V6(v6),
         },
         v4 => v4,
-    };
-    ip::any::Address::from(canonical).is_unicast_global()
+    }
+}
+
+/// True only for a public unicast address. An IPv4-mapped IPv6 address is
+/// normalized to IPv4 first, so a mapped private address is never classified as
+/// an IPv6 special case.
+pub(crate) fn is_public_address(address: IpAddr) -> bool {
+    ip::any::Address::from(canonical_ip(address)).is_unicast_global()
+}
+
+/// True only for the fake-ip range of a local DNS proxy (Clash/mihomo ship
+/// `fake-ip-range: 198.18.0.1/16`): the answer is synthesized by the proxy and
+/// the real connection is carried by its tunnel, so the address is not what the
+/// request actually reaches. Only this one benchmark /16 is admitted; the
+/// neighbouring 198.19.0.0/16 and every other private or reserved class stay
+/// refused, and the mapped-IPv6 normalization is the same one above.
+pub(crate) fn is_proxy_synthesized_address(address: IpAddr) -> bool {
+    const FAKE_IP_PREFIX: [u8; 2] = [198, 18];
+    match canonical_ip(address) {
+        IpAddr::V4(v4) => v4.octets()[..2] == FAKE_IP_PREFIX[..],
+        IpAddr::V6(_) => false,
+    }
 }
 
 /// The trusted resolver for one hop: the real lookup is filtered before the
@@ -424,9 +456,16 @@ struct GuardedResolver {
 
 impl GuardedResolver {
     fn filter(&self, mut addresses: Vec<SocketAddr>) -> Result<Vec<SocketAddr>, String> {
+        // A Clash/mihomo style local DNS proxy answers with a synthetic address
+        // from its fake-ip range and tunnels the real connection, so refusing
+        // that answer breaks every real upgrade behind such a proxy. Only that
+        // range is admitted here; all other private and reserved classes are
+        // still refused.
         addresses.retain(|address| {
             let ip = address.ip();
-            (self.allow_loopback && ip.is_loopback()) || is_public_address(ip)
+            (self.allow_loopback && ip.is_loopback())
+                || is_public_address(ip)
+                || is_proxy_synthesized_address(ip)
         });
         if addresses.is_empty() {
             return Err("no public unicast address for the trusted origin".into());

@@ -942,6 +942,89 @@ fn m8_address_classifier_is_public_unicast_only() {
     }
 }
 
+/// The proxy-synthesized class: a Clash/mihomo style local DNS proxy answers
+/// names from its fake-ip range (default 198.18.0.1/16) and carries the real
+/// connection through its tunnel, so those answers must be distinguishable from
+/// ordinary private answers — without loosening the public-unicast classifier.
+#[test]
+fn m8_proxy_synthesized_fake_ip_addresses_are_classified_exactly() {
+    use crate::updater::http::{is_proxy_synthesized_address, is_public_address};
+    for synthesized in ["198.18.0.20", "198.18.25.229", "::ffff:198.18.0.20"] {
+        let address: IpAddr = synthesized.parse().expect("address");
+        assert!(
+            is_proxy_synthesized_address(address),
+            "{synthesized} must be a proxy-synthesized fake-ip address"
+        );
+        assert!(
+            !is_public_address(address),
+            "{synthesized} is still not public unicast: the classifier must not move"
+        );
+    }
+    for refused in [
+        "198.19.0.1",
+        "::ffff:198.19.0.1",
+        "8.8.8.8",
+        "::ffff:8.8.8.8",
+        "10.0.0.1",
+        "127.0.0.1",
+        "::1",
+        "fe80::1",
+        "fc00::1",
+        "2001:db8::1",
+    ] {
+        let address: IpAddr = refused.parse().expect("address");
+        assert!(
+            !is_proxy_synthesized_address(address),
+            "{refused} must never be mistaken for a proxy-synthesized answer"
+        );
+    }
+}
+
+/// A name answer inside the fake-ip range is no longer refused by the per-hop
+/// guard, so a real upgrade behind such a proxy reaches the connect instead of
+/// dying with the address policy error. The neighbouring benchmark /16 is still
+/// refused by the same guard through the real transport, so this is one narrow
+/// exception and not a removed guard.
+#[test]
+fn m8_proxy_fake_ip_dns_answer_passes_the_transport_guard() {
+    let resolver = map_resolver(vec![
+        ("update.example", vec!["198.18.0.20"]),
+        ("package.example", vec!["198.19.0.1"]),
+    ]);
+    let transport = crate::updater::http::Transport::for_test(
+        "http://update.example:80",
+        "http://package.example:80",
+        None,
+        crate::updater::http::body_limit(),
+        resolver.clone(),
+    )
+    .expect("transport");
+
+    // The refused half, through the real transport: a synchronous refusal with
+    // the same empty-set error, before any connect.
+    let refused = run_local(async { transport.get_package("http://package.example/y", &[]).await })
+        .expect_err("198.19.0.1 is not a proxy-synthesized answer");
+    assert!(
+        format!("{refused}").contains("no public unicast address"),
+        "the neighbouring benchmark range must keep the address policy error: {refused}"
+    );
+
+    // The admitted half: exactly the guard the transport installs for one hop.
+    // The request itself is not issued — the fake-ip answer has no local
+    // fixture, so driving `get_api` here would open a real outbound connect just
+    // to watch it fail.
+    let guard = transport.guard_for_test(false);
+    let admitted = guard
+        .resolve("update.example", 80)
+        .expect("a proxy-synthesized fake-ip answer must not be refused");
+    assert_eq!(admitted, vec![SocketAddr::from(([198, 18, 0, 20], 80))]);
+    assert!(
+        resolver.calls().iter().any(|host| host == "update.example"),
+        "the name must have been resolved by the transport's own resolver: {:?}",
+        resolver.calls()
+    );
+}
+
 #[test]
 fn m8_transport_refuses_private_and_mapped_private_dns_answers() {
     // A name binding is NOT a loopback literal: whatever it resolves to must be
