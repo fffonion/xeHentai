@@ -1,0 +1,162 @@
+// Update check decision and log selection (`updater/updater.py:21-63`).
+//
+// This module owns the mode decision (off/check/download), the same-update-id
+// comparison, what gets logged for each outcome, the download decision, and the
+// start-time apply/stale decision. It performs NO network operation: the Rust
+// owner supplies the typed binding/request plan from `github.rss`, executes
+// that plan through its own native transport, and enforces the signature,
+// digest, ABI, path, platform and preparation safety whatever these decisions
+// ask for.
+// A `download` decision selects the signed package download; ONLY the native
+// installer publishes pending, and only the next start applies it. A failed
+// candidate is dropped and the running release stays as it is.
+
+struct LogEvent {
+    level: string,
+    key: string,
+    args: [string],
+}
+
+struct ModeDecision {
+    outcome: string,
+    exception: string?,
+}
+
+struct CheckDecision {
+    outcome: string,
+    events: [LogEvent],
+}
+
+struct StartupDecision {
+    outcome: string,
+    events: [LogEvent],
+}
+
+fn mode_error() -> string {
+    "unknown auto update mode"
+}
+
+pub fn upd_mode(mode: string) -> ModeDecision {
+    let mut outcome = "invalid";
+    let mut exception: string? = null;
+    if mode == "off" {
+        outcome = "off";
+    } else if mode == "check" {
+        outcome = "check";
+    } else if mode == "download" {
+        outcome = "download";
+    } else {
+        exception = mode_error();
+    }
+    let decision = {
+        outcome: outcome,
+        exception: exception,
+    };
+    decision
+}
+
+fn event(level: string, key: string, args: [string]) -> LogEvent {
+    let entry = {
+        level: level,
+        key: key,
+        args: args,
+    };
+    entry
+}
+
+fn available_events(ts: string, message: string, update_id: string) -> [LogEvent] {
+    let mut events: [LogEvent] = [];
+    events[events.length] = event("info", "UPDATE_AVAILABLE", [ts, message, update_id]);
+    events
+}
+
+/// The check decision. `applied_update_id` is the update id of the currently
+/// loaded build (empty for this un-updated build); it is an ordinary input and
+/// the only source of the same-id decision.
+pub fn upd_decide(
+    mode: string,
+    applied_update_id: string,
+    update_id: string,
+    ts: string,
+    message: string
+) -> CheckDecision {
+    let mut outcome = "invalid";
+    let mut events: [LogEvent] = [];
+    if applied_update_id.length > 0 && applied_update_id == update_id {
+        outcome = "up_to_date";
+        events[events.length] = event("debug", "UPDATE_NO_UPDATE", []);
+    } else if mode == "check" || mode == "off" {
+        // `off` is reached only by a DIRECT legacy `check_update` call: the CLI
+        // caller suppresses the whole module for `off`, so a direct check still
+        // asks the source and prints the manual-download hint (oracle
+        // u2_off_stable_diff), exactly like `check`.
+        outcome = "available";
+        events = available_events(ts, message, update_id);
+        events[events.length] = event("info", "UPDATE_DOWNLOAD_MANUALLY", []);
+    } else if mode == "download" {
+        // Download mode selects the package download; the native owner then
+        // performs the signed fetch and publishes ONE pending envelope. The
+        // current process keeps running the version it started with.
+        outcome = "download";
+        events = available_events(ts, message, update_id);
+    } else {
+        outcome = "invalid";
+    }
+    let decision = {
+        outcome: outcome,
+        events: events,
+    };
+    decision
+}
+
+/// Failure logging selected by this module; the Rust owner renders the typed
+/// event through the existing App logger.
+pub fn upd_failure(detail: string) -> CheckDecision {
+    let mut events: [LogEvent] = [];
+    events[events.length] = event("warning", "UPDATE_FAILED", [detail]);
+    let decision = {
+        outcome: "failed",
+        events: events,
+    };
+    decision
+}
+
+/// The pending envelope was published: it takes effect on the next start.
+pub fn upd_pending_written(update_id: string) -> CheckDecision {
+    let mut events: [LogEvent] = [];
+    events[events.length] = event("info", "UPDATE_COMPLETE", []);
+    events[events.length] = event("debug", "UPDATE_PENDING_ID", [update_id]);
+    let decision = {
+        outcome: "pending",
+        events: events,
+    };
+    decision
+}
+
+/// Start-time decision. `applied_update_id` is the id recorded for the running
+/// installation and `candidate_update_id` the validated pending package; a
+/// request that is already applied is stale and is dropped instead of being
+/// applied twice. The native owner still enforces every signature, digest,
+/// ABI, path and platform check whatever this decides, and only it decides
+/// that the switch itself succeeded.
+pub fn upd_startup(
+    pending_present: bool,
+    applied_update_id: string,
+    candidate_update_id: string
+) -> StartupDecision {
+    let mut outcome = "none";
+    let mut events: [LogEvent] = [];
+    if pending_present {
+        if applied_update_id.length > 0 && applied_update_id == candidate_update_id {
+            outcome = "stale";
+        } else {
+            outcome = "apply";
+            events[events.length] = event("info", "UPDATE_APPLIED", [candidate_update_id]);
+        }
+    }
+    let decision = {
+        outcome: outcome,
+        events: events,
+    };
+    decision
+}
