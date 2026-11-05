@@ -891,6 +891,64 @@ mod tests {
     }
 
     #[test]
+    fn metadata_accepts_a_matched_empty_japanese_title() {
+        let mut filters = loaded();
+        let body = concat!(
+            "<h1 id=\"gn\">English title</h1><h1 id=\"gj\"></h1>",
+            "Length:</td><td class=\"gdt2\">269 pages</td>",
+            "Showing 1 - 20 of 269 images"
+        );
+
+        let result = filters
+            .metadata(&page(200, "u", "u", body))
+            .expect("metadata call");
+
+        assert_eq!(outcome(&result), "ok");
+        let Value::Map(meta) = field(&result, "meta") else {
+            panic!("meta must be a map");
+        };
+        assert_eq!(meta.get(&Value::string("gjname")), Some(&Value::string("")));
+        assert_eq!(
+            meta.get(&Value::string("gnname")),
+            Some(&Value::string("English title"))
+        );
+    }
+
+    #[test]
+    fn metadata_still_rejects_a_missing_japanese_title_match() {
+        let mut filters = loaded();
+        let body = concat!(
+            "<h1 id=\"gn\">English title</h1>",
+            "Length:</td><td class=\"gdt2\">269 pages</td>",
+            "Showing 1 - 20 of 269 images"
+        );
+
+        let result = filters
+            .metadata(&page(200, "u", "u", body))
+            .expect("metadata call");
+
+        assert_eq!(outcome(&result), "exception");
+        assert_eq!(
+            text_field(&result, "exception").as_deref(),
+            Some("IndexError")
+        );
+
+        let missing_english = concat!(
+            "<h1 id=\"gj\">Japanese title</h1>",
+            "Length:</td><td class=\"gdt2\">269 pages</td>",
+            "Showing 1 - 20 of 269 images"
+        );
+        let result = filters
+            .metadata(&page(200, "u", "u", missing_english))
+            .expect("metadata call");
+        assert_eq!(outcome(&result), "exception");
+        assert_eq!(
+            text_field(&result, "exception").as_deref(),
+            Some("IndexError")
+        );
+    }
+
+    #[test]
     fn pageurl_returns_every_reference_url_and_debug_body() {
         let mut filters = loaded();
         let body = concat!(

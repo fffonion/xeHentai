@@ -263,17 +263,24 @@ pub fn flt_metadata(page: PageResponse) -> MetadataResult {
             ban = expires;
         }
     } else {
-        let gjname = find_first("=\"gj\">(.*?)</h1>", page.text);
-        if gjname.length == 0 {
+        let gj_matches = flt::find_all("=\"gj\">(.*?)</h1>", page.text);
+        if gj_matches.length == 0 {
             outcome = "exception";
             exception = "IndexError";
         } else {
-            let gnname = find_first("=\"gn\">(.*?)</h1>", page.text);
-            if gnname.length == 0 {
+            let gj_row = &gj_matches[0];
+            let gjname = gj_row[1];
+            let gn_matches = flt::find_all("=\"gn\">(.*?)</h1>", page.text);
+            if gn_matches.length == 0 {
                 outcome = "exception";
                 exception = "IndexError";
             } else {
-                let total_text = find_first("Length:</td><td class=\"gdt2\">(\\d+)\\s+page", page.text);
+                let gn_row = &gn_matches[0];
+                let gnname = gn_row[1];
+                let total_text = find_first(
+                    "Length:</td><td class=\"gdt2\">(\\d+)\\s+page",
+                    page.text
+                );
                 if total_text.length == 0 {
                     outcome = "exception";
                     exception = "IndexError";
