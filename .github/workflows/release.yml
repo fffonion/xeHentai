@@ -69,7 +69,7 @@ jobs:
           # the archive into a subdirectory that the upload and publish steps do
           # not look at.
           case "$TAG" in
-            */*|*" "*|*$'\t'*)
+            */*|*" "*|*$'\t'*|-*)
               echo "release tag must be one flat path component: '$TAG'" >&2
               exit 1
               ;;
