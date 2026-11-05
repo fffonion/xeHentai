@@ -99,6 +99,7 @@ jobs:
           "$XEH_PYTHON" tools/test_package_dist.py
           "$XEH_PYTHON" tools/test_compat_gallery.py
           "$XEH_PYTHON" tools/test_native_runtime_gate.py
+          "$XEH_PYTHON" tools/test_m6_windows_console.py
           "$XEH_PYTHON" tools/browser/test_verify_webui_49.py
           "$XEH_PYTHON" tools/browser/test_export_diagnostics.py
           "$XEH_PYTHON" tools/browser/test_run.py
@@ -577,6 +578,16 @@ jobs:
       NATIVE_GALLERY_ROOT_ALIAS_TEST: rpc::server::tests::native_gallery_root_alias_escape_is_denied
       NATIVE_RSS_UPDATE_TEST: tests::native_rss_update::native_signed_rss_update_uses_the_same_host_and_preserves_non_rss_files
       NATIVE_RSS_HOLD_CONTROL_TEST: tests::native_rss_update::native_held_gallery_times_out_then_auto_exits
+      M6_COMMON_CLI_SURFACE_TEST: tests::m6::m6_binary_reports_version_help_and_usage_errors
+      M6_COMMON_URL_DOWNLOAD_TEST: tests::m6::m6_binary_downloads_urls_then_exits_zero
+      M6_UNIX_RESIDENT_TEST: tests::m6::m6_binary_without_urls_stays_resident_until_sigterm
+      M6_UNIX_SECOND_INTERRUPT_TEST: tests::m6::m6_binary_second_interrupt_is_a_bounded_exit
+      M6_UNIX_PTY_PROMPTS_TEST: tests::m6::m6_pty_prompts_in_reference_order_and_answers_drive_the_download
+      M6_UNIX_PTY_CTRL_C_TEST: tests::m6::m6_pty_ctrl_c_at_the_login_prompt_cleans_up_and_exits_zero
+      M6_UNIX_DAEMON_TEST: tests::m6::m6_daemon_forks_once_and_the_child_runs_the_real_app
+      M6_WINDOWS_DAEMON_TEST: tests::m6::m6_daemon_reports_unsupported_on_this_platform
+      M6_WINDOWS_CONSOLE_RESIDENT_TEST: tests::m6::m6_windows_resident_exits_cleanly_on_console_ctrl_c
+      M6_WINDOWS_CONSOLE_PROMPT_TEST: tests::m6::m6_windows_login_prompt_exits_cleanly_on_console_ctrl_c
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -663,6 +674,34 @@ jobs:
                   False,
               ),
           ]
+          # The M6 native platform supplement reuses this exact-case loop: the
+          # two portable CLI/download cases run on both hosts, the existing
+          # Unix lifecycle/PTY/daemon cases on macOS, and three Windows-only
+          # cases (the documented unsupported daemon branch and the isolated
+          # real console Ctrl-C resident/login-prompt cases).
+          M6_COMMON_CASES = [
+              ("m6-cli-surface", os.environ["M6_COMMON_CLI_SURFACE_TEST"]),
+              ("m6-url-download", os.environ["M6_COMMON_URL_DOWNLOAD_TEST"]),
+          ]
+          M6_UNIX_CASES = [
+              ("m6-resident", os.environ["M6_UNIX_RESIDENT_TEST"]),
+              ("m6-second-interrupt", os.environ["M6_UNIX_SECOND_INTERRUPT_TEST"]),
+              ("m6-pty-prompts", os.environ["M6_UNIX_PTY_PROMPTS_TEST"]),
+              ("m6-pty-ctrl-c", os.environ["M6_UNIX_PTY_CTRL_C_TEST"]),
+              ("m6-daemon", os.environ["M6_UNIX_DAEMON_TEST"]),
+          ]
+          M6_WINDOWS_CASES = [
+              ("m6-windows-daemon", os.environ["M6_WINDOWS_DAEMON_TEST"]),
+              (
+                  "m6-windows-console-resident",
+                  os.environ["M6_WINDOWS_CONSOLE_RESIDENT_TEST"],
+              ),
+              (
+                  "m6-windows-console-prompt",
+                  os.environ["M6_WINDOWS_CONSOLE_PROMPT_TEST"],
+              ),
+          ]
+          CASES += [(label, test_name, False) for label, test_name in M6_COMMON_CASES]
           if os.name == "nt":
               # This explicit long-running lifecycle control is required on
               # Windows only; it is marked #[ignore] so it never joins the
@@ -674,6 +713,11 @@ jobs:
                       True,
                   )
               )
+              CASES += [
+                  (label, test_name, False) for label, test_name in M6_WINDOWS_CASES
+              ]
+          else:
+              CASES += [(label, test_name, False) for label, test_name in M6_UNIX_CASES]
 
 
           def _text(value):
@@ -771,6 +815,10 @@ jobs:
               source_sha = head.stdout.strip()
               results = []
               failed = False
+              # The Windows-only console cases take the interpreter this gate
+              # actually runs under; the Rust cases fail (never skip) when it is
+              # absent. No interpreter path is guessed.
+              os.environ["XEH_M6_PYTHON"] = sys.executable
               for label, test_name, ignored in CASES:
                   outdir = RUNNER_TEMP / label
                   outdir.mkdir(parents=True, exist_ok=True)
@@ -910,6 +958,16 @@ jobs:
             ${{ runner.temp }}/native-gallery-private-hardlink
             ${{ runner.temp }}/native-gallery-root-alias
             ${{ runner.temp }}/native-rss-hold-control
+            ${{ runner.temp }}/m6-cli-surface
+            ${{ runner.temp }}/m6-url-download
+            ${{ runner.temp }}/m6-resident
+            ${{ runner.temp }}/m6-second-interrupt
+            ${{ runner.temp }}/m6-pty-prompts
+            ${{ runner.temp }}/m6-pty-ctrl-c
+            ${{ runner.temp }}/m6-daemon
+            ${{ runner.temp }}/m6-windows-daemon
+            ${{ runner.temp }}/m6-windows-console-resident
+            ${{ runner.temp }}/m6-windows-console-prompt
             ${{ runner.temp }}/native-consumers-summary.json
           retention-days: 7
           if-no-files-found: warn

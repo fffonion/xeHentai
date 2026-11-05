@@ -59,6 +59,67 @@ EXTRA_CASES = [
     ("native-gallery-root-alias", "NATIVE_GALLERY_ROOT_ALIAS_TEST", ROOT_ALIAS_TEST),
 ]
 
+# M6 native-platform supplement. The first two exact cases are portable and run
+# on both hosts; the five Unix lifecycle/PTY/daemon cases run on macOS only; the
+# three Windows-only cases are the documented unsupported daemon branch and the
+# isolated real console Ctrl-C resident/login-prompt cases.
+M6_COMMON = [
+    (
+        "m6-cli-surface",
+        "M6_COMMON_CLI_SURFACE_TEST",
+        "tests::m6::m6_binary_reports_version_help_and_usage_errors",
+    ),
+    (
+        "m6-url-download",
+        "M6_COMMON_URL_DOWNLOAD_TEST",
+        "tests::m6::m6_binary_downloads_urls_then_exits_zero",
+    ),
+]
+M6_UNIX = [
+    (
+        "m6-resident",
+        "M6_UNIX_RESIDENT_TEST",
+        "tests::m6::m6_binary_without_urls_stays_resident_until_sigterm",
+    ),
+    (
+        "m6-second-interrupt",
+        "M6_UNIX_SECOND_INTERRUPT_TEST",
+        "tests::m6::m6_binary_second_interrupt_is_a_bounded_exit",
+    ),
+    (
+        "m6-pty-prompts",
+        "M6_UNIX_PTY_PROMPTS_TEST",
+        "tests::m6::m6_pty_prompts_in_reference_order_and_answers_drive_the_download",
+    ),
+    (
+        "m6-pty-ctrl-c",
+        "M6_UNIX_PTY_CTRL_C_TEST",
+        "tests::m6::m6_pty_ctrl_c_at_the_login_prompt_cleans_up_and_exits_zero",
+    ),
+    (
+        "m6-daemon",
+        "M6_UNIX_DAEMON_TEST",
+        "tests::m6::m6_daemon_forks_once_and_the_child_runs_the_real_app",
+    ),
+]
+M6_WINDOWS = [
+    (
+        "m6-windows-daemon",
+        "M6_WINDOWS_DAEMON_TEST",
+        "tests::m6::m6_daemon_reports_unsupported_on_this_platform",
+    ),
+    (
+        "m6-windows-console-resident",
+        "M6_WINDOWS_CONSOLE_RESIDENT_TEST",
+        "tests::m6::m6_windows_resident_exits_cleanly_on_console_ctrl_c",
+    ),
+    (
+        "m6-windows-console-prompt",
+        "M6_WINDOWS_CONSOLE_PROMPT_TEST",
+        "tests::m6::m6_windows_login_prompt_exits_cleanly_on_console_ctrl_c",
+    ),
+]
+
 
 def workflow_text():
     return WORKFLOW.read_text(encoding="utf-8")
@@ -96,6 +157,7 @@ GATE_ENV = {
     "NATIVE_RSS_HOLD_CONTROL_TEST": RSS_HOLD_TEST,
 }
 GATE_ENV.update({env: test for _, env, test in EXTRA_CASES})
+GATE_ENV.update({env: test for _, env, test in M6_COMMON + M6_UNIX + M6_WINDOWS})
 
 
 @contextlib.contextmanager
@@ -117,7 +179,8 @@ def gate_module():
 
     Only the environment is controlled; the block's own code decides the case
     list. This host is not Windows, so the executed list is the seven base
-    cases and the Windows-only append is asserted from the branch source.
+    cases plus the two portable M6 cases and the five Unix M6 cases; the
+    Windows-only append is asserted from the branch source instead.
     """
     namespace = {"__name__": "native_gate_under_test"}
     with gate_environ():
@@ -258,16 +321,17 @@ def test_the_two_original_cases_are_unchanged_and_never_ignored():
     assert "--ignored" not in argv
     assert argv[-3:] == ["--exact", RSS_TEST, "--nocapture"]
     # The five gallery/archive consumers follow them, in order, never ignored.
-    assert labels[2:] == [label for label, _, _ in EXTRA_CASES]
-    assert names[2:] == [test for _, _, test in EXTRA_CASES]
-    assert flags[2:] == [False] * len(EXTRA_CASES)
+    assert labels[2:7] == [label for label, _, _ in EXTRA_CASES]
+    assert names[2:7] == [test for _, _, test in EXTRA_CASES]
+    assert flags[2:7] == [False] * len(EXTRA_CASES)
 
 
 def test_seven_base_cases_bind_the_five_gallery_archive_consumers():
     module = gate_module()
     cases = module["CASES"]
-    assert len(cases) == 7, cases
-    assert [case[2] for case in cases] == [False] * 7
+    base = cases[:7]
+    assert len(base) == 7, base
+    assert [case[2] for case in base] == [False] * 7
     text = workflow_text()
     block = gate_block()
     for label, env, test in EXTRA_CASES:
@@ -278,8 +342,11 @@ def test_seven_base_cases_bind_the_five_gallery_archive_consumers():
         assert "--ignored" not in argv, label
         assert argv[argv.index("--target-dir") + 1] == "/runner/temp/cargo-target"
         assert env in block, env
-    # Windows is the only host that adds the ignored long-running control.
-    assert len(cases) + 1 == 8
+    # This host selects the seven base cases, the two portable M6 cases and the
+    # five Unix M6 cases; Windows instead keeps the seven base, the two portable
+    # M6 cases, the ignored long-running control and three Windows M6 cases.
+    assert len(cases) == 7 + len(M6_COMMON) + len(M6_UNIX), cases
+    assert len(base) + len(M6_COMMON) + 1 + len(M6_WINDOWS) == 13
 
 
 def test_the_ignored_control_is_appended_only_in_the_windows_branch():
@@ -303,6 +370,117 @@ def test_the_ignored_control_is_appended_only_in_the_windows_branch():
     text = workflow_text()
     assert f"NATIVE_RSS_HOLD_CONTROL_TEST: {RSS_HOLD_TEST}" in text
     assert "${{ runner.temp }}/native-rss-hold-control" in text
+
+
+def test_m6_common_and_unix_cases_are_selected_on_this_host():
+    module = gate_module()
+    cases = module["CASES"]
+    labels = [case[0] for case in cases]
+    names = [case[1] for case in cases]
+    flags = [case[2] for case in cases]
+    assert labels[7:9] == [label for label, _, _ in M6_COMMON], labels
+    assert names[7:9] == [test for _, _, test in M6_COMMON], names
+    assert labels[9:] == [label for label, _, _ in M6_UNIX], labels
+    assert names[9:] == [test for _, _, test in M6_UNIX], names
+    assert flags[7:] == [False] * (len(M6_COMMON) + len(M6_UNIX)), flags
+    text = workflow_text()
+    block = gate_block()
+    for label, env, test in M6_COMMON + M6_UNIX:
+        argv = module["cargo_argv"](test, "/runner/temp/cargo-target")
+        assert argv[argv.index("--exact") + 1] == test, label
+        assert "--ignored" not in argv, label
+        assert env in block, env
+        assert f"{env}: {test}" in text, env
+        assert "${{ runner.temp }}/" + label in text, label
+    # The two portable cases are shared: their append is outside the platform
+    # branch, so both hosts evaluate it.
+    assert (
+        "CASES += [(label, test_name, False) for label, test_name in M6_COMMON_CASES]"
+        in block
+    )
+
+
+def test_windows_selection_is_the_seven_base_plus_hold_plus_three_m6():
+    # The selector runs the REAL block with os.name temporarily 'nt'. Nothing is
+    # executed: this asserts which exact names Windows would be asked to run.
+    saved = os.name
+    os.name = "nt"
+    try:
+        cases = gate_module()["CASES"]
+    finally:
+        os.name = saved
+    labels = [case[0] for case in cases]
+    names = [case[1] for case in cases]
+    flags = [case[2] for case in cases]
+    assert labels[:2] == ["native-gallery-read", "native-rss-update"], labels
+    assert labels[2:7] == [label for label, _, _ in EXTRA_CASES], labels
+    assert labels[7:9] == [label for label, _, _ in M6_COMMON], labels
+    assert labels[9] == "native-rss-hold-control", labels
+    assert labels[10:] == [label for label, _, _ in M6_WINDOWS], labels
+    assert names[9] == RSS_HOLD_TEST, names
+    assert names[7:9] == [test for _, _, test in M6_COMMON], names
+    assert names[10:] == [test for _, _, test in M6_WINDOWS], names
+    assert flags[:9] == [False] * 9 and flags[9] is True, flags
+    assert flags[10:] == [False] * len(M6_WINDOWS), flags
+    assert len(cases) == 13, labels
+    # No Unix lifecycle case is selected on Windows.
+    assert not set(labels) & {label for label, _, _ in M6_UNIX}
+
+
+def test_m6_windows_cases_stay_in_the_windows_branch_only():
+    tree = ast.parse(gate_block())
+    lists = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name) and target.id.startswith("M6_"):
+                lists[target.id] = ast.unparse(node.value)
+    assert set(lists) == {"M6_COMMON_CASES", "M6_UNIX_CASES", "M6_WINDOWS_CASES"}, lists
+    module_appends = "\n".join(
+        ast.unparse(node) for node in tree.body if isinstance(node, ast.AugAssign)
+    )
+    assert "M6_COMMON_CASES" in module_appends
+    for label, env, _ in M6_WINDOWS:
+        assert label in lists["M6_WINDOWS_CASES"], label
+        assert env in lists["M6_WINDOWS_CASES"], env
+        assert label not in lists["M6_UNIX_CASES"], label
+        assert label not in lists["M6_COMMON_CASES"], label
+    for label, env, _ in M6_UNIX:
+        assert label in lists["M6_UNIX_CASES"], label
+        assert env in lists["M6_UNIX_CASES"], env
+        assert label not in lists["M6_COMMON_CASES"], label
+    for label, env, _ in M6_COMMON:
+        assert label in lists["M6_COMMON_CASES"], label
+        assert env in lists["M6_COMMON_CASES"], env
+    branches = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.If) and "os.name" in ast.unparse(node.test)
+    ]
+    assert len(branches) == 1
+    body = "\n".join(ast.unparse(node) for node in branches[0].body)
+    orelse = "\n".join(ast.unparse(node) for node in branches[0].orelse)
+    # Only the Windows branch keeps the Windows list; only its else keeps Unix.
+    assert "M6_WINDOWS_CASES" in body, body
+    assert "M6_UNIX_CASES" in orelse, orelse
+    assert "M6_UNIX_CASES" not in body
+    assert "M6_WINDOWS_CASES" not in orelse
+    assert "M6_COMMON_CASES" not in body and "M6_COMMON_CASES" not in orelse
+    assert "native-rss-hold-control" in body
+
+
+def test_m6_gate_passes_the_actual_interpreter_and_names_real_functions():
+    block = gate_block()
+    text = workflow_text()
+    assert 'os.environ["XEH_M6_PYTHON"] = sys.executable' in block
+    assert "XEH_M6_PYTHON" in text
+    rust = (ROOT / "src" / "tests.rs").read_text(encoding="utf-8")
+    assert "XEH_M6_PYTHON" in rust
+    all_cases = M6_COMMON + M6_UNIX + M6_WINDOWS
+    short = [test.rsplit("::", 1)[-1] for _, _, test in all_cases]
+    assert len(short) == len(set(short)), short
+    for name in short:
+        assert f"fn {name}(" in rust, name
 
 
 MIGRATION_BEGIN = "# --- migration-chain-gate: begin ---"
@@ -442,6 +620,10 @@ TESTS = [
     test_the_two_original_cases_are_unchanged_and_never_ignored,
     test_seven_base_cases_bind_the_five_gallery_archive_consumers,
     test_the_ignored_control_is_appended_only_in_the_windows_branch,
+    test_m6_common_and_unix_cases_are_selected_on_this_host,
+    test_windows_selection_is_the_seven_base_plus_hold_plus_three_m6,
+    test_m6_windows_cases_stay_in_the_windows_branch_only,
+    test_m6_gate_passes_the_actual_interpreter_and_names_real_functions,
     test_migration_gate_rejects_zero_match_and_accepts_only_exact_pass,
     test_migration_gate_argv_is_ignored_exact_and_target_bound,
     test_migration_gate_verifies_a_fresh_report_and_binds_the_run_root,

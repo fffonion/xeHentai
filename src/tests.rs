@@ -12641,14 +12641,10 @@ mod m6 {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
-    #[cfg(unix)]
-    use std::process::Child;
-    use std::process::{Command, Stdio};
+    use std::process::{Child, Command, Stdio};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, OnceLock};
-    use std::time::Duration;
-    #[cfg(unix)]
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     const MANIFEST: &str = env!("CARGO_MANIFEST_DIR");
 
@@ -12741,8 +12737,9 @@ mod m6 {
 
     pub(super) fn base_command(root: &Path) -> Command {
         let mut command = Command::new(binary());
+        command.current_dir(root);
+        #[cfg(unix)]
         command
-            .current_dir(root)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", root.join("home"))
@@ -12750,6 +12747,40 @@ mod m6 {
             .env("XDG_CACHE_HOME", root.join("cache"))
             .env("LANG", "C")
             .env("LC_ALL", "C");
+        // The POSIX env_clear/PATH above never held on Windows. Keep the
+        // platform allowlist the proven native_rss_update::spawn uses
+        // (SystemRoot/PATH and other inherited runtime variables) and redirect
+        // only the user/temp roots into this case's owned directory.
+        #[cfg(windows)]
+        for name in [
+            "XEH_EMIT_ROOT",
+            "XEH_EVIDENCE_DIR",
+            "XEH_CAPTURE_OUT",
+            "RUST_TEST_THREADS",
+            "XEH_BUILD_ID",
+            "XEH_M6_PYTHON",
+            "LC_MESSAGES",
+        ] {
+            command.env_remove(name);
+        }
+        #[cfg(windows)]
+        command
+            .env("HOME", root.join("home"))
+            .env("USERPROFILE", root.join("home"))
+            .env("TMPDIR", root.join("tmp"))
+            .env("TEMP", root.join("tmp"))
+            .env("TMP", root.join("tmp"))
+            .env("XDG_CACHE_HOME", root.join("cache"))
+            .env("LANG", "C")
+            .env("LC_ALL", "C");
+        prepare_root(root);
+        command
+    }
+
+    /// The owned per-case root: separate HOME/TMP/cache and the real business
+    /// modules next to the program. Shared by the direct commands and the
+    /// Windows console controller, which starts the binary itself.
+    pub(super) fn prepare_root(root: &Path) {
         std::fs::create_dir_all(root.join("home")).unwrap();
         std::fs::create_dir_all(root.join("tmp")).unwrap();
         std::fs::create_dir_all(root.join("cache")).unwrap();
@@ -12760,7 +12791,6 @@ mod m6 {
         if !rss.is_dir() {
             copy_tree(&Path::new(MANIFEST).join("rss"), &rss);
         }
-        command
     }
 
     pub(super) fn copy_tree(from: &Path, to: &Path) {
@@ -12789,9 +12819,8 @@ mod m6 {
         }
     }
 
-    /// Unix-only: every caller drives a POSIX signal/PTY or daemon child. The
-    /// Windows lifecycle is not exercised by these helpers.
-    #[cfg(unix)]
+    /// Bounded child reaping; pure std so the Windows console case can use the
+    /// same helper without a POSIX-only cfg.
     pub(super) fn wait_exit(
         child: &mut Child,
         timeout: Duration,
@@ -12808,6 +12837,7 @@ mod m6 {
         }
     }
 
+    /// Unix-only callers today; the loop itself is portable std.
     #[cfg(unix)]
     pub(super) fn wait_for<F: FnMut() -> bool>(timeout: Duration, mut check: F) -> bool {
         let deadline = Instant::now() + timeout;
@@ -13678,6 +13708,180 @@ mod m6 {
         let log = std::fs::read_to_string(root.path().join("eh.log")).unwrap();
         assert!(log.contains("started."), "{log}");
         assert!(log.contains("application task loop finished"), "{log}");
+    }
+
+    // MARK: - Windows: documented daemon branch and real console Ctrl-C
+
+    /// Windows has no daemon fork: the documented branch logs the localized
+    /// unsupported message and exits 0. This drives the real executable, never
+    /// a simulated string, and does not implement daemon support.
+    #[cfg(windows)]
+    #[test]
+    fn m6_daemon_reports_unsupported_on_this_platform() {
+        let root = tempfile::tempdir().expect("root");
+        let outcome = run(root.path(), &["--daemon", "--auto-update", "off"]);
+        assert_eq!(
+            outcome.code, 0,
+            "stdout={}\nstderr={}",
+            outcome.stdout, outcome.stderr
+        );
+        let log = std::fs::read_to_string(root.path().join("eh.log")).expect("log file");
+        assert!(
+            log.contains("daemon mode is not supported on platform: windows"),
+            "{log}"
+        );
+    }
+
+    /// Run the stdlib console controller as its own console child and return
+    /// its fixed facts. The controller alone owns FreeConsole/AttachConsole and
+    /// the single broadcast; this runner keeps its console and never signals a
+    /// shared one. A missing interpreter or a non-zero controller status is a
+    /// hard failure, never a skip.
+    #[cfg(windows)]
+    fn console_case(mode: &str, root: &Path) -> serde_json::Value {
+        let python = std::env::var("XEH_M6_PYTHON").expect(
+            "XEH_M6_PYTHON must be the actual gate interpreter (sys.executable); \
+             the Windows console cases never guess one",
+        );
+        assert!(
+            Path::new(&python).is_file(),
+            "XEH_M6_PYTHON must name an existing interpreter"
+        );
+        let script = Path::new(MANIFEST)
+            .join("tools")
+            .join("m6_windows_console.py");
+        assert!(script.is_file(), "missing {}", script.display());
+        let mut command = Command::new(&python);
+        command
+            .arg(&script)
+            .args(["--mode", mode, "--native"])
+            .arg(binary())
+            .arg("--root")
+            .arg(root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        {
+            use std::os::windows::process::CommandExt;
+            // Only the controller child gets its own console; the runner and
+            // any gateway keep theirs and are never detached.
+            command.creation_flags(0x0000_0010 /* CREATE_NEW_CONSOLE */);
+        }
+        for name in [
+            "XEH_EMIT_ROOT",
+            "XEH_EVIDENCE_DIR",
+            "XEH_CAPTURE_OUT",
+            "RUST_TEST_THREADS",
+        ] {
+            command.env_remove(name);
+        }
+        let mut child = command.spawn().expect("spawn the console controller");
+        let stdout = child.stdout.take().map(|mut pipe| {
+            std::thread::spawn(move || {
+                let mut sink = Vec::new();
+                let _ = pipe.read_to_end(&mut sink);
+                sink
+            })
+        });
+        let stderr = child.stderr.take().map(|mut pipe| {
+            std::thread::spawn(move || {
+                let mut sink = Vec::new();
+                let _ = pipe.read_to_end(&mut sink);
+                sink
+            })
+        });
+        // Bounds the whole controller: internal readiness (90 s) + natural exit
+        // (60 s) + kill/reap (30 s) + reader joins (2 x 20 s) stay below this.
+        let status = match wait_exit(&mut child, Duration::from_secs(300)) {
+            Some(status) => status,
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("the console controller exceeded its bound");
+            }
+        };
+        let out = stdout
+            .map(|reader| reader.join().unwrap_or_default())
+            .unwrap_or_default();
+        let err = stderr
+            .map(|reader| reader.join().unwrap_or_default())
+            .unwrap_or_default();
+        // Fixed facts only; libtest parses stdout, so diagnostics go to stderr.
+        eprintln!(
+            "m6 windows console {mode}: controller rc {:?} stderr_len {}",
+            status.code(),
+            err.len()
+        );
+        eprintln!(
+            "m6 windows console {mode}: facts {}",
+            String::from_utf8_lossy(&out).trim()
+        );
+        assert_eq!(
+            status.code(),
+            Some(0),
+            "the console controller reported a fixed failure"
+        );
+        serde_json::from_slice(&out).expect("one JSON facts object from the controller")
+    }
+
+    #[cfg(windows)]
+    fn assert_console_facts(facts: &serde_json::Value, mode: &str) {
+        assert_eq!(facts["mode"], mode, "{facts}");
+        assert_eq!(facts["ok"], true, "{facts}");
+        assert_eq!(facts["natural_exit"], true, "{facts}");
+        assert_eq!(facts["exit_code"], 0, "{facts}");
+        assert_eq!(facts["forced_kill"], false, "{facts}");
+        assert_eq!(facts["signal_sent"], true, "{facts}");
+        assert_eq!(facts["console_clients_match"], true, "{facts}");
+        assert_eq!(facts["console_client_count"], 2, "{facts}");
+        assert_eq!(facts["unexpected_console_client"], false, "{facts}");
+        assert_eq!(facts["started_logged"], true, "{facts}");
+        assert_eq!(facts["cleanup_logged"], true, "{facts}");
+        assert_eq!(facts["session_nw"], "1", "{facts}");
+        assert_eq!(facts["session_tasks_empty"], true, "{facts}");
+    }
+
+    /// Resident, no URLs: the controller's readiness is a real RPC `getInfo`
+    /// answer while the host is still running; one console Ctrl-C must reach
+    /// the product's Tokio Ctrl-C handler and exit 0 through the real cleanup.
+    #[cfg(windows)]
+    #[test]
+    fn m6_windows_resident_exits_cleanly_on_console_ctrl_c() {
+        let root = tempfile::tempdir().expect("root");
+        prepare_root(root.path());
+        let facts = console_case("resident", root.path());
+        assert_console_facts(&facts, "resident");
+        assert_eq!(facts["prompt_observed"], false, "{facts}");
+        let log = std::fs::read_to_string(root.path().join("eh.log")).expect("log file");
+        assert!(log.contains("xeHentai 2.023-rss started."), "{log}");
+        assert!(log.contains("cleaning up..."), "{log}");
+        let session: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(root.path().join("h.json")).expect("session file"),
+        )
+        .expect("session JSON");
+        assert_eq!(session["cookies"]["nw"], "1");
+        assert_eq!(session["tasks"], serde_json::json!({}));
+    }
+
+    /// Interactive login prompt: the readiness fact is the actual prompt bytes
+    /// observed by the controller (no trailing newline assumed). One console
+    /// Ctrl-C at that prompt must exit 0, log cleanup and save the session.
+    #[cfg(windows)]
+    #[test]
+    fn m6_windows_login_prompt_exits_cleanly_on_console_ctrl_c() {
+        let root = tempfile::tempdir().expect("root");
+        prepare_root(root.path());
+        let facts = console_case("prompt", root.path());
+        assert_console_facts(&facts, "prompt");
+        assert_eq!(facts["prompt_observed"], true, "{facts}");
+        let log = std::fs::read_to_string(root.path().join("eh.log")).expect("log file");
+        assert!(log.contains("xeHentai 2.023-rss started."), "{log}");
+        assert!(log.contains("cleaning up..."), "{log}");
+        let session: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(root.path().join("h.json")).expect("session file"),
+        )
+        .expect("session JSON");
+        assert_eq!(session["cookies"]["nw"], "1");
     }
 
     /// Blocker A regression: a valid login restored from `h.json` or supplied
