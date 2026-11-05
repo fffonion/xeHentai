@@ -184,23 +184,26 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           # A `-pre`/`-rc` style tag is published as a prerelease; anything else
           # is a normal release. Re-running the workflow for an existing tag
-          # replaces its assets instead of failing.
+          # replaces its assets instead of failing. Every gh call names the
+          # repository explicitly: this job deliberately has no checkout, so
+          # there is no local remote for gh to infer.
           prerelease=()
           case "$TAG" in
             *-*) prerelease=(--prerelease) ;;
           esac
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/* --clobber
-            gh release edit "$TAG" "${prerelease[@]}" --title "$TAG"
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber --repo "$REPO"
+            gh release edit "$TAG" "${prerelease[@]}" --title "$TAG" --repo "$REPO"
           else
-            gh release create "$TAG" dist/* \
+            gh release create "$TAG" dist/* --repo "$REPO" \
               --title "$TAG" \
               --generate-notes \
               "${prerelease[@]}"
           fi
-          gh release view "$TAG" --json tagName,isPrerelease,assets \
+          gh release view "$TAG" --repo "$REPO" --json tagName,isPrerelease,assets \
             --jq '{tagName, isPrerelease, assets: [.assets[].name]}'
