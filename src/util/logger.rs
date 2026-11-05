@@ -25,23 +25,34 @@ pub const DEBUG: i64 = 1;
 pub const VERBOSE: i64 = 0;
 
 /// Query keys whose values never reach a log line. The comparison is
-/// case-insensitive on the percent-decoded key.
+/// case-insensitive on the percent-decoded key, so `%74oken`, `TOKEN` and
+/// `Token` all hit the same entry. The list is a policy, not an exhaustive
+/// inventory of every credential spelling: it covers the common OAuth, bearer
+/// and basic-auth names a browser-style URL can carry.
 const SENSITIVE_QUERY_KEYS: &[&str] = &[
+    "access_key",
     "access_token",
     "api_key",
     "apikey",
     "auth",
+    "auth_token",
     "authorization",
+    "client_secret",
     "code",
+    "consumer_secret",
     "cookie",
     "hash",
     "id_token",
     "key",
+    "oauth_token",
+    "oauth_verifier",
     "passwd",
     "password",
+    "private_key",
     "pwd",
     "refresh_token",
     "secret",
+    "secret_key",
     "session",
     "session_id",
     "sessionid",
@@ -191,6 +202,13 @@ impl Logger {
         }
     }
 
+    /// True when a `VERB` line would be written. Callers use it to skip
+    /// building a message (URL sanitizing, route labels, formatting) that the
+    /// sink would discard, so the default silent path stays cheap.
+    pub fn verbose_enabled(&self) -> bool {
+        self.enabled(VERBOSE)
+    }
+
     pub fn verbose(&mut self, message: &str) -> std::io::Result<()> {
         if !self.enabled(VERBOSE) {
             return Ok(());
@@ -293,10 +311,7 @@ fn redact_query(query: &str) -> String {
             out.push_str(segment);
             continue;
         };
-        let decoded = percent_encoding::percent_decode_str(key)
-            .decode_utf8_lossy()
-            .to_ascii_lowercase();
-        if SENSITIVE_QUERY_KEYS.contains(&decoded.as_str()) {
+        if SENSITIVE_QUERY_KEYS.contains(&canonical_query_key(key).as_str()) {
             out.push_str(key);
             out.push_str("=REDACTED");
         } else {
@@ -304,6 +319,15 @@ fn redact_query(query: &str) -> String {
         }
     }
     out
+}
+
+/// The comparison form of one query key: percent-decoded, then case-folded.
+/// A key is never echoed in canonical form; only the original spelling is
+/// kept in the output, so redaction does not rewrite the query.
+fn canonical_query_key(key: &str) -> String {
+    percent_encoding::percent_decode_str(key)
+        .decode_utf8_lossy()
+        .to_lowercase()
 }
 
 pub fn now_gmt8() -> DateTime<FixedOffset> {
@@ -513,5 +537,43 @@ mod tests {
         let safe = safe_url("https://example.org/?%74oken=leak&page=1");
         assert_eq!(safe, "https://example.org/?%74oken=REDACTED&page=1");
         assert!(!safe.contains("leak"), "{safe}");
+    }
+
+    /// The policy is canonical, not an exact-spelling allowlist: the common
+    /// OAuth/basic names are redacted when their case varies and when their
+    /// key bytes are percent-encoded.
+    #[test]
+    fn safe_url_redacts_common_credential_keys_in_any_case_or_encoding() {
+        for (key, secret) in [
+            ("OAuth_Token", "oauth-secret"),
+            ("AUTH_TOKEN", "auth-secret"),
+            ("Client_Secret", "client-secret"),
+            ("%63lient%5Fsecret", "encoded-client-secret"),
+            ("%6Fauth%5Ftoken", "encoded-oauth-secret"),
+            ("Access_Key", "access-secret"),
+            ("Secret_Key", "secret-key-value"),
+            ("oauth_verifier", "verifier-secret"),
+        ] {
+            let raw = format!("https://example.org/callback?page=2&{key}={secret}&lang=en");
+            let safe = safe_url(&raw);
+            assert!(!safe.contains(secret), "{key}: raw value leaked: {safe}");
+            assert!(
+                safe.contains(&format!("{key}=REDACTED")),
+                "{key}: the original key spelling stays, only the value goes: {safe}"
+            );
+            // Unrelated parameters and the userinfo/fragment rules are
+            // untouched by the wider key policy.
+            assert!(safe.contains("page=2&"), "{key}: {safe}");
+            assert!(safe.contains("lang=en"), "{key}: {safe}");
+        }
+        let with_userinfo = safe_url(
+            "https://alice:s3cret@example.org/cb?OAuth_Token=v&client_secret=w#access_token=zzz",
+        );
+        assert!(!with_userinfo.contains("alice"), "{with_userinfo}");
+        assert!(!with_userinfo.contains("s3cret"), "{with_userinfo}");
+        assert_eq!(
+            with_userinfo,
+            "https://example.org/cb?OAuth_Token=REDACTED&client_secret=REDACTED"
+        );
     }
 }

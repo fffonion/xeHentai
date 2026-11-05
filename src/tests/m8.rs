@@ -651,6 +651,62 @@ fn transport(
     )
 }
 
+/// Update traffic is real traffic. With the App logger attached, an update hop
+/// emits the same start/done pair as a worker request, with the URL redacted;
+/// the default `download` auto-update mode is what makes this path live at
+/// startup. A transport with no logger (the fixture default) stays silent.
+#[test]
+fn m8_transport_requests_follow_the_shared_verbose_policy() {
+    assert_eq!(
+        crate::config::Config::default().auto_update,
+        "download",
+        "the updater path is live by default, so it must be logged"
+    );
+    let api = Source::start(
+        "api",
+        "127.0.0.1",
+        vec![("/api?oauth_token=api-secret&page=2", Route::json("{}"))],
+    );
+    let package = Source::start(
+        "package",
+        "127.0.0.2",
+        vec![("/pkg", Route::status(200, b"pkg".to_vec()))],
+    );
+    let output = super::CapturedOutput::default();
+    let mut logged = transport(&api.origin(), &package.origin()).expect("transport");
+    logged.set_logger(crate::util::logger::Logger::with_output(
+        Box::new(output.clone()),
+        false,
+    ));
+    let url = format!("{}/api?oauth_token=api-secret&page=2", api.origin());
+    let response = run_local(async { logged.get_api(&url, &[]).await }).expect("api request");
+    assert_eq!(response.status, 200);
+    let log = output.text();
+    assert!(log.contains("http request start: method=GET"), "{log}");
+    assert!(log.contains("http request done:"), "{log}");
+    assert!(log.contains("status=200"), "{log}");
+    assert!(log.contains("route=direct"), "{log}");
+    assert!(log.contains("oauth_token=REDACTED"), "{log}");
+    assert!(!log.contains("api-secret"), "{log}");
+
+    // The same traffic without an App logger writes nothing: logging is a
+    // propagated sink, not an unconditional side effect of a request.
+    let before = output.text().len();
+    let silent = transport(&api.origin(), &package.origin()).expect("transport");
+    run_local(async {
+        silent
+            .get_package(&format!("{}/pkg", package.origin()), &[])
+            .await
+    })
+    .expect("package request");
+    assert_eq!(
+        output.text().len(),
+        before,
+        "an unattached transport must not log: {}",
+        output.text()
+    );
+}
+
 /// The one explicit CDN origin is authorized ONLY as a redirect target of a
 /// package request. It is never an initial URL and never valid for commit
 /// metadata, and no other origin becomes reachable by adding it.

@@ -987,9 +987,18 @@ impl App {
                             .proxy
                             .get_or_insert_with(|| Arc::new(Mutex::new(Pool::new())));
                         let mut pool = pool.lock().unwrap();
-                        for address in &addresses {
+                        for (index, address) in addresses.iter().enumerate() {
                             if let Err(error) = pool.add_proxy(address) {
-                                let message = format!("proxy {address}: {error}");
+                                // The configured spelling can hold userinfo or
+                                // a legacy Glype rewrite query, and some error
+                                // payloads echo the address, so neither is
+                                // logged: the position plus a closed class is
+                                // enough to act on without leaking a secret.
+                                let message = format!(
+                                    "proxy #{} rejected: class={}",
+                                    index + 1,
+                                    error.class()
+                                );
                                 let _ = self.logger.warning(&message);
                             }
                         }

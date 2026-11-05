@@ -496,6 +496,10 @@ fn spawn_update_check(
             }
         };
         updater.set_publisher(publisher);
+        // The update transport makes real requests, so it gets the same shared
+        // App logger as worker sessions and follows one `-v` policy.
+        let logger = app.borrow_app_mut(|app| app.logger_mut().clone());
+        updater.set_logger(logger);
         let channel = updater::render_channel(locale, beta);
         app.borrow_app_mut(|app| {
             let _ = app.logger_mut().debug(&channel);

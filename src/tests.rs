@@ -7254,6 +7254,97 @@ mod m3_transport {
             "default verbosity must not emit request VERB lines: {appended}"
         );
     }
+
+    /// A rejected proxy configuration is a WARNING about an unparseable entry,
+    /// not a place to echo it: the old Glype spelling can carry userinfo and a
+    /// `u=` rewrite target, so only the position and a closed class are logged.
+    #[tokio::test]
+    async fn rejected_glype_proxy_config_is_logged_without_address_or_secret() {
+        let root = tempfile::tempdir().unwrap();
+        let output = super::CapturedOutput::default();
+        let logger = crate::util::logger::Logger::with_output(Box::new(output.clone()), false);
+        let mut config = crate::config::Config::default();
+        config.dir = root.path().join("downloads").to_string_lossy().into_owned();
+        let mut app = crate::core::App::with_guid_source(
+            config,
+            logger,
+            root.path(),
+            root.path(),
+            Box::new(crate::core::FixedGuids::new(Vec::<String>::new())),
+        )
+        .unwrap();
+        let userinfo_secret = "glype-userinfo-secret";
+        let query_secret = "glype-rewrite-secret";
+        let address = format!(
+            "http://user:{userinfo_secret}@proxy.test:8080/browse.php?u={query_secret}&b=4"
+        );
+        app.update_config(
+            serde_json::json!({ "proxy": [address] })
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let log = output.text();
+        assert!(
+            log.contains("WARN - [") && log.contains("proxy #1 rejected: class=unsupported"),
+            "the rejection still has to be actionable: {log}"
+        );
+        for leaked in [userinfo_secret, query_secret, "proxy.test", "browse.php"] {
+            assert!(!log.contains(leaked), "{leaked} leaked into: {log}");
+        }
+        assert_eq!(
+            app.proxy_count(),
+            0,
+            "a rejected proxy is never in the pool"
+        );
+    }
+
+    /// A dropped in-flight attempt must still close its record. The fixture
+    /// accepts the real connection and then holds it without a response, so the
+    /// cancellation happens while the network attempt is genuinely live.
+    #[tokio::test]
+    async fn cancelled_request_attempt_ends_in_one_cancelled_record() {
+        let output = super::CapturedOutput::default();
+        let logger = crate::util::logger::Logger::with_output(Box::new(output.clone()), false);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let held = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _head = read_headers(&mut socket).await;
+            let _ = accepted_tx.send(());
+            // Hold the socket open and never answer: the client's request is in
+            // flight, and only dropping the future can end it.
+            std::future::pending::<()>().await;
+        });
+        let mut client = session(
+            None,
+            Arc::new(MapResolver::default()),
+            FallbackMap::empty(),
+            TlsClient::production(),
+            ProxyPolicy::All,
+        );
+        client.set_logger(logger);
+        let url = format!("http://127.0.0.1:{port}/page?oauth_token=oauth-secret&page=2");
+        let mut attempt = Box::pin(client.get_once(&url));
+        tokio::select! {
+            accepted = accepted_rx => accepted.expect("the fixture accepted the connection"),
+            result = &mut attempt => panic!(
+                "the held request must still be in flight, got status {:?}",
+                result.map(|response| response.status)
+            ),
+        }
+        drop(attempt);
+        held.abort();
+        let log = output.text();
+        assert_eq!(log.matches("http request start:").count(), 1, "{log}");
+        assert_eq!(log.matches("http request cancelled:").count(), 1, "{log}");
+        assert_eq!(log.matches("http request done:").count(), 0, "{log}");
+        assert_eq!(log.matches("http request failed:").count(), 0, "{log}");
+        assert!(log.contains("oauth_token=REDACTED"), "{log}");
+        assert!(!log.contains("oauth-secret"), "{log}");
+    }
 }
 
 /// M4: persistent scan/download workers, Task pipeline, monitor and

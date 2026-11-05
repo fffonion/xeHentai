@@ -922,11 +922,24 @@ impl Session {
         self.logger = Some(logger);
     }
 
-    fn log_verbose(&self, message: &str) {
-        if let Some(logger) = &self.logger {
-            let mut logger = logger.clone();
-            let _ = logger.verbose(message);
+    /// The one request-record factory: silent (and free) unless VERB is
+    /// enabled, because the path label and safe URL are only built here.
+    fn request_record(
+        &self,
+        method: &str,
+        url_text: &str,
+        route: impl FnOnce() -> String,
+    ) -> Option<RequestRecord> {
+        let logger = self.logger.as_ref()?;
+        if !logger.verbose_enabled() {
+            return None;
         }
+        Some(RequestRecord::start(
+            logger.clone(),
+            method,
+            safe_url(url_text),
+            route(),
+        ))
     }
 
     pub fn set_header(&mut self, name: &str, value: Option<String>) {
@@ -1219,16 +1232,18 @@ impl Session {
             path
         };
 
-        let route = if fallback.is_some() {
-            "fallback-ip".to_string()
-        } else {
-            route_label(selected)
-        };
-        let safe = safe_url(url_text);
-        let started = std::time::Instant::now();
-        self.log_verbose(&format!(
-            "http request start: method={method} url={safe} route={route}"
-        ));
+        // The record is created exactly where the attempt begins (route
+        // establishment is the attempt), and it owns its terminal line. A
+        // caller that drops this future, a worker abort, or a shutdown between
+        // the start and the outcome therefore still ends the pair — with
+        // `cancelled`, never with a silently unmatched start.
+        let record = self.request_record(method, url_text, || {
+            if fallback.is_some() {
+                "fallback-ip".to_string()
+            } else {
+                route_label(selected)
+            }
+        });
         let outcome: Result<Exchange, HttpError> = async {
             let (io, form) = if let Some(ip) = fallback {
                 let address: IpAddr = ip
@@ -1285,20 +1300,17 @@ impl Session {
                 .await
         }
         .await;
-        let elapsed = started.elapsed().as_secs_f64();
         let exchange = match outcome {
             Ok(exchange) => {
-                self.log_verbose(&format!(
-                    "http request done: method={method} url={safe} status={} elapsed={elapsed:.3}s route={route}",
-                    exchange.status
-                ));
+                if let Some(record) = record {
+                    record.done(exchange.status);
+                }
                 exchange
             }
             Err(error) => {
-                self.log_verbose(&format!(
-                    "http request failed: method={method} url={safe} class={} elapsed={elapsed:.3}s route={route}",
-                    error.class()
-                ));
+                if let Some(record) = record {
+                    record.failed(error.class());
+                }
                 return Err(error);
             }
         };
@@ -1445,6 +1457,70 @@ struct Exchange {
     body: Vec<u8>,
     text: String,
     stream: Option<StreamBody>,
+}
+
+/// One started request attempt and its single terminal record.
+///
+/// `done`/`failed` consume the guard; if neither runs (the caller drops the
+/// in-flight future, the task is aborted, or shutdown cuts it), `Drop` writes
+/// the `cancelled` terminal line instead. Every started attempt therefore ends
+/// in exactly one of done/failed/cancelled, and the start/finish pair is never
+/// left unmatched.
+struct RequestRecord {
+    logger: Logger,
+    method: String,
+    url: String,
+    route: String,
+    started: std::time::Instant,
+    finished: bool,
+}
+
+impl RequestRecord {
+    fn start(logger: Logger, method: &str, url: String, route: String) -> Self {
+        let mut logger = logger;
+        let _ = logger.verbose(&format!(
+            "http request start: method={method} url={url} route={route}"
+        ));
+        Self {
+            logger,
+            method: method.to_string(),
+            url,
+            route,
+            started: std::time::Instant::now(),
+            finished: false,
+        }
+    }
+
+    fn done(mut self, status: i64) {
+        self.finished = true;
+        let elapsed = self.started.elapsed().as_secs_f64();
+        let _ = self.logger.verbose(&format!(
+            "http request done: method={} url={} status={status} elapsed={elapsed:.3}s route={}",
+            self.method, self.url, self.route
+        ));
+    }
+
+    fn failed(mut self, class: &str) {
+        self.finished = true;
+        let elapsed = self.started.elapsed().as_secs_f64();
+        let _ = self.logger.verbose(&format!(
+            "http request failed: method={} url={} class={class} elapsed={elapsed:.3}s route={}",
+            self.method, self.url, self.route
+        ));
+    }
+}
+
+impl Drop for RequestRecord {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let elapsed = self.started.elapsed().as_secs_f64();
+        let _ = self.logger.verbose(&format!(
+            "http request cancelled: method={} url={} elapsed={elapsed:.3}s route={}",
+            self.method, self.url, self.route
+        ));
+    }
 }
 
 fn path_and_query(url: &url::Url) -> String {

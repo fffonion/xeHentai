@@ -486,6 +486,12 @@ impl Updater {
         self.publisher = publisher;
     }
 
+    /// Attach the App's shared logger so update HTTP hops honour the same
+    /// `-v` policy as worker traffic instead of being silent.
+    pub fn set_logger(&mut self, logger: crate::util::logger::Logger) {
+        self.transport.set_logger(logger);
+    }
+
     #[allow(dead_code)]
     pub fn publisher(&self) -> install::Publisher {
         self.publisher.clone()

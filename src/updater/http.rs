@@ -33,6 +33,7 @@ use url::{Host, Url};
 use crate::proxy::{LookupFuture, Resolver, SystemResolver, TlsClient};
 use crate::updater::UpdateError;
 use crate::updater::{SourceBinding, UPDATER_RSS};
+use crate::util::logger::Logger;
 use crate::worker::{FallbackMap, RealClock, Session, SessionConfig};
 
 use super::package;
@@ -83,6 +84,10 @@ pub(crate) struct Transport {
     cdn: Option<Origin>,
     resolver: Arc<dyn Resolver>,
     limit: usize,
+    /// The App logger when this transport belongs to a running App. An update
+    /// request is a real network request, so it follows the same verbose
+    /// policy (safe URL, route, closed error class) as every other attempt.
+    logger: Option<Logger>,
 }
 
 #[derive(Debug)]
@@ -191,7 +196,14 @@ impl Transport {
             },
             resolver,
             limit,
+            logger: None,
         })
+    }
+
+    /// Attach the App's shared logger. The clone shares level, file and
+    /// output, so one `-v` decision covers worker and updater traffic.
+    pub(crate) fn set_logger(&mut self, logger: Logger) {
+        self.logger = Some(logger);
     }
 
     #[cfg(all(test, unix))]
@@ -387,6 +399,9 @@ impl Transport {
             crate::util::ProxyPolicy::All,
             config,
         );
+        if let Some(logger) = &self.logger {
+            session.set_logger(logger.clone());
+        }
         let response = session
             .get_once(url.as_str())
             .await

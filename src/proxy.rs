@@ -73,6 +73,22 @@ impl ProxyError {
     pub fn is_bad_status_line(&self) -> bool {
         matches!(self, Self::Http(message) if message.contains("BadStatusLine"))
     }
+
+    /// Closed label for a rejection log. A configured proxy address can carry
+    /// userinfo or a legacy Glype rewrite query, so neither the address nor the
+    /// error payload (`Address(addr)`) may be logged; only this class is.
+    pub fn class(&self) -> &'static str {
+        match self {
+            Self::Address(_) => "invalid-address",
+            Self::Unsupported(_) => "unsupported",
+            Self::NoProxy => "no-proxy",
+            Self::Dns(_) => "dns",
+            Self::Connect(_) => "connect",
+            Self::Handshake(_) => "handshake",
+            Self::Tls(_) => "tls",
+            Self::Http(_) => "http",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
