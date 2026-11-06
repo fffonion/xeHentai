@@ -477,6 +477,16 @@ mod tests {
     }
 
     #[test]
+    fn proxy_help_lists_only_supported_schemes() {
+        for locale in [Locale::EnUs, Locale::ZhHans, Locale::ZhHant] {
+            let help = key(locale, "XEH_OPT_p").expect("proxy option help");
+            assert!(help.contains("socks5/4a"), "{}: {help}", locale.tag());
+            assert!(help.contains("http(s)"), "{}: {help}", locale.tag());
+            assert!(!help.contains("glype"), "{}: {help}", locale.tag());
+        }
+    }
+
+    #[test]
     fn only_the_declared_locales_are_available() {
         assert_eq!(available_locales(), ["en_us", "zh_hans", "zh_hant"]);
     }

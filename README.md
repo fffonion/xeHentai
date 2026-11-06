@@ -82,9 +82,12 @@ configuration, filesystem and process operations live in Rust under `src/`.
 ./xeHentai --daemon --auto-update check
 ```
 
-Runtime resources are resolved from the directory of the executable when it
-contains `rss/`, otherwise from the working directory. A packaged release
-therefore starts from any working directory and never reads the build tree.
+Runtime RSS scripts and locale strings are embedded in the executable. Runtime
+resource lookup prefers an `rss/` tree beside the executable and otherwise
+uses the current working directory. Existing RSS files there override embedded
+defaults; missing files fall back to the embedded copies. The release package
+ships RSS files as update overrides, so it starts from any working directory
+without relying on the build tree.
 
 ## Distribution package
 

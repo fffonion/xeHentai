@@ -830,8 +830,9 @@ pub fn command(program: &str, defaults: &Config, locale: Locale) -> Command {
         )
 }
 
-/// Reference `os.path.abspath`: resolve against the process cwd without
-/// following symlinks and normalize `.`/`..` lexically.
+/// Reference `os.path.abspath`: resolve against the process cwd and normalize
+/// `.`/`..` lexically when the cwd is available. If cwd lookup fails, preserve
+/// a relative input as relative; startup path resolution fails explicitly.
 pub fn abspath(path: &Path) -> String {
     let cwd = std::env::current_dir().ok();
     abspath_with_cwd(path, cwd.as_deref())

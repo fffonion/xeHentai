@@ -1043,13 +1043,13 @@ impl Session {
                 .await;
             match hop {
                 Ok(mut response) => {
-                    if let Some(addr) = &proxy_addr {
+                    if !stream && let Some(addr) = &proxy_addr {
                         self.record_proxy(addr, true);
                     }
                     let content_length = match response.headers.joined("content-length") {
                         Some(value) => match value.trim().parse::<i64>() {
-                            Ok(length) => length,
-                            Err(_) => {
+                            Ok(length) if length >= 0 => length,
+                            _ => {
                                 attempts.push(AttemptRecord {
                                     url: response.url.clone(),
                                     method: method.to_string(),
@@ -1064,7 +1064,7 @@ impl Session {
                             }
                         },
                         None if !stream => response.body.len() as i64,
-                        None => 0,
+                        None => -1,
                     };
                     response.content_length = content_length;
                     attempts.push(AttemptRecord {
@@ -1164,6 +1164,12 @@ impl Session {
             && let Ok(mut pool) = pool.lock()
         {
             pool.trace(addr, Some(!success), None);
+        }
+    }
+
+    pub(crate) fn report_stream_result(&self, proxy: Option<&str>, success: bool) {
+        if let Some(address) = proxy {
+            self.record_proxy(address, success);
         }
     }
 
@@ -1474,11 +1480,8 @@ impl Session {
                 ResponseHeaders::from_raw(entries)
             })
         };
-        let text_response = headers
-            .joined("content-type")
-            .is_some_and(|value| value.starts_with("text"));
         let (_, incoming) = response.into_parts();
-        if stream && !text_response {
+        if stream {
             return Ok(Exchange {
                 status,
                 headers,

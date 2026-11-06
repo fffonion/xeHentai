@@ -255,13 +255,12 @@ async fn foreign_listener_on_the_configured_port_never_opens_the_browser() {
 /// shut; the server error remains the real startup result.
 #[tokio::test]
 async fn failed_server_init_after_bind_never_opens_the_browser() {
-    let empty = tempfile::tempdir().expect("empty resource root");
     let root = tempfile::tempdir().expect("root");
     let cache = tempfile::tempdir().expect("cache");
-    let runtime = crate::core::Runtime::new(
-        super::test_app(root.path(), &[]),
-        empty.path().to_path_buf(),
-    );
+    let resource_root = root.path().join("not-a-directory");
+    std::fs::write(&resource_root, b"not a directory").expect("invalid resource root");
+    let runtime =
+        crate::core::Runtime::new(super::test_app(root.path(), &[]), resource_root.clone());
     let handle = runtime.handle();
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let (ready_tx, ready_rx) = oneshot::channel();
@@ -269,7 +268,7 @@ async fn failed_server_init_after_bind_never_opens_the_browser() {
         "127.0.0.1",
         0,
         cache.path(),
-        empty.path(),
+        &resource_root,
         Arc::new(crate::worker::RealClock),
         None,
         "http://127.0.0.1:9".to_string(),

@@ -1715,6 +1715,10 @@ impl DownloadPort for SharedPort {
             }
         }
     }
+
+    fn warn_download(&mut self, message: &str) {
+        let _ = self.inner.app.borrow_mut().logger.warning(message);
+    }
 }
 
 /// One worker record shared with the monitor: identity, liveness, optional

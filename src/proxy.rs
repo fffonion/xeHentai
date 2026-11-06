@@ -244,9 +244,8 @@ impl Pool {
     }
 }
 
-/// The reference regex accepts any `[ah]*` suffix; requests itself only
-/// understands 4a/5h for remote DNS. We keep the accepted spellings and treat
-/// a trailing `a` (v4) / `h` (v5) as the remote-DNS variant.
+/// SOCKS5 always sends the target domain to the proxy for name resolution;
+/// SOCKS4 selects local DNS by default and SOCKS4a sends the name remotely.
 pub fn parse_proxy(addr: &str) -> Result<ProxySpec, ProxyError> {
     if is_glype_address(addr) {
         return Err(ProxyError::Unsupported("glype".to_string()));
@@ -268,11 +267,7 @@ pub fn parse_proxy(addr: &str) -> Result<ProxySpec, ProxyError> {
         let suffix = scheme
             .trim_start_matches("socks")
             .trim_start_matches(['4', '5']);
-        let remote_dns = if version == 4 {
-            suffix.contains('a')
-        } else {
-            suffix.contains('h')
-        };
+        let remote_dns = version == 5 || (version == 4 && suffix.contains('a'));
         let _ = captures;
         return Ok(ProxySpec {
             addr: addr.to_string(),
@@ -959,7 +954,7 @@ mod tests {
             parse_proxy("socks5://127.0.0.1:1080").unwrap().kind,
             ProxyKind::Socks {
                 version: 5,
-                remote_dns: false
+                remote_dns: true
             }
         ));
         assert!(matches!(

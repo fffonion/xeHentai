@@ -74,6 +74,7 @@ struct StreamResult {
     code: int?,
     real_url: string?,
     url: string?,
+    expected_length: int?,
 }
 
 // --- fixed reference constants -------------------------------------------
@@ -617,17 +618,16 @@ pub fn flt_download(page: PageResponse) -> DownloadResult {
     } else if page.status == 404 => {
         download_fail(1011, page)
     } else => {
-        let found = flt::find_all(re_imghash(), page.url);
+        let size = image_size(page.url);
         let mut size_mismatch = false;
-        if found.length > 0 {
-            let row = &found[found.length - 1];
-            if row.length > 2 {
-                if digit_int(row[2]) != page.content_length {
-                    size_mismatch = true;
-                }
+        if size != null && page.content_length >= 0 {
+            if size.unwrap_or(0) != page.content_length {
+                size_mismatch = true;
             }
         }
-        if page.content_length == 0 || size_mismatch => {
+        let has_expected_length = page.content_length >= 0
+            || (size != null && size.unwrap_or(0) > 0);
+        if !has_expected_length || (page.content_length == 0 && size == null) || size_mismatch => {
             download_fail(1012, page)
         } else if !page.has_stream => {
             download_fail(1014, page)
@@ -646,11 +646,18 @@ pub fn flt_download(page: PageResponse) -> DownloadResult {
 // After the native body ends, decide whether the observed byte count/read
 // error makes the file broken and aborts the staging file.
 pub fn flt_stream_result(input: PageResponse, actual_length: int, read_error: string) -> StreamResult {
-    let mut broken = false;
-    if read_error.length > 0 {
-        broken = true;
+    let size = image_size(input.url);
+    let expected_length = if size != null && size.unwrap_or(0) > 0 => {
+        size.unwrap_or(0)
+    } else => {
+        input.content_length
+    };
+    let mut exposed_expected_length: int? = null;
+    if expected_length >= 0 {
+        exposed_expected_length = expected_length;
     }
-    if actual_length != input.content_length {
+    let mut broken = false;
+    if read_error.length > 0 || expected_length < 0 || actual_length != expected_length {
         broken = true;
     }
     if broken => {
@@ -659,6 +666,7 @@ pub fn flt_stream_result(input: PageResponse, actual_length: int, read_error: st
             code: 1012,
             real_url: input.real_url,
             url: input.url,
+            expected_length: exposed_expected_length,
         }
     } else => {
         {
@@ -666,6 +674,7 @@ pub fn flt_stream_result(input: PageResponse, actual_length: int, read_error: st
             code: null,
             real_url: null,
             url: null,
+            expected_length: exposed_expected_length,
         }
     }
 }

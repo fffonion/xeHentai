@@ -2,7 +2,7 @@
 """Durable feature-inventory integrity tests for the production loader.
 
 Under test is the production entry point ``compat.load_cases()`` with the
-real ``tools/cases.json``. The catalog is a closed inventory: 373 unique
+real ``tools/cases.json``. The catalog is a closed inventory: 376 unique
 feature rows after the six known duplicate IDs were consolidated into one
 row per ID, keeping BOTH original assertion legs. These tests pin the
 post-consolidation counts, the literal identifiers, and the retained
@@ -45,10 +45,10 @@ DUPLICATE_IDS = (
 WIRE_SOURCE = "xeHentai/rpc.py do_POST/do_GET wire contract"
 NATIVE_SOURCE = "xeHentai/rpc.py unit contract"
 RPC_TARGET = "src/rpc/{mod,server}.rs + rss/rpc/handlers.rss"
-EXPECTED_UNIQUE_ROWS = 373
+EXPECTED_UNIQUE_ROWS = 376
 EXPECTED_RPC_UNIQUE = 106
-EXPECTED_IMPLEMENTED = 358
-EXPECTED_DELTA = 15
+EXPECTED_IMPLEMENTED = 357
+EXPECTED_DELTA = 19
 EXPECTED_UNIMPLEMENTED = 0
 CLI_IMPLEMENTED = 30
 UPDATE_ROWS = 5
@@ -145,6 +145,18 @@ def test_speed_deltas_are_explicit_in_the_inventory():
     assert monitor["status"] == "delta", monitor
     assert "delta.monitor-speed-cleared-on-exit" in monitor["delta"], monitor
     assert any("clears to zero" in assertion for assertion in monitor["assertions"]), monitor
+    assert compat.NATIVE_CASE_MAP["monitor"][
+        "tests::m4::monitor_sums_worker_speeds_and_clears_the_total_on_exit"
+    ] == ["m4.monitor.slow-windows"]
+
+
+def test_glype_help_text_delta_is_explicit_in_the_inventory():
+    document = compat.load_cases()
+    row = {row["id"]: row for row in document["cases"]}["delta.i18n-glype-help-text"]
+    assert row["suite"] == "i18n", row
+    assert row["status"] == "delta", row
+    assert row["delta"].startswith("delta.i18n-glype-help-text:"), row
+    assert any("all three locales omit Glype" in assertion for assertion in row["assertions"]), row
 
 
 def test_six_merged_ids_keep_both_original_legs():
@@ -373,9 +385,40 @@ def test_rpc_native_filters_select_every_required_mapped_name():
     assert filters.count(KNOWN_RPC_NATIVE) == 1, filters
 
 
+def test_monitor_sleep_filters_select_the_mapped_native_cases():
+    filters = [argv[-1] for argv in compat.NATIVE_COMMANDS["monitor"]]
+    for test_name in (
+        "tests::m4::scan_and_download_idle_waits_are_one_second_and_cancelable",
+        "tests::m4::task_queue_idle_poll_uses_injected_one_second_sleep",
+    ):
+        assert compat.NATIVE_CASE_MAP["monitor"][test_name] == [
+            "delta.sleep-cancellation"
+        ]
+        assert any(filter_text in test_name for filter_text in filters), (
+            test_name, filters)
+
+
+def test_config_native_filters_are_exact_for_mapped_integration_cases():
+    commands = compat.NATIVE_COMMANDS["config"]
+    required = {
+        name for name in compat.NATIVE_CASE_MAP["config"]
+        if name.startswith("tests::")
+    }
+    assert required
+    for test_name in required:
+        matching = [
+            argv for argv in commands
+            if len(argv) >= 5 and argv[4] == test_name
+            and argv[-2:] == ["--", "--exact"]
+        ]
+        assert len(matching) == 1, (test_name, matching)
+    assert not any(len(argv) >= 5 and argv[4] == "tests::" for argv in commands)
+
+
 TESTS = [
     test_current_catalog_ids_are_unique_and_strict,
     test_speed_deltas_are_explicit_in_the_inventory,
+    test_glype_help_text_delta_is_explicit_in_the_inventory,
     test_six_merged_ids_keep_both_original_legs,
     test_cli_rows_are_implemented_and_update_rows_are_promoted,
     test_duplicate_id_is_rejected_before_any_case_map,
@@ -390,6 +433,8 @@ TESTS = [
     test_rpc_six_merged_ids_require_same_round_mapped_native,
     test_rpc_six_merged_ids_pass_only_when_all_mapped_native_ok,
     test_rpc_native_filters_select_every_required_mapped_name,
+    test_monitor_sleep_filters_select_the_mapped_native_cases,
+    test_config_native_filters_are_exact_for_mapped_integration_cases,
 ]
 
 

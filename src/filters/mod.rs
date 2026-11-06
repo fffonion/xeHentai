@@ -346,6 +346,7 @@ pub struct StreamOutcome {
     pub code: Option<i64>,
     pub real_url: Option<String>,
     pub url: Option<String>,
+    pub expected_length: Option<i64>,
 }
 
 fn page_entries(page: &PageResponse) -> Vec<(Value, Value)> {
@@ -740,6 +741,7 @@ fn decode_stream(value: &Value) -> Result<StreamOutcome, FilterError> {
         code: int(map, "code")?,
         real_url: text(map, "real_url")?,
         url: text(map, "url")?,
+        expected_length: int(map, "expected_length")?,
     })
 }
 

@@ -843,10 +843,22 @@
       "suite": "i18n",
       "inputs": [],
       "assertions": [
-        "97 keys exist in all three YAML locales with exact text"
+        "all 97 reference key names exist in all three locale YAML files"
       ],
       "status": "implemented",
       "delta": null
+    },
+    {
+      "id": "delta.i18n-glype-help-text",
+      "source": "frozen i18n XEH_OPT_p text; current proxy scheme support",
+      "target": "src/proxy.rs / locales",
+      "suite": "i18n",
+      "inputs": [],
+      "assertions": [
+        "all three locales omit Glype from proxy help because the Rust proxy parser rejects that unsupported scheme"
+      ],
+      "status": "delta",
+      "delta": "delta.i18n-glype-help-text: proxy help excludes Glype, which the current Rust implementation does not support."
     },
     {
       "id": "i18n.interpolation",
@@ -2414,6 +2426,22 @@
       "delta": null
     },
     {
+      "id": "proxy.image-stream-integrity",
+      "source": "worker.py HttpReq.request and filters.py download response handling",
+      "target": "src/worker.rs + src/core/mod.rs + rss/filters/match.rss",
+      "suite": "proxy",
+      "inputs": [
+        "native m3_transport"
+      ],
+      "assertions": [
+        "EOF-delimited image bodies are accepted only when the URL supplies an expected byte count; exact bytes are published.",
+        "An HTML error body is rejected whether labelled image/jpeg or text/html; staging is removed and byte-count diagnostics omit URL/query data. Only that recognized HTML error debits proxy health; low-speed, read, and byte-count failures do not increase proxy failures because attribution is ambiguous.",
+        "A streamed text quota notice retains ERR_QUOTA_EXCEEDED; a non-quota text response with the exact URL byte count is rejected and never published."
+      ],
+      "status": "delta",
+      "delta": "delta.proxy-image-stream-integrity: validates streamed byte counts against URL or response length and rejects HTML and text error bodies, preserving quota classification and preventing incomplete or error payloads from being published."
+    },
+    {
       "id": "proxy.http",
       "source": "proxy.py http_proxy + worker fixup",
       "target": "src/proxy.rs + src/worker.rs",
@@ -2478,10 +2506,10 @@
         "native m3_transport"
       ],
       "assertions": [
-        "Real SOCKS5 no-auth handshake with locally resolved address."
+        "Real SOCKS5 no-auth handshake sends the domain to the proxy for remote resolution; it performs no local target lookup or fallback-IP route."
       ],
-      "status": "implemented",
-      "delta": null
+      "status": "delta",
+      "delta": "delta.proxy-socks5-remote-dns: treats socks5 and socks5h identically, sending hostname targets to the proxy and avoiding local DNS/fallback IP."
     },
     {
       "id": "proxy.socks5h",
@@ -2991,6 +3019,22 @@
         "The rolling cnt-second rate is bytes observed in the window divided by its duration; old samples expire without new chunks."
       ],
       "delta": "delta.speed-window-bytes-over-time: replaces worker.py:141-171 arithmetic-mean interval rates."
+    },
+    {
+      "id": "delta.sleep-cancellation",
+      "source": "worker.py HttpReq.request and HttpWorker.run",
+      "target": "src/worker.rs + src/core/runtime.rs",
+      "suite": "monitor",
+      "inputs": [
+        "native m4"
+      ],
+      "assertions": [
+        "Scan and download workers poll their queues only when empty; each idle wait is one second, and the download speed window resets before waiting.",
+        "Retryable request failures use the same random()+0.618 backoff; the frozen Python source exposes no configurable scan/download sleep keys.",
+        "Rust cancellation wakes scan/download worker idle waits and can drop a retry wait promptly; Python's blocking time.sleep is observed only after it completes."
+      ],
+      "status": "delta",
+      "delta": "delta.sleep-cancellation: preserves Python wait durations and trigger conditions while making Rust worker sleeps cancellation-aware for prompt task shutdown."
     },
     {
       "id": "m4.monitor.finish",

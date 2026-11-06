@@ -1731,10 +1731,12 @@ pub(crate) trait DownloadPort {
     fn begin_save(&mut self, imgurl: &str, redirect_url: &str) -> Result<SaveStart, TaskError>;
     fn retry_page(&mut self, url: &str) -> Result<bool, TaskError>;
     fn commit(&mut self, staged: StagedSave) -> Result<CommitOutcome, TaskError>;
+    fn warn_download(&mut self, message: &str);
 }
 
 pub(crate) struct DirectPort<'a> {
     pub task: &'a mut Task,
+    pub logger: &'a mut Logger,
     pub token: (u64, u64),
 }
 
@@ -1767,6 +1769,10 @@ impl DownloadPort for DirectPort<'_> {
             self.task.commit_staged_save(staged)?,
         ))
     }
+
+    fn warn_download(&mut self, message: &str) {
+        let _ = self.logger.warning(message);
+    }
 }
 
 /// Per-item download runtime inputs. `speed`/`low_speed_threshold` are only
@@ -1789,6 +1795,39 @@ fn fake_page(url: &str) -> PageResponse {
         ori: false,
         has_stream: false,
     }
+}
+
+fn is_html_error_body(prefix: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(prefix);
+    let start = text
+        .trim_start_matches(|character: char| {
+            character.is_ascii_whitespace() || character == '\u{feff}'
+        })
+        .chars()
+        .take(96)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    [
+        "<!doctype html",
+        "<html",
+        "<head",
+        "<body",
+        "<title",
+        "<iframe",
+        "<meta",
+        "<script",
+    ]
+    .iter()
+    .any(|marker| start.starts_with(marker))
+}
+
+fn stream_diagnostic(kind: &str, received: i64, expected: Option<i64>) -> String {
+    let expected = expected
+        .map(|length| length.to_string())
+        .unwrap_or_else(|| "unknown".into());
+    format!(
+        "image stream rejected: kind={kind} received_bytes={received} expected_bytes={expected}"
+    )
 }
 
 fn download_failed(
@@ -1860,13 +1899,90 @@ pub(crate) async fn run_download<P: DownloadPort>(
         return Ok(ImageDownload::Aborted);
     }
     let has_stream = outcome.response.has_stream();
-    let view = App::page_view(&outcome.response, false, has_stream);
-    let decision = filters
+    let mut view = App::page_view(&outcome.response, false, has_stream);
+    let mut decision = filters
         .download_outcome(&view)
         .map_err(|error| AppError::Filter(error.to_string()))?;
+    if decision.fail_code == Some(consts::ERR_IMAGE_BROKEN) && has_stream {
+        let mut body_prefix = Vec::with_capacity(512);
+        let mut read = 0i64;
+        let mut read_error = None;
+        let mut aborted = false;
+        if let Some(stream) = outcome.response.stream.as_mut() {
+            while body_prefix.len() < 512 {
+                if keepalive() {
+                    aborted = true;
+                    break;
+                }
+                match guarded!(stream.next_chunk()) {
+                    Ok(Some(chunk)) => {
+                        read += chunk.len() as i64;
+                        let prefix_bytes = (512 - body_prefix.len()).min(chunk.len());
+                        body_prefix.extend_from_slice(&chunk[..prefix_bytes]);
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        read_error = Some(error);
+                        break;
+                    }
+                }
+            }
+        }
+        if aborted {
+            if let Some(stream) = outcome.response.stream.take() {
+                stream.close().await;
+            }
+            return Ok(ImageDownload::Aborted);
+        }
+        view.text = String::from_utf8_lossy(&body_prefix).into_owned();
+        decision = filters
+            .download_outcome(&view)
+            .map_err(|error| AppError::Filter(error.to_string()))?;
+        if decision.fail_code != Some(consts::ERR_QUOTA_EXCEEDED)
+            && is_html_error_body(&body_prefix)
+        {
+            let streamed = filters
+                .stream_outcome(&view, read, read_error.as_deref())
+                .map_err(|error| AppError::Filter(error.to_string()))?;
+            let fail_code = streamed.code.unwrap_or(consts::ERR_IMAGE_BROKEN);
+            session.report_stream_result(outcome.response.proxy.as_deref(), false);
+            port.warn_download(&stream_diagnostic(
+                "html_error_body",
+                read,
+                streamed.expected_length,
+            ));
+            if let Some(stream) = outcome.response.stream.take() {
+                stream.close().await;
+            }
+            let failed = ImageDownload::Failed {
+                fail_code,
+                real_url: view.real_url.clone(),
+                url: view.url.clone(),
+            };
+            if let ImageDownload::Failed { url, .. } = &failed
+                && port.validate()
+            {
+                let _ = port.retry_page(url);
+            }
+            return Ok(failed);
+        }
+        if let Some(error) = read_error.as_deref() {
+            let streamed = filters
+                .stream_outcome(&view, read, Some(error))
+                .map_err(|filter| AppError::Filter(filter.to_string()))?;
+            port.warn_download(&stream_diagnostic(
+                "read_error",
+                read,
+                streamed.expected_length,
+            ));
+        }
+    }
     if decision.fail_code.is_some() {
         if let Some(stream) = outcome.response.stream.take() {
             stream.close().await;
+        }
+        if decision.fail_code != Some(consts::ERR_IMAGE_BROKEN) {
+            session.report_stream_result(outcome.response.proxy.as_deref(), true);
         }
         let failed = download_failed(filters, image_url, &view, true)?;
         if let ImageDownload::Failed { url, .. } = &failed
@@ -1883,9 +1999,115 @@ pub(crate) async fn run_download<P: DownloadPort>(
         return Ok(ImageDownload::Aborted);
     }
     let stream_page = App::page_view(&outcome.response, false, true);
-    let Some(stream) = outcome.response.stream.take() else {
+    let Some(mut stream) = outcome.response.stream.take() else {
         return Ok(ImageDownload::Aborted);
     };
+    let text_response = stream_page
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        .is_some_and(|(_, value)| {
+            value
+                .trim_start()
+                .get(..4)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("text"))
+        });
+    if text_response {
+        let prefix_limit = if stream_page.content_length >= 0 {
+            stream_page.content_length.min(512) as usize
+        } else {
+            512
+        };
+        let mut body_prefix = Vec::with_capacity(prefix_limit);
+        let mut read = 0i64;
+        let mut read_error = None;
+        while body_prefix.len() < prefix_limit {
+            if keepalive() {
+                stream.close().await;
+                return Ok(ImageDownload::Aborted);
+            }
+            match guarded!(stream.next_chunk()) {
+                Ok(Some(chunk)) => {
+                    read += chunk.len() as i64;
+                    let prefix_bytes = (prefix_limit - body_prefix.len()).min(chunk.len());
+                    body_prefix.extend_from_slice(&chunk[..prefix_bytes]);
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    read_error = Some(error);
+                    break;
+                }
+            }
+        }
+        view.text = String::from_utf8_lossy(&body_prefix).into_owned();
+        let quota = filters
+            .download_outcome(&view)
+            .map_err(|error| AppError::Filter(error.to_string()))?
+            .fail_code
+            == Some(consts::ERR_QUOTA_EXCEEDED);
+        if quota {
+            session.report_stream_result(outcome.response.proxy.as_deref(), true);
+            stream.close().await;
+            if port.validate() {
+                let _ = port.retry_page(&view.url);
+            }
+            return Ok(ImageDownload::Failed {
+                fail_code: consts::ERR_QUOTA_EXCEEDED,
+                real_url: view.real_url.clone(),
+                url: view.url.clone(),
+            });
+        }
+        if is_html_error_body(&body_prefix) {
+            let streamed = filters
+                .stream_outcome(&view, read, read_error.as_deref())
+                .map_err(|error| AppError::Filter(error.to_string()))?;
+            let fail_code = streamed.code.unwrap_or(consts::ERR_IMAGE_BROKEN);
+            session.report_stream_result(outcome.response.proxy.as_deref(), false);
+            port.warn_download(&stream_diagnostic(
+                "html_error_body",
+                read,
+                streamed.expected_length,
+            ));
+            stream.close().await;
+            if port.validate() {
+                let _ = port.retry_page(&view.url);
+            }
+            return Ok(ImageDownload::Failed {
+                fail_code,
+                real_url: view.real_url.clone(),
+                url: view.url.clone(),
+            });
+        }
+        if let Some(error) = read_error.as_deref() {
+            let streamed = filters
+                .stream_outcome(&view, read, Some(error))
+                .map_err(|filter| AppError::Filter(filter.to_string()))?;
+            port.warn_download(&stream_diagnostic(
+                "read_error",
+                read,
+                streamed.expected_length,
+            ));
+            stream.close().await;
+            if port.validate() {
+                let _ = port.retry_page(&view.url);
+            }
+            return Ok(ImageDownload::Failed {
+                fail_code: streamed.code.unwrap_or(consts::ERR_IMAGE_BROKEN),
+                real_url: view.real_url.clone(),
+                url: view.url.clone(),
+            });
+        }
+        session.report_stream_result(outcome.response.proxy.as_deref(), true);
+        stream.close().await;
+        if port.validate() {
+            let _ = port.retry_page(&view.url);
+        }
+        return Ok(ImageDownload::Failed {
+            fail_code: 1014,
+            real_url: view.real_url.clone(),
+            url: view.url.clone(),
+        });
+    }
     let staged = match port
         .begin_save(image_url, &view.url)
         .map_err(AppError::Task)?
@@ -1911,6 +2133,7 @@ pub(crate) async fn run_download<P: DownloadPort>(
         }
     };
     let mut read = 0i64;
+    let mut body_prefix = Vec::with_capacity(512);
     loop {
         if keepalive() {
             return Ok(ImageDownload::Aborted);
@@ -1919,12 +2142,45 @@ pub(crate) async fn run_download<P: DownloadPort>(
         match chunk {
             Ok(Some(chunk)) => {
                 read += chunk.len() as i64;
+                let scan_html_prefix = body_prefix.len() < 512;
+                let prefix_bytes = (512 - body_prefix.len()).min(chunk.len());
+                body_prefix.extend_from_slice(&chunk[..prefix_bytes]);
+                if scan_html_prefix && is_html_error_body(&body_prefix) {
+                    drop(file);
+                    let broken = filters
+                        .stream_outcome(&stream_page, read, Some("HTML error response body"))
+                        .map_err(|filter| AppError::Filter(filter.to_string()))?;
+                    let code = broken.code.unwrap_or(consts::ERR_IMAGE_BROKEN);
+                    session.report_stream_result(outcome.response.proxy.as_deref(), false);
+                    port.warn_download(&stream_diagnostic(
+                        "html_error_body",
+                        read,
+                        broken.expected_length,
+                    ));
+                    drop(stage);
+                    if port.validate() {
+                        let _ = port.retry_page(&view.url);
+                    }
+                    return Ok(ImageDownload::Failed {
+                        fail_code: code,
+                        real_url: view.real_url.clone(),
+                        url: view.url.clone(),
+                    });
+                }
                 if let Some(speed) = &runtime.speed {
                     let mut checker = speed.lock().unwrap_or_else(|error| error.into_inner());
                     checker.check(chunk.len());
                     let full = checker.calc(true);
                     drop(checker);
                     if is_low_speed(full, runtime.low_speed_threshold) {
+                        let checked = filters
+                            .stream_outcome(&stream_page, read, None)
+                            .map_err(|filter| AppError::Filter(filter.to_string()))?;
+                        port.warn_download(&stream_diagnostic(
+                            "low_speed",
+                            read,
+                            checked.expected_length,
+                        ));
                         drop(file);
                         drop(stage);
                         let failed =
@@ -1952,6 +2208,11 @@ pub(crate) async fn run_download<P: DownloadPort>(
                     .stream_outcome(&stream_page, read, Some(&error))
                     .map_err(|filter| AppError::Filter(filter.to_string()))?;
                 let code = broken.code.unwrap_or(consts::ERR_IMAGE_BROKEN);
+                port.warn_download(&stream_diagnostic(
+                    "read_error",
+                    read,
+                    broken.expected_length,
+                ));
                 drop(stage);
                 if port.validate() {
                     let _ = port.retry_page(&view.url);
@@ -1977,6 +2238,11 @@ pub(crate) async fn run_download<P: DownloadPort>(
         .map_err(|filter| AppError::Filter(filter.to_string()))?;
     if streamed.broken {
         let code = streamed.code.unwrap_or(consts::ERR_IMAGE_BROKEN);
+        port.warn_download(&stream_diagnostic(
+            "length_mismatch",
+            read,
+            streamed.expected_length,
+        ));
         drop(stage);
         if port.validate() {
             let _ = port.retry_page(&view.url);
@@ -1987,6 +2253,7 @@ pub(crate) async fn run_download<P: DownloadPort>(
             url: view.url.clone(),
         });
     }
+    session.report_stream_result(outcome.response.proxy.as_deref(), true);
     if !port.validate() || keepalive() {
         return Ok(ImageDownload::Aborted);
     }
@@ -2037,6 +2304,7 @@ impl App {
                 .all_tasks
                 .get_mut(guid)
                 .ok_or_else(|| AppError::State(format!("unknown task {guid}")))?,
+            logger: &mut self.logger,
             token: item.token,
         };
         let mut runtime = DownloadRuntime {
@@ -2414,5 +2682,24 @@ impl Serialize for Cookies<'_> {
             map.serialize_entry(key, value)?;
         }
         map.end()
+    }
+}
+
+#[cfg(test)]
+mod html_error_body_tests {
+    use super::is_html_error_body;
+
+    #[test]
+    fn recognizes_html_after_bom_and_leading_whitespace() {
+        assert!(is_html_error_body(
+            b"\xef\xbb\xbf \r\n<!DOCTYPE html><html><body>blocked</body></html>"
+        ));
+    }
+
+    #[test]
+    fn ignores_binary_image_prefixes() {
+        assert!(!is_html_error_body(
+            b"\x89PNG\r\n\x1a\n<html-looking payload"
+        ));
     }
 }

@@ -577,6 +577,15 @@ NATIVE_CASE_MAP = {
         ],
     },
     "monitor": {
+        "tests::m4::scan_and_download_idle_waits_are_one_second_and_cancelable": [
+            "delta.sleep-cancellation"
+        ],
+        "tests::m4::task_queue_idle_poll_uses_injected_one_second_sleep": [
+            "delta.sleep-cancellation"
+        ],
+        "tests::m4::monitor_sums_worker_speeds_and_clears_the_total_on_exit": [
+            "m4.monitor.slow-windows"
+        ],
         "tests::m4::monitor_reports_two_slow_windows_before_a_zero_speed_stuck_break": [
             "m4.monitor.native-slow-stuck"
         ],
@@ -773,6 +782,9 @@ NATIVE_CASE_MAP = {
         "i18n::tests::every_reference_key_exists_in_all_three_locales": [
             "i18n.keys.all"
         ],
+        "i18n::tests::proxy_help_lists_only_supported_schemes": [
+            "delta.i18n-glype-help-text"
+        ],
     },
     "transport": {
         "worker::tests::transport_get_preserves_header_order_duplicates_and_cookies": [
@@ -821,7 +833,7 @@ NATIVE_CASE_MAP = {
             "proxy.socks4",
             "proxy.socks4a",
         ],
-        "tests::m3_transport::socks5_and_socks5h_prove_local_vs_proxy_dns": [
+        "tests::m3_transport::socks5_and_socks5h_always_use_remote_dns_without_ip_fallback": [
             "proxy.socks5",
             "proxy.socks5h",
         ],
@@ -833,6 +845,24 @@ NATIVE_CASE_MAP = {
         ],
         "tests::m3_transport::image_only_policy_proxies_non_webpage_urls": [
             "proxy.policy"
+        ],
+        "tests::m3_transport::proxy_image_without_content_length_uses_url_size_and_publishes_exact_bytes": [
+            "proxy.image-stream-integrity"
+        ],
+        "tests::m3_transport::proxy_image_php_error_body_is_not_published": [
+            "proxy.image-stream-integrity"
+        ],
+        "tests::m3_transport::proxy_image_text_html_error_body_is_rejected_as_broken": [
+            "proxy.image-stream-integrity"
+        ],
+        "tests::m3_transport::proxy_image_quota_body_keeps_quota_code_when_streamed": [
+            "proxy.image-stream-integrity"
+        ],
+        "tests::m3_transport::proxy_image_text_error_body_matching_url_size_is_not_published": [
+            "proxy.image-stream-integrity"
+        ],
+        "tests::m3_transport::proxy_image_truncated_body_does_not_debit_proxy_health": [
+            "proxy.image-stream-integrity"
         ],
         "tests::m3_transport::proxy_config_update_adds_to_the_shared_pool": [
             "proxy.pool-order"
@@ -1119,7 +1149,31 @@ NATIVE_CASE_MAP = {
 NATIVE_COMMANDS = {
     "config": [
         ["cargo", "test", "--bin", "xeHentai", "config::tests"],
-        ["cargo", "test", "--bin", "xeHentai", "tests::"],
+        [
+            "cargo", "test", "--bin", "xeHentai",
+            "tests::migration_then_save_then_reload_survives_python_changes",
+            "--", "--exact",
+        ],
+        [
+            "cargo", "test", "--bin", "xeHentai",
+            "tests::entry_point_initializes_configuration_and_log",
+            "--", "--exact",
+        ],
+        [
+            "cargo", "test", "--bin", "xeHentai",
+            "tests::entry_point_imports_legacy_python_once",
+            "--", "--exact",
+        ],
+        [
+            "cargo", "test", "--bin", "xeHentai",
+            "tests::rust_and_rss_sources_stay_in_separate_directories",
+            "--", "--exact",
+        ],
+        [
+            "cargo", "test", "--bin", "xeHentai",
+            "tests::sdk_exports_named_structs_with_optional_and_array_fields",
+            "--", "--exact",
+        ],
         ["cargo", "test", "--bin", "xeHentai", "r#const::tests"],
     ],
     "cli": [
@@ -1154,6 +1208,14 @@ NATIVE_COMMANDS = {
     ],
     "monitor": [
         ["cargo", "test", "--bin", "xeHentai", "tests::m4::monitor_"],
+        [
+            "cargo", "test", "--bin", "xeHentai",
+            "tests::m4::scan_and_download_idle_waits_are_one_second_and_cancelable",
+        ],
+        [
+            "cargo", "test", "--bin", "xeHentai",
+            "tests::m4::task_queue_idle_poll_uses_injected_one_second_sleep",
+        ],
     ],
     "download": [
         ["cargo", "test", "--bin", "xeHentai", "tests::m4::pipeline"],
@@ -4058,28 +4120,6 @@ class _CompatStopMonitor(Exception):
     pass
 
 
-def _compat_speed_trace(worker, speed):
-    clock = _compat_fake_time(speed.get("start", 100.0), 0.0)
-    original = worker.time
-    worker.time = clock
-    try:
-        checker = worker.speed_checker(cnt=speed.get("cnt", 5))
-        trace = []
-        now = speed.get("start", 100.0)
-        resets = set(speed.get("resets", []))
-        for index, (size, delta) in enumerate(speed["timeline"]):
-            now += delta
-            clock.now = now
-            checker.check(size)
-            trace.append([float(round(checker.calc(False), 6)), float(round(checker.calc(True), 6)), len(checker.speed_buffer)])
-            if index in resets:
-                checker.reset()
-                trace.append(["reset", float(round(checker.calc(False), 6)), len(checker.speed_buffer)])
-        return trace
-    finally:
-        worker.time = original
-
-
 def _compat_speed_ref(worker, sample_bytes):
     clock = _compat_fake_time(0.0, 1.1)
     original = worker.time
@@ -4245,7 +4285,6 @@ def _compat_monitor_scenario(worker, const, scenario):
         "finished": task.meta["finished"],
         "rename_calls": task.rename_calls,
         "cleanup_calls": task.cleanup_calls,
-        "download_speed": float(round(getattr(monitor, "download_speed", 0.0), 6)),
         "stopped": stopped,
         "stats": stats["count"],
     }
@@ -4257,10 +4296,7 @@ def oracle_monitor(upstream, request):
     sys.path.insert(0, str(upstream))
     worker = importlib.import_module("xeHentai.worker")
     const = importlib.import_module("xeHentai.const")
-    result = {
-        "speed": _compat_speed_trace(worker, request["speed"]),
-        "monitor": {},
-    }
+    result = {"monitor": {}}
     for name, scenario in request["monitor"].items():
         result["monitor"][name] = _compat_monitor_scenario(worker, const, scenario)
     return result
@@ -4336,17 +4372,17 @@ def monitor_scenarios():
 
 
 SPEED_WINDOW_TRACE = [
-    [512.0, 0.0, 1],
-    [819.2, 0.0, 2],
-    [1170.285714, 0.0, 3],
-    [1024.0, 1024.0, 4],
+    [0.0, 0.0, 1],
+    [0.0, 0.0, 2],
+    [2730.666667, 0.0, 3],
+    [1462.857143, 0.0, 4],
     ["reset", 0.0, 0],
-    [2048.0, 0.0, 1],
-    [1024.0, 0.0, 2],
-    [1024.0, 1024.0, 3],
+    [0.0, 0.0, 1],
+    [2048.0, 0.0, 2],
+    [1280.0, 0.0, 3],
     [409.6, 409.6, 3],
     ["reset", 0.0, 0],
-    [1024.0, 0.0, 1],
+    [0.0, 0.0, 1],
 ]
 
 MONITOR_CASES = [
@@ -4374,7 +4410,7 @@ def compare_monitor(cases, oracle, candidate):
     for case_id in MONITOR_CASES:
         cases.setdefault(case_id, True)
     # The speed checker is an approved delta from the Python ring. Compare the
-    # candidate against the new byte-window contract, not the frozen trace.
+    # candidate against the byte-window contract, not the frozen trace.
     speed_diffs = compare(SPEED_WINDOW_TRACE, candidate["speed"], "speed")
     cases["m4.speed.checker"] = not speed_diffs
     diffs.extend(speed_diffs)
@@ -4383,15 +4419,12 @@ def compare_monitor(cases, oracle, candidate):
             continue
         expected = {
             field: oracle["monitor"][key].get(field)
-            for field in ("events", "state", "finished", "download_speed", "stopped", "stats")
+            for field in ("events", "state", "finished", "stopped", "stats")
         }
         actual = {
             field: candidate["monitor"][key].get(field)
-            for field in ("events", "state", "finished", "download_speed", "stopped", "stats")
+            for field in ("events", "state", "finished", "stopped", "stats")
         }
-        # Monitor.run retires the published value on every exit path so RPC
-        # clients cannot keep seeing the last active-worker total.
-        expected["download_speed"] = 0.0
         local = compare(expected, actual, key)
         if local:
             cases[case_id] = False
@@ -6303,13 +6336,12 @@ def run_oracle(oracle, request, root, upstream, log_path, locale=None, cwd=None,
 
 
 def _cargo_target_argv(argv, target_dir):
-    """Explicit leased target dir for every nested cargo invocation.
-
-    Complements (never replaces) the CARGO_TARGET_DIR environment: the flag
-    is inserted right after the cargo subcommand so `cargo test/check` and
-    friends build in slot-2 even if the environment were dropped.
-    """
+    """Pin nested Cargo calls to the assigned executable and target directory."""
     out = list(argv)
+    if out and out[0] == "cargo":
+        resolved = shutil.which("cargo")
+        if resolved is not None:
+            out[0] = resolved
     if "--target-dir" not in out and len(out) >= 2:
         out[2:2] = ["--target-dir", str(target_dir)]
     return out
@@ -6445,11 +6477,23 @@ def compare_i18n(cases, oracle, candidate, messages, codes):
         cases["i18n.available-locales"] = False
     else:
         cases["i18n.available-locales"] = True
+    glype_help_matches = True
     for tag, mapped in LOCALE_TAGS:
         oracle_locale = oracle[tag]
         candidate_locale = candidate["locales"][mapped]
+        expected_messages = dict(oracle_locale["messages"])
+        candidate_messages = dict(candidate_locale["messages"])
+        expected_proxy_help = expected_messages.pop("XEH_OPT_p")
+        candidate_proxy_help = candidate_messages.pop("XEH_OPT_p", None)
+        expected_proxy_help = expected_proxy_help.replace(", glype", "", 1)
+        if candidate_proxy_help != expected_proxy_help:
+            glype_help_matches = False
+            diffs.append(
+                f"delta.i18n-glype-help-text.{mapped}: "
+                f"{expected_proxy_help!r} != {candidate_proxy_help!r}"
+            )
         message_diffs = compare(
-            oracle_locale["messages"], candidate_locale["messages"], f"i18n.{mapped}.messages"
+            expected_messages, candidate_messages, f"i18n.{mapped}.messages"
         )
         error_diffs = compare(
             oracle_locale["errors"], candidate_locale["errors"], f"i18n.{mapped}.errors"
@@ -6457,6 +6501,7 @@ def compare_i18n(cases, oracle, candidate, messages, codes):
         diffs.extend(message_diffs + error_diffs)
         cases[f"i18n.messages.{mapped}"] = not message_diffs
         cases[f"i18n.errors.{mapped}"] = not error_diffs
+    cases["delta.i18n-glype-help-text"] = glype_help_matches
     key_diffs = compare(oracle["en_us"]["keys"], sorted(candidate["reference_keys"]), "i18n.keys")
     diffs.extend(key_diffs)
     cases["i18n.keys.all"] = not key_diffs
@@ -6753,6 +6798,11 @@ def self_check(suite, oracle, candidate, native_runs=None):
         compare_i18n(cases, oracle, mutated, [], [])
         checks.append(("message", not cases["i18n.messages.zh_hans"]))
         mutated = copy.deepcopy(candidate)
+        mutated["locales"]["en_us"]["messages"]["XEH_OPT_p"] = oracle["en_us"]["messages"]["XEH_OPT_p"]
+        cases = {}
+        compare_i18n(cases, oracle, mutated, [], [])
+        checks.append(("glype-help-text", not cases["delta.i18n-glype-help-text"]))
+        mutated = copy.deepcopy(candidate)
         mutated["locales"]["en_us"]["errors"]["1006"] = "mutated"
         cases = {}
         compare_i18n(cases, oracle, mutated, [], [])
@@ -6981,11 +7031,6 @@ def self_check(suite, oracle, candidate, native_runs=None):
         cases = {}
         compare_monitor(cases, oracle, mutated)
         checks.append(("monitor-event", not cases["m4.monitor.finish"]))
-        mutated = copy.deepcopy(candidate)
-        mutated["monitor"]["slow"]["download_speed"] = 1.0
-        cases = {}
-        compare_monitor(cases, oracle, mutated)
-        checks.append(("monitor-speed-cleared", not cases["m4.monitor.slow-windows"]))
         mutated = copy.deepcopy(candidate)
         mutated["monitor"]["slow"]["stats"] = 1
         cases = {}

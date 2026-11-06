@@ -5380,8 +5380,8 @@ mod m3_transport {
     }
 
     #[tokio::test]
-    async fn socks5_and_socks5h_prove_local_vs_proxy_dns() {
-        for (scheme, remote) in [("socks5", false), ("socks5h", true)] {
+    async fn socks5_and_socks5h_always_use_remote_dns_without_ip_fallback() {
+        for scheme in ["socks5", "socks5h"] {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
             let (tx, rx) = tokio::sync::oneshot::channel::<u8>();
@@ -5426,10 +5426,11 @@ mod m3_transport {
             let mut pool = Pool::new();
             pool.add_proxy(&format!("{scheme}://127.0.0.1:{port}"))
                 .unwrap();
+            let fallback = FallbackMap::empty().with_host("gallery.test", &["198.51.100.7"]);
             let mut session = session(
                 Some(Arc::new(Mutex::new(pool))),
                 Arc::clone(&resolver),
-                FallbackMap::empty(),
+                fallback,
                 TlsClient::production(),
                 ProxyPolicy::All,
             );
@@ -5438,12 +5439,14 @@ mod m3_transport {
                 .await
                 .expect("socks5 request");
             assert_eq!(outcome.response.text, "socks5-ok");
-            assert_eq!(rx.await.unwrap(), if remote { 3 } else { 1 });
-            let local = resolver.calls().iter().any(|host| host == "gallery.test");
             assert_eq!(
-                local,
-                !remote,
-                "{scheme} resolver calls {:?}",
+                rx.await.unwrap(),
+                3,
+                "{scheme} must send the domain to the proxy"
+            );
+            assert!(
+                !resolver.calls().iter().any(|host| host == "gallery.test"),
+                "{scheme} must not resolve the target locally: {:?}",
                 resolver.calls()
             );
             server.await.unwrap();
@@ -6165,6 +6168,7 @@ mod m3_transport {
         reload_url: String,
         task_dir: std::path::PathBuf,
         sentinel: std::path::PathBuf,
+        log_path: std::path::PathBuf,
     }
 
     fn prepare_download_fixture(root: &std::path::Path, port: u16) -> DownloadFixture {
@@ -6202,6 +6206,7 @@ mod m3_transport {
         std::fs::create_dir_all(&task_dir).unwrap();
         let sentinel = task_dir.join("sentinel.txt");
         std::fs::write(&sentinel, b"old-state").unwrap();
+        let log_path = root.join("download.log");
         DownloadFixture {
             app,
             guid,
@@ -6209,6 +6214,7 @@ mod m3_transport {
             reload_url: reload,
             task_dir,
             sentinel,
+            log_path,
         }
     }
 
@@ -6265,6 +6271,382 @@ mod m3_transport {
         response.extend_from_slice(bytes);
         socket.write_all(&response).await.unwrap();
         socket.shutdown().await.unwrap();
+    }
+
+    fn configure_download_proxy(fixture: &mut DownloadFixture, port: u16) -> String {
+        let address = format!("http://127.0.0.1:{port}");
+        let mut patch = serde_json::Map::new();
+        patch.insert("proxy".into(), serde_json::json!([address]));
+        fixture
+            .app
+            .update_config(patch)
+            .expect("proxy configuration");
+        fixture
+            .app
+            .task_mut(&fixture.guid)
+            .unwrap()
+            .config
+            .proxy_image_only = true;
+        address
+    }
+
+    fn set_fixture_image_url(fixture: &mut DownloadFixture, image_url: String) {
+        let task = fixture.app.task_mut(&fixture.guid).unwrap();
+        task.put_img_queue(&image_url, &fixture.reload_url, "pic.jpg")
+            .unwrap();
+        task.img_q = Some(std::collections::VecDeque::from([image_url.clone()]));
+        fixture.image_url = image_url;
+    }
+
+    #[tokio::test]
+    async fn proxy_image_without_content_length_uses_url_size_and_publishes_exact_bytes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_port = listener.local_addr().unwrap().port();
+        let bytes = image_body();
+        let expected = bytes.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_headers(&mut socket).await;
+            assert!(String::from_utf8_lossy(&request).starts_with("GET http://127.0.0.1:"));
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            socket.write_all(&bytes).await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("downloads")).unwrap();
+        let mut fixture = prepare_download_fixture(root.path(), proxy_port);
+        let proxy = configure_download_proxy(&mut fixture, proxy_port);
+        let mut filters =
+            crate::filters::Filters::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+
+        match fixture
+            .app
+            .download_one_image(&fixture.guid, &mut filters)
+            .await
+            .unwrap()
+        {
+            crate::core::ImageDownload::Saved(path) => {
+                assert_eq!(std::fs::read(path).unwrap(), expected);
+            }
+            other => panic!("expected complete proxied image, got {other:?}"),
+        }
+        assert_eq!(
+            fixture
+                .app
+                .proxy_pool()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .counts(&proxy),
+            Some((1, 0))
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn proxy_image_php_error_body_is_not_published() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_port = listener.local_addr().unwrap().port();
+        let body = b"<html><body>proxy response error</body></html>".to_vec();
+        let body_len = body.len();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_headers(&mut socket).await;
+            assert!(String::from_utf8_lossy(&request).starts_with("GET http://127.0.0.1:"));
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {body_len}\r\n\r\n"
+            );
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.write_all(&body).await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("downloads")).unwrap();
+        let mut fixture = prepare_download_fixture(root.path(), proxy_port);
+        set_fixture_image_url(
+            &mut fixture,
+            format!(
+                "http://127.0.0.1:{proxy_port}/0123456789abcdef0123456789abcdef01234567-4096-200-0-jpg/image.php?n=proxy-error"
+            ),
+        );
+        let proxy = configure_download_proxy(&mut fixture, proxy_port);
+        fixture.app.logger.set_logfile(&fixture.log_path).unwrap();
+        let mut filters =
+            crate::filters::Filters::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+
+        match fixture
+            .app
+            .download_one_image(&fixture.guid, &mut filters)
+            .await
+            .unwrap()
+        {
+            crate::core::ImageDownload::Failed { fail_code, .. } => {
+                assert_eq!(fail_code, crate::r#const::ERR_IMAGE_BROKEN);
+            }
+            other => panic!("expected rejected proxy body, got {other:?}"),
+        }
+        assert_clean_stage(&fixture);
+        let log = std::fs::read_to_string(&fixture.log_path).unwrap();
+        assert!(
+            log.contains("kind=html_error_body"),
+            "missing diagnostic: {log}"
+        );
+        assert!(
+            log.contains(&format!("received_bytes={body_len}")),
+            "missing byte count: {log}"
+        );
+        assert!(
+            log.contains("expected_bytes=4096"),
+            "missing expected count: {log}"
+        );
+        assert!(!log.contains("proxy-error"), "query data leaked: {log}");
+        assert!(!log.contains("keystamp="), "URL query leaked: {log}");
+        assert_eq!(
+            fixture
+                .app
+                .proxy_pool()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .counts(&proxy),
+            Some((0, 1))
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn proxy_image_text_html_error_body_is_rejected_as_broken() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_port = listener.local_addr().unwrap().port();
+        let body = b"<html><body>origin error</body></html>".to_vec();
+        let body_len = body.len();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_headers(&mut socket).await;
+            assert!(String::from_utf8_lossy(&request).starts_with("GET http://127.0.0.1:"));
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {body_len}\r\n\r\n"
+            );
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.write_all(&body).await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("downloads")).unwrap();
+        let mut fixture = prepare_download_fixture(root.path(), proxy_port);
+        set_fixture_image_url(
+            &mut fixture,
+            format!(
+                "http://127.0.0.1:{proxy_port}/0123456789abcdef0123456789abcdef01234567-4096-200-0-jpg/image.php"
+            ),
+        );
+        let proxy = configure_download_proxy(&mut fixture, proxy_port);
+        fixture.app.logger.set_logfile(&fixture.log_path).unwrap();
+        let mut filters =
+            crate::filters::Filters::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+
+        match fixture
+            .app
+            .download_one_image(&fixture.guid, &mut filters)
+            .await
+            .unwrap()
+        {
+            crate::core::ImageDownload::Failed { fail_code, .. } => {
+                assert_eq!(fail_code, crate::r#const::ERR_IMAGE_BROKEN);
+            }
+            other => panic!("expected rejected text/html image body, got {other:?}"),
+        }
+        assert_clean_stage(&fixture);
+        let log = std::fs::read_to_string(&fixture.log_path).unwrap();
+        assert!(
+            log.contains("kind=html_error_body"),
+            "missing diagnostic: {log}"
+        );
+        assert_eq!(
+            fixture
+                .app
+                .proxy_pool()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .counts(&proxy),
+            Some((0, 1))
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn proxy_image_quota_body_keeps_quota_code_when_streamed() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_port = listener.local_addr().unwrap().port();
+        let body = b"exceeded your image viewing limits".to_vec();
+        let body_len = body.len();
+        let url_image_size = body_len + 1000;
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_headers(&mut socket).await;
+            assert!(String::from_utf8_lossy(&request).starts_with("GET http://127.0.0.1:"));
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {body_len}\r\n\r\n"
+            );
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.write_all(&body).await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("downloads")).unwrap();
+        let mut fixture = prepare_download_fixture(root.path(), proxy_port);
+        set_fixture_image_url(
+            &mut fixture,
+            format!(
+                "http://127.0.0.1:{proxy_port}/0123456789abcdef0123456789abcdef01234567-{url_image_size}-200-0-jpg/image.php"
+            ),
+        );
+        let proxy = configure_download_proxy(&mut fixture, proxy_port);
+        let mut filters =
+            crate::filters::Filters::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+
+        match fixture
+            .app
+            .download_one_image(&fixture.guid, &mut filters)
+            .await
+            .unwrap()
+        {
+            crate::core::ImageDownload::Failed { fail_code, .. } => {
+                assert_eq!(fail_code, crate::r#const::ERR_QUOTA_EXCEEDED);
+            }
+            other => panic!("expected quota failure, got {other:?}"),
+        }
+        assert_clean_stage(&fixture);
+        assert!(!root.path().join("downloads/Test Gallery/1.jpg").exists());
+        assert_eq!(
+            fixture
+                .app
+                .proxy_pool()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .counts(&proxy),
+            Some((1, 0))
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn proxy_image_text_error_body_matching_url_size_is_not_published() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_port = listener.local_addr().unwrap().port();
+        let body = b"error response body is not an image".to_vec();
+        let body_len = body.len();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_headers(&mut socket).await;
+            assert!(String::from_utf8_lossy(&request).starts_with("GET http://127.0.0.1:"));
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {body_len}\r\n\r\n"
+            );
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.write_all(&body).await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("downloads")).unwrap();
+        let mut fixture = prepare_download_fixture(root.path(), proxy_port);
+        set_fixture_image_url(
+            &mut fixture,
+            format!(
+                "http://127.0.0.1:{proxy_port}/0123456789abcdef0123456789abcdef01234567-{body_len}-200-0-jpg/image.php"
+            ),
+        );
+        let proxy = configure_download_proxy(&mut fixture, proxy_port);
+        let mut filters =
+            crate::filters::Filters::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+
+        match fixture
+            .app
+            .download_one_image(&fixture.guid, &mut filters)
+            .await
+            .unwrap()
+        {
+            crate::core::ImageDownload::Failed { fail_code, .. } => {
+                assert_eq!(fail_code, 1014);
+            }
+            other => panic!("expected non-image response rejection, got {other:?}"),
+        }
+        assert_clean_stage(&fixture);
+        assert!(!root.path().join("downloads/Test Gallery/1.jpg").exists());
+        assert_eq!(
+            fixture
+                .app
+                .proxy_pool()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .counts(&proxy),
+            Some((1, 0))
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn proxy_image_truncated_body_does_not_debit_proxy_health() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_port = listener.local_addr().unwrap().port();
+        let body = vec![b'x'; 1024];
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_headers(&mut socket).await;
+            assert!(String::from_utf8_lossy(&request).starts_with("GET http://127.0.0.1:"));
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: 4096\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            socket.write_all(&body).await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("downloads")).unwrap();
+        let mut fixture = prepare_download_fixture(root.path(), proxy_port);
+        let proxy = configure_download_proxy(&mut fixture, proxy_port);
+        let mut filters =
+            crate::filters::Filters::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+
+        match fixture
+            .app
+            .download_one_image(&fixture.guid, &mut filters)
+            .await
+            .unwrap()
+        {
+            crate::core::ImageDownload::Failed { fail_code, .. } => {
+                assert_eq!(fail_code, crate::r#const::ERR_IMAGE_BROKEN);
+            }
+            other => panic!("expected truncated image body rejection, got {other:?}"),
+        }
+        assert_clean_stage(&fixture);
+        assert_eq!(
+            fixture
+                .app
+                .proxy_pool()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .counts(&proxy),
+            Some((0, 0))
+        );
+        server.await.unwrap();
     }
 
     async fn read_until_eof(socket: &mut (impl AsyncRead + Unpin), millis: u64) -> bool {
@@ -7708,6 +8090,95 @@ mod m4 {
         }
     }
 
+    #[derive(Default)]
+    struct PendingSleepClock {
+        sleeps: std::sync::Mutex<Vec<f64>>,
+        release: tokio::sync::Notify,
+    }
+
+    impl crate::worker::HttpClock for PendingSleepClock {
+        fn random(&self) -> f64 {
+            0.5
+        }
+
+        fn sleep<'a>(&'a self, seconds: f64) -> crate::worker::SleepFuture<'a> {
+            self.sleeps.lock().unwrap().push(seconds);
+            Box::pin(self.release.notified())
+        }
+
+        fn now(&self) -> f64 {
+            100.0
+        }
+    }
+
+    #[tokio::test]
+    async fn scan_and_download_idle_waits_are_one_second_and_cancelable() {
+        for (state, scan_threads, download_threads) in [
+            (consts::TASK_STATE_SCAN_IMG, 1, 0),
+            (consts::TASK_STATE_DOWNLOAD, 0, 1),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let clock = Arc::new(PendingSleepClock::default());
+            let mut app = m4_app(
+                root.path(),
+                m4_config(root.path(), scan_threads, download_threads),
+            );
+            let guid = m4_task(
+                &mut app,
+                root.path(),
+                "http://e-hentai.org/g/123/abcdef0123/",
+                serde_json::json!({}),
+            );
+            {
+                let task = app.task_mut(&guid).unwrap();
+                task.state = state;
+                task.meta.insert("title".into(), serde_json::json!("idle"));
+                task.meta.insert("total".into(), serde_json::json!(1));
+                task.meta.insert("finished".into(), serde_json::json!(0));
+                task.page_q = Some(std::collections::VecDeque::new());
+                task.img_q = Some(std::collections::VecDeque::new());
+            }
+            app.set_session_config(SessionConfig {
+                clock: clock.clone(),
+                ..SessionConfig::default()
+            });
+            let runtime = Runtime::new(app, Path::new(MANIFEST).to_path_buf());
+            let local = LocalSet::new();
+            local
+                .run_until(async move {
+                    let (run, handle) = runtime.spawn();
+                    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                    loop {
+                        if clock.sleeps.lock().unwrap().contains(&1.0) {
+                            break;
+                        }
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "idle worker did not request its one-second wait for state {state}"
+                        );
+                        tokio::task::yield_now().await;
+                    }
+                    let paused = tokio::time::timeout(
+                        Duration::from_millis(500),
+                        handle.pause_task_and_wait(&guid),
+                    )
+                    .await
+                    .expect("cancellation must wake the idle worker")
+                    .expect("pause and drain idle task");
+                    assert_eq!(paused.joined, 2);
+                    handle.borrow_app_mut(|app| app.set_exit(consts::XEH_STATE_SOFT_EXIT));
+                    clock.release.notify_one();
+                    tokio::time::timeout(Duration::from_secs(2), run)
+                        .await
+                        .expect("runtime should stop after task exit")
+                        .expect("runtime task join");
+                    let sleeps = clock.sleeps.lock().unwrap().clone();
+                    assert!(sleeps.contains(&1.0), "state {state}: {sleeps:?}");
+                })
+                .await;
+        }
+    }
+
     #[tokio::test]
     async fn task_queue_idle_poll_uses_injected_one_second_sleep() {
         let root = tempfile::tempdir().unwrap();
@@ -8284,11 +8755,13 @@ mod m4 {
                             image_a.len()
                         );
                         let _ = socket.write_all(head.as_bytes()).await;
+                        // The fifth 1 KB chunk arrives after the 5 s window; four
+                        // samples remain, for 800 B/s below the 1024 B/s limit.
                         for chunk in image_a.chunks(1000) {
                             if socket.write_all(chunk).await.is_err() {
                                 return;
                             }
-                            tokio::time::sleep(Duration::from_millis(1100)).await;
+                            tokio::time::sleep(Duration::from_millis(1400)).await;
                         }
                         let _ = socket.shutdown().await;
                     } else if path.contains(hash40_b) {
