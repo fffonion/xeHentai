@@ -404,7 +404,7 @@ def test_config_native_filters_are_exact_for_mapped_integration_cases():
         name for name in compat.NATIVE_CASE_MAP["config"]
         if name.startswith("tests::")
     }
-    assert required
+    assert "tests::sdk_exports_named_structs_with_option_and_array_fields" in required
     for test_name in required:
         matching = [
             argv for argv in commands
