@@ -12,7 +12,7 @@ use std::sync::{Arc, OnceLock};
 
 use regex::Regex;
 use vm::{
-    CompileSourceFileOptions, HostApiCatalog, HostFunctionRegistry, SourceFlavor, Value, Vm,
+    CompileSourceFileOptions, HostApiCatalog, HostFunctionRegistry, SourceFlavor, Value,
     VmStatus, compile_source_with_flavor_and_options,
 };
 
@@ -403,11 +403,11 @@ impl Config {
             ("proxy_image", "bool"),
             ("proxy_image_only", "bool"),
             ("rpc_interface", "string"),
-            ("rpc_port", "int?"),
-            ("rpc_secret", "string?"),
+            ("rpc_port", "Option<int>"),
+            ("rpc_secret", "Option<string>"),
             ("rpc_open_browser", "bool"),
             ("make_archive", "bool"),
-            ("download_range", "[[int]]?"),
+            ("download_range", "Option<[[int]]>"),
             ("scan_thread_cnt", "int"),
             ("download_thread_cnt", "int"),
             ("download_timeout", "int"),
@@ -444,14 +444,16 @@ impl Config {
         ));
         out.push_str(&format!(
             "        rpc_port: {},\n",
-            self.rpc_port
-                .map_or_else(|| "null".into(), |value| value.to_string())
+            match self.rpc_port {
+                Some(value) => format!("Option::Some({value})"),
+                None => "Option::None".to_string(),
+            }
         ));
         out.push_str(&format!(
             "        rpc_secret: {},\n",
             match &self.rpc_secret {
-                Some(value) => rss_string(value)?,
-                None => "null".into(),
+                Some(value) => format!("Option::Some({})", rss_string(value)?),
+                None => "Option::None".into(),
             }
         ));
         out.push_str(&format!(
@@ -463,13 +465,13 @@ impl Config {
             "        download_range: {},\n",
             match &self.download_range {
                 Some(rows) => format!(
-                    "[{}]",
+                    "Option::Some([{}])",
                     rows.iter()
                         .map(|row| format!("[{}, {}]", row[0], row[1]))
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
-                None => "null".into(),
+                None => "Option::None".into(),
             }
         ));
         out.push_str(&format!(
@@ -529,7 +531,7 @@ impl Config {
         let compiled =
             compile_source_with_flavor_and_options(source, SourceFlavor::RustScript, options)
                 .map_err(|error| ConfigError::RssCompile(error.to_string()))?;
-        let mut vm = Vm::new(compiled.program);
+        let mut vm = crate::guest_boundary::open_vm(compiled.program);
         config_registry()
             .bind_vm_cached(&mut vm)
             .map_err(|error| ConfigError::RssDenied(error.to_string()))?;
@@ -643,6 +645,20 @@ fn required<'a>(map: &'a vm::VmMap, name: &str) -> Result<&'a Value, ConfigError
     field(map, name).ok_or_else(|| ConfigError::RssShape(format!("missing field '{name}'")))
 }
 
+/// The payload of one field the `Config` struct declares as `Option<T>`.
+///
+/// The generated module always emits the field; absence is the canonical
+/// `Option::None` carrier, decided by its Boolean tag and never by a physical
+/// Null, so `Some("")` and `Some(0)` stay present values.
+fn optional_payload<'a>(
+    map: &'a vm::VmMap,
+    name: &str,
+) -> Result<Option<&'a Value>, ConfigError> {
+    let value = required(map, name)?;
+    crate::guest_boundary::decode(value)
+        .map_err(|reason| ConfigError::RssShape(format!("field '{name}': {reason}")))
+}
+
 fn shape(name: &str, expected: &str, actual: &Value) -> ConfigError {
     ConfigError::RssShape(format!(
         "field '{name}' must be {expected}, found {actual:?}"
@@ -671,18 +687,18 @@ fn get_string(map: &vm::VmMap, name: &str) -> Result<String, ConfigError> {
 }
 
 fn get_optional_int(map: &vm::VmMap, name: &str) -> Result<Option<i64>, ConfigError> {
-    match field(map, name) {
-        None | Some(Value::Null) => Ok(None),
+    match optional_payload(map, name)? {
+        None => Ok(None),
         Some(Value::Int(value)) => Ok(Some(*value)),
-        Some(other) => Err(shape(name, "int?", other)),
+        Some(other) => Err(shape(name, "Option<int>", other)),
     }
 }
 
 fn get_optional_string(map: &vm::VmMap, name: &str) -> Result<Option<String>, ConfigError> {
-    match field(map, name) {
-        None | Some(Value::Null) => Ok(None),
+    match optional_payload(map, name)? {
+        None => Ok(None),
         Some(Value::String(value)) => Ok(Some((**value).clone())),
-        Some(other) => Err(shape(name, "string?", other)),
+        Some(other) => Err(shape(name, "Option<string>", other)),
     }
 }
 
@@ -719,8 +735,8 @@ fn get_int_array(map: &vm::VmMap, name: &str) -> Result<Vec<i64>, ConfigError> {
 }
 
 fn get_download_range(map: &vm::VmMap, name: &str) -> Result<Option<Vec<[i64; 2]>>, ConfigError> {
-    match field(map, name) {
-        None | Some(Value::Null) => Ok(None),
+    match optional_payload(map, name)? {
+        None => Ok(None),
         Some(Value::Array(rows)) => {
             let mut out = Vec::with_capacity(rows.len());
             for (index, row) in rows.iter().enumerate() {
@@ -743,7 +759,7 @@ fn get_download_range(map: &vm::VmMap, name: &str) -> Result<Option<Vec<[i64; 2]
             }
             Ok(Some(out))
         }
-        Some(other) => Err(shape(name, "[[int]]?", other)),
+        Some(other) => Err(shape(name, "Option<[[int]]>", other)),
     }
 }
 

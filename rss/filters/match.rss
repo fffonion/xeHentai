@@ -30,51 +30,51 @@ struct Meta {
 struct LoginResult {
     outcome: string,
     cookies: [[string]],
-    message: string?,
-    exception: string?,
+    message: Option<string>,
+    exception: Option<string>,
 }
 
 struct MetadataResult {
     outcome: string,
-    fail_code: int?,
-    ban: string?,
-    meta: Meta?,
-    exception: string?,
+    fail_code: Option<int>,
+    ban: Option<string>,
+    meta: Option<Meta>,
+    exception: Option<string>,
 }
 
 struct PageResult {
     outcome: string,
     urls: [string],
-    fail_code: int?,
-    debug_text: string?,
-    exception: string?,
+    fail_code: Option<int>,
+    debug_text: Option<string>,
+    exception: Option<string>,
 }
 
 struct ImgResult {
     outcome: string,
-    code: int?,
-    real_url: string?,
-    url: string?,
-    image_url: string?,
-    reload_url: string?,
-    filename: string?,
-    exception: string?,
+    code: Option<int>,
+    real_url: Option<string>,
+    url: Option<string>,
+    image_url: Option<string>,
+    reload_url: Option<string>,
+    filename: Option<string>,
+    exception: Option<string>,
 }
 
 struct DownloadResult {
     outcome: string,
-    code: int?,
-    real_url: string?,
-    url: string?,
-    exception: string?,
+    code: Option<int>,
+    real_url: Option<string>,
+    url: Option<string>,
+    exception: Option<string>,
 }
 
 struct StreamResult {
     outcome: string,
-    code: int?,
-    real_url: string?,
-    url: string?,
-    expected_length: int?,
+    code: Option<int>,
+    real_url: Option<string>,
+    url: Option<string>,
+    expected_length: Option<int>,
 }
 
 // --- fixed reference constants -------------------------------------------
@@ -156,21 +156,23 @@ fn starts_with(text: string, prefix: string) -> bool {
 }
 
 fn header_value(headers: [[string]], name: string) -> string {
-    let value = flt::header_get(headers, name);
-    let out = match value {
-        null => "",
-        _ => value.unwrap_or(""),
+    // `header_get` is a declared `Option<string>`: `None` means the header is
+    // absent, `Some("")` is a header that exists with an empty value.
+    flt::header_get(headers, name).unwrap_or("")
+}
+
+// A declared `Option<T>` is present when its tag is `Some`, whatever the
+// payload is; `Some("")` is therefore present.
+fn option_present<T>(value: Option<T>) -> bool {
+    let present: bool = match value {
+        Option::Some(_) => true,
+        Option::None => false,
     };
-    out
+    present
 }
 
 fn header_present(headers: [[string]], name: string) -> bool {
-    let value = flt::header_get(headers, name);
-    let out = match value {
-        null => false,
-        _ => true,
-    };
-    out
+    option_present::<string>(flt::header_get(headers, name))
 }
 
 // `%d` conversion used by the reference MPV URL format.
@@ -192,31 +194,34 @@ fn login_cookie(pattern: string, header: string) -> string {
 
 pub fn flt_login(page: PageResponse) -> LoginResult {
     let raw = flt::header_get(page.headers, "set-cookie");
+    // `set-cookie` absent is the reference `TypeError`: `None` is not
+    // iterable. A present-but-empty header still takes the ordinary path.
+    let present = option_present::<string>(raw.copy());
+    let header = raw.unwrap_or("");
     let mut outcome = "ok";
     let mut cookies: [[string]] = [];
-    let mut message: string? = null;
-    let mut exception: string? = null;
-    if raw == null {
+    let mut message: Option<string> = Option::None;
+    let mut exception: Option<string> = Option::None;
+    if !present {
         outcome = "exception";
-        exception = "TypeError";
-        message = "'NoneType' object is not iterable";
+        exception = Option::Some("TypeError");
+        message = Option::Some("'NoneType' object is not iterable");
     } else {
-            let header = raw.unwrap_or("");
-            let member = login_cookie("ipb_member_id=(.*?);", header);
-            let password = login_cookie("ipb_pass_hash=(.*?);", header);
-            if member.length == 0 || password.length == 0 {
-                let errors = flt::find_all("<span class=\"postcolor\">([^<]+)</span>", page.text);
-                outcome = "fail";
-                if errors.length > 0 {
-                    let row = &errors[0];
-                    message = row[1];
-                } else {
-                    message = "ex: list index out of range";
-                }
+        let member = login_cookie("ipb_member_id=(.*?);", header);
+        let password = login_cookie("ipb_pass_hash=(.*?);", header);
+        if member.length == 0 || password.length == 0 {
+            let errors = flt::find_all("<span class=\"postcolor\">([^<]+)</span>", page.text);
+            outcome = "fail";
+            if errors.length > 0 {
+                let row = &errors[0];
+                message = Option::Some(row[1]);
             } else {
-                cookies[cookies.length] = ["ipb_member_id", member];
-                cookies[cookies.length] = ["ipb_pass_hash", password];
+                message = Option::Some("ex: list index out of range");
             }
+        } else {
+            cookies[cookies.length] = ["ipb_member_id", member];
+            cookies[cookies.length] = ["ipb_pass_hash", password];
+        }
     }
     {
         outcome: outcome,
@@ -240,41 +245,41 @@ fn find_first(pattern: string, text: string) -> string {
 
 pub fn flt_metadata(page: PageResponse) -> MetadataResult {
     let mut outcome = "ok";
-    let mut fail_code: int? = null;
-    let mut ban: string? = null;
-    let mut exception: string? = null;
-    let mut meta: Meta? = null;
+    let mut fail_code: Option<int> = Option::None;
+    let mut ban: Option<string> = Option::None;
+    let mut exception: Option<string> = Option::None;
+    let mut meta: Option<Meta> = Option::None;
 
     if page.status == 600 {
         outcome = "fail";
-        fail_code = 1009;
+        fail_code = Option::Some(1009);
     } else if page.status == 404 {
         outcome = "fail";
-        fail_code = 1004;
+        fail_code = Option::Some(1004);
     } else if flt::match_prefix("This gallery is pining for the fjords", page.text) {
         outcome = "fail";
-        fail_code = 1002;
+        fail_code = Option::Some(1002);
     } else if flt::match_prefix("Your IP address has been temporarily banned", page.text) {
         outcome = "fail";
-        fail_code = 1010;
+        fail_code = Option::Some(1010);
         let expires = find_first("The ban expires in (.+)", page.text);
         if expires.length == 0 {
-            exception = "IndexError";
+            exception = Option::Some("IndexError");
         } else {
-            ban = expires;
+            ban = Option::Some(expires);
         }
     } else {
         let gj_matches = flt::find_all("=\"gj\">(.*?)</h1>", page.text);
         if gj_matches.length == 0 {
             outcome = "exception";
-            exception = "IndexError";
+            exception = Option::Some("IndexError");
         } else {
             let gj_row = &gj_matches[0];
             let gjname = gj_row[1];
             let gn_matches = flt::find_all("=\"gn\">(.*?)</h1>", page.text);
             if gn_matches.length == 0 {
                 outcome = "exception";
-                exception = "IndexError";
+                exception = Option::Some("IndexError");
             } else {
                 let gn_row = &gn_matches[0];
                 let gnname = gn_row[1];
@@ -284,7 +289,7 @@ pub fn flt_metadata(page: PageResponse) -> MetadataResult {
                 );
                 if total_text.length == 0 {
                     outcome = "exception";
-                    exception = "IndexError";
+                    exception = Option::Some("IndexError");
                 } else {
                     let showing_groups = flt::find_all(
                         "Showing (\\d+) - (\\d+) of ([\\d,]+) images",
@@ -292,7 +297,7 @@ pub fn flt_metadata(page: PageResponse) -> MetadataResult {
                     );
                     if showing_groups.length == 0 {
                         outcome = "exception";
-                        exception = "IndexError";
+                        exception = Option::Some("IndexError");
                     } else {
                         let showing_row = &showing_groups[0];
                         let tags_found = flt::find_all("toggle_tagmenu\\('([^']+)'", page.text);
@@ -314,7 +319,7 @@ pub fn flt_metadata(page: PageResponse) -> MetadataResult {
                             thumbnail_cnt: digit_int(showing_row[2]) - digit_int(showing_row[1]) + 1,
                             use_multipage_viewer: use_mpv,
                         };
-                        meta = meta_value;
+                        meta = Option::Some(meta_value);
                     }
                 }
             }
@@ -343,20 +348,20 @@ pub fn flt_pageurl(page: PageResponse) -> PageResult {
         let row = &picpage[index];
         urls[urls.length] = row[1];
     }
-    let mut debug_text: string? = null;
+    let mut debug_text: Option<string> = Option::None;
     let mut outcome = "ok";
-    let mut fail_code: int? = null;
+    let mut fail_code: Option<int> = Option::None;
     if picpage.length == 0 {
         outcome = "fail";
-        fail_code = 1008;
-        debug_text = page.text;
+        fail_code = Option::Some(1008);
+        debug_text = Option::Some(page.text);
     }
     {
         outcome: outcome,
         urls: urls,
         fail_code: fail_code,
         debug_text: debug_text,
-        exception: null,
+        exception: Option::None,
     }
 }
 
@@ -364,28 +369,28 @@ pub fn flt_pageurl_mpv(page: PageResponse) -> PageResult {
     let imagelists = flt::find_all("imagelist\\s=\\s([^;]+)", page.text);
     let mut outcome = "ok";
     let mut urls: [string] = [];
-    let mut fail_code: int? = null;
-    let mut exception: string? = null;
+    let mut fail_code: Option<int> = Option::None;
+    let mut exception: Option<string> = Option::None;
 
     if imagelists.length == 0 {
         outcome = "exception";
-        fail_code = 1008;
-        exception = "IndexError";
+        fail_code = Option::Some(1008);
+        exception = Option::Some("IndexError");
     } else {
         let imagelist_row = &imagelists[0];
+        // A declared `Option<[map<string>]>`: `None` is the reference
+        // `ValueError` from `json.loads`, an empty list is a real parse.
         let parsed = flt::json_parse(imagelist_row[1]);
         let mut entries: [map<string>] = [];
-        let mut parsed_ok = false;
-        if parsed == null {
-            parsed_ok = false;
-        } else {
-            entries = parsed.unwrap_or([]);
-            parsed_ok = true;
+        let parsed_ok = option_present::<[map<string>]>(parsed.copy());
+        if parsed_ok {
+            let empty: [map<string>] = [];
+            entries = parsed.unwrap_or(empty);
         }
         if !parsed_ok {
             outcome = "exception";
-            fail_code = 1008;
-            exception = "TypeError";
+            fail_code = Option::Some(1008);
+            exception = Option::Some("TypeError");
         } else {
             let base_matches = flt::find_all("https?://[^/]+", page.real_url);
             let mut base_url = "";
@@ -395,12 +400,12 @@ pub fn flt_pageurl_mpv(page: PageResponse) -> PageResult {
             }
             if base_url.length == 0 {
                 outcome = "exception";
-                exception = "IndexError";
+                exception = Option::Some("IndexError");
             } else {
                 let index_matches = flt::find_all(re_index(), page.real_url);
                 if index_matches.length == 0 {
                     outcome = "exception";
-                    exception = "IndexError";
+                    exception = Option::Some("IndexError");
                 } else {
                     let index_row = &index_matches[0];
                     let gid = index_row[1];
@@ -419,7 +424,7 @@ pub fn flt_pageurl_mpv(page: PageResponse) -> PageResult {
                     }
                     if failed {
                         outcome = "exception";
-                        exception = "KeyError";
+                        exception = Option::Some("KeyError");
                     }
                 }
             }
@@ -429,20 +434,20 @@ pub fn flt_pageurl_mpv(page: PageResponse) -> PageResult {
         outcome: outcome,
         urls: urls,
         fail_code: fail_code,
-        debug_text: null,
+        debug_text: Option::None,
         exception: exception,
     }
 }
 
 // --- quota wrapper --------------------------------------------------------
 
-fn image_size(url: string) -> int? {
+fn image_size(url: string) -> Option<int> {
     let found = flt::find_all(re_imghash(), url);
-    let mut out: int? = null;
+    let mut out: Option<int> = Option::None;
     if found.length > 0 {
         let row = &found[found.length - 1];
         if row.length > 2 {
-            out = digit_int(row[2]);
+            out = Option::Some(digit_int(row[2]));
         }
     }
     out
@@ -456,11 +461,13 @@ fn quota_content_length(content_length: int) -> bool {
 // Returns 0 to continue, otherwise the reference quota error code.
 fn quota_code(page: PageResponse) -> int {
     let size = image_size(page.url);
+    let has_size = option_present::<int>(size.copy());
+    let image_pixels = size.unwrap_or(0);
     let mut size_differs = true;
-    if size == null {
-        size_differs = true;
-    } else {
-        size_differs = size.unwrap_or(0) != page.content_length;
+    // No `-w-h` hash in the URL: the reference has no expected size, which
+    // counts as "differs" for the quota predicate.
+    if has_size {
+        size_differs = image_pixels != page.content_length;
     }
     let mut out = 0;
     if page.status == 600 {
@@ -485,13 +492,13 @@ fn quota_code(page: PageResponse) -> int {
 fn img_fail(code: int, page: PageResponse) -> ImgResult {
     {
         outcome: "fail",
-        code: code,
-        real_url: page.real_url,
-        url: page.url,
-        image_url: null,
-        reload_url: null,
-        filename: null,
-        exception: null,
+        code: Option::Some(code),
+        real_url: Option::Some(page.real_url),
+        url: Option::Some(page.url),
+        image_url: Option::None,
+        reload_url: Option::None,
+        filename: Option::None,
+        exception: Option::None,
     }
 }
 
@@ -500,13 +507,13 @@ fn img_fail(code: int, page: PageResponse) -> ImgResult {
 fn img_ok(image_url: string, reload_url: string, filename: string) -> ImgResult {
     {
         outcome: "ok",
-        code: null,
-        real_url: null,
-        url: null,
-        image_url: image_url,
-        reload_url: reload_url,
-        filename: filename,
-        exception: null,
+        code: Option::None,
+        real_url: Option::None,
+        url: Option::None,
+        image_url: Option::Some(image_url),
+        reload_url: Option::Some(reload_url),
+        filename: Option::Some(filename),
+        exception: Option::None,
     }
 }
 
@@ -604,41 +611,40 @@ pub fn flt_imgurl(page: PageResponse) -> ImgResult {
 fn download_fail(code: int, page: PageResponse) -> DownloadResult {
     {
         outcome: "fail",
-        code: code,
-        real_url: page.real_url,
-        url: page.url,
-        exception: null,
+        code: Option::Some(code),
+        real_url: Option::Some(page.real_url),
+        url: Option::Some(page.url),
+        exception: Option::None,
     }
 }
 
 pub fn flt_download(page: PageResponse) -> DownloadResult {
     let quota = quota_code(page);
+    // Each struct field is read once into a local: the guest field read owns
+    // the value it takes from the response map.
+    let status = page.status;
+    let content_length = page.content_length;
+    let has_stream = page.has_stream;
+    let size = image_size(page.url);
+    let has_size = option_present::<int>(size.copy());
+    let image_pixels = size.unwrap_or(0);
+    let size_mismatch = has_size && content_length >= 0 && image_pixels != content_length;
+    let has_expected_length = content_length >= 0 || (has_size && image_pixels > 0);
     if quota != 0 => {
         download_fail(quota, page)
-    } else if page.status == 404 => {
+    } else if status == 404 => {
         download_fail(1011, page)
+    } else if !has_expected_length || (content_length == 0 && !has_size) || size_mismatch => {
+        download_fail(1012, page)
+    } else if !has_stream => {
+        download_fail(1014, page)
     } else => {
-        let size = image_size(page.url);
-        let mut size_mismatch = false;
-        if size != null && page.content_length >= 0 {
-            if size.unwrap_or(0) != page.content_length {
-                size_mismatch = true;
-            }
-        }
-        let has_expected_length = page.content_length >= 0
-            || (size != null && size.unwrap_or(0) > 0);
-        if !has_expected_length || (page.content_length == 0 && size == null) || size_mismatch => {
-            download_fail(1012, page)
-        } else if !page.has_stream => {
-            download_fail(1014, page)
-        } else => {
-            {
-                outcome: "stream",
-                code: null,
-                real_url: null,
-                url: null,
-                exception: null,
-            }
+        {
+            outcome: "stream",
+            code: Option::None,
+            real_url: Option::None,
+            url: Option::None,
+            exception: Option::None,
         }
     }
 }
@@ -647,14 +653,16 @@ pub fn flt_download(page: PageResponse) -> DownloadResult {
 // error makes the file broken and aborts the staging file.
 pub fn flt_stream_result(input: PageResponse, actual_length: int, read_error: string) -> StreamResult {
     let size = image_size(input.url);
-    let expected_length = if size != null && size.unwrap_or(0) > 0 => {
-        size.unwrap_or(0)
-    } else => {
-        input.content_length
-    };
-    let mut exposed_expected_length: int? = null;
+    let has_size = option_present::<int>(size.copy());
+    let size_value = size.unwrap_or(0);
+    let mut expected_length = input.content_length;
+    // The header length is the fallback when the URL carries no hash.
+    if has_size && size_value > 0 {
+        expected_length = size_value;
+    }
+    let mut exposed_expected_length: Option<int> = Option::None;
     if expected_length >= 0 {
-        exposed_expected_length = expected_length;
+        exposed_expected_length = Option::Some(expected_length);
     }
     let mut broken = false;
     if read_error.length > 0 || expected_length < 0 || actual_length != expected_length {
@@ -663,17 +671,17 @@ pub fn flt_stream_result(input: PageResponse, actual_length: int, read_error: st
     if broken => {
         {
             outcome: "broken",
-            code: 1012,
-            real_url: input.real_url,
-            url: input.url,
+            code: Option::Some(1012),
+            real_url: Option::Some(input.real_url),
+            url: Option::Some(input.url),
             expected_length: exposed_expected_length,
         }
     } else => {
         {
             outcome: "ok",
-            code: null,
-            real_url: null,
-            url: null,
+            code: Option::None,
+            real_url: Option::None,
+            url: Option::None,
             expected_length: exposed_expected_length,
         }
     }
@@ -681,11 +689,11 @@ pub fn flt_stream_result(input: PageResponse, actual_length: int, read_error: st
 
 pub fn dbg_json(text: string) -> string {
     let parsed = flt::json_parse(text);
+    let parsed_present = option_present::<[map<string>]>(parsed.copy());
+    let empty: [map<string>] = [];
+    let list: [map<string>] = parsed.unwrap_or(empty);
     let mut out = "null";
-    if parsed == null {
-        out = "null";
-    } else {
-        let list: [map<string>] = parsed.unwrap_or([]);
+    if parsed_present {
         let mut joined = "";
         for index in 0..list.length {
             let entry = &list[index];

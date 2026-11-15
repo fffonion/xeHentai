@@ -73,7 +73,7 @@ fn compile_module(source: &str) -> Result<Vm, RpcError> {
     let compiled =
         compile_source_with_flavor_and_options(source, SourceFlavor::RustScript, options)
             .map_err(|error| RpcError::Compile(error.to_string()))?;
-    let mut vm = Vm::new(compiled.program);
+    let mut vm = crate::guest_boundary::open_vm(compiled.program);
     rpc_registry()
         .bind_vm_cached(&mut vm)
         .map_err(|error| RpcError::Bind(error.to_string()))?;
