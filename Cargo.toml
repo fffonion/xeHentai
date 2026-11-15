@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.6", default-features = false, features = ["std", "help", "usage", "error-context", "suggestions", "string"] }
-pd-vm = { git = "https://github.com/rustscript-lang/rustscript.git", rev = "fc8b0c8179640a8ffe460a64b3690e35c2f7eb73", default-features = false, features = ["runtime", "http-client"] }
+pd-vm = { git = "https://github.com/rustscript-lang/rustscript.git", rev = "fc8b0c8179640a8ffe460a64b3690e35c2f7eb73", default-features = false, features = ["runtime", "http-client", "cranelift-jit"] }
 regex = "1"
 rust-i18n = "4"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "io-util", "io-std", "signal", "time", "fs"] }

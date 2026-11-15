@@ -3,13 +3,10 @@
 //! Two contracts live here because both are decided by the pinned Core, not by
 //! a caller:
 //!
-//! * **No native JIT backend.** This build enables only the `runtime` and
-//!   `http-client` features, so the crate is compiled without `cranelift-jit`.
-//!   The pinned Core still defaults `JitConfig::enabled` to
-//!   `native_jit_supported()`, which is true on this host architecture, so a
-//!   hot loop or a linking call site reaches a native compile that can only
-//!   fail. Every application VM is therefore opened with the JIT disabled
-//!   explicitly; the interpreter is the only engine this build has.
+//! * **Native JIT backend.** The `pd-vm` dependency enables `runtime`,
+//!   `http-client` and `cranelift-jit`, so `JitConfig::enabled` can stay at its
+//!   supported default and hot loops compile instead of reaching a backend
+//!   that was never linked.
 //!
 //! * **A guest `Option<T>` is never a physical Null.** It is a map with a
 //!   Boolean `tag` (`true` = Some) and the active `payload`, and one tag-only
@@ -20,15 +17,9 @@
 
 use vm::{Program, Value, Vm};
 
-/// Open one VM with the native JIT disabled (see the module documentation).
+/// Open one VM with the compiled native JIT backend.
 pub(crate) fn open_vm(program: Program) -> Vm {
-    Vm::new_with_jit_config(
-        program,
-        vm::jit::JitConfig {
-            enabled: false,
-            ..vm::jit::JitConfig::default()
-        },
-    )
+    Vm::new(program)
 }
 
 /// The carrier for `Option::Some(payload)`.
