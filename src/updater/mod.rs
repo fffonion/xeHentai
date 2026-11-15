@@ -244,11 +244,10 @@ fn optional_text(
         what,
         message: format!("missing field {name}"),
     })?;
-    match crate::guest_boundary::decode(declared)
-        .map_err(|reason| UpdateError::Shape {
-            what,
-            message: format!("field {name} is not a declared Option: {reason}"),
-        })? {
+    match crate::guest_boundary::decode(declared).map_err(|reason| UpdateError::Shape {
+        what,
+        message: format!("field {name} is not a declared Option: {reason}"),
+    })? {
         None => Ok(None),
         Some(Value::String(text)) => Ok(Some((**text).clone())),
         Some(other) => Err(UpdateError::Shape {

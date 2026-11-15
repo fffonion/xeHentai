@@ -12,8 +12,8 @@ use std::sync::{Arc, OnceLock};
 
 use regex::Regex;
 use vm::{
-    CompileSourceFileOptions, HostApiCatalog, HostFunctionRegistry, SourceFlavor, Value,
-    VmStatus, compile_source_with_flavor_and_options,
+    CompileSourceFileOptions, HostApiCatalog, HostFunctionRegistry, SourceFlavor, Value, VmStatus,
+    compile_source_with_flavor_and_options,
 };
 
 pub const CONFIG_FILE: &str = "config.rss";
@@ -650,10 +650,7 @@ fn required<'a>(map: &'a vm::VmMap, name: &str) -> Result<&'a Value, ConfigError
 /// The generated module always emits the field; absence is the canonical
 /// `Option::None` carrier, decided by its Boolean tag and never by a physical
 /// Null, so `Some("")` and `Some(0)` stay present values.
-fn optional_payload<'a>(
-    map: &'a vm::VmMap,
-    name: &str,
-) -> Result<Option<&'a Value>, ConfigError> {
+fn optional_payload<'a>(map: &'a vm::VmMap, name: &str) -> Result<Option<&'a Value>, ConfigError> {
     let value = required(map, name)?;
     crate::guest_boundary::decode(value)
         .map_err(|reason| ConfigError::RssShape(format!("field '{name}': {reason}")))

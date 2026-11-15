@@ -182,9 +182,9 @@ fn json_parse_host(_vm: &mut Vm, args: &[Value]) -> Result<CallOutcome, VmError>
         }
         rows.push(Value::map(row));
     }
-    Ok(CallOutcome::Return(return_one(option_some(
-        Value::array(rows),
-    ))))
+    Ok(CallOutcome::Return(return_one(option_some(Value::array(
+        rows,
+    )))))
 }
 
 fn header_get_host(_vm: &mut Vm, args: &[Value]) -> Result<CallOutcome, VmError> {
@@ -601,8 +601,8 @@ fn field<'a>(map: &'a vm::VmMap, name: &str) -> Option<&'a Value> {
 /// The guest struct always carries the field; its absence is the canonical
 /// `Option::None` carrier decoded by tag, never a physical Null.
 fn option_payload<'a>(map: &'a vm::VmMap, name: &str) -> Result<Option<&'a Value>, FilterError> {
-    let value = field(map, name)
-        .ok_or_else(|| FilterError::Shape(format!("missing field {name}")))?;
+    let value =
+        field(map, name).ok_or_else(|| FilterError::Shape(format!("missing field {name}")))?;
     decode_option(value).map_err(|reason| FilterError::Shape(format!("field {name}: {reason}")))
 }
 
