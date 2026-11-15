@@ -445,15 +445,15 @@ impl Config {
         out.push_str(&format!(
             "        rpc_port: {},\n",
             match self.rpc_port {
-                Some(value) => format!("Option::Some({value})"),
-                None => "Option::None".to_string(),
+                Some(value) => format!("Some({value})"),
+                None => "None".to_string(),
             }
         ));
         out.push_str(&format!(
             "        rpc_secret: {},\n",
             match &self.rpc_secret {
-                Some(value) => format!("Option::Some({})", rss_string(value)?),
-                None => "Option::None".into(),
+                Some(value) => format!("Some({})", rss_string(value)?),
+                None => "None".into(),
             }
         ));
         out.push_str(&format!(
@@ -465,13 +465,13 @@ impl Config {
             "        download_range: {},\n",
             match &self.download_range {
                 Some(rows) => format!(
-                    "Option::Some([{}])",
+                    "Some([{}])",
                     rows.iter()
                         .map(|row| format!("[{}, {}]", row[0], row[1]))
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
-                None => "Option::None".into(),
+                None => "None".into(),
             }
         ));
         out.push_str(&format!(
@@ -648,7 +648,7 @@ fn required<'a>(map: &'a vm::VmMap, name: &str) -> Result<&'a Value, ConfigError
 /// The payload of one field the `Config` struct declares as `Option<T>`.
 ///
 /// The generated module always emits the field; absence is the canonical
-/// `Option::None` carrier, decided by its Boolean tag and never by a physical
+/// `None` carrier, decided by its Boolean tag and never by a physical
 /// Null, so `Some("")` and `Some(0)` stay present values.
 fn optional_payload<'a>(map: &'a vm::VmMap, name: &str) -> Result<Option<&'a Value>, ConfigError> {
     let value = required(map, name)?;

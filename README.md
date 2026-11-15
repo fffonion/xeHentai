@@ -205,7 +205,7 @@ excluding source maps and `PROVENANCE`; it is a development tool and CI no
 longer needs it, because the tracked `ui/` it used to compare against is gone.
 
 The dependency `pd-vm` is pinned to the RustScript revision
-`cdb0b798d631cd7ffab6dfed3fe4b69381ed3340`.
+`2f433edab3f1907e8cb060e901357d7e2af016ce`.
 
 ## CI
 

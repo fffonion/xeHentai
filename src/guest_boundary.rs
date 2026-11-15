@@ -22,12 +22,12 @@ pub(crate) fn open_vm(program: Program) -> Vm {
     Vm::new(program)
 }
 
-/// The carrier for `Option::Some(payload)`.
+/// The carrier for `Some(payload)`.
 pub(crate) fn some(payload: Value) -> Value {
     vm::option::some_carrier(payload)
 }
 
-/// The carrier for `Option::None`.
+/// The carrier for `None`.
 pub(crate) fn none() -> Value {
     vm::option::none_carrier()
 }
@@ -41,9 +41,9 @@ pub(crate) fn none() -> Value {
 pub(crate) fn decode(value: &Value) -> Result<Option<&Value>, &'static str> {
     match vm::option::payload(value) {
         Ok((true, Some(payload))) => Ok(Some(payload)),
-        Ok((true, None)) => Err("Option::Some carries no payload"),
+        Ok((true, None)) => Err("Some carries no payload"),
         Ok((false, None)) => Ok(None),
-        Ok((false, Some(_))) => Err("Option::None carries a payload"),
+        Ok((false, Some(_))) => Err("None carries a payload"),
         Err(_) => Err("value is not a canonical Option"),
     }
 }

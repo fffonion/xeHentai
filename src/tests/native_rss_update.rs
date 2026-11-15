@@ -438,8 +438,8 @@ fn bind(mut source: String, api: &str, package: &str) -> String {
     );
     let pem_literal = TEST_PUBLIC_PEM.replace('\n', "\\n");
     source.replace(
-        "verification_key: Option::None,",
-        &format!("verification_key: Option::Some(\"{pem_literal}\"),"),
+        "verification_key: None,",
+        &format!("verification_key: Some(\"{pem_literal}\"),"),
     )
 }
 

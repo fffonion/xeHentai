@@ -38,7 +38,7 @@ fn mode_error() -> string {
 
 pub fn upd_mode(mode: string) -> ModeDecision {
     let mut outcome = "invalid";
-    let mut exception: Option<string> = Option::None;
+    let mut exception: Option<string> = None;
     if mode == "off" {
         outcome = "off";
     } else if mode == "check" {
@@ -46,7 +46,7 @@ pub fn upd_mode(mode: string) -> ModeDecision {
     } else if mode == "download" {
         outcome = "download";
     } else {
-        exception = Option::Some(mode_error());
+        exception = Some(mode_error());
     }
     let decision = {
         outcome: outcome,

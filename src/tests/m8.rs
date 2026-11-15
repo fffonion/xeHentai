@@ -384,8 +384,8 @@ pub(super) fn publish_binding_with(root: &Path, api: &str, package: &str, pem: O
     if let Some(pem) = pem {
         let pem_literal = pem.replace('\n', "\\n");
         source = source.replace(
-            "verification_key: Option::None,",
-            &format!("verification_key: Option::Some(\"{pem_literal}\"),"),
+            "verification_key: None,",
+            &format!("verification_key: Some(\"{pem_literal}\"),"),
         );
     }
     std::fs::write(&path, source).expect("write binding");

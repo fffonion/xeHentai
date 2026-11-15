@@ -594,15 +594,15 @@ fn patch_binding_split(
         );
     if let Some(cdn) = cdn {
         source = source.replace(
-            "package_cdn_origin: Option::Some(\"https://release-assets.githubusercontent.com\"),",
-            &format!("package_cdn_origin: Option::Some(\"{cdn}\"),"),
+            "package_cdn_origin: Some(\"https://release-assets.githubusercontent.com\"),",
+            &format!("package_cdn_origin: Some(\"{cdn}\"),"),
         );
     }
     if let Some(pem) = pem {
         let pem_literal = pem.replace('\n', "\\n");
         source = source.replace(
-            "verification_key: Option::None,",
-            &format!("verification_key: Option::Some(\"{pem_literal}\"),"),
+            "verification_key: None,",
+            &format!("verification_key: Some(\"{pem_literal}\"),"),
         );
     }
     std::fs::write(path, source).expect("write binding");
@@ -4074,8 +4074,8 @@ fn b6_publish_binding(root: &Path, origin: &str, pem: &str, stable: &str, beta: 
         let path = root.join("rss/updater/github.rss");
         let source = std::fs::read_to_string(&path).expect("b6 binding");
         let source = source.replace(
-            "beta_channel: Option::None,",
-            &format!("beta_channel: Option::Some(\"{beta}\"),"),
+            "beta_channel: None,",
+            &format!("beta_channel: Some(\"{beta}\"),"),
         );
         std::fs::write(&path, source).expect("b6 beta binding");
     }

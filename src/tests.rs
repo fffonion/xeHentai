@@ -23,9 +23,9 @@ fn probe() -> Probe {
     {
         flag: false,
         text: "a\nb",
-        port: Option::None,
+        port: None,
         items: [],
-        range: Option::Some([[1, 5], [8, 8]]),
+        range: Some([[1, 5], [8, 8]]),
     }
 }
 
@@ -14902,8 +14902,8 @@ mod m7 {
         let path = rss.join("updater/github.rss");
         let source = std::fs::read_to_string(&path).expect("github.rss");
         let beta_line = match beta {
-            Some(channel) => format!("beta_channel: Option::Some(\"{channel}\"),"),
-            None => "beta_channel: Option::None,".to_string(),
+            Some(channel) => format!("beta_channel: Some(\"{channel}\"),"),
+            None => "beta_channel: None,".to_string(),
         };
         let source = source
             .replace(
@@ -14914,7 +14914,7 @@ mod m7 {
                 "package_download_origin: \"https://github.com\",",
                 &format!("package_download_origin: \"{origin}\","),
             )
-            .replace("beta_channel: Option::None,", &beta_line);
+            .replace("beta_channel: None,", &beta_line);
         std::fs::write(&path, source).unwrap();
     }
 

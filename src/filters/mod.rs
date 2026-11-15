@@ -599,7 +599,7 @@ fn field<'a>(map: &'a vm::VmMap, name: &str) -> Option<&'a Value> {
 /// The payload of one field the guest declares as `Option<T>`.
 ///
 /// The guest struct always carries the field; its absence is the canonical
-/// `Option::None` carrier decoded by tag, never a physical Null.
+/// `None` carrier decoded by tag, never a physical Null.
 fn option_payload<'a>(map: &'a vm::VmMap, name: &str) -> Result<Option<&'a Value>, FilterError> {
     let value =
         field(map, name).ok_or_else(|| FilterError::Shape(format!("missing field {name}")))?;
@@ -1225,8 +1225,8 @@ pub fn flt_header_probe(headers: [[string]]) -> string {
 pub fn flt_header_present_probe(headers: [[string]]) -> bool {
     let found = flt::header_get(headers, "Set-Cookie");
     let present: bool = match found {
-        Option::Some(_) => true,
-        Option::None => false,
+        Some(_) => true,
+        None => false,
     };
     present
 }
