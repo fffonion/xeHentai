@@ -16,6 +16,10 @@ use vm::{
     VmStatus, compile_source_with_flavor_and_options, register_catalog_static_function, return_one,
 };
 
+use crate::guest_boundary::{
+    decode as decode_option, none as option_none, open_vm, some as option_some,
+};
+
 pub const FILTER_RSS: &str = "rss/filters/match.rss";
 
 #[derive(Debug)]
@@ -86,12 +90,14 @@ fn filter_catalog() -> Arc<HostApiCatalog> {
                 HostParamSchema::value("headers", array_of(array_of(string()))),
                 HostParamSchema::value("name", string()),
             ],
-            HostTypeSchema::Optional(Box::new(string())),
+            // A declared guest `Option<string>`: absence is the guest None, never
+            // a physical Null at the boundary.
+            HostTypeSchema::Option(Box::new(string())),
         ));
         builder.function(HostFunctionSchema::with_return(
             "flt::json_parse",
             vec![HostParamSchema::value("text", string())],
-            HostTypeSchema::Optional(Box::new(array_of(HostTypeSchema::Map(Box::new(string()))))),
+            HostTypeSchema::Option(Box::new(array_of(HostTypeSchema::Map(Box::new(string()))))),
         ));
         Arc::new(builder.build().expect("filter catalog must build"))
     }))
@@ -153,15 +159,17 @@ fn json_parse_host(_vm: &mut Vm, args: &[Value]) -> Result<CallOutcome, VmError>
     let text = string_arg(args, 0)?;
     let parsed: serde_json::Value = match serde_json::from_str(&text) {
         Ok(value) => value,
-        Err(_) => return Ok(CallOutcome::Return(return_one(Value::Null))),
+        // The reference `json.loads` raises; the declared `Option` reports the
+        // failure as None instead of inventing an empty list.
+        Err(_) => return Ok(CallOutcome::Return(return_one(option_none()))),
     };
     let serde_json::Value::Array(items) = parsed else {
-        return Ok(CallOutcome::Return(return_one(Value::Null)));
+        return Ok(CallOutcome::Return(return_one(option_none())));
     };
     let mut rows = Vec::with_capacity(items.len());
     for item in items {
         let serde_json::Value::Object(fields) = item else {
-            return Ok(CallOutcome::Return(return_one(Value::Null)));
+            return Ok(CallOutcome::Return(return_one(option_none())));
         };
         let mut row = Vec::with_capacity(fields.len());
         for (key, value) in fields {
@@ -174,7 +182,9 @@ fn json_parse_host(_vm: &mut Vm, args: &[Value]) -> Result<CallOutcome, VmError>
         }
         rows.push(Value::map(row));
     }
-    Ok(CallOutcome::Return(return_one(Value::array(rows))))
+    Ok(CallOutcome::Return(return_one(option_some(Value::array(
+        rows,
+    )))))
 }
 
 fn header_get_host(_vm: &mut Vm, args: &[Value]) -> Result<CallOutcome, VmError> {
@@ -204,8 +214,8 @@ fn header_get_host(_vm: &mut Vm, args: &[Value]) -> Result<CallOutcome, VmError>
         }
     }
     Ok(CallOutcome::Return(return_one(match joined {
-        Some(value) => Value::string(value),
-        None => Value::Null,
+        Some(value) => option_some(Value::string(value)),
+        None => option_none(),
     })))
 }
 
@@ -387,15 +397,15 @@ fn download_value(input: &DownloadInput) -> Value {
     entries.push((
         Value::string("actual_length"),
         match input.actual_length {
-            Some(length) => Value::Int(length),
-            None => Value::Null,
+            Some(length) => option_some(Value::Int(length)),
+            None => option_none(),
         },
     ));
     entries.push((
         Value::string("read_error"),
         match &input.read_error {
-            Some(error) => Value::string(error.clone()),
-            None => Value::Null,
+            Some(error) => option_some(Value::string(error.clone())),
+            None => option_none(),
         },
     ));
     Value::map(entries)
@@ -586,9 +596,42 @@ fn field<'a>(map: &'a vm::VmMap, name: &str) -> Option<&'a Value> {
     map.get(&Value::string(name))
 }
 
-fn text(map: &vm::VmMap, name: &str) -> Result<Option<String>, FilterError> {
+/// The payload of one field the guest declares as `Option<T>`.
+///
+/// The guest struct always carries the field; its absence is the canonical
+/// `None` carrier decoded by tag, never a physical Null.
+fn option_payload<'a>(map: &'a vm::VmMap, name: &str) -> Result<Option<&'a Value>, FilterError> {
+    let value =
+        field(map, name).ok_or_else(|| FilterError::Shape(format!("missing field {name}")))?;
+    decode_option(value).map_err(|reason| FilterError::Shape(format!("field {name}: {reason}")))
+}
+
+/// One required plain `string` field.
+fn text(map: &vm::VmMap, name: &str) -> Result<String, FilterError> {
     match field(map, name) {
-        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok((**value).clone()),
+        None => Err(FilterError::Shape(format!("missing field {name}"))),
+        Some(other) => Err(FilterError::Shape(format!(
+            "field {name} is not a string: {other:?}"
+        ))),
+    }
+}
+
+/// One required plain `int` field.
+fn plain_int(map: &vm::VmMap, name: &str) -> Result<i64, FilterError> {
+    match field(map, name) {
+        Some(Value::Int(value)) => Ok(*value),
+        None => Err(FilterError::Shape(format!("missing field {name}"))),
+        Some(other) => Err(FilterError::Shape(format!(
+            "field {name} is not an int: {other:?}"
+        ))),
+    }
+}
+
+/// One field the guest declares as `Option<string>`.
+fn option_text(map: &vm::VmMap, name: &str) -> Result<Option<String>, FilterError> {
+    match option_payload(map, name)? {
+        None => Ok(None),
         Some(Value::String(value)) => Ok(Some((**value).clone())),
         Some(other) => Err(FilterError::Shape(format!(
             "field {name} is not a string: {other:?}"
@@ -596,9 +639,10 @@ fn text(map: &vm::VmMap, name: &str) -> Result<Option<String>, FilterError> {
     }
 }
 
-fn int(map: &vm::VmMap, name: &str) -> Result<Option<i64>, FilterError> {
-    match field(map, name) {
-        None | Some(Value::Null) => Ok(None),
+/// One field the guest declares as `Option<int>`.
+fn option_int(map: &vm::VmMap, name: &str) -> Result<Option<i64>, FilterError> {
+    match option_payload(map, name)? {
+        None => Ok(None),
         Some(Value::Int(value)) => Ok(Some(*value)),
         Some(other) => Err(FilterError::Shape(format!(
             "field {name} is not an int: {other:?}"
@@ -617,7 +661,7 @@ fn strings(map: &vm::VmMap, name: &str) -> Result<Vec<String>, FilterError> {
                 ))),
             })
             .collect(),
-        None | Some(Value::Null) => Ok(Vec::new()),
+        None => Err(FilterError::Shape(format!("missing field {name}"))),
         Some(other) => Err(FilterError::Shape(format!(
             "field {name} is not an array: {other:?}"
         ))),
@@ -625,18 +669,18 @@ fn strings(map: &vm::VmMap, name: &str) -> Result<Vec<String>, FilterError> {
 }
 
 fn support_text(map: &vm::VmMap) -> Result<Option<String>, FilterError> {
-    match text(map, "exception")? {
+    match option_text(map, "exception")? {
         Some(value) => Ok(Some(value)),
-        None => text(map, "message"),
+        None => option_text(map, "message"),
     }
 }
 
 fn decode_login(value: &Value) -> Result<LoginOutcome, FilterError> {
     let map = object(value, "login result")?;
-    let outcome = text(map, "outcome")?.unwrap_or_default();
+    let outcome = text(map, "outcome")?;
     let mut cookies = None;
     if outcome == "ok" {
-        let Value::Array(rows) = field(map, "cookies").unwrap_or(&Value::Null) else {
+        let Some(Value::Array(rows)) = field(map, "cookies") else {
             return Err(FilterError::Shape("login cookies are not an array".into()));
         };
         let mut pairs = Vec::with_capacity(rows.len());
@@ -656,7 +700,7 @@ fn decode_login(value: &Value) -> Result<LoginOutcome, FilterError> {
     Ok(LoginOutcome {
         cookies,
         fail_message: if outcome == "fail" {
-            text(map, "message")?
+            option_text(map, "message")?
         } else {
             None
         },
@@ -670,20 +714,27 @@ fn decode_login(value: &Value) -> Result<LoginOutcome, FilterError> {
 
 fn decode_metadata(value: &Value) -> Result<MetadataOutcome, FilterError> {
     let map = object(value, "metadata result")?;
-    let outcome = text(map, "outcome")?.unwrap_or_default();
+    let outcome = text(map, "outcome")?;
     let mut meta = None;
     if outcome == "ok" {
-        let meta_map = match field(map, "meta") {
+        // `meta` is declared `Option<Meta>`: `Some` must carry the named struct,
+        // `None` means no metadata was produced.
+        let meta_map = match option_payload(map, "meta")? {
             Some(Value::Map(meta_map)) => meta_map,
-            _ => return Err(FilterError::Shape("metadata result has no meta".into())),
+            Some(other) => {
+                return Err(FilterError::Shape(format!(
+                    "metadata result meta is not a map: {other:?}"
+                )));
+            }
+            None => return Err(FilterError::Shape("metadata result has no meta".into())),
         };
         meta = Some(Metadata {
-            gjname: text(meta_map, "gjname")?.unwrap_or_default(),
-            gnname: text(meta_map, "gnname")?.unwrap_or_default(),
-            total: int(meta_map, "total")?.unwrap_or(0),
-            finished: int(meta_map, "finished")?.unwrap_or(0),
+            gjname: text(meta_map, "gjname")?,
+            gnname: text(meta_map, "gnname")?,
+            total: plain_int(meta_map, "total")?,
+            finished: plain_int(meta_map, "finished")?,
             tags: strings(meta_map, "tags")?,
-            thumbnail_cnt: int(meta_map, "thumbnail_cnt")?.unwrap_or(0),
+            thumbnail_cnt: plain_int(meta_map, "thumbnail_cnt")?,
             use_multipage_viewer: matches!(
                 field(meta_map, "use_multipage_viewer"),
                 Some(Value::Bool(true))
@@ -691,10 +742,10 @@ fn decode_metadata(value: &Value) -> Result<MetadataOutcome, FilterError> {
         });
     }
     Ok(MetadataOutcome {
-        fail_code: int(map, "fail_code")?,
-        ban: text(map, "ban")?,
+        fail_code: option_int(map, "fail_code")?,
+        ban: option_text(map, "ban")?,
         meta,
-        exception: text(map, "exception")?,
+        exception: option_text(map, "exception")?,
     })
 }
 
@@ -702,46 +753,46 @@ fn decode_page(value: &Value) -> Result<PageOutcome, FilterError> {
     let map = object(value, "page result")?;
     Ok(PageOutcome {
         urls: strings(map, "urls")?,
-        fail_code: int(map, "fail_code")?,
-        debug_text: text(map, "debug_text")?,
-        exception: text(map, "exception")?,
+        fail_code: option_int(map, "fail_code")?,
+        debug_text: option_text(map, "debug_text")?,
+        exception: option_text(map, "exception")?,
     })
 }
 
 fn decode_image(value: &Value) -> Result<ImageOutcome, FilterError> {
     let map = object(value, "image result")?;
     Ok(ImageOutcome {
-        image_url: text(map, "image_url")?,
-        reload_url: text(map, "reload_url")?,
-        filename: text(map, "filename")?,
-        fail_code: int(map, "code")?,
-        real_url: text(map, "real_url")?,
-        url: text(map, "url")?,
-        exception: text(map, "exception")?,
+        image_url: option_text(map, "image_url")?,
+        reload_url: option_text(map, "reload_url")?,
+        filename: option_text(map, "filename")?,
+        fail_code: option_int(map, "code")?,
+        real_url: option_text(map, "real_url")?,
+        url: option_text(map, "url")?,
+        exception: option_text(map, "exception")?,
     })
 }
 
 fn decode_download(value: &Value) -> Result<DownloadOutcome, FilterError> {
     let map = object(value, "download result")?;
-    let outcome = text(map, "outcome")?.unwrap_or_default();
+    let outcome = text(map, "outcome")?;
     Ok(DownloadOutcome {
         stream: outcome == "stream",
-        fail_code: int(map, "code")?,
-        real_url: text(map, "real_url")?,
-        url: text(map, "url")?,
-        exception: text(map, "exception")?,
+        fail_code: option_int(map, "code")?,
+        real_url: option_text(map, "real_url")?,
+        url: option_text(map, "url")?,
+        exception: option_text(map, "exception")?,
     })
 }
 
 fn decode_stream(value: &Value) -> Result<StreamOutcome, FilterError> {
     let map = object(value, "stream result")?;
-    let outcome = text(map, "outcome")?.unwrap_or_default();
+    let outcome = text(map, "outcome")?;
     Ok(StreamOutcome {
         broken: outcome == "broken",
-        code: int(map, "code")?,
-        real_url: text(map, "real_url")?,
-        url: text(map, "url")?,
-        expected_length: int(map, "expected_length")?,
+        code: option_int(map, "code")?,
+        real_url: option_text(map, "real_url")?,
+        url: option_text(map, "url")?,
+        expected_length: option_int(map, "expected_length")?,
     })
 }
 
@@ -753,7 +804,7 @@ pub fn compile_module(source: &str) -> Result<Vm, FilterError> {
     let compiled =
         compile_source_with_flavor_and_options(source, SourceFlavor::RustScript, options)
             .map_err(|error| FilterError::Compile(error.to_string()))?;
-    let mut vm = Vm::new(compiled.program);
+    let mut vm = open_vm(compiled.program);
     filter_registry()
         .bind_vm_cached(&mut vm)
         .map_err(|error| FilterError::Bind(error.to_string()))?;
@@ -788,18 +839,29 @@ mod tests {
     }
 
     fn int_field(value: &Value, name: &str) -> Option<i64> {
-        match field(value, name) {
-            Value::Null => None,
-            Value::Int(number) => Some(*number),
-            other => panic!("{name} is not an int: {other:?}"),
+        let declared = decode_option(field(value, name))
+            .unwrap_or_else(|reason| panic!("{name} is not a declared Option: {reason}"));
+        match declared {
+            None => None,
+            Some(Value::Int(number)) => Some(*number),
+            Some(other) => panic!("{name} is not an int: {other:?}"),
+        }
+    }
+
+    fn option_map<'a>(value: &'a Value, name: &str) -> &'a vm::VmMap {
+        match decode_option(field(value, name)) {
+            Ok(Some(Value::Map(map))) => map,
+            other => panic!("{name} is not a Some(map): {other:?}"),
         }
     }
 
     fn text_field(value: &Value, name: &str) -> Option<String> {
-        match field(value, name) {
-            Value::Null => None,
-            Value::String(text) => Some((**text).clone()),
-            other => panic!("{name} is not a string: {other:?}"),
+        let declared = decode_option(field(value, name))
+            .unwrap_or_else(|reason| panic!("{name} is not a declared Option: {reason}"));
+        match declared {
+            None => None,
+            Some(Value::String(text)) => Some((**text).clone()),
+            Some(other) => panic!("{name} is not a string: {other:?}"),
         }
     }
 
@@ -873,9 +935,7 @@ mod tests {
             <a href=\"https://e-hentai.org/mpv/123/abcdef0123/#page2\"><div title=\"Page";
         let result = filters.metadata(&page(200, "u", "u", body)).expect("meta");
         assert_eq!(outcome(&result), "ok");
-        let Value::Map(meta) = field(&result, "meta") else {
-            panic!("meta must be a map");
-        };
+        let meta = option_map(&result, "meta");
         assert_eq!(meta.get(&Value::string("total")), Some(&Value::Int(12)));
         assert_eq!(
             meta.get(&Value::string("thumbnail_cnt")),
@@ -920,9 +980,7 @@ mod tests {
             .expect("metadata call");
 
         assert_eq!(outcome(&result), "ok");
-        let Value::Map(meta) = field(&result, "meta") else {
-            panic!("meta must be a map");
-        };
+        let meta = option_map(&result, "meta");
         assert_eq!(meta.get(&Value::string("gjname")), Some(&Value::string("")));
         assert_eq!(
             meta.get(&Value::string("gnname")),
@@ -1161,12 +1219,16 @@ pub fn flt_match_probe(text: string) -> string {
 }
 
 pub fn flt_header_probe(headers: [[string]]) -> string {
-    let value = flt::header_get(headers, "Set-Cookie");
-    let rendered = match value {
-        null => "",
-        _ => value.unwrap_or(""),
+    flt::header_get(headers, "Set-Cookie").unwrap_or("")
+}
+
+pub fn flt_header_present_probe(headers: [[string]]) -> bool {
+    let found = flt::header_get(headers, "Set-Cookie");
+    let present: bool = match found {
+        Some(_) => true,
+        None => false,
     };
-    rendered
+    present
 }
 
 pub fn flt_json_probe(text: string) -> string {
@@ -1240,6 +1302,32 @@ pub fn flt_fmt_probe(n: int, text: string) -> string {
             .expect("header call");
         assert_eq!(result, Value::string("a=1; Path=/, b=2; Path=/"));
 
+        // A present-but-empty header is still present: the declared
+        // `Option<string>` must not collapse `Some("")` into `None`.
+        let callable = vm
+            .resolve_exported_callable("flt_header_present_probe")
+            .expect("header present probe");
+        let result = vm
+            .invoke_callable(
+                callable.clone(),
+                &[Value::array(vec![Value::array(vec![
+                    Value::string("set-cookie"),
+                    Value::string(""),
+                ])])],
+            )
+            .expect("empty header call");
+        assert_eq!(result, Value::Bool(true));
+        let result = vm
+            .invoke_callable(
+                callable,
+                &[Value::array(vec![Value::array(vec![
+                    Value::string("content-type"),
+                    Value::string("text/html"),
+                ])])],
+            )
+            .expect("absent header call");
+        assert_eq!(result, Value::Bool(false));
+
         let callable = vm
             .resolve_exported_callable("flt_json_probe")
             .expect("json probe");
@@ -1247,7 +1335,9 @@ pub fn flt_fmt_probe(n: int, text: string) -> string {
             .invoke_callable(
                 callable,
                 &[Value::string(
-                    r#"[{"k":"abc","w":1280},{"k":"def","w":720}]"#,
+                    // `map<string>` is strictly typed at this pin: every value in
+                    // the decoded object must be a string.
+                    r#"[{"k":"abc"},{"k":"def"}]"#,
                 )],
             )
             .expect("json call");

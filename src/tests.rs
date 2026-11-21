@@ -6,7 +6,7 @@ use std::path::Path;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use vm::{SourceFlavor, Value, Vm, VmStatus, compile_source_with_flavor};
+use vm::{SourceFlavor, Value, VmStatus, compile_source_with_flavor};
 
 use crate::config::{CONFIG_FILE, Config, ConfigError, Origin};
 
@@ -14,18 +14,18 @@ const SHAPE_PROBE: &str = r#"
 struct Probe {
     flag: bool,
     text: string,
-    port: int?,
+    port: Option<int>,
     items: [string],
-    range: [[int]]?,
+    range: Option<[[int]]>,
 }
 
 fn probe() -> Probe {
     {
         flag: false,
         text: "a\nb",
-        port: null,
+        port: None,
         items: [],
-        range: [[1, 5], [8, 8]],
+        range: Some([[1, 5], [8, 8]]),
     }
 }
 
@@ -33,10 +33,10 @@ probe();
 "#;
 
 #[test]
-fn sdk_exports_named_structs_with_optional_and_array_fields() {
+fn sdk_exports_named_structs_with_option_and_array_fields() {
     let compiled = compile_source_with_flavor(SHAPE_PROBE, SourceFlavor::RustScript)
         .expect("probe module must compile");
-    let mut vm = Vm::new(compiled.program);
+    let mut vm = crate::guest_boundary::open_vm(compiled.program);
     assert_eq!(vm.run().expect("probe must run"), VmStatus::Halted);
     let value = vm.stack().last().cloned().expect("probe result");
     let Value::Map(map) = value else {
@@ -47,10 +47,20 @@ fn sdk_exports_named_structs_with_optional_and_array_fields() {
         map.get(&Value::string("text")),
         Some(&Value::string("a\nb"))
     );
-    // Guest named-struct values omit optional fields set to null.
-    assert!(map.get(&Value::string("port")).is_none());
+    // A declared `Option` field is carried explicitly: `None` is the tag-only
+    // canonical carrier, never an omitted key or a physical Null.
+    let port = map
+        .get(&Value::string("port"))
+        .expect("declared Option field is present");
     assert_eq!(
-        map.get(&Value::string("range")),
+        crate::guest_boundary::decode(port).expect("canonical Option"),
+        None
+    );
+    let range = map
+        .get(&Value::string("range"))
+        .expect("declared Option field is present");
+    assert_eq!(
+        crate::guest_boundary::decode(range).expect("canonical Option"),
         Some(&Value::array(vec![
             Value::array(vec![Value::Int(1), Value::Int(5)]),
             Value::array(vec![Value::Int(8), Value::Int(8)]),
@@ -14892,8 +14902,8 @@ mod m7 {
         let path = rss.join("updater/github.rss");
         let source = std::fs::read_to_string(&path).expect("github.rss");
         let beta_line = match beta {
-            Some(channel) => format!("beta_channel: \"{channel}\","),
-            None => "beta_channel: null,".to_string(),
+            Some(channel) => format!("beta_channel: Some(\"{channel}\"),"),
+            None => "beta_channel: None,".to_string(),
         };
         let source = source
             .replace(
@@ -14904,7 +14914,7 @@ mod m7 {
                 "package_download_origin: \"https://github.com\",",
                 &format!("package_download_origin: \"{origin}\","),
             )
-            .replace("beta_channel: null,", &beta_line);
+            .replace("beta_channel: None,", &beta_line);
         std::fs::write(&path, source).unwrap();
     }
 

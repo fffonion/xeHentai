@@ -14,6 +14,7 @@ mod config;
 mod r#const;
 mod core;
 mod filters;
+mod guest_boundary;
 mod i18n;
 mod proxy;
 mod resources;

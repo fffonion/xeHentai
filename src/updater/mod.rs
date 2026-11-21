@@ -179,7 +179,7 @@ fn compile(script: &'static str, source: &str) -> Result<Vm, UpdateError> {
                 message: error.to_string(),
             },
         )?;
-    let mut vm = Vm::new(compiled.program);
+    let mut vm = crate::guest_boundary::open_vm(compiled.program);
     registry()
         .bind_vm_cached(&mut vm)
         .map_err(|error| UpdateError::Bind {
@@ -240,8 +240,15 @@ fn optional_text(
     name: &str,
     what: &'static str,
 ) -> Result<Option<String>, UpdateError> {
-    match field(map, name) {
-        None | Some(Value::Null) => Ok(None),
+    let declared = field(map, name).ok_or_else(|| UpdateError::Shape {
+        what,
+        message: format!("missing field {name}"),
+    })?;
+    match crate::guest_boundary::decode(declared).map_err(|reason| UpdateError::Shape {
+        what,
+        message: format!("field {name} is not a declared Option: {reason}"),
+    })? {
+        None => Ok(None),
         Some(Value::String(text)) => Ok(Some((**text).clone())),
         Some(other) => Err(UpdateError::Shape {
             what,
@@ -292,22 +299,22 @@ fn binding_value(binding: &SourceBinding) -> Value {
     entries.push((
         Value::string("package_cdn_origin"),
         match &binding.package_cdn_origin {
-            Some(origin) => Value::string(origin.clone()),
-            None => Value::Null,
+            Some(origin) => crate::guest_boundary::some(Value::string(origin.clone())),
+            None => crate::guest_boundary::none(),
         },
     ));
     entries.push((
         Value::string("beta_channel"),
         match &binding.beta_channel {
-            Some(channel) => Value::string(channel.clone()),
-            None => Value::Null,
+            Some(channel) => crate::guest_boundary::some(Value::string(channel.clone())),
+            None => crate::guest_boundary::none(),
         },
     ));
     entries.push((
         Value::string("verification_key"),
         match &binding.verification_key {
-            Some(key) => Value::string(key.clone()),
-            None => Value::Null,
+            Some(key) => crate::guest_boundary::some(Value::string(key.clone())),
+            None => crate::guest_boundary::none(),
         },
     ));
     Value::map(entries)

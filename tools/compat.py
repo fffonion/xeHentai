@@ -678,7 +678,7 @@ NATIVE_CASE_MAP = {
         "tests::rust_and_rss_sources_stay_in_separate_directories": [
             "structure.src-rss-separation"
         ],
-        "tests::sdk_exports_named_structs_with_optional_and_array_fields": [
+        "tests::sdk_exports_named_structs_with_option_and_array_fields": [
             "config.rss.sdk-shape"
         ],
         "r#const::tests::task_states_match_reference_values": [
@@ -1171,7 +1171,7 @@ NATIVE_COMMANDS = {
         ],
         [
             "cargo", "test", "--bin", "xeHentai",
-            "tests::sdk_exports_named_structs_with_optional_and_array_fields",
+            "tests::sdk_exports_named_structs_with_option_and_array_fields",
             "--", "--exact",
         ],
         ["cargo", "test", "--bin", "xeHentai", "r#const::tests"],

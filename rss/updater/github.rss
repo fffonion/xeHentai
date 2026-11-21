@@ -27,20 +27,20 @@ struct SourceBinding {
     api_origin: string,
     repo: string,
     stable_channel: string,
-    beta_channel: string?,
+    beta_channel: Option<string>,
     package_download_origin: string,
     // The one explicitly authorized Content-Delivery origin. GitHub Release
     // assets answer 302 from github.com to release-assets.githubusercontent.com;
     // the native transport admits this origin ONLY as a redirect target of a
     // package request (descriptor, signature, payload) and never for the commit
     // metadata request. A controlled install may point it at one owned loopback
-    // origin or leave it null.
-    package_cdn_origin: string?,
+    // origin or leave it unbound.
+    package_cdn_origin: Option<string>,
     // Detached-signature verification key (PEM). Production stays unbound
-    // (null) until the release stage binds the real key; a controlled local
-    // install binds an explicit synthetic test key. A package can never be
-    // trusted while this is null.
-    verification_key: string?,
+    // (`None`) until the release stage binds the real key; a controlled
+    // local install binds an explicit synthetic test key. A package can never be
+    // trusted while this is unbound.
+    verification_key: Option<string>,
 }
 
 struct RequestPlan {
@@ -49,7 +49,7 @@ struct RequestPlan {
     method: string,
     url: string,
     headers: [[string]],
-    exception: string?,
+    exception: Option<string>,
 }
 
 // JSON shape used only at the wire boundary. The reference indexes
@@ -84,11 +84,21 @@ struct CommitInfo {
     signature_link: string,
     // Install-relative source prefix inside the payload archive.
     archive_prefix: string,
-    exception: string?,
+    exception: Option<string>,
 }
 
 fn binding_error() -> string {
     "source binding is missing an origin or repository"
+}
+
+// A declared `Option<T>` is present when its tag is `Some`, whatever the
+// payload is.
+fn option_present<T>(value: Option<T>) -> bool {
+    let present: bool = match value {
+        Some(_) => true,
+        None => false,
+    };
+    present
 }
 
 fn http_error(body: string) -> string {
@@ -100,10 +110,10 @@ pub fn gh_binding() -> SourceBinding {
         api_origin: "https://api.github.com",
         repo: "fffonion/xeHentai",
         stable_channel: "rss",
-        beta_channel: null,
+        beta_channel: None,
         package_download_origin: "https://github.com",
-        package_cdn_origin: "https://release-assets.githubusercontent.com",
-        verification_key: null,
+        package_cdn_origin: Some("https://release-assets.githubusercontent.com"),
+        verification_key: None,
     }
 }
 
@@ -120,18 +130,23 @@ pub fn gh_prefix(update_id: string) -> string {
 pub fn gh_plan(binding: SourceBinding, beta: bool, user_agent: string) -> RequestPlan {
     let mut outcome = "ok";
     let mut channel = "" + binding.stable_channel;
-    let mut exception: string? = null;
+    let mut exception: Option<string> = None;
     if binding.api_origin.length == 0 || binding.repo.length == 0 {
         outcome = "binding_invalid";
-        exception = binding_error();
+        exception = Some(binding_error());
         channel = "";
     } else if beta {
-        if binding.beta_channel == null {
+        let beta_channel = binding.beta_channel;
+        let beta_present = option_present::<string>(beta_channel.copy());
+        let beta_name = beta_channel.unwrap_or("");
+        if !beta_present {
             outcome = "beta_channel_missing";
-            exception = "update_beta_channel is enabled but the source binding has no beta channel";
+            exception = Some(
+                "update_beta_channel is enabled but the source binding has no beta channel"
+            );
             channel = "";
         } else {
-            channel = "" + binding.beta_channel;
+            channel = "" + beta_name;
         }
     }
     let url = binding.api_origin + "/repos/" + binding.repo + "/commits?sha=" + channel;
@@ -163,13 +178,13 @@ pub fn gh_parse(binding: SourceBinding, status: int, body: string) -> CommitInfo
     let mut descriptor_link = "";
     let mut signature_link = "";
     let mut archive_prefix = "";
-    let mut exception: string? = null;
+    let mut exception: Option<string> = None;
     if status != 200 {
         outcome = "http_error";
-        exception = http_error("" + body);
+        exception = Some(http_error("" + body));
     } else if commits.length == 0 {
         outcome = "empty";
-        exception = http_error("" + body);
+        exception = Some(http_error("" + body));
     } else {
         let commit = commits[0].copy();
         let commit_body = commit.commit;
