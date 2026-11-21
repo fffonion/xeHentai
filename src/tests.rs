@@ -11967,7 +11967,7 @@ fn compat_rpc(inputs: &serde_json::Value) -> serde_json::Value {
                             .file_name()
                             .and_then(|name| name.to_str())
                             .unwrap_or("");
-                        if ["h.json", "eh.log", "webui.gz", "webui-cache.json"].contains(&name) {
+                        if ["h.json", "eh.log", "webui.gz"].contains(&name) {
                             continue;
                         }
                         dirs.push(rel);
@@ -12143,7 +12143,7 @@ fn record_readdir_item_results(
 }
 
 fn compat_gallery_dirs(root: &std::path::Path) -> Vec<serde_json::Value> {
-    const TOP_FILE_EXCLUDED: [&str; 4] = ["h.json", "eh.log", "webui.gz", "webui-cache.json"];
+    const TOP_FILE_EXCLUDED: [&str; 3] = ["h.json", "eh.log", "webui.gz"];
     const TOP_DIR_EXCLUDED: [&str; 3] = ["home", "cache", "tmp"];
     /// Build a transport-relative path with `/` separators, preserving
     /// literal backslashes inside Unix components. Non-Unicode components

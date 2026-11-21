@@ -8352,7 +8352,7 @@ def _rpc_snapshot_app(app):
 # The top-level harness isolation dirs (home/cache/tmp from clean_env) are
 # likewise excluded: oracle runs execute with cwd inside the isolated root
 # while the candidate probe does not, so they are harness artifacts.
-DIR_SNAPSHOT_EXCLUDED = {"h.json", "eh.log", "webui.gz", "webui-cache.json"}
+DIR_SNAPSHOT_EXCLUDED = {"h.json", "eh.log", "webui.gz"}
 DIR_SNAPSHOT_TOP_EXCLUDED = {"home", "cache", "tmp"}
 
 
@@ -9057,7 +9057,7 @@ def _gallery_dirs(work):
     """Disk dimension: relative tree with content, typed link targets.
 
     - Only exact top-level transport artifacts are excluded (root `h.json`,
-      `eh.log`, `webui.gz`, `webui-cache.json` and top `home/cache/tmp`).
+      `eh.log`, `webui.gz` and top `home/cache/tmp`).
       Nested files with those basenames are business data and observed.
     - Ordinary files carry exact bytes (latin-1); ZIPs carry the approved
       semantic (sorted names + latin-1 contents, no comment waiver).
@@ -9072,7 +9072,7 @@ def _gallery_dirs(work):
     out = []
     stack = [root]
     # Exact top-level transport artifacts only (never nested).
-    top_file_excluded = {"h.json", "eh.log", "webui.gz", "webui-cache.json"}
+    top_file_excluded = {"h.json", "eh.log", "webui.gz"}
     top_dir_excluded = {"home", "cache", "tmp"}
 
     def map_target(target):

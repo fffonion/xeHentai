@@ -2153,7 +2153,7 @@ mod tests {
         let tampered = first.replacen(sign, "00000000", 1);
         let refused = dispatch_get(
             &mut StaticCache::load(
-                Path::new("/nonexistent-webui-cache.json"),
+                Path::new("/nonexistent-webui.gz"),
                 Arc::new(crate::worker::RealClock),
             ),
             &tampered,
@@ -2210,7 +2210,7 @@ mod tests {
         // The same URL is not valid on a server without that secret.
         let unsigned = dispatch_get(
             &mut StaticCache::load(
-                &cache_path.join("webui-cache.json"),
+                &cache_path.join("webui.gz"),
                 Arc::new(crate::worker::RealClock),
             ),
             first,
@@ -2253,7 +2253,7 @@ mod tests {
         // Mismatched and empty signatures answer 403 without touching disk.
         let image = dispatch_get(
             &mut StaticCache::load(
-                Path::new("/nonexistent-webui-cache.json"),
+                Path::new("/nonexistent-webui.gz"),
                 Arc::new(crate::worker::RealClock),
             ),
             "/img/00000000/guid1/1",
@@ -2262,7 +2262,7 @@ mod tests {
         assert_eq!(status_of(image), 403);
         let archive = dispatch_get(
             &mut StaticCache::load(
-                Path::new("/nonexistent-webui-cache.json"),
+                Path::new("/nonexistent-webui.gz"),
                 Arc::new(crate::worker::RealClock),
             ),
             "/zip/00000000/guid1/gallery.zip",
@@ -3148,7 +3148,7 @@ mod tests {
                         .file_name()
                         .and_then(|name| name.to_str())
                         .unwrap_or("");
-                    if ["h.json", "eh.log", "webui.gz", "webui-cache.json"].contains(&name) {
+                    if ["h.json", "eh.log", "webui.gz"].contains(&name) {
                         continue;
                     }
                     out.push(rel);
@@ -4558,7 +4558,7 @@ mod tests {
             .and_then(|text| text.parse().ok())
             .unwrap_or(0);
         let cache_dir = tempfile::tempdir().expect("cache").keep();
-        let cache_path = cache_dir.join("webui-cache.json");
+        let cache_path = cache_dir.join("webui.gz");
         let before = open_fds();
         let before_targets = fd_targets();
         // Intentional own-leak control: open AFTER the before measurement so
@@ -4915,7 +4915,7 @@ mod tests {
     #[test]
     fn static_cache_bounds_entries_and_total() {
         let dir = tempfile::tempdir().expect("dir").keep();
-        let path = dir.join("webui-cache.json");
+        let path = dir.join("webui.gz");
         let mut cache = StaticCache::load(&path, Arc::new(crate::worker::RealClock));
         for index in 0..65 {
             cache.store(
@@ -4936,10 +4936,8 @@ mod tests {
         );
         // Five 8 MiB entries exceed the 32 MiB total: oldest-first
         // eviction keeps only the newest within budget.
-        let mut cache = StaticCache::load(
-            &dir.join("webui-cache2.json"),
-            Arc::new(crate::worker::RealClock),
-        );
+        let mut cache =
+            StaticCache::load(&dir.join("webui2.gz"), Arc::new(crate::worker::RealClock));
         for name in ["big-a", "big-b", "big-c", "big-d", "big-e"] {
             cache.store(
                 name,
@@ -4990,43 +4988,48 @@ mod tests {
 
     #[test]
     fn static_persisted_cache_load_enforces_bounds() {
+        use serde_pickle::{HashableValue as Key, Value as Pickle};
+        use std::collections::BTreeMap;
+        use std::io::Write;
+        fn write_cache(path: &std::path::Path, mut entries: BTreeMap<Key, Pickle>) {
+            entries.insert(Key::String("v".into()), Pickle::I64(1));
+            let pickle =
+                serde_pickle::value_to_vec(&Pickle::Dict(entries), serde_pickle::SerOptions::new())
+                    .expect("serialize pickle");
+            let mut encoder =
+                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(&pickle).expect("compress cache");
+            std::fs::write(path, encoder.finish().expect("finish zlib")).expect("cache file");
+        }
+        let entry = |body| {
+            Pickle::List(vec![
+                Pickle::Bytes(body),
+                Pickle::String("text/plain".into()),
+                Pickle::F64(100.0),
+                Pickle::String("x".into()),
+            ])
+        };
         let dir = tempfile::tempdir().expect("dir").keep();
+        let path = dir.join(crate::rpc::STATIC_CACHE_NAME);
         // One 9 MiB entry: skipped on load, never cached.
-        let huge_b64 = "A".repeat(9 * 1024 * 1024 / 3 * 4);
-        let text = format!(
-            "{{\"v\":1,\"entries\":{{\"big\":{{\"body_b64\":\"{huge_b64}\",\"mime\":\"application/octet-stream\",\"fetched\":100.0,\"last_modified\":\"x\"}}}}}}"
-        );
-        let path = dir.join("webui-cache.json");
-        std::fs::write(&path, text).expect("cache file");
+        let mut entries = BTreeMap::new();
+        entries.insert(Key::String("big".into()), entry(vec![0; 9 * 1024 * 1024]));
+        write_cache(&path, entries);
         let cache = StaticCache::load(&path, Arc::new(crate::worker::RealClock));
-        // RED: the oversize entry loads.
-        assert!(
-            cache.stale("big").is_none(),
-            "persisted entry past the 8 MiB bound must be skipped"
-        );
-        // 200 persisted entries: truncated to the newest 64.
-        let mut entries = String::from("{\"v\":1,\"entries\":{");
+        assert!(cache.stale("big").is_none());
+        // 200 entries: only the last 64 fit under the entry count bound.
+        let mut entries = BTreeMap::new();
         for index in 0..200 {
-            if index > 0 {
-                entries.push(',');
-            }
-            entries.push_str(&format!(
-                "\"e{index}\":{{\"body_b64\":\"eA==\",\"mime\":\"text/plain\",\"fetched\":100.0,\"last_modified\":\"x\"}}"
-            ));
+            entries.insert(Key::String(format!("e{index:03}")), entry(b"x".to_vec()));
         }
-        entries.push_str("}}");
-        std::fs::write(&path, entries).expect("cache file");
+        write_cache(&path, entries);
         let cache = StaticCache::load(&path, Arc::new(crate::worker::RealClock));
-        let mut kept = 0;
-        for index in 0..200 {
-            if cache.stale(&format!("e{index}")).is_some() {
-                kept += 1;
-            }
-        }
-        assert!(
-            kept <= 64,
-            "persisted entries must truncate to 64, kept {kept}"
-        );
+        let kept = (0..200)
+            .filter(|index| cache.stale(&format!("e{index:03}")).is_some())
+            .count();
+        assert_eq!(kept, 64);
+        assert!(cache.stale("e000").is_none());
+        assert!(cache.stale("e199").is_some());
     }
 
     #[test]
@@ -5647,11 +5650,25 @@ mod tests {
     // --- static cache: TTL, 304, stale fallback, persistence -----------------
 
     #[test]
-    fn static_cache_ttl_stale_persist_and_legacy_refusal() {
+    fn static_cache_reads_python_zlib_pickle() {
+        use crate::worker::StepClock;
+        let dir = tempfile::tempdir().expect("cache directory");
+        let path = dir.path().join(crate::rpc::STATIC_CACHE_NAME);
+        std::fs::write(&path, include_bytes!("fixtures/webui.gz")).expect("Python fixture");
+        let clock = Arc::new(StepClock::new(1_000_000.0, 0.0));
+        let mut cache = StaticCache::load(&path, clock);
+        let entry = cache.fresh("/").expect("Python cache entry");
+        assert_eq!(entry.body, b"<html>python cache</html>");
+        assert_eq!(entry.mime, "text/html");
+        assert_eq!(entry.last_modified, "Wed, 01 Jan 2025 00:00:00 GMT");
+    }
+
+    #[test]
+    fn static_cache_ttl_stale_persist_and_corrupt_refusal() {
         use crate::worker::StepClock;
         let dir = tempfile::tempdir().expect("dir").keep();
         let clock = Arc::new(StepClock::new(1_000_000.0, 0.0));
-        let path = dir.join("webui-cache.json");
+        let path = dir.join(crate::rpc::STATIC_CACHE_NAME);
         let mut cache = StaticCache::load(&path, Arc::clone(&clock) as Arc<dyn HttpClock>);
         assert!(cache.fresh("/").is_none());
         cache.store(
@@ -5694,14 +5711,11 @@ mod tests {
             true,
         );
         assert!(cache.fresh("/static/app.js").is_none());
-        // Restart: the JSON cache reloads; a legacy pickle never loads.
-        std::fs::write(dir.join("webui.gz"), b"not a pickle").expect("legacy");
+        // Restart loads the compressed pickle; corrupt input resets to empty.
         let mut reloaded = StaticCache::load(&path, Arc::clone(&clock) as Arc<dyn HttpClock>);
         assert!(reloaded.fresh("/").is_some());
-        let mut broken = StaticCache::load(
-            &dir.join("missing.json"),
-            Arc::clone(&clock) as Arc<dyn HttpClock>,
-        );
+        std::fs::write(&path, b"not a compressed pickle").expect("corrupt cache");
+        let mut broken = StaticCache::load(&path, Arc::clone(&clock) as Arc<dyn HttpClock>);
         assert!(broken.fresh("/").is_none());
     }
 

@@ -19,6 +19,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net",
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+# webui.gz uses the Python reference's zlib-compressed pickle dictionary.
+serde-pickle = "1.2.0"
+flate2 = "1"
 indexmap = "2"
 uuid = { version = "1", features = ["v4"] }
 # Read Deflate gallery entries with the flate2 backend already used by image.

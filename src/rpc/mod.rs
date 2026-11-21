@@ -1750,49 +1750,65 @@ impl StaticCache {
             clock,
             path: path.to_path_buf(),
         };
-        // Legacy `webui.gz` pickle payloads are never loaded; any unreadable
-        // or version-mismatched cache rebuilds empty and is documented. The
-        // persisted file itself is read through a bound: a full cache is
-        // ~43 MiB of base64 on disk, anything past the persist bound is
-        // refused before allocation. Each entry faces the per-asset budget
-        // and the total/count caps on the way in.
+        // The Python reference stores zlib(pickle({"v": 1, path: [body,
+        // mime, fetched, last_modified]})). Bound both the file and the
+        // decompressed pickle before decoding; malformed entries are skipped.
         if let Ok(file) = std::fs::File::open(path) {
-            let mut limited = file.take(MAX_CACHE_FILE + 1);
-            let mut text = Vec::new();
             use std::io::Read;
-            if limited.read_to_end(&mut text).is_err() || text.len() as u64 > MAX_CACHE_FILE {
+            let mut compressed = Vec::new();
+            if file
+                .take(MAX_CACHE_FILE + 1)
+                .read_to_end(&mut compressed)
+                .is_err()
+                || compressed.len() as u64 > MAX_CACHE_FILE
+            {
                 return cache;
             }
-            let text = match String::from_utf8(text) {
-                Ok(text) => text,
-                Err(_) => return cache,
-            };
-            if let Ok(root) = serde_json::from_str::<Value>(&text)
-                && root.get("v").and_then(|v| v.as_u64()) == Some(STATIC_CACHE_VERSION as u64)
-                && let Some(entries) = root.get("entries").and_then(|v| v.as_object())
+            let decoder = flate2::read::ZlibDecoder::new(compressed.as_slice());
+            let mut pickle = Vec::new();
+            if decoder
+                .take(MAX_CACHE_FILE + 1)
+                .read_to_end(&mut pickle)
+                .is_err()
+                || pickle.len() as u64 > MAX_CACHE_FILE
             {
-                for (name, entry) in entries {
-                    let body = entry
-                        .get("body_b64")
-                        .and_then(|v| v.as_str())
-                        .and_then(base64_body);
-                    let mime = entry.get("mime").and_then(|v| v.as_str());
-                    let fetched = entry.get("fetched").and_then(|v| v.as_f64());
-                    let last_modified = entry.get("last_modified").and_then(|v| v.as_str());
-                    if let (Some(body), Some(mime), Some(fetched), Some(last_modified)) =
-                        (body, mime, fetched, last_modified)
-                    {
-                        cache.insert_capped(
-                            name.clone(),
-                            StaticEntry {
-                                body,
-                                mime: mime.to_string(),
-                                fetched,
-                                last_modified: last_modified.to_string(),
-                            },
-                        );
-                    }
+                return cache;
+            }
+            let Ok(serde_pickle::Value::Dict(entries)) =
+                serde_pickle::value_from_slice(&pickle, serde_pickle::DeOptions::new())
+            else {
+                return cache;
+            };
+            use serde_pickle::{HashableValue as Key, Value as Pickle};
+            if !matches!(entries.get(&Key::String("v".to_string())), Some(Pickle::I64(v)) if *v == i64::from(STATIC_CACHE_VERSION))
+            {
+                return cache;
+            }
+            for (key, value) in entries {
+                let (Key::String(name), Pickle::List(fields)) = (key, value) else {
+                    continue;
+                };
+                let [
+                    Pickle::Bytes(body),
+                    Pickle::String(mime),
+                    Pickle::F64(fetched),
+                    Pickle::String(last_modified),
+                ] = fields.as_slice()
+                else {
+                    continue;
+                };
+                if name == "v" || !fetched.is_finite() {
+                    continue;
                 }
+                cache.insert_capped(
+                    name,
+                    StaticEntry {
+                        body: body.clone(),
+                        mime: mime.clone(),
+                        fetched: *fetched,
+                        last_modified: last_modified.clone(),
+                    },
+                );
             }
         }
         cache
@@ -1868,101 +1884,43 @@ impl StaticCache {
     }
 
     fn save(&self) -> Result<(), String> {
-        let mut entries = serde_json::Map::new();
+        use serde_pickle::{HashableValue as Key, Value as Pickle};
+        use std::collections::BTreeMap;
+        use std::io::Write;
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            Key::String("v".into()),
+            Pickle::I64(i64::from(STATIC_CACHE_VERSION)),
+        );
         for (name, entry) in &self.entries {
             entries.insert(
-                name.clone(),
-                Value::Object({
-                    let mut map = serde_json::Map::new();
-                    map.insert(
-                        "body_b64".to_string(),
-                        Value::String(encode_body(&entry.body)),
-                    );
-                    map.insert("mime".to_string(), Value::String(entry.mime.clone()));
-                    map.insert(
-                        "fetched".to_string(),
-                        Value::Number(
-                            serde_json::Number::from_f64(entry.fetched)
-                                .unwrap_or(serde_json::Number::from(0)),
-                        ),
-                    );
-                    map.insert(
-                        "last_modified".to_string(),
-                        Value::String(entry.last_modified.clone()),
-                    );
-                    map
-                }),
+                Key::String(name.clone()),
+                Pickle::List(vec![
+                    Pickle::Bytes(entry.body.clone()),
+                    Pickle::String(entry.mime.clone()),
+                    Pickle::F64(entry.fetched),
+                    Pickle::String(entry.last_modified.clone()),
+                ]),
             );
         }
-        let mut root = serde_json::Map::new();
-        root.insert("v".to_string(), Value::from(STATIC_CACHE_VERSION));
-        root.insert("entries".to_string(), Value::Object(entries));
-        let text = serde_json::to_string(&Value::Object(root)).map_err(|e| e.to_string())?;
+        let pickle =
+            serde_pickle::value_to_vec(&Pickle::Dict(entries), serde_pickle::SerOptions::new())
+                .map_err(|error| error.to_string())?;
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder
+            .write_all(&pickle)
+            .map_err(|error| error.to_string())?;
+        let compressed = encoder.finish().map_err(|error| error.to_string())?;
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
         // Atomic write: a failed save never leaves a half cache behind.
         let tmp = self.path.with_extension("tmp");
-        std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp, &self.path).map_err(|e| e.to_string())?;
+        std::fs::write(&tmp, compressed).map_err(|error| error.to_string())?;
+        std::fs::rename(&tmp, &self.path).map_err(|error| error.to_string())?;
         Ok(())
     }
-}
-
-fn encode_body(body: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(body.len().div_ceil(3) * 4);
-    for chunk in body.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
-        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        out.push(ALPHABET[((triple >> 18) & 63) as usize] as char);
-        out.push(ALPHABET[((triple >> 12) & 63) as usize] as char);
-        if chunk.len() > 1 {
-            out.push(ALPHABET[((triple >> 6) & 63) as usize] as char);
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(ALPHABET[(triple & 63) as usize] as char);
-        } else {
-            out.push('=');
-        }
-    }
-    out
-}
-
-fn base64_body(text: &str) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(text.len().div_ceil(4) * 3);
-    let bytes = text.as_bytes();
-    if !bytes.len().is_multiple_of(4) {
-        return None;
-    }
-    let value = |c: u8| match c {
-        b'A'..=b'Z' => Some(c - b'A'),
-        b'a'..=b'z' => Some(c - b'a' + 26),
-        b'0'..=b'9' => Some(c - b'0' + 52),
-        b'+' => Some(62),
-        b'/' => Some(63),
-        b'=' => Some(64),
-        _ => None,
-    };
-    for chunk in bytes.chunks(4) {
-        let v: Vec<u8> = chunk.iter().map(|c| value(*c)).collect::<Option<_>>()?;
-        let triple = ((v[0] as u32) << 18)
-            | ((v[1] as u32) << 12)
-            | (((v[2] & 63) as u32) << 6)
-            | ((v[3] & 63) as u32);
-        out.push((triple >> 16) as u8);
-        if v[2] != 64 {
-            out.push((triple >> 8) as u8);
-        }
-        if v[3] != 64 {
-            out.push(triple as u8);
-        }
-    }
-    Some(out)
 }
 
 /// Optional local WebUI pack (`ui/` beside the executable): a materialized
@@ -2053,10 +2011,8 @@ fn pack_mime(relative: &Path) -> String {
 
 /// Production static origin from `rpc.py:272` (`http://xehentai.yooooo.us`).
 pub const PRODUCTION_STATIC_ORIGIN: &str = "http://xehentai.yooooo.us";
-/// File name of the native static cache. It intentionally differs from the
-/// reference `webui.gz`: legacy pickle payloads are never loaded and the
-/// safe rebuild is documented in `tools/cases.json`.
-pub const STATIC_CACHE_NAME: &str = "webui-cache.json";
+/// Cache file shared with the Python reference.
+pub const STATIC_CACHE_NAME: &str = "webui.gz";
 pub const STATIC_CACHE_VERSION: u32 = 1;
 /// `const.py:43` one-hour static TTL, seconds.
 pub const STATIC_TTL: f64 = 3600.0;
@@ -2084,9 +2040,7 @@ pub const MAX_STATIC_ENTRY: usize = 8 * 1024 * 1024;
 pub const MAX_STATIC_TOTAL: u64 = 32 * 1024 * 1024;
 /// Maximum retained static entries.
 pub const MAX_STATIC_ENTRIES: usize = 64;
-/// Bounded read for the persisted static cache file: a full 32 MiB cache is
-/// ~43 MiB of base64 on disk, so 64 MiB leaves margin while refusing
-/// unbounded files before allocation.
+/// Limit both the compressed file and the inflated pickle before decoding.
 pub const MAX_CACHE_FILE: u64 = 64 * 1024 * 1024;
 /// Owned streaming chunk: media files stream in 64 KiB backpressured pieces.
 pub const IO_CHUNK: usize = 64 * 1024;
