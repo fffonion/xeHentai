@@ -21,7 +21,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 indexmap = "2"
 uuid = { version = "1", features = ["v4"] }
-zip = { version = "2.4", default-features = false }
+# Read Deflate gallery entries with the flate2 backend already used by image.
+zip = { version = "2.4", default-features = false, features = ["deflate-flate2", "flate2"] }
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"

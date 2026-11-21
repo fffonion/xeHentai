@@ -5169,6 +5169,41 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    fn deflated_zip_serves_original_image() {
+        // An 8x8 PNG and a ZIP containing it as `1.png`, made with Pillow
+        // and Python's zipfile.ZIP_DEFLATED, independent of Cargo features.
+        let png = hex::decode(concat!(
+            "89504e470d0a1a0a0000000d49484452000000080000000808020000004b6d29",
+            "dc0000001349444154789c63644861c00a98b00b0f56090054600074c30b417a",
+            "0000000049454e44ae426082",
+        ))
+        .expect("PNG fixture");
+        let zip = hex::decode(concat!(
+            "504b0304140000000800000021005684c172470000004c00000005000000312e",
+            "706e67eb0cf073e7e592e2626060e0f5f4700902d21c20ccc10424bd7335ef00",
+            "29614f17c7908a39c9291e8907b8666ce0e60fe3640849602839cced58059466",
+            "f074f57359e794d00400504b01021403140000000800000021005684c1724700",
+            "00004c000000050000000000000000000000800100000000312e706e67504b05",
+            "060000000001000100330000006a0000000000",
+        ))
+        .expect("ZIP fixture");
+        let mut app = test_app();
+        let guid = task_with_image(&mut app, "1.png", &png);
+        let dir = app.task(&guid).expect("task").get_fpath().expect("gallery");
+        let expected = std::fs::read(dir.join("1.png")).expect("original image");
+        std::fs::remove_dir_all(&dir).expect("archive replaces the loose gallery");
+        std::fs::write(dir.with_extension("zip"), zip).expect("sibling ZIP");
+
+        let uri = format!("{guid}/5");
+        let target = format!("/img/{}/{uri}", hash_link(None, &uri));
+        let raw = get_wire_concurrent(app, &target);
+        let (status, _, body) = split_response(&raw);
+        assert!(status.contains("200"), "{status}");
+        assert_eq!(body, expected);
+    }
+
+    #[test]
     #[cfg(target_os = "linux")]
     fn gallery_stream_large_archive_entries() {
         // A large valid on-demand archive streams with its real entries,

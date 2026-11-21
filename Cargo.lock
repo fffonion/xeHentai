@@ -3479,6 +3479,7 @@ dependencies = [
  "arbitrary",
  "crc32fast",
  "crossbeam-utils",
+ "flate2",
  "indexmap",
  "memchr",
 ]
