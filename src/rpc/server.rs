@@ -4785,6 +4785,31 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gallery_absolute_aliases_within_captured_root_are_readable() {
+        let mut app = test_app();
+        let png = png_bytes(8, 8);
+        let guid = task_with_image(&mut app, "1.jpg", &png);
+        let dir = app.task(&guid).expect("task").get_fpath().expect("fpath");
+        std::fs::rename(dir.join("1.jpg"), dir.join("real.jpg")).expect("move image");
+        std::os::unix::fs::symlink(dir.join("real.jpg"), dir.join("1.jpg"))
+            .expect("internal absolute alias");
+        assert_eq!(
+            read_gallery_file(&app, &guid, "1").expect("direct alias").0,
+            png
+        );
+        std::fs::remove_file(dir.join("1.jpg")).expect("remove alias");
+        std::os::unix::fs::symlink(dir.join("real.jpg"), dir.join("nested.jpg"))
+            .expect("nested absolute alias");
+        std::os::unix::fs::symlink(dir.join("nested.jpg"), dir.join("1.jpg"))
+            .expect("outer absolute alias");
+        assert_eq!(
+            read_gallery_file(&app, &guid, "1").expect("nested alias").0,
+            png
+        );
+    }
+
     /// Linux FD scope: sibling-archive symlink denial needs the Linux FD
     /// sibling grant plus Unix symlink construction. Non-Linux uses the
     /// `Unsupported` stub and never compiles this case.

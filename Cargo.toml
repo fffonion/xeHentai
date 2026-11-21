@@ -50,11 +50,10 @@ tempfile = "3"
 sha2 = "0.10"
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "pkcs8", "pem"] }
 hex = "0.4"
-# The confined gallery/archive opens use the reviewed `cap-primitives` 4.0.3
-# resolver on all supported hosts (Linux, macOS, Windows). Its Unix and
-# Windows backends are both reached through this one dependency; `rustix` and
-# `nix` below stay Unix-only because only the Unix backend needs raw
-# `openat`/`fcntl` and the POSIX daemon.
+# The confined gallery/archive opens use the published `cap-primitives` 4.0.3
+# resolver on all supported hosts (Linux, macOS, Windows). Relative links are
+# resolved by the crate; an internal absolute alias is rebased in the owning
+# gallery grant before it reaches the crate.
 cap-primitives = "=4.0.3"
 
 # Only the Unix leaf/entry primitives (`rustix::fs` `openat`/`fcntl`, and the
@@ -65,15 +64,6 @@ rustix = { version = "1", features = ["fs", "thread"] }
 # POSIX daemon startup and the real-PTY lifecycle tests use the mature nix
 # bindings; the product only needs `fork`/`_exit` and standard descriptors.
 nix = { version = "0.31", features = ["process", "signal", "term", "fs", "user"] }
-
-# The adopted dependency is the reviewed 4.0.3 source tree in `vendor/`, not a
-# rewritten or fetcher-substituted manifest: `Cargo.toml`, `Cargo.toml.orig`,
-# licenses and version are the original published bytes plus the accepted
-# absolute-prefix policy, extended to the three supported confined hosts.
-# Path wiring here (rather than editing the vendor manifest's optional
-# dependencies) keeps the vendor tree intact.
-[patch.crates-io]
-cap-primitives = { path = "vendor/cap-primitives-4.0.3" }
 
 [dev-dependencies]
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }

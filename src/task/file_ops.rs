@@ -497,9 +497,9 @@ fn unavailable_reason(kind: std::io::ErrorKind) -> &'static str {
 // 2. the owning `TaskFiles` fixed download root and the validated single
 //    gallery component as the only root provenance;
 // 3. the frozen pre-permit directory observations as the only binding;
-// 4. the accepted mature `cap-primitives` 4.0.3 resolver for the loose leaf
-//    (including the reviewed `open_with_absolute_prefix` literal rebase on
-//    Linux and macOS) and for descriptor-relative enumeration;
+// 4. the published `cap-primitives` 4.0.3 resolver for each link read,
+//    confined loose leaf open and descriptor-relative enumeration; absolute
+//    internal aliases are rebased under the captured gallery grant;
 // 5. a single-component `openat` for archive entries, with the same-descriptor
 //    type and private-identity verdict before any byte is copied.
 // ---------------------------------------------------------------------------
@@ -1020,12 +1020,7 @@ impl GalleryGrant {
         let Some(gallery) = rooted.gallery.as_ref() else {
             return Ok(None);
         };
-        match capfs::open_with_absolute_prefix(
-            gallery,
-            Path::new(leaf),
-            &leaf_options(),
-            &rooted.gallery_spelling,
-        ) {
+        match open_gallery_leaf(gallery, Path::new(leaf), &rooted.gallery_spelling) {
             Ok(file) => Ok(Some(self.finish(file, &self.gallery_path().join(leaf))?)),
             // Genuine absence inside the gallery: an internal dangling alias or
             // a file that was never there. The reference ZIP fallback applies.
@@ -1380,6 +1375,65 @@ fn check_leaf(leaf: &OsStr) -> Result<(), TaskError> {
         });
     }
     Ok(())
+}
+
+/// Follow an internal gallery alias using the held gallery descriptor. The
+/// published resolver confines the final open and every link read. Absolute
+/// link text is only a label: rebase it under the captured gallery spelling,
+/// then open the resulting relative path from the same held descriptor.
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+fn open_gallery_leaf(gallery: &File, leaf: &Path, spelling: &Path) -> std::io::Result<File> {
+    use std::collections::VecDeque;
+    use std::io::{Error, ErrorKind};
+    let denied = || Error::new(ErrorKind::PermissionDenied, "link leaves the gallery grant");
+    let mut pending: VecDeque<OsString> = leaf
+        .components()
+        .map(|component| component.as_os_str().to_os_string())
+        .collect();
+    let mut relative = PathBuf::new();
+    let mut links = 0;
+    while let Some(component) = pending.pop_front() {
+        match Path::new(&component).components().next() {
+            Some(Component::CurDir) => continue,
+            Some(Component::ParentDir) => {
+                if !relative.pop() {
+                    return Err(denied());
+                }
+                continue;
+            }
+            Some(Component::Normal(_)) => relative.push(&component),
+            _ => return Err(denied()),
+        }
+        match capfs::read_link_contents(gallery, &relative) {
+            Ok(target) => {
+                links += 1;
+                if links > 40 {
+                    return Err(Error::new(ErrorKind::InvalidData, "too many gallery links"));
+                }
+                relative.pop();
+                let next = if target.has_root() {
+                    relative.clear();
+                    target.strip_prefix(spelling).map_err(|_| denied())?
+                } else {
+                    &target
+                };
+                let mut components: VecDeque<OsString> = next
+                    .components()
+                    .map(|component| component.as_os_str().to_os_string())
+                    .collect();
+                components.append(&mut pending);
+                pending = components;
+            }
+            Err(error) if error.kind() == ErrorKind::InvalidInput => {}
+            // winx forwards FSCTL_GET_REPARSE_POINT's raw Windows status for
+            // an ordinary file, which Rust maps to `Other` on this toolchain.
+            #[cfg(windows)]
+            Err(error) if error.raw_os_error() == Some(4390) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    capfs::open(gallery, &relative, &leaf_options())
 }
 
 /// Read-only open options for every payload descriptor.
