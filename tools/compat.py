@@ -1052,7 +1052,10 @@ NATIVE_CASE_MAP = {
         "rpc::server::tests::thumbnails_fit_never_upscale_and_keep_format": [
             "gallery.thumb.task-wait.1.resized",
         ],
-        "rpc::server::tests::static_cache_ttl_stale_persist_and_legacy_refusal": [
+        "rpc::server::tests::static_cache_ttl_stale_persist_and_corrupt_refusal": [
+            "rpc.static.cache",
+        ],
+        "rpc::server::tests::static_cache_reads_python_zlib_pickle": [
             "rpc.static.cache",
         ],
         "rpc::server::tests::static_fetch_honors_304_and_reports_origin_errors": [
@@ -1060,6 +1063,9 @@ NATIVE_CASE_MAP = {
         ],
         "rpc::server::tests::gallery_symlink_escape_and_reserved_are_denied": [
             "gallery.traversal",
+        ],
+        "rpc::server::tests::gallery_absolute_aliases_within_captured_root_are_readable": [
+            "gallery.read.task-wait.1",
         ],
         "rpc::server::tests::gallery_sibling_archive_symlink_is_denied": [
             "gallery.read.task-zip.2",
