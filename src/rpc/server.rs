@@ -7037,7 +7037,7 @@ mod tests {
                         STATE_COMPAT_FRESH_ENTRY,
                         format!(
                             "xeHentai Archiver v{}\nTitle:{}\nOriginal URL:http://e-hentai.org/g/123/abcdef0123/",
-                            consts::VERSION,
+                            consts::archive_version(),
                             route.title
                         ),
                     )

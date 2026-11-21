@@ -123,7 +123,7 @@ impl Task {
         let title = self.meta_str("title")?.to_string();
         let comment = format!(
             "xeHentai Archiver v{}\nTitle:{}\nOriginal URL:{}",
-            crate::r#const::VERSION,
+            crate::r#const::archive_version(),
             title,
             self.url
         );

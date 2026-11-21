@@ -3598,10 +3598,18 @@ fn archive_uses_store_sorted_entries_and_the_reference_comment() {
     assert!(gallery.exists());
 
     let mut archive = zip::ZipArchive::new(fs::File::open(&arc).unwrap()).unwrap();
+    let expected_version = match env!("XEH_BUILD_ID") {
+        "dev" => "2.023",
+        tag => tag,
+    };
+    let comment = std::str::from_utf8(archive.comment()).unwrap();
     assert_eq!(
-        archive.comment(),
-        b"xeHentai Archiver v2.023\nTitle:archive\nOriginal URL:https://e-hentai.org/g/123456/0123456789/"
+        comment,
+        format!(
+            "xeHentai Archiver v{expected_version}\nTitle:archive\nOriginal URL:https://e-hentai.org/g/123456/0123456789/"
+        )
     );
+    println!("{comment}");
     assert_eq!(archive.len(), 3);
     let names: Vec<String> = (0..archive.len())
         .map(|index| archive.by_index(index).unwrap().name().to_string())

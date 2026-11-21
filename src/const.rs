@@ -26,6 +26,11 @@ pub const TARGET: &str = env!("XEH_TARGET");
 /// Compiled release/update identifier (`XEH_BUILD_ID`, `dev` when unset).
 pub const BUILD_ID: &str = env!("XEH_BUILD_ID");
 
+/// Version written into newly created gallery ZIP comments.
+pub fn archive_version() -> &'static str {
+    if BUILD_ID == "dev" { VERSION } else { BUILD_ID }
+}
+
 /// The version label the running image reports. An ordinary unpublished build
 /// prints exactly [`VERSION_DISPLAY`]; a build compiled with a release/update
 /// identifier reports it in the same label, which is how two real native
