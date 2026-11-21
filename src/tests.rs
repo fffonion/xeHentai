@@ -8440,11 +8440,20 @@ mod m4 {
                             .map(|speed| speed.lock().unwrap().calc(false))
                     })
                     .sum();
+                assert!(expected > 0.0);
                 assert_eq!(monitor.download_speed(), expected);
                 assert_eq!(
                     handle.get_info()["download_speed"],
                     serde_json::json!(expected)
                 );
+
+                // The last item has been taken by a worker, but is still downloading.
+                handle.borrow_app_mut(|app| {
+                    app.task_mut(&guid).unwrap().img_q.as_mut().unwrap().clear();
+                });
+                let info = handle.get_info();
+                assert_eq!(info["queue_pending"], 0);
+                assert_eq!(info["download_speed"], serde_json::json!(expected));
 
                 monitor.request_exit();
                 let _ = join.await;

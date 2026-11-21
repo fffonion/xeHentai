@@ -8,7 +8,7 @@
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1231,6 +1231,10 @@ impl AppHandle {
             if state > consts::TASK_STATE_PAUSED && pending > 0 {
                 info["queue_pending"] = json!(pending);
                 info["queue_finished"] = json!(self.inner.finished(&monitor.guid));
+            }
+            // Workers dequeue images before streaming them, so an empty queue
+            // can still have active transfers.
+            if state > consts::TASK_STATE_PAUSED {
                 info["download_speed"] = json!(monitor.download_speed());
             }
         }
@@ -1719,6 +1723,15 @@ impl DownloadPort for SharedPort {
     fn warn_download(&mut self, message: &str) {
         let _ = self.inner.app.borrow_mut().logger.warning(message);
     }
+}
+
+fn relative_to_task_root<'a>(inner: &RuntimeInner, guid: &str, path: &'a Path) -> &'a Path {
+    inner
+        .app
+        .borrow()
+        .task(guid)
+        .and_then(|task| path.strip_prefix(task.files().root()).ok())
+        .unwrap_or(path)
 }
 
 /// One worker record shared with the monitor: identity, liveness, optional
@@ -2334,7 +2347,8 @@ async fn download_worker(
         match result {
             Ok(ImageDownload::Saved(path)) => {
                 monitor.vote(&name, consts::ERR_NO_ERROR);
-                inner.log(DEBUG, &format!("t-{name} saved {}", path.display()));
+                let relative = relative_to_task_root(&inner, &guid, &path);
+                inner.log(DEBUG, &format!("t-{name} saved {}", relative.display()));
                 inner.record(
                     "worker.download.saved",
                     json!({"thread": name, "url": item.image_url}),
@@ -2342,7 +2356,8 @@ async fn download_worker(
             }
             Ok(ImageDownload::AlreadyDone(path)) => {
                 monitor.vote(&name, consts::ERR_NO_ERROR);
-                inner.log(DEBUG, &format!("t-{name} exists {}", path.display()));
+                let relative = relative_to_task_root(&inner, &guid, &path);
+                inner.log(DEBUG, &format!("t-{name} exists {}", relative.display()));
                 inner.record(
                     "worker.download.exists",
                     json!({"thread": name, "url": item.image_url}),
