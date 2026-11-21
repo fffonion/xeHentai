@@ -126,9 +126,12 @@ jobs:
           set -euo pipefail
           package="$RUNNER_TEMP/dist/xehentai-linux-x86_64"
           python3 tools/package_dist.py --binary target/release/xeHentai --output "$package"
-          test -f "$package/rss/rpc/handlers.rss"
-          # The release package never carries the WebUI: it is proxied from
-          # the fixed origin at run time.
+          # The RSS scripts and the locale catalogue are compiled into the
+          # executable, and the WebUI is proxied from the fixed origin at run
+          # time: nothing but the binary, the example config and the license is
+          # shipped.
+          test ! -e "$package/rss"
+          test ! -e "$package/locales"
           test ! -e "$package/ui"
           mkdir -p "$RUNNER_TEMP/unpacked" "$RUNNER_TEMP/run"
           tar -xzf "$package.tar.gz" -C "$RUNNER_TEMP/unpacked"

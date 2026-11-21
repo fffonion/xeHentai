@@ -85,10 +85,9 @@ def test_package_contains_runtime_files_with_exact_bytes():
         assert os.access(output / "xeHentai", os.X_OK)
         for relative in package_dist.REQUIRED_FILES:
             assert (output / relative).read_bytes() == (ROOT / relative).read_bytes(), relative
-        for relative in package_dist.REQUIRED_DIRS:
-            expected = _tree_files(ROOT / relative)
-            assert expected, relative
-            assert _tree_files(output / relative) == expected, relative
+        # RSS sources and locale YAML live inside the executable.
+        assert not (output / "rss").exists()
+        assert not (output / "locales").exists()
         assert not (output / "config.rss").exists()
         assert not (output / "config.py").exists()
         assert not (output / "target").exists()
@@ -104,8 +103,6 @@ def test_package_contains_runtime_files_with_exact_bytes():
             assert names == set(_tree_files(output)), sorted(names ^ set(_tree_files(output)))
             for relative in [
                 "xeHentai",
-                "rss/rpc/handlers.rss",
-                "locales/en_us.yml",
                 "config.example.rss",
             ]:
                 archived = tar.extractfile(members[prefix + relative]).read()
@@ -143,10 +140,7 @@ def _synthetic_source(root):
         target = root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(("content of " + relative + "\n").encode())
-    for relative in package_dist.REQUIRED_DIRS:
-        target = root / relative
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "sample.txt").write_bytes(b"sample resource\n")
+
 
 
 def test_missing_required_resource_is_rejected_without_partial_output():
@@ -154,12 +148,12 @@ def test_missing_required_resource_is_rejected_without_partial_output():
         tmp = Path(tmp)
         source = tmp / "source"
         _synthetic_source(source)
-        shutil.rmtree(source / "locales")
+        (source / "config.example.rss").unlink()
         output = tmp / "dist" / "pkg"
         try:
             package_dist.build(source, _fake_binary(tmp), output)
         except package_dist.PackagingError as error:
-            assert "locales" in str(error), error
+            assert "config.example.rss" in str(error), error
         else:
             raise AssertionError("a missing required resource must be rejected")
         assert not output.exists()
@@ -375,7 +369,7 @@ def test_zip_format_contains_the_same_tree_with_exact_bytes():
             assert names == expected, sorted(names ^ expected)
             assert "xeHentai.exe" in names
             assert not any(name.startswith("ui/") for name in names), sorted(names)
-            for relative in ["xeHentai.exe", "rss/rpc/handlers.rss", "locales/en_us.yml"]:
+            for relative in ["xeHentai.exe", "config.example.rss"]:
                 assert package.read(prefix + relative) == (output / relative).read_bytes(), relative
 
 

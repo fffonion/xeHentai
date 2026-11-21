@@ -113,11 +113,6 @@ output instead of leaving a mixed tree. The package contains:
 
 ```
 xeHentai
-rss/rpc/handlers.rss
-rss/filters/match.rss
-rss/updater/github.rss
-rss/updater/updater.rss
-locales/**
 config.example.rss
 LICENSE.txt
 ```
@@ -125,9 +120,10 @@ LICENSE.txt
 There is no `ui/` entry: the WebUI is proxied from its fixed upstream origin at
 run time and cached locally, so nothing about the built pack is shipped. It
 never copies `config.rss`, `config.py`, session files, logs, keys, `target/`,
-`.git/` or the source tree. `locales/` is compiled into the executable but is
-also shipped as a language resource, and `config.example.rss` documents the
-configuration fields.
+`.git/` or the source tree. Both `rss/**` and `locales/**` are compiled into the
+executable and are deliberately absent from the archive: an update package is
+the only thing that replaces the RSS scripts, and `config.example.rss`
+documents the configuration fields.
 
 ## Build and test
 

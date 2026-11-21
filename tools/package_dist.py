@@ -29,30 +29,19 @@ ROOT = Path(__file__).resolve().parent.parent
 # behavior and is the Unix default; `zip` is the Windows default.
 ARCHIVE_SUFFIXES = {"tar.gz": ".tar.gz", "zip": ".zip"}
 
-# RSS sources are embedded at build time and shipped as runtime overrides so
-# signed updates can replace them. Locale YAML is embedded by rust-i18n; the
-# distribution keeps its translation resources as well.
+# RSS sources and locale YAML are compiled into the executable: the binary
+# starts without any resource tree beside it. The distribution therefore ships
+# only the executable, the example configuration and the license. Update
+# packages stay separate: they carry the four RSS scripts that override the
+# embedded ones at runtime.
 REQUIRED_FILES = (
-    "rss/rpc/handlers.rss",
-    "rss/filters/match.rss",
-    "rss/updater/github.rss",
-    "rss/updater/updater.rss",
     "config.example.rss",
     "LICENSE.txt",
 )
-REQUIRED_DIRS = ("locales",)
 
 
 class PackagingError(Exception):
     """A required input or an exclusive output precondition was not met."""
-
-
-def _directory_files(source_root, relative):
-    directory = source_root / relative
-    files = sorted(path for path in directory.rglob("*") if path.is_file())
-    if not files:
-        raise PackagingError(f"required resource directory is empty: {relative}")
-    return files
 
 
 def plan(source_root, binary):
@@ -67,14 +56,6 @@ def plan(source_root, binary):
         if not source.is_file():
             raise PackagingError(f"required resource is missing: {relative}")
         pairs.append((source, relative))
-    for relative in REQUIRED_DIRS:
-        directory = source_root / relative
-        if not directory.is_dir():
-            raise PackagingError(f"required resource directory is missing: {relative}")
-        pairs.extend(
-            (source, str(source.relative_to(source_root)).replace(os.sep, "/"))
-            for source in _directory_files(source_root, relative)
-        )
     return pairs
 
 

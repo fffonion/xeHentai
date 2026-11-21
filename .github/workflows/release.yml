@@ -138,9 +138,11 @@ jobs:
                   package.extractall(Path(os.environ["RUNNER_TEMP"]) / "smoke", filter="data")
           executable = root / executable_name
           assert executable.is_file(), executable
-          assert (root / "rss/rpc/handlers.rss").is_file()
-          # The WebUI is proxied from the fixed upstream origin at run time;
-          # a release package must never carry a `ui/` tree.
+          # RSS sources and the locale catalogue are compiled into the
+          # executable, so the package carries neither tree; the WebUI is
+          # proxied from the fixed upstream origin at run time.
+          assert not (root / "rss").exists()
+          assert not (root / "locales").exists()
           assert not (root / "ui").exists()
           # Run from the unpacked directory so the resources are the ones the
           # package actually shipped, not the checkout's.
