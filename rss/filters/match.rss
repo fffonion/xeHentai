@@ -126,23 +126,7 @@ fn digit_int(text: string) -> int {
 }
 
 fn contains(text: string, needle: string) -> bool {
-    let needle_len = needle.length;
-    let text_len = text.length;
-    let mut found = false;
-    if needle_len == 0 {
-        found = true;
-    } else if text_len >= needle_len {
-        let limit = text_len - needle_len + 1;
-        let mut index = 0;
-        while index < limit {
-            if text[index:(index + needle_len)] == needle {
-                found = true;
-                break;
-            }
-            index = index + 1;
-        }
-    }
-    found
+    string_contains(text, needle)
 }
 
 fn starts_with(text: string, prefix: string) -> bool {
