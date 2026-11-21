@@ -2460,14 +2460,46 @@ fn m7p_next_start_drops_a_pending_candidate_that_is_already_applied() {
         pkg.payload.clone(),
     );
     let after_apply = server.requests().len();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("reserve RPC port");
+    let address = listener.local_addr().expect("RPC address");
+    drop(listener);
+    let port = address.port().to_string();
     let child = ChildRun::spawn(
         install.path(),
         &exe,
-        &["-l", "eh.log", "-vv", "--auto-update", "off"],
+        &[
+            "-l",
+            "eh.log",
+            "-vv",
+            "--auto-update",
+            "off",
+            "--rpc-port",
+            &port,
+            "--rpc-open-browser",
+            "false",
+        ],
     );
+    // The startup line is already in eh.log from the previous two runs. A
+    // response from this child's newly bound RPC listener proves the
+    // supervisor has installed its SIGINT handler before we send the signal.
     assert!(
-        wait_log(install.path(), "2.023-rss started."),
-        "the app did not keep starting after a rejected candidate: {}",
+        m6::wait_for(Duration::from_secs(30), || {
+            let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(200))
+            else {
+                return false;
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
+            if stream
+                .write_all(b"GET /nope HTTP/1.0\r\nHost: x\r\n\r\n")
+                .is_err()
+            {
+                return false;
+            }
+            let mut reply = [0u8; 64];
+            matches!(stream.read(&mut reply), Ok(n) if reply[..n].starts_with(b"HTTP/1.0 404 Not Found"))
+        }),
+        "the app did not reach the supervised RPC loop: {}",
         log_of(install.path())
     );
     assert_eq!(child.stop(), 0);
