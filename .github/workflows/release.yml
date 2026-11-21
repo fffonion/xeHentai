@@ -2,8 +2,8 @@ name: Release
 
 # A tag push is the only thing that produces distributable packages: one
 # self-contained archive per supported desktop platform, published together on
-# a GitHub release. Branch and pull-request CI stays on the Linux gates in
-# `ci.yml`; the native consumers there also run only for a tag.
+# `ci.yml` runs Linux gates on branches and also exercises the native
+# macOS/Windows consumers on rss-rewrite and release tags.
 on:
   push:
     tags:

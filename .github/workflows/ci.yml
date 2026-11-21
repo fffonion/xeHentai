@@ -581,9 +581,9 @@ jobs:
   native-gallery-read:
     name: Native consumers (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # Ordinary branch/PR CI is Linux-only. The macOS and Windows consumers
-    # execute on a release tag, where a distributable package is also built.
-    if: startsWith(github.ref, 'refs/tags/')
+    # Test both native hosts on the integration branch before release, and
+    # repeat the same consumers on the tagged release source.
+    if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/rss-rewrite'
     timeout-minutes: 60
     strategy:
       fail-fast: false
