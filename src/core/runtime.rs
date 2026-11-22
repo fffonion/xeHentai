@@ -2334,7 +2334,6 @@ async fn download_worker(
             cancel: Some(&mut cancel),
             stage_drain: Some(inner.stage.clone()),
         };
-        speed.lock().unwrap_or_else(|e| e.into_inner()).reset();
         let result = run_download(
             &mut port,
             &mut session,

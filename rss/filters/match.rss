@@ -612,13 +612,12 @@ pub fn flt_download(page: PageResponse) -> DownloadResult {
     let size = image_size(page.url);
     let has_size = option_present::<int>(size.copy());
     let image_pixels = size.unwrap_or(0);
-    let size_mismatch = has_size && content_length >= 0 && image_pixels != content_length;
     let has_expected_length = content_length >= 0 || (has_size && image_pixels > 0);
     if quota != 0 => {
         download_fail(quota, page)
     } else if status == 404 => {
         download_fail(1011, page)
-    } else if !has_expected_length || (content_length == 0 && !has_size) || size_mismatch => {
+    } else if !has_expected_length || content_length == 0 => {
         download_fail(1012, page)
     } else if !has_stream => {
         download_fail(1014, page)
@@ -640,8 +639,8 @@ pub fn flt_stream_result(input: PageResponse, actual_length: int, read_error: st
     let has_size = option_present::<int>(size.copy());
     let size_value = size.unwrap_or(0);
     let mut expected_length = input.content_length;
-    // The header length is the fallback when the URL carries no hash.
-    if has_size && size_value > 0 {
+    // The URL size is a hint only when the server omits Content-Length.
+    if expected_length < 0 && has_size && size_value > 0 {
         expected_length = size_value;
     }
     let mut exposed_expected_length: Option<int> = None;

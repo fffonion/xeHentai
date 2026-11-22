@@ -6368,6 +6368,52 @@ mod m3_transport {
     }
 
     #[tokio::test]
+    async fn complete_jpeg_with_stale_url_size_is_published_from_http_length() {
+        let mut jpeg = Vec::new();
+        let rgb = image::RgbImage::from_pixel(32, 32, image::Rgb([24, 56, 88]));
+        image::DynamicImage::ImageRgb8(rgb)
+            .write_to(
+                &mut std::io::Cursor::new(&mut jpeg),
+                image::ImageFormat::Jpeg,
+            )
+            .unwrap();
+        assert!(image::load_from_memory(&jpeg).is_ok());
+        let expected = jpeg.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_headers(&mut socket).await;
+            serve_full_image(&mut socket, &jpeg).await;
+        });
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("downloads")).unwrap();
+        let mut fixture = prepare_download_fixture(root.path(), port);
+        set_fixture_image_url(
+            &mut fixture,
+            format!(
+                "http://127.0.0.1:{port}/0123456789abcdef0123456789abcdef01234567-9999-200-0-jpg/image.php"
+            ),
+        );
+        configure_download_proxy(&mut fixture, port);
+        let mut filters =
+            crate::filters::Filters::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+        match fixture
+            .app
+            .download_one_image(&fixture.guid, &mut filters)
+            .await
+            .unwrap()
+        {
+            crate::core::ImageDownload::Saved(path) => {
+                assert_eq!(std::fs::read(path).unwrap(), expected);
+            }
+            other => panic!("complete JPEG with an accurate HTTP length was rejected: {other:?}"),
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn proxy_image_php_error_body_is_not_published() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_port = listener.local_addr().unwrap().port();
@@ -6421,7 +6467,7 @@ mod m3_transport {
             "missing byte count: {log}"
         );
         assert!(
-            log.contains("expected_bytes=4096"),
+            log.contains(&format!("expected_bytes={body_len}")),
             "missing expected count: {log}"
         );
         assert!(!log.contains("proxy-error"), "query data leaked: {log}");
@@ -6669,10 +6715,12 @@ mod m3_transport {
 
     async fn read_until_eof(socket: &mut (impl AsyncRead + Unpin), millis: u64) -> bool {
         let mut buffer = [0u8; 16];
-        matches!(
-            tokio::time::timeout(Duration::from_millis(millis), socket.read(&mut buffer)).await,
-            Ok(Ok(0))
-        )
+        // Unread response bytes can turn a closed TCP peer into ECONNRESET.
+        match tokio::time::timeout(Duration::from_millis(millis), socket.read(&mut buffer)).await {
+            Ok(Ok(0)) => true,
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionReset => true,
+            _ => false,
+        }
     }
 
     #[tokio::test]
@@ -7934,7 +7982,7 @@ mod m4 {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn pipeline_resets_speed_window_before_each_download_item() {
+    async fn pipeline_downloads_consecutive_images_with_one_worker() {
         let image_hash_a = "0123456789abcdef0123456789abcdef01234567";
         let image_hash_b = "89abcdef0123456789abcdef0123456789abcdef";
         let image_hash10_a = "0123456789";
@@ -8072,6 +8120,104 @@ mod m4 {
             2,
             "{requests:?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_info_reports_speed_across_short_consecutive_images() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let served = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&served);
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let served = Arc::clone(&served);
+                tokio::spawn(async move {
+                    let path = path_of(&read_head(&mut socket).await);
+                    if path.contains("?p=") {
+                        respond(
+                            &mut socket,
+                            "200 OK",
+                            "text/html",
+                            &page_body("0123456789", 8),
+                        )
+                        .await;
+                    } else if path.starts_with("/g/") {
+                        respond(&mut socket, "200 OK", "text/html", &metadata_body(8)).await;
+                    } else if path.starts_with("/s/") {
+                        let fid = path.rsplit('-').next().unwrap().parse::<i64>().unwrap();
+                        let hash = format!("{fid:010x}{fid:030x}");
+                        let name = format!("image-{fid}");
+                        let page = image_page_body(port, &hash, "0123456789", fid, &name, 6144);
+                        respond(&mut socket, "200 OK", "text/html", &page).await;
+                    } else if let Some(hash) = path.strip_prefix("/img/") {
+                        let fid = i64::from_str_radix(&hash[..10], 16).unwrap();
+                        let body = image_body(fid as u8, 6144);
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
+                            body.len()
+                        );
+                        socket.write_all(head.as_bytes()).await.unwrap();
+                        served.fetch_add(1, Ordering::SeqCst);
+                        for chunk in body.chunks(2048) {
+                            if socket.write_all(chunk).await.is_err() {
+                                return;
+                            }
+                            tokio::time::sleep(Duration::from_millis(180)).await;
+                        }
+                        let _ = socket.shutdown().await;
+                    } else {
+                        respond(&mut socket, "404 Not Found", "text/html", b"missing").await;
+                    }
+                });
+            }
+        });
+
+        let root = tempfile::tempdir().unwrap();
+        let mut app = m4_app(root.path(), m4_config(root.path(), 1, 1));
+        let guid = m4_task(
+            &mut app,
+            root.path(),
+            "http://e-hentai.org/g/123/abcdef0123/",
+            serde_json::json!({}),
+        );
+        m4_session(
+            &mut app,
+            Arc::new(crate::worker::RealClock),
+            Arc::new(FixedResolver::new(
+                format!("127.0.0.1:{port}").parse().unwrap(),
+            )),
+        );
+        LocalSet::new()
+            .run_until(async {
+                let runtime = Runtime::new(app, Path::new(MANIFEST).to_path_buf());
+                let (mut run, handle) = runtime.spawn();
+                let deadline = std::time::Instant::now() + Duration::from_secs(25);
+                let mut reported = false;
+                while handle.task_state(&guid) != Some(consts::TASK_STATE_FINISHED) {
+                    assert!(std::time::Instant::now() < deadline, "{:?}", handle.trace());
+                    if observed.load(Ordering::SeqCst) >= 2
+                        && handle.get_info()["download_speed"].as_f64().unwrap_or(0.0) > 0.0
+                    {
+                        reported = true;
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_millis(60)) => {}
+                        result = &mut run => panic!("runtime stopped early: {result:?}"),
+                    }
+                }
+                assert_eq!(observed.load(Ordering::SeqCst), 8);
+                assert!(
+                    reported,
+                    "getInfo reported zero during eight successful image transfers"
+                );
+                handle.shutdown().await;
+                run.await.unwrap();
+            })
+            .await;
+        server.abort();
     }
 
     async fn wait_trace_count(handle: &AppHandle, kind: &str, count: usize) -> Vec<TraceEvent> {
@@ -9450,7 +9596,12 @@ mod m4 {
                 let legit_zip = downloads.join("legit-entry.zip");
                 let deadline = std::time::Instant::now() + Duration::from_secs(15);
                 loop {
-                    if legit_zip.exists() {
+                    if legit_zip.exists()
+                        && handle.borrow_app(|app| {
+                            app.task(&legit_guid)
+                                .is_some_and(|task| task.state == consts::TASK_STATE_FINISHED)
+                        })
+                    {
                         break;
                     }
                     if std::time::Instant::now() > deadline {

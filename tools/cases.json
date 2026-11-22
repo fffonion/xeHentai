@@ -2406,10 +2406,10 @@
         "download.stream-error"
       ],
       "assertions": [
-        "Pre-stream size/404/stream checks and post-stream length/error abort callbacks."
+        "Pre-stream 404/zero/stream checks and post-stream length/error abort callbacks; a complete HTTP-length image with stale URL size is accepted."
       ],
-      "status": "implemented",
-      "delta": null
+      "status": "delta",
+      "delta": "The Python reference rejects a URL size mismatch before streaming; the native host trusts a declared HTTP length and rejects incomplete bodies after streaming."
     },
     {
       "id": "filters.reset-quota",
@@ -2435,11 +2435,12 @@
       ],
       "assertions": [
         "EOF-delimited image bodies are accepted only when the URL supplies an expected byte count; exact bytes are published.",
+        "When the response declares Content-Length, a complete image is published even if the URL size is stale; incomplete bodies are still rejected.",
         "An HTML error body is rejected whether labelled image/jpeg or text/html; staging is removed and byte-count diagnostics omit URL/query data. Only that recognized HTML error debits proxy health; low-speed, read, and byte-count failures do not increase proxy failures because attribution is ambiguous.",
         "A streamed text quota notice retains ERR_QUOTA_EXCEEDED; a non-quota text response with the exact URL byte count is rejected and never published."
       ],
       "status": "delta",
-      "delta": "delta.proxy-image-stream-integrity: validates streamed byte counts against URL or response length and rejects HTML and text error bodies, preserving quota classification and preventing incomplete or error payloads from being published."
+      "delta": "delta.proxy-image-stream-integrity: validates streamed byte counts against HTTP length when present, or URL length when absent; rejects HTML and text error bodies and preserves quota classification."
     },
     {
       "id": "proxy.http",

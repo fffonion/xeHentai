@@ -2134,6 +2134,10 @@ pub(crate) async fn run_download<P: DownloadPort>(
     };
     let mut read = 0i64;
     let mut body_prefix = Vec::with_capacity(512);
+    let mut item_speed = runtime.speed.as_ref().map(|speed| {
+        let window = speed.lock().unwrap_or_else(|error| error.into_inner()).cnt;
+        SpeedChecker::new(window, Arc::clone(&session.config.clock))
+    });
     loop {
         if keepalive() {
             return Ok(ImageDownload::Aborted);
@@ -2168,10 +2172,13 @@ pub(crate) async fn run_download<P: DownloadPort>(
                     });
                 }
                 if let Some(speed) = &runtime.speed {
-                    let mut checker = speed.lock().unwrap_or_else(|error| error.into_inner());
+                    speed
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .check(chunk.len());
+                    let checker = item_speed.as_mut().expect("item speed for download worker");
                     checker.check(chunk.len());
                     let full = checker.calc(true);
-                    drop(checker);
                     if is_low_speed(full, runtime.low_speed_threshold) {
                         let checked = filters
                             .stream_outcome(&stream_page, read, None)

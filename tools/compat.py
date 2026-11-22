@@ -849,6 +849,9 @@ NATIVE_CASE_MAP = {
         "tests::m3_transport::proxy_image_without_content_length_uses_url_size_and_publishes_exact_bytes": [
             "proxy.image-stream-integrity"
         ],
+        "tests::m3_transport::complete_jpeg_with_stale_url_size_is_published_from_http_length": [
+            "proxy.image-stream-integrity"
+        ],
         "tests::m3_transport::proxy_image_php_error_body_is_not_published": [
             "proxy.image-stream-integrity"
         ],
@@ -2280,7 +2283,7 @@ def site_scenarios():
             id="download.stream",
             url=stream_url,
             real_url=stream_url,
-            content_length=100,
+            content_length=10,
             has_stream=True,
         ),
         page("download", id="download.404", status=404, url=stream_url, real_url=stream_url),
@@ -2297,13 +2300,14 @@ def site_scenarios():
             url=stream_url,
             real_url=stream_url,
             content_length=99,
+            has_stream=True,
         ),
         page(
             "download",
             id="download.no-stream",
             url=stream_url,
             real_url=stream_url,
-            content_length=100,
+            content_length=10,
             has_stream=False,
         ),
         page(
@@ -2356,7 +2360,7 @@ class _SiteFakeResponse:
         self.headers = joined
         self._chunks = [chunk.encode("utf-8") for chunk in scenario.get("chunks", [])]
         self._stream_error = scenario.get("stream_error")
-        if scenario["fn"] == "download" or "chunks" in scenario:
+        if scenario["has_stream"] or "chunks" in scenario:
             self.iter_content_cb = None
 
     @property
@@ -6546,7 +6550,18 @@ def _mark_cases(cases, mapping, flags):
 
 
 def compare_site(cases, oracle, candidate):
-    diffs, flags = _compare_scenarios(oracle, candidate, "site")
+    name = "download.size-mismatch"
+    diffs, flags = _compare_scenarios(oracle, candidate, "site", skip=(name,))
+    scenario = next(row for row in site_scenarios() if row["id"] == name)
+    url = scenario["url"]
+    real_url = scenario["real_url"]
+    common = {"debug": None, "exception": None, "ret": None}
+    expected_oracle = {**common, "callbacks": [["fail", [[1012, real_url, url]]]]}
+    expected_candidate = {**common, "callbacks": [["suc", [["STREAM", real_url, url]]]]}
+    section = compare(expected_oracle, oracle.get(name), f"site.{name}.oracle")
+    section += compare(expected_candidate, candidate.get(name), f"site.{name}.candidate")
+    diffs.extend(section)
+    flags[name] = not section
     _mark_cases(cases, SITE_CASES, flags)
     return diffs
 
@@ -7005,6 +7020,16 @@ def self_check(suite, oracle, candidate, native_runs=None):
         cases = {}
         compare_site(cases, oracle, mutated)
         checks.append(("stream-abort", not cases["filters.download-response"]))
+        mutated = copy.deepcopy(candidate)
+        mutated["download.size-mismatch"]["callbacks"] = []
+        cases = {}
+        compare_site(cases, oracle, mutated)
+        checks.append(("stale-url-candidate", not cases["filters.download-response"]))
+        altered_oracle = copy.deepcopy(oracle)
+        altered_oracle["download.size-mismatch"]["callbacks"] = []
+        cases = {}
+        compare_site(cases, altered_oracle, candidate)
+        checks.append(("stale-url-oracle", not cases["filters.download-response"]))
         mutated = copy.deepcopy(candidate)
         mutated["mpv.missing-key"]["callbacks"] = []
         cases = {}
