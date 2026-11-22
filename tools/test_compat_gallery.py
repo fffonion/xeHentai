@@ -202,12 +202,33 @@ def test_files_archive_comments_keep_metadata_comparison():
     assert compat._files_expected_archive_comments(oracle, altered) != altered
 
 
+def test_cli_version_uses_current_display():
+    def transcript(version):
+        return {"root": "unused", "range": [], "cases": [
+            {"key": key, "exit": 0, "text": version}
+            if key == "version" else {"key": key, "exit": 3}
+            for key, _argv in compat.CLI_ARGV_CASES
+        ]}
+
+    oracle = transcript("xeHentai v2.023")
+    candidate = transcript("xeHentai v3.0.0-dev")
+    cases = {}
+    assert compat.compare_cli(cases, oracle, candidate) == []
+    assert cases["cli.version"] is True
+    changed = transcript("xeHentai v3.0.0-other")
+    cases = {}
+    assert compat.compare_cli(cases, oracle, changed) == [
+        "cli.version: candidate version 'xeHentai v3.0.0-other'"]
+    assert cases["cli.version"] is False
+
+
 TESTS = [
     test_gallery_poststate_snapshot_is_deepcopy_isolated,
     test_rpc_archive_comment_uses_displayed_version,
     test_rpc_archive_comment_rejects_different_gallery,
     test_gallery_archive_comment_uses_displayed_version,
     test_files_archive_comments_keep_metadata_comparison,
+    test_cli_version_uses_current_display,
 ]
 
 

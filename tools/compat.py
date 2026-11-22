@@ -4792,7 +4792,7 @@ def compare_cli(cases, oracle, candidate):
                     section.append(f"cli.{key}: candidate help is missing {flag}")
         elif expected["exit"] == 0 and "version" in key:
             text = (actual.get("text") or "").strip()
-            if not text.startswith("xeHentai v2.023"):
+            if text != "xeHentai v3.0.0-dev":
                 section.append(f"cli.{key}: candidate version {text!r}")
         diffs.extend(section)
         flags[key] = not section
