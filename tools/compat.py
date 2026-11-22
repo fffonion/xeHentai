@@ -729,7 +729,7 @@ NATIVE_CASE_MAP = {
         "r#const::tests::every_translatable_error_code_has_a_key_and_no_extra_codes": [
             "const.err-key-map"
         ],
-        "r#const::tests::version_is_printed_with_the_implementation_marker": [
+        "r#const::tests::public_version_uses_the_current_build_identity": [
             "delta.version-string"
         ],
     },

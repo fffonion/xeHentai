@@ -222,6 +222,12 @@ def test_cli_version_uses_current_display():
     assert cases["cli.version"] is False
 
 
+def test_version_delta_has_native_case_coverage():
+    assert compat.NATIVE_CASE_MAP["config"][
+        "r#const::tests::public_version_uses_the_current_build_identity"
+    ] == ["delta.version-string"]
+
+
 TESTS = [
     test_gallery_poststate_snapshot_is_deepcopy_isolated,
     test_rpc_archive_comment_uses_displayed_version,
@@ -229,6 +235,7 @@ TESTS = [
     test_gallery_archive_comment_uses_displayed_version,
     test_files_archive_comments_keep_metadata_comparison,
     test_cli_version_uses_current_display,
+    test_version_delta_has_native_case_coverage,
 ]
 
 
