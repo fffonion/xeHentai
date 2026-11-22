@@ -2057,7 +2057,7 @@ pub const MAX_ACTIVE_CONN: usize = 64;
 /// decode/build jobs, queued on one owned semaphore.
 pub const MAX_HEAVY_WORKERS: usize = 2;
 
-pub const VERSION_HEADER: &str = "xeHentai/2.023-rss";
+pub const VERSION_HEADER: &str = concat!("xeHentai/", env!("XEH_DISPLAY_VERSION"));
 
 #[derive(Debug)]
 pub struct Response {
@@ -2543,6 +2543,14 @@ mod tests {
         // token buried in surrounding text; the candidate requires equality.
         assert!(!check_auth(Some("s3cret"), Some("xx token:s3cret yy")));
         assert!(!check_auth(Some("s3cret"), Some("token:s3cret ")));
+    }
+
+    #[test]
+    fn server_header_uses_the_same_public_version_as_get_info() {
+        assert_eq!(
+            VERSION_HEADER,
+            format!("xeHentai/{}", crate::r#const::VERSION_DISPLAY)
+        );
     }
 
     #[test]

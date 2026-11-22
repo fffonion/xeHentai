@@ -4850,7 +4850,7 @@ UPDATE_SEEDED_CASES = (
 # The v2 descriptor binds exactly the compiling host ABI; the host version is
 # what the running image reports (it never changes with an RSS-only update).
 UPDATE_PLATFORM = {
-    "host_version": "2.023-rss",
+    "host_version": "3.0.0-dev",
     "host_abi": 1,
     "script_abi": 1,
 }
@@ -8713,8 +8713,8 @@ def _compare_rpc_group(cases, oracle, candidate):
             if not _re.fullmatch(r"2\.023-py\d+", str(old_version)):
                 diffs.append(f"{case_id}: oracle version shape {old_version!r}")
                 cases[case_id] = False
-            if str(new_version) != "2.023-rss":
-                diffs.append(f"{case_id}: candidate version {new_version!r} != 2.023-rss")
+            if str(new_version) != "3.0.0-dev":
+                diffs.append(f"{case_id}: candidate version {new_version!r} != 3.0.0-dev")
                 cases[case_id] = False
         old_guid = (old_body.get("result") if isinstance(old_body.get("result"), str) else None)
         new_guid = (new_body.get("result") if isinstance(new_body.get("result"), str) else None)

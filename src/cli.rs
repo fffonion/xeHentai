@@ -1427,7 +1427,10 @@ mod tests {
     #[test]
     fn cli_help_and_version_are_reported_separately() {
         match parse_with(&Config::default(), &["xeH", "--version"]).expect("version") {
-            Parsed::Version(text) => assert_eq!(text.trim(), "xeHentai v2.023-rss"),
+            Parsed::Version(text) => assert_eq!(
+                text.trim(),
+                format!("xeHentai v{}", crate::r#const::VERSION_DISPLAY)
+            ),
             other => panic!("{other:?}"),
         }
         match parse_with(&Config::default(), &["xeH", "-h"]).expect("help") {

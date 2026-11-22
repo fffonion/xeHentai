@@ -83,12 +83,14 @@ def test_package_contains_runtime_files_with_exact_bytes():
         assert output.is_dir()
         assert (output / "xeHentai").read_bytes() == binary.read_bytes()
         assert os.access(output / "xeHentai", os.X_OK)
-        for relative in package_dist.REQUIRED_FILES:
-            assert (output / relative).read_bytes() == (ROOT / relative).read_bytes(), relative
+        assert _tree_files(output) == ["LICENSE.txt", "README.md", "config.rss", "xeHentai"]
+        assert (output / "config.rss").read_bytes() == (ROOT / "config.example.rss").read_bytes()
+        assert (output / "README.md").read_bytes() == (ROOT / "README.md").read_bytes()
+        assert (output / "LICENSE.txt").read_bytes() == (ROOT / "LICENSE.txt").read_bytes()
         # RSS sources and locale YAML live inside the executable.
         assert not (output / "rss").exists()
         assert not (output / "locales").exists()
-        assert not (output / "config.rss").exists()
+        assert not (output / "config.example.rss").exists()
         assert not (output / "config.py").exists()
         assert not (output / "target").exists()
         assert not (output / ".git").exists()
@@ -103,7 +105,8 @@ def test_package_contains_runtime_files_with_exact_bytes():
             assert names == set(_tree_files(output)), sorted(names ^ set(_tree_files(output)))
             for relative in [
                 "xeHentai",
-                "config.example.rss",
+                "config.rss",
+                "README.md",
             ]:
                 archived = tar.extractfile(members[prefix + relative]).read()
                 assert archived == (output / relative).read_bytes(), relative
@@ -367,10 +370,14 @@ def test_zip_format_contains_the_same_tree_with_exact_bytes():
             }
             expected = set(_tree_files(output))
             assert names == expected, sorted(names ^ expected)
-            assert "xeHentai.exe" in names
+            assert names == {"xeHentai.exe", "config.rss", "README.md", "LICENSE.txt", "RPC模式.bat", "点我开始.bat"}
             assert not any(name.startswith("ui/") for name in names), sorted(names)
-            for relative in ["xeHentai.exe", "config.example.rss"]:
+            for relative in ["xeHentai.exe", "config.rss", "README.md", "LICENSE.txt", "RPC模式.bat", "点我开始.bat"]:
                 assert package.read(prefix + relative) == (output / relative).read_bytes(), relative
+            for launcher in ("RPC模式.bat", "点我开始.bat"):
+                text = package.read(prefix + launcher).decode("utf-8")
+                assert "cd /d %~dp0" in text
+                assert "xeHentai.exe" in text
 
 
 def test_existing_zip_archive_is_refused_without_overwrite():

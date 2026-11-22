@@ -6,10 +6,8 @@
 //! unused entries are expected until their owning module lands.
 #![allow(dead_code)]
 
-/// Reference release version, printed by the application.
-pub const VERSION: &str = "2.023";
-/// Version string that marks the Rust/RustScript implementation.
-pub const VERSION_DISPLAY: &str = "2.023-rss";
+/// Public version of this native build (release tag or Cargo version + dev).
+pub const VERSION_DISPLAY: &str = env!("XEH_DISPLAY_VERSION");
 pub const SCRIPT_NAME: &str = "xeHentai";
 
 /// Native package contract revisions this binary understands (plan §9.2.5).
@@ -28,19 +26,12 @@ pub const BUILD_ID: &str = env!("XEH_BUILD_ID");
 
 /// Version written into newly created gallery ZIP comments.
 pub fn archive_version() -> &'static str {
-    if BUILD_ID == "dev" { VERSION } else { BUILD_ID }
+    VERSION_DISPLAY
 }
 
-/// The version label the running image reports. An ordinary unpublished build
-/// prints exactly [`VERSION_DISPLAY`]; a build compiled with a release/update
-/// identifier reports it in the same label, which is how two real native
-/// builds stay distinguishable without any runtime override.
+/// The version label the running image reports.
 pub fn version_label() -> String {
-    if BUILD_ID == "dev" {
-        VERSION_DISPLAY.to_string()
-    } else {
-        format!("{VERSION_DISPLAY}+{BUILD_ID}")
-    }
+    VERSION_DISPLAY.to_string()
 }
 
 pub const DUMMY_FILENAME: &str = "-dummy-";
@@ -274,8 +265,13 @@ mod tests {
     }
 
     #[test]
-    fn version_is_printed_with_the_implementation_marker() {
-        assert_eq!(VERSION, "2.023");
-        assert_eq!(VERSION_DISPLAY, "2.023-rss");
+    fn public_version_uses_the_current_build_identity() {
+        assert_eq!(archive_version(), VERSION_DISPLAY);
+        if BUILD_ID == "dev" {
+            assert_eq!(VERSION_DISPLAY, "3.0.0-dev");
+        } else {
+            assert_eq!(VERSION_DISPLAY, BUILD_ID);
+        }
+        assert_eq!(version_label(), VERSION_DISPLAY);
     }
 }

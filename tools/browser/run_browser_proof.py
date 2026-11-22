@@ -292,7 +292,7 @@ with sync_playwright() as p:
     dlg.get_by_role("button", name="Confirm").click()
     page.wait_for_timeout(2600)
     body = page.inner_text("body")
-    check("connect.connected", "2.023-rss" in body and "disconneted" not in body)
+    check("connect.connected", "3.0.0-dev" in body and "disconneted" not in body)
     check("tasks.rows", page.locator("tr.el-table__row").count() == 3,
           page.locator("tr.el-table__row").count())
     for name in ("alpha", "beta", "gamma"):

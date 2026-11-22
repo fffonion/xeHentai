@@ -29,15 +29,16 @@ ROOT = Path(__file__).resolve().parent.parent
 # behavior and is the Unix default; `zip` is the Windows default.
 ARCHIVE_SUFFIXES = {"tar.gz": ".tar.gz", "zip": ".zip"}
 
-# RSS sources and locale YAML are compiled into the executable: the binary
-# starts without any resource tree beside it. The distribution therefore ships
-# only the executable, the example configuration and the license. Update
-# packages stay separate: they carry the four RSS scripts that override the
-# embedded ones at runtime.
+# RSS sources and locale YAML are compiled into the executable. Package the
+# example under its runtime filename, as the Python distribution did with
+# config.py, and include the current product instructions. Update packages
+# stay separate: they carry the four RSS scripts.
 REQUIRED_FILES = (
     "config.example.rss",
+    "README.md",
     "LICENSE.txt",
 )
+WINDOWS_LAUNCHERS = ("RPC模式.bat", "点我开始.bat")
 
 
 class PackagingError(Exception):
@@ -55,7 +56,13 @@ def plan(source_root, binary):
         source = source_root / relative
         if not source.is_file():
             raise PackagingError(f"required resource is missing: {relative}")
-        pairs.append((source, relative))
+        pairs.append((source, "config.rss" if relative == "config.example.rss" else relative))
+    if binary.suffix.lower() == ".exe":
+        for relative in WINDOWS_LAUNCHERS:
+            source = source_root / "tools" / "windows" / relative
+            if not source.is_file():
+                raise PackagingError(f"required resource is missing: {source}")
+            pairs.append((source, relative))
     return pairs
 
 

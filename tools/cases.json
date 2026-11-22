@@ -1517,10 +1517,10 @@
       "suite": "config",
       "inputs": [],
       "assertions": [
-        "version is printed as 2.023-rss instead of 2.023"
+        "version is printed as 3.0.0-dev instead of 2.023"
       ],
       "status": "delta",
-      "delta": "version is printed as 2.023-rss instead of 2.023"
+      "delta": "version is printed as 3.0.0-dev instead of 2.023"
     },
     {
       "id": "delta.python-import-subset",

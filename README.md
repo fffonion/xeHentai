@@ -86,8 +86,7 @@ Runtime RSS scripts and locale strings are embedded in the executable. Runtime
 resource lookup prefers an `rss/` tree beside the executable and otherwise
 uses the current working directory. Existing RSS files there override embedded
 defaults; missing files fall back to the embedded copies. The release package
-ships RSS files as update overrides, so it starts from any working directory
-without relying on the build tree.
+starts from its own directory without relying on the build tree.
 
 ## Distribution package
 
@@ -113,17 +112,21 @@ output instead of leaving a mixed tree. The package contains:
 
 ```
 xeHentai
-config.example.rss
+config.rss
+README.md
 LICENSE.txt
 ```
 
+The Windows ZIP also includes `RPC模式.bat` and `点我开始.bat`, with paths
+relative to the unpacked directory. The packaged `config.rss` comes from the
+repository's `config.example.rss`; no user configuration is copied.
+
 There is no `ui/` entry: the WebUI is proxied from its fixed upstream origin at
 run time and cached locally, so nothing about the built pack is shipped. It
-never copies `config.rss`, `config.py`, session files, logs, keys, `target/`,
+never copies a local `config.rss`, `config.py`, session files, logs, keys, `target/`,
 `.git/` or the source tree. Both `rss/**` and `locales/**` are compiled into the
 executable and are deliberately absent from the archive: an update package is
-the only thing that replaces the RSS scripts, and `config.example.rss`
-documents the configuration fields.
+the only thing that replaces the RSS scripts.
 
 ## Build and test
 

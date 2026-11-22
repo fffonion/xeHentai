@@ -157,7 +157,13 @@ fn entry_point_initializes_configuration_and_log() {
     assert_eq!(crate::run_with_args(root.path(), argv), 0);
     assert!(root.path().join(CONFIG_FILE).is_file());
     let log = fs::read_to_string(root.path().join("eh.log")).expect("log file");
-    assert!(log.contains("xeHentai 2.023-rss started."), "{log}");
+    assert!(
+        log.contains(&format!(
+            "xeHentai {} started.",
+            crate::r#const::VERSION_DISPLAY
+        )),
+        "{log}"
+    );
     assert!(log.contains("application task loop finished"), "{log}");
 }
 
@@ -3585,7 +3591,7 @@ fn rename_pads_thousands_writes_the_done_marker_and_reads_string_keys() {
 }
 
 #[test]
-fn archive_uses_store_sorted_entries_and_the_reference_comment() {
+fn archive_uses_store_sorted_entries_and_the_current_version_comment() {
     let root = tempfile::tempdir().expect("root");
     let mut task = prepared_task(root.path(), "guid0001", "archive", 2, |_| {});
     let gallery = task.get_fpath().unwrap();
@@ -3598,10 +3604,7 @@ fn archive_uses_store_sorted_entries_and_the_reference_comment() {
     assert!(gallery.exists());
 
     let mut archive = zip::ZipArchive::new(fs::File::open(&arc).unwrap()).unwrap();
-    let expected_version = match env!("XEH_BUILD_ID") {
-        "dev" => "2.023",
-        tag => tag,
-    };
+    let expected_version = crate::r#const::VERSION_DISPLAY;
     let comment = std::str::from_utf8(archive.comment()).unwrap();
     assert_eq!(
         comment,
@@ -13607,7 +13610,10 @@ mod m6 {
         let root = tempfile::tempdir().expect("root");
         let version = run(root.path(), &["--version"]);
         assert_eq!(version.code, 0, "{}", version.stderr);
-        assert_eq!(version.stdout.trim(), "xeHentai v2.023-rss");
+        assert_eq!(
+            version.stdout.trim(),
+            format!("xeHentai v{}", crate::r#const::VERSION_DISPLAY)
+        );
         assert!(version.stderr.is_empty());
 
         let help = run(root.path(), &["--help"]);
@@ -13710,7 +13716,13 @@ mod m6 {
             "image requests: {paths:?}"
         );
         let log = std::fs::read_to_string(root.path().join("eh.log")).expect("log file");
-        assert!(log.contains("xeHentai 2.023-rss started."), "{log}");
+        assert!(
+            log.contains(&format!(
+                "xeHentai {} started.",
+                crate::r#const::VERSION_DISPLAY
+            )),
+            "{log}"
+        );
         assert!(log.contains("application task loop finished"), "{log}");
         // `save_tasks` defaults to false, so the reference session holds only
         // the cookies; this is the exact shape the frozen reference writes.
@@ -13740,7 +13752,12 @@ mod m6 {
         // Real barrier: the startup log line proves the app is running.
         let started = wait_for(Duration::from_secs(20), || {
             std::fs::read_to_string(&log_path)
-                .map(|log| log.contains("xeHentai 2.023-rss started."))
+                .map(|log| {
+                    log.contains(&format!(
+                        "xeHentai {} started.",
+                        crate::r#const::VERSION_DISPLAY
+                    ))
+                })
                 .unwrap_or(false)
         });
         assert!(started, "the binary never logged its startup line");
@@ -14474,7 +14491,13 @@ mod m6 {
         assert_console_facts(&facts, "resident");
         assert_eq!(facts["prompt_observed"], false, "{facts}");
         let log = std::fs::read_to_string(root.path().join("eh.log")).expect("log file");
-        assert!(log.contains("xeHentai 2.023-rss started."), "{log}");
+        assert!(
+            log.contains(&format!(
+                "xeHentai {} started.",
+                crate::r#const::VERSION_DISPLAY
+            )),
+            "{log}"
+        );
         assert!(log.contains("cleaning up..."), "{log}");
         let session: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(root.path().join("h.json")).expect("session file"),
@@ -14496,7 +14519,13 @@ mod m6 {
         assert_console_facts(&facts, "prompt");
         assert_eq!(facts["prompt_observed"], true, "{facts}");
         let log = std::fs::read_to_string(root.path().join("eh.log")).expect("log file");
-        assert!(log.contains("xeHentai 2.023-rss started."), "{log}");
+        assert!(
+            log.contains(&format!(
+                "xeHentai {} started.",
+                crate::r#const::VERSION_DISPLAY
+            )),
+            "{log}"
+        );
         assert!(log.contains("cleaning up..."), "{log}");
         let session: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(root.path().join("h.json")).expect("session file"),

@@ -126,10 +126,8 @@ jobs:
           set -euo pipefail
           package="$RUNNER_TEMP/dist/xehentai-linux-x86_64"
           python3 tools/package_dist.py --binary target/release/xeHentai --output "$package"
-          # The RSS scripts and the locale catalogue are compiled into the
-          # executable, and the WebUI is proxied from the fixed origin at run
-          # time: nothing but the binary, the example config and the license is
-          # shipped.
+          # The RSS scripts and locale catalogue are compiled into the
+          # executable; the package ships its binary, config, README and license.
           test ! -e "$package/rss"
           test ! -e "$package/locales"
           test ! -e "$package/ui"

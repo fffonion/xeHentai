@@ -1882,7 +1882,13 @@ fn m7p_next_start_applies_the_resource_candidate_and_runs_the_new_rss() {
         log_of(install.path())
     );
     let log = log_of(install.path());
-    assert!(log.contains("xeHentai 2.023-rss started."), "{log}");
+    assert!(
+        log.contains(&format!(
+            "xeHentai {} started.",
+            crate::r#const::VERSION_DISPLAY
+        )),
+        "{log}"
+    );
     assert!(
         !log.contains("files installed"),
         "a download must not apply: {log}"
@@ -1991,7 +1997,9 @@ fn m7p_next_start_applies_the_resource_candidate_and_runs_the_new_rss() {
         vec!["update_id".to_string(), "applied_at".to_string()],
         "the applied record carries only the update id and its time: {state}"
     );
-    assert!(log_of(install.path()).contains("2.023-rss started."));
+    assert!(
+        log_of(install.path()).contains(&format!("{} started.", crate::r#const::VERSION_DISPLAY))
+    );
 
     // Only the four RSS scripts and the private pending/applied metadata moved.
     let after_phase = snapshot_without_host(install.path());
@@ -2279,7 +2287,10 @@ fn m7p_next_start_rejects_an_uncompilable_candidate_and_keeps_the_live_tree() {
         &["-l", "eh.log", "-vv", "--auto-update", "off"],
     );
     assert!(
-        wait_log(install.path(), "2.023-rss started."),
+        wait_log(
+            install.path(),
+            &format!("{} started.", crate::r#const::VERSION_DISPLAY)
+        ),
         "the plain start did not happen: {}",
         log_of(install.path())
     );
@@ -2301,7 +2312,10 @@ fn m7p_next_start_rejects_an_uncompilable_candidate_and_keeps_the_live_tree() {
         log_of(install.path())
     );
     assert!(
-        wait_log(install.path(), "2.023-rss started."),
+        wait_log(
+            install.path(),
+            &format!("{} started.", crate::r#const::VERSION_DISPLAY)
+        ),
         "the app did not keep starting after a rejected candidate: {}",
         log_of(install.path())
     );
@@ -2396,7 +2410,10 @@ fn m7p_next_start_discards_a_tampered_pending_and_keeps_the_running_release() {
         log_of(install.path())
     );
     assert!(
-        wait_log(install.path(), "2.023-rss started."),
+        wait_log(
+            install.path(),
+            &format!("{} started.", crate::r#const::VERSION_DISPLAY)
+        ),
         "the app did not keep starting after a rejected candidate: {}",
         log_of(install.path())
     );

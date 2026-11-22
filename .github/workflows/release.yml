@@ -83,15 +83,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # The compiled identifier is the tag, so the shipped binary reports
-          # `xeHentai v<display>+<tag>` and two tag builds stay distinguishable.
+          # The compiled public version is exactly the release tag.
           XEH_BUILD_ID="$TAG" cargo build --release --locked
       - name: Verify the executable and its version label
         shell: bash
         run: |
           set -euo pipefail
           "${{ matrix.binary }}" --version | tee version.txt
-          grep -F "$TAG" version.txt
+          read -r reported < version.txt
+          test "$reported" = "xeHentai v$TAG"
       - name: Assemble the package
         shell: bash
         run: |
@@ -149,7 +149,7 @@ jobs:
           result = subprocess.run([str(executable), "--version"], cwd=root, capture_output=True, text=True)
           print(result.stdout.strip(), result.stderr.strip())
           assert result.returncode == 0, result.returncode
-          assert expected in result.stdout, result.stdout
+          assert result.stdout.strip() == f"xeHentai v{expected}", result.stdout
           PY
       - name: Upload the package
         uses: actions/upload-artifact@v7
