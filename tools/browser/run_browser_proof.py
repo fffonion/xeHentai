@@ -290,7 +290,12 @@ with sync_playwright() as p:
     assert_form_port(dlg)
     dlg.locator("input.el-input__inner").nth(2).fill(SECRET)
     dlg.get_by_role("button", name="Confirm").click()
-    page.wait_for_timeout(2600)
+    page.wait_for_function(
+        """() => document.body.innerText.includes('3.0.0-dev')
+            && !document.body.innerText.includes('disconneted')
+            && document.querySelectorAll('tr.el-table__row').length === 3""",
+        timeout=10000,
+    )
     body = page.inner_text("body")
     check("connect.connected", "3.0.0-dev" in body and "disconneted" not in body)
     check("tasks.rows", page.locator("tr.el-table__row").count() == 3,
