@@ -6720,9 +6720,38 @@ def _files_delta_checks(oracle, candidate):
     return diffs
 
 
+def _files_expected_archive_comments(oracle, candidate):
+    expected = copy.deepcopy(oracle)
+    size_delta = 0
+    for path in (("archive", "first", "archive"), ("zip64",)):
+        old = expected
+        new = candidate
+        for key in path:
+            old = old[key]
+            new = new[key]
+        if _archive_comment_matches(old["comment"], new["comment"]):
+            if path[0] == "archive":
+                size_delta = (len(new["comment"].encode("utf-8"))
+                              - len(old["comment"].encode("utf-8")))
+            old["comment"] = new["comment"]
+    # The binary ZIP has no text snapshot in the filesystem observer. Its
+    # recorded byte size increases only by the changed comment header.
+    if size_delta:
+        for tree in (expected["archive"]["first"]["tree"],
+                     expected["archive"]["tree"]):
+            for entry in tree:
+                if (entry.get("path") == "downloads/archive.zip"
+                        and entry.get("type") == "file" and entry.get("text") is None):
+                    entry["size"] += size_delta
+    return expected
+
+
 def compare_files(cases, oracle, candidate):
+    # Only the archive version header changes. Keep every other field under
+    # the ordinary deep comparison, including title and original URL.
+    expected = _files_expected_archive_comments(oracle, candidate)
     diffs, flags = _compare_scenarios(
-        oracle, candidate, "files", skip=FILES_DELTA_SCENARIOS
+        expected, candidate, "files", skip=FILES_DELTA_SCENARIOS
     )
     delta_diffs = _files_delta_checks(oracle, candidate)
     diffs.extend(delta_diffs)
@@ -8610,6 +8639,12 @@ def compare_rpc(cases, oracle, candidate):
     return diffs
 
 
+def _archive_comment_matches(reference, candidate):
+    header, separator, details = reference.partition("\n")
+    return (header == "xeHentai Archiver v2.023" and separator == "\n"
+            and candidate == "xeHentai Archiver v3.0.0-dev\n" + details)
+
+
 def _compare_rpc_group(cases, oracle, candidate):
     diffs = []
     oracle_root = oracle.get("root", "")
@@ -8690,7 +8725,7 @@ def _compare_rpc_group(cases, oracle, candidate):
                 diffs.append(f"{case_id}: zip entries/contents differ")
                 cases[case_id] = False
                 continue
-            if old_comment.replace("2.023-py", "2.023-") != new_comment:
+            if not _archive_comment_matches(old_comment, new_comment):
                 diffs.append(f"{case_id}: zip comment mismatch")
                 cases[case_id] = False
                 continue
@@ -10140,8 +10175,8 @@ def compare_gallery(cases, oracle, candidate, request=None):
                          f"candidate={new.get('status')}")
             cases[key] = False
             continue
-        # Names ORDER is preserved by the value comparison; comment
-        # normalizes the known producer tag before comparing.
+        # Names ORDER is preserved by the value comparison; comments
+        # compare the reference metadata with the candidate's public version.
         if old.get("names") != new.get("names"):
             diffs.append(f"{key}: entries differ "
                          f"{old.get('names')} != {new.get('names')}")
@@ -10151,8 +10186,7 @@ def compare_gallery(cases, oracle, candidate, request=None):
             diffs.append(f"{key}: entry contents differ")
             cases[key] = False
             continue
-        old_comment = old.get("comment").replace("2.023-py", "2.023-")
-        if old_comment != new.get("comment"):
+        if not _archive_comment_matches(old.get("comment"), new.get("comment")):
             diffs.append(f"{key}: comment mismatch")
             cases[key] = False
             continue

@@ -14,12 +14,15 @@ it passes because ``_gallery_task_obs``/``_gallery_poststate`` deep-freeze.
 Runnable without extra dependencies: ``python3 tools/test_compat_gallery.py``.
 """
 
+import copy
+import io
 import json
 import os
 import shutil
 import sys
 import tempfile
 import traceback
+import zipfile
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parent
@@ -124,7 +127,88 @@ def test_gallery_poststate_snapshot_is_deepcopy_isolated():
         shutil.rmtree(work, ignore_errors=True)
 
 
-TESTS = [test_gallery_poststate_snapshot_is_deepcopy_isolated]
+def _archive_response(comment):
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, "w") as archive:
+        archive.writestr("sample.jpg", b"image")
+        archive.comment = comment.encode("utf-8")
+    return {
+        "id": "rpc.http.zip-valid",
+        "status": "HTTP/1.0 200 OK",
+        "headers": [("content-type", "application/zip")],
+        "body": data.getvalue().decode("latin-1"),
+        "trailing_newline": False,
+    }
+
+
+def test_rpc_archive_comment_uses_displayed_version():
+    suffix = "\nTitle:Gallery\nOriginal URL:https://example.test/gallery"
+    oracle = {"cases": [_archive_response("xeHentai Archiver v2.023" + suffix)]}
+    candidate = {"cases": [_archive_response("xeHentai Archiver v3.0.0-dev" + suffix)]}
+    cases = {}
+    assert compat._compare_rpc_group(cases, oracle, candidate) == []
+    assert cases["rpc.http.zip-valid"] is True
+
+
+def test_rpc_archive_comment_rejects_different_gallery():
+    suffix = "\nTitle:Gallery\nOriginal URL:https://example.test/gallery"
+    oracle = {"cases": [_archive_response("xeHentai Archiver v2.023" + suffix)]}
+    candidate = {"cases": [_archive_response(
+        "xeHentai Archiver v3.0.0-dev" + suffix.replace("Gallery", "Different"))]}
+    cases = {}
+    assert compat._compare_rpc_group(cases, oracle, candidate) == [
+        "rpc.http.zip-valid: zip comment mismatch"]
+    assert cases["rpc.http.zip-valid"] is False
+
+
+def test_gallery_archive_comment_uses_displayed_version():
+    suffix = "\nTitle:Gallery\nOriginal URL:https://example.test/gallery"
+    assert compat._archive_comment_matches(
+        "xeHentai Archiver v2.023" + suffix,
+        "xeHentai Archiver v3.0.0-dev" + suffix)
+    assert not compat._archive_comment_matches(
+        "xeHentai Archiver v2.023" + suffix,
+        "xeHentai Archiver v3.0.0-dev" + suffix.replace("Gallery", "Different"))
+
+
+def test_files_archive_comments_keep_metadata_comparison():
+    suffix = "\nTitle:Gallery\nOriginal URL:https://example.test/gallery"
+    old_comment = "xeHentai Archiver v2.023" + suffix
+    new_comment = "xeHentai Archiver v3.0.0-dev" + suffix
+    tree = [{"path": "downloads/archive.zip", "type": "file",
+             "size": 200 + len(old_comment.encode("utf-8")), "text": None}]
+    oracle = {
+        "archive": {"first": {"archive": {
+            "comment": old_comment,
+            "entries": ["sample.jpg"]}, "tree": copy.deepcopy(tree)},
+            "tree": copy.deepcopy(tree)},
+        "zip64": {"comment": old_comment, "entry_count": 1},
+    }
+    candidate = copy.deepcopy(oracle)
+    candidate["archive"]["first"]["archive"]["comment"] = new_comment
+    candidate["zip64"]["comment"] = new_comment
+    for entries in (candidate["archive"]["first"]["tree"],
+                    candidate["archive"]["tree"]):
+        entries[0]["size"] = 200 + len(new_comment.encode("utf-8"))
+    expected = compat._files_expected_archive_comments(oracle, candidate)
+    assert expected == candidate
+    assert oracle["zip64"]["comment"] == old_comment
+    altered = copy.deepcopy(candidate)
+    altered["zip64"]["comment"] = altered["zip64"]["comment"].replace(
+        "Title:Gallery", "Title:Different")
+    assert compat._files_expected_archive_comments(oracle, altered) != altered
+    altered = copy.deepcopy(candidate)
+    altered["archive"]["tree"][0]["size"] += 1
+    assert compat._files_expected_archive_comments(oracle, altered) != altered
+
+
+TESTS = [
+    test_gallery_poststate_snapshot_is_deepcopy_isolated,
+    test_rpc_archive_comment_uses_displayed_version,
+    test_rpc_archive_comment_rejects_different_gallery,
+    test_gallery_archive_comment_uses_displayed_version,
+    test_files_archive_comments_keep_metadata_comparison,
+]
 
 
 def main():
